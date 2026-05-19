@@ -3,8 +3,8 @@
 Developer-preview Rust implementation of the **Attested Confidential Inference
 (ACI)** aggregator service.
 
-The protocol it speaks is the draft ACI specification in
-[`Dstack-TEE/dstack`](https://github.com/Dstack-TEE/dstack/blob/master/docs/specs/attested-confidential-inference.md).
+The protocol it speaks is the draft ACI specification proposed in
+[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694).
 This crate is the program a trusted workload launcher (separate repo) can
 fetch, install, and run inside a dstack v2 application VM.
 
