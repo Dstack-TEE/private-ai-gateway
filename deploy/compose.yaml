@@ -1,0 +1,61 @@
+# dstack compose example for the ACI aggregator under trusted-workload-launcher.
+#
+# Pattern matches the launcher README's "Production option A": both this
+# compose file and the inline config participate in dstack's compose_hash, so
+# a verifier comparing compose_hash sees the full pin (launcher image +
+# REPO_URL + COMMIT_SHA + REPO_SUBDIR + aggregator runtime env).
+#
+# Substitute:
+#   * <launcher-digest>  - OCI digest of the published trusted-workload-launcher
+#     image you audited.
+#   * <full-40-hex-sha>  - full commit SHA of the private-ai-gateway repo
+#     that should run inside the TEE.
+#
+# Anything trust-bearing (REPO_URL, COMMIT_SHA, REPO_SUBDIR, the env block,
+# even this file's text) is covered by compose_hash. The aggregator uses
+# dstack KMS and quote APIs through the Rust dstack SDK.
+
+services:
+  aggregator:
+    image: docker.io/dstack/trusted-workload-launcher@sha256:<launcher-digest>
+    command: ["/etc/trusted-workload-launcher/aggregator.conf"]
+    ports:
+      - "8086:8086"
+    configs:
+      - source: aggregator-pin
+        target: /etc/trusted-workload-launcher/aggregator.conf
+      - source: aggregator-runtime
+        target: /etc/trusted-workload-launcher/aggregator.env
+    volumes:
+      - aggregator-checkout:/var/lib/trusted-workload-launcher
+      - aggregator-state:/var/lib/private-ai-gateway
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: unless-stopped
+
+configs:
+  aggregator-pin:
+    content: |
+      REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+      COMMIT_SHA=<full-40-hex-sha>
+      WORK_DIR=/var/lib/trusted-workload-launcher/private-ai-gateway
+      REPO_SUBDIR=private-ai-gateway
+      CHILD_ENV_FILE=/etc/trusted-workload-launcher/aggregator.env
+
+  aggregator-runtime:
+    content: |
+      PRIVATE_AI_GATEWAY_BIND=0.0.0.0:8086
+      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/var/lib/private-ai-gateway/upstreams.json
+      PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
+      PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+      PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha>
+      # PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS=0
+      # PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS=10
+      # PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS=600
+      # PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS=60
+      # PRIVATE_AI_GATEWAY_TLS_CERT_PATHS=/etc/tls/aci-endpoint.crt
+      # PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256=<64-hex-spki-sha256>[,<64-hex-spki-sha256>]
+      # PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=unix:/var/run/dstack.sock
+
+volumes:
+  aggregator-checkout:
+  aggregator-state:

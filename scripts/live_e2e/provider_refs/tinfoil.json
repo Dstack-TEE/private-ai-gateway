@@ -1,0 +1,10 @@
+{
+  "provider": "tinfoil",
+  "reviewed_at": "2026-05-16",
+  "mode": "provider-current",
+  "accepted_models": {
+    "kimi-k2-6": {
+      "expected_binding": "tls_spki_sha256"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "provider": "near-ai",
+  "reviewed_at": "2026-05-16",
+  "mode": "provider-current",
+  "accepted_models": {
+    "google/gemma-4-31B-it": {
+      "expected_binding": "tls_spki_sha256"
+    }
+  }
+}

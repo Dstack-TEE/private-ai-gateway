@@ -1,0 +1,36 @@
+[
+  {
+    "name": "tinfoil-live",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
+    "public_model": "live-tinfoil",
+    "upstream_model": "kimi-k2-6",
+    "api_key_env": "TINFOIL_API_KEY",
+    "binding": "tls_spki_sha256",
+    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
+    "structured_output_max_tokens": 2048
+  },
+  {
+    "name": "near-ai-live",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near",
+    "upstream_model": "google/gemma-4-31B-it",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": ["DSTACK_VERIFIER_URL"],
+    "capabilities": ["chat", "streaming", "structured_outputs", "context"]
+  },
+  {
+    "name": "chutes-live",
+    "provider": "chutes",
+    "base_url": "https://api.chutes.ai",
+    "public_model": "live-chutes",
+    "upstream_model": "moonshotai/Kimi-K2.5-TEE",
+    "api_key_env": "CHUTES_API_KEY",
+    "binding": "e2ee_public_key_sha256",
+    "capabilities": ["chat", "streaming", "context"],
+    "session_refresh_seconds": 45,
+    "chutes_e2ee_discovery_rounds": 3
+  }
+]

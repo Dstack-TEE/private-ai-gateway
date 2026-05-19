@@ -1,0 +1,38 @@
+[
+  {
+    "name": "tinfoil-glm51-live",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
+    "public_model": "glm51-tinfoil",
+    "upstream_model": "glm-5-1",
+    "api_key_env": "TINFOIL_API_KEY",
+    "binding": "tls_spki_sha256",
+    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
+    "structured_output_max_tokens": 2048
+  },
+  {
+    "name": "near-ai-glm51-live",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "glm51-near",
+    "upstream_model": "zai-org/GLM-5.1-FP8",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": ["DSTACK_VERIFIER_URL"],
+    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
+    "structured_output_max_tokens": 2048
+  },
+  {
+    "name": "chutes-glm51-live",
+    "provider": "chutes",
+    "base_url": "https://api.chutes.ai",
+    "public_model": "glm51-chutes",
+    "upstream_model": "zai-org/GLM-5.1-TEE",
+    "api_key_env": "CHUTES_API_KEY",
+    "binding": "e2ee_public_key_sha256",
+    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
+    "structured_output_max_tokens": 2048,
+    "session_refresh_seconds": 45,
+    "chutes_e2ee_discovery_rounds": 3
+  }
+]
