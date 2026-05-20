@@ -1,4 +1,4 @@
-# One-file dstack compose for Private AI Gateway under trusted-workload-launcher.
+# One-file dstack compose for Private AI Gateway under git-launcher.
 #
 # Deploy from this directory after setting the variables below, for example:
 #
@@ -14,19 +14,19 @@
 
 services:
   private-ai-gateway:
-    image: docker.io/dstacktee/trusted-workload-launcher@sha256:211d3922f21a9ec6fac252db2cc703a5d3412973509655c9f91f3036c6101afb
-    command: ["/etc/trusted-workload-launcher/gateway.conf"]
+    image: docker.io/dstacktee/git-launcher@sha256:9a9d61abd4d9176ecc8b9f318e3b08fde5eec11f988fd83981d87c0f5d8a2c87
+    command: ["/etc/git-launcher/gateway.conf"]
     ports:
       - "8086:8086"
     configs:
       - source: gateway-pin
-        target: /etc/trusted-workload-launcher/gateway.conf
+        target: /etc/git-launcher/gateway.conf
       - source: gateway-runtime
-        target: /etc/trusted-workload-launcher/gateway.env
+        target: /etc/git-launcher/gateway.env
       - source: gateway-upstreams
         target: /etc/private-ai-gateway/upstreams.seed.json
     volumes:
-      - gateway-checkout:/var/lib/trusted-workload-launcher
+      - gateway-checkout:/var/lib/git-launcher
       - gateway-state:/var/lib/private-ai-gateway
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
@@ -36,8 +36,8 @@ configs:
     content: |
       REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
       COMMIT_SHA=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
-      WORK_DIR=/var/lib/trusted-workload-launcher/private-ai-gateway
-      CHILD_ENV_FILE=/etc/trusted-workload-launcher/gateway.env
+      WORK_DIR=/var/lib/git-launcher/private-ai-gateway
+      CHILD_ENV_FILE=/etc/git-launcher/gateway.env
 
   gateway-runtime:
     content: |

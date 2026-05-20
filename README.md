@@ -5,7 +5,7 @@ Developer-preview Rust implementation of the **Attested Confidential Inference
 
 The protocol it speaks is the draft ACI specification proposed in
 [`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694).
-This crate is the program a trusted workload launcher (separate repo) can
+This crate is the program `git-launcher` (separate repo) can
 fetch, install, and run inside a dstack v2 application VM.
 
 ## Status
@@ -87,7 +87,7 @@ tests/
 ## Launcher wiring (`entrypoint.sh`)
 
 This repo is designed to be launched by
-[`trusted-workload-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/trusted-workload-launcher).
+[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 The launcher pulls the repo at a pinned commit, `cd`s into
 the public gateway repo root, exports the `CHILD_ENV_FILE`, and runs the
 gateway-owned `entrypoint.sh`.

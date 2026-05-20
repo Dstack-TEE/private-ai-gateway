@@ -1,8 +1,8 @@
-# Deploying Private AI Gateway With trusted-workload-launcher
+# Deploying Private AI Gateway With git-launcher
 
 This directory contains the one-file dstack compose path for launching
 Private AI Gateway through
-[`trusted-workload-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/trusted-workload-launcher/trusted-workload-launcher).
+[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 
 The launcher fetches a pinned `private-ai-gateway` commit, verifies `HEAD`,
 exports a runtime env file, and runs the gateway repo's own
@@ -14,11 +14,11 @@ build, run, and ACI policy live in this repo.
 The compose hard-codes the released launcher image:
 
 ```text
-docker.io/dstacktee/trusted-workload-launcher@sha256:211d3922f21a9ec6fac252db2cc703a5d3412973509655c9f91f3036c6101afb
+docker.io/dstacktee/git-launcher@sha256:9a9d61abd4d9176ecc8b9f318e3b08fde5eec11f988fd83981d87c0f5d8a2c87
 ```
 
 That digest comes from
-[`trusted-workload-launcher-v0.1.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/trusted-workload-launcher-v0.1.0).
+[`git-launcher-v0.1.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.1.0).
 
 Prepare an audited gateway commit, then run:
 
@@ -149,7 +149,7 @@ A verifier checks:
 
 | Layer | What to compare |
 | --- | --- |
-| Launcher image | The image digest in the attested compose equals `sha256:211d3922f21a9ec6fac252db2cc703a5d3412973509655c9f91f3036c6101afb` and verifies through the `trusted-workload-launcher-v0.1.0` Sigstore provenance. |
+| Launcher image | The image digest in the attested compose equals `sha256:9a9d61abd4d9176ecc8b9f318e3b08fde5eec11f988fd83981d87c0f5d8a2c87` and verifies through the `git-launcher-v0.1.0` Sigstore provenance. |
 | Launcher config | `REPO_URL` and `COMMIT_SHA` in `gateway-pin` match the audited gateway commit. |
 | Runtime env | `gateway-runtime` matches the deployment policy, including source-provenance fields and config paths. |
 | Upstream seed | `gateway-upstreams` is the reviewed initial provider policy. |
