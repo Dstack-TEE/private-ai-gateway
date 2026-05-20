@@ -186,18 +186,9 @@ fn deploy_examples_exist_and_reference_entrypoint_sh() {
 
 #[test]
 fn no_stale_tee_launch_sh_references_remain() {
-    // The legacy name should not appear in shipping aggregator artefacts.
-    // It IS allowed in two narrow places, both of which honestly
-    // describe the launcher's current legacy default and the gap that
-    // requires a launcher-side change:
-    //
-    //   * inside fenced ```...``` code blocks that quote the launcher's
-    //     own bash source verbatim (we cannot rewrite a verbatim quote
-    //     of someone else's code);
-    //   * on prose lines that visibly tag the mention as "legacy".
-    //
-    // Everything else is a stale reference that should be migrated to
-    // entrypoint.sh.
+    // The public gateway deploy path uses the current launcher contract:
+    // default mode runs entrypoint.sh. The old tee-launch.sh name should not
+    // appear in shipping gateway artefacts.
     let files: [(PathBuf, &str); 5] = [
         (script_path(), "entrypoint.sh"),
         (repo_root().join("README.md"), "top-level README.md"),
@@ -216,22 +207,12 @@ fn no_stale_tee_launch_sh_references_remain() {
     ];
     for (path, label) in files.iter() {
         let body = std::fs::read_to_string(path).unwrap();
-        let mut in_code_fence = false;
         for (lineno, line) in body.lines().enumerate() {
-            // Track fenced code blocks (``` toggles in/out).
-            if line.trim_start().starts_with("```") {
-                in_code_fence = !in_code_fence;
-                continue;
-            }
-            if in_code_fence {
-                continue;
-            }
             if !line.contains("tee-launch.sh") {
                 continue;
             }
-            assert!(
-                line.to_lowercase().contains("legacy"),
-                "{label}:{n}: stale tee-launch.sh reference outside a 'legacy' annotation:\n  {line}",
+            panic!(
+                "{label}:{n}: stale tee-launch.sh reference:\n  {line}",
                 n = lineno + 1
             );
         }
@@ -252,7 +233,7 @@ fn deploy_text(name: &str) -> String {
 #[test]
 fn launcher_config_uses_only_default_mode_keys() {
     // aggregator.conf is the launcher config. The launcher contract is
-    // intentionally minimal: REPO_URL, COMMIT_SHA, WORK_DIR, REPO_SUBDIR,
+    // intentionally minimal: REPO_URL, COMMIT_SHA, WORK_DIR, and
     // CHILD_ENV_FILE. Setting INSTALL_CMD or RUN_CMD would move
     // aggregator-owned install/run logic back into the launcher config,
     // which is exactly the boundary we keep out of.
@@ -271,18 +252,18 @@ fn launcher_config_uses_only_default_mode_keys() {
         }
     }
     // Sanity: the keys we DO use are present.
-    for required in &[
-        "REPO_URL=",
-        "COMMIT_SHA=",
-        "WORK_DIR=",
-        "REPO_SUBDIR=",
-        "CHILD_ENV_FILE=",
-    ] {
+    for required in &["REPO_URL=", "COMMIT_SHA=", "WORK_DIR=", "CHILD_ENV_FILE="] {
         assert!(
             body.contains(required),
             "aggregator.conf should set {required}... so the launcher has a complete default-mode pin"
         );
     }
+    assert!(
+        !body
+            .lines()
+            .any(|line| line.trim_start().starts_with("REPO_SUBDIR=")),
+        "aggregator.conf must not set REPO_SUBDIR now that the public repo root is the gateway"
+    );
 }
 
 #[test]
@@ -298,6 +279,10 @@ fn compose_yaml_inlines_only_default_mode_keys() {
     assert!(
         !body.contains("RUN_CMD="),
         "compose.yaml must not set RUN_CMD; the aggregator owns its run via entrypoint.sh"
+    );
+    assert!(
+        !body.contains("REPO_SUBDIR="),
+        "compose.yaml must not set REPO_SUBDIR now that the public repo root is the gateway"
     );
 }
 
@@ -326,19 +311,19 @@ fn deploy_readme_states_ownership_boundary() {
 }
 
 #[test]
-fn deploy_readme_documents_launcher_side_followup() {
-    // The current launcher hardcodes the entry script name to
-    // `tee-launch.sh`. Until the launcher is updated to look for
-    // `entrypoint.sh`, this deployment example does not run end-to-end
-    // on the unmodified launcher. The deploy README must say so loudly.
+fn deploy_readme_documents_one_command_deploy_and_seed_config() {
     let body = deploy_text("README.md");
     assert!(
-        body.contains("Required launcher-side follow-up"),
-        "deploy/README.md must have a 'Required launcher-side follow-up' section explaining the entrypoint.sh rename"
+        body.contains("One-Command Deploy"),
+        "deploy/README.md must document the one-command compose path"
     );
     assert!(
-        body.contains("tee-launch.sh"),
-        "deploy/README.md must mention the legacy `tee-launch.sh` name so a reader can map this section back to the launcher's current code"
+        body.contains("UPSTREAM_CONFIG_SEED_PATH"),
+        "deploy/README.md must document the compose-mounted upstream seed"
+    );
+    assert!(
+        body.contains("does not set `REPO_SUBDIR`"),
+        "deploy/README.md must state that the public gateway repo runs from repo root"
     );
 }
 

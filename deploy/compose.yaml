@@ -1,54 +1,54 @@
-# dstack compose example for the ACI aggregator under trusted-workload-launcher.
+# One-file dstack compose for Private AI Gateway under trusted-workload-launcher.
 #
-# Pattern matches the launcher README's "Production option A": both this
-# compose file and the inline config participate in dstack's compose_hash, so
-# a verifier comparing compose_hash sees the full pin (launcher image +
-# REPO_URL + COMMIT_SHA + REPO_SUBDIR + aggregator runtime env).
+# Deploy from this directory after setting the variables below, for example:
 #
-# Substitute:
-#   * <launcher-digest>  - OCI digest of the published trusted-workload-launcher
-#     image you audited.
-#   * <full-40-hex-sha>  - full commit SHA of the private-ai-gateway repo
-#     that should run inside the TEE.
+#   PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha> \
+#   PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-token> \
+#   phala-h4xuser deploy -n private-ai-gateway -c compose.yaml
 #
-# Anything trust-bearing (REPO_URL, COMMIT_SHA, REPO_SUBDIR, the env block,
-# even this file's text) is covered by compose_hash. The aggregator uses
-# dstack KMS and quote APIs through the Rust dstack SDK.
+# The compose inlines the launcher pin, runtime env, and initial upstream
+# config so dstack's compose_hash covers the complete launch policy. The
+# gateway copies the read-only upstream seed into its mutable state path only
+# when no mutable config exists yet; later admin updates replace the mutable
+# file without changing this attested compose.
 
 services:
-  aggregator:
-    image: docker.io/dstack/trusted-workload-launcher@sha256:<launcher-digest>
-    command: ["/etc/trusted-workload-launcher/aggregator.conf"]
+  private-ai-gateway:
+    image: docker.io/dstacktee/trusted-workload-launcher@sha256:211d3922f21a9ec6fac252db2cc703a5d3412973509655c9f91f3036c6101afb
+    command: ["/etc/trusted-workload-launcher/gateway.conf"]
     ports:
       - "8086:8086"
     configs:
-      - source: aggregator-pin
-        target: /etc/trusted-workload-launcher/aggregator.conf
-      - source: aggregator-runtime
-        target: /etc/trusted-workload-launcher/aggregator.env
+      - source: gateway-pin
+        target: /etc/trusted-workload-launcher/gateway.conf
+      - source: gateway-runtime
+        target: /etc/trusted-workload-launcher/gateway.env
+      - source: gateway-upstreams
+        target: /etc/private-ai-gateway/upstreams.seed.json
     volumes:
-      - aggregator-checkout:/var/lib/trusted-workload-launcher
-      - aggregator-state:/var/lib/private-ai-gateway
+      - gateway-checkout:/var/lib/trusted-workload-launcher
+      - gateway-state:/var/lib/private-ai-gateway
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
 configs:
-  aggregator-pin:
+  gateway-pin:
     content: |
       REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
-      COMMIT_SHA=<full-40-hex-sha>
+      COMMIT_SHA=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
       WORK_DIR=/var/lib/trusted-workload-launcher/private-ai-gateway
-      REPO_SUBDIR=private-ai-gateway
-      CHILD_ENV_FILE=/etc/trusted-workload-launcher/aggregator.env
+      CHILD_ENV_FILE=/etc/trusted-workload-launcher/gateway.env
 
-  aggregator-runtime:
+  gateway-runtime:
     content: |
       PRIVATE_AI_GATEWAY_BIND=0.0.0.0:8086
       PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/var/lib/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
+      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH=/etc/private-ai-gateway/upstreams.seed.json
+      PRIVATE_AI_GATEWAY_ADMIN_TOKEN=${PRIVATE_AI_GATEWAY_ADMIN_TOKEN:?set PRIVATE_AI_GATEWAY_ADMIN_TOKEN}
       PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
-      PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha>
+      PRIVATE_AI_GATEWAY_REPO_COMMIT=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
       # PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS=0
+      # PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS=3600
       # PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS=10
       # PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS=600
       # PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS=60
@@ -56,6 +56,10 @@ configs:
       # PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256=<64-hex-spki-sha256>[,<64-hex-spki-sha256>]
       # PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=unix:/var/run/dstack.sock
 
+  gateway-upstreams:
+    content: |
+      []
+
 volumes:
-  aggregator-checkout:
-  aggregator-state:
+  gateway-checkout:
+  gateway-state:

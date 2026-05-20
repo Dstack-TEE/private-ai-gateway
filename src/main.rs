@@ -13,6 +13,7 @@
 //! | --- | --- | --- |
 //! | Bind address | `PRIVATE_AI_GATEWAY_BIND` | `DSTACK_LLM_ROUTER_BIND` |
 //! | Upstream config path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` | `DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_PATH` |
+//! | Initial upstream config seed path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` | `DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_SEED_PATH` |
 //! | Admin API bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | `DSTACK_LLM_ROUTER_ADMIN_TOKEN` |
 //! | Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` | `DSTACK_LLM_ROUTER_REPO_URL` |
 //! | Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | `DSTACK_LLM_ROUTER_REPO_COMMIT` |
@@ -45,7 +46,7 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
-    UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
+    parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::build_router_with_admin;
@@ -164,6 +165,63 @@ fn resolve_tls_public_keys(
     }
 }
 
+fn seed_upstream_config_if_empty(
+    target_path: &Path,
+    seed_path: Option<&str>,
+) -> Result<(), std::io::Error> {
+    let Some(seed_path) = seed_path else {
+        return Ok(());
+    };
+    let seed_path = Path::new(seed_path);
+    let target_has_config = match std::fs::read_to_string(target_path) {
+        Ok(text) => !text.trim().is_empty(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to read upstream config {} before applying seed: {err}",
+                    target_path.display()
+                ),
+            ));
+        }
+    };
+    if target_has_config {
+        tracing::info!(
+            target = %target_path.display(),
+            seed = %seed_path.display(),
+            "upstream config already exists; seed config not applied"
+        );
+        return Ok(());
+    }
+
+    let seed_text = std::fs::read_to_string(seed_path).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read upstream config seed {}: {err}",
+                seed_path.display()
+            ),
+        )
+    })?;
+    parse_config_text(&seed_text).map_err(|err| {
+        invalid_input(format!(
+            "invalid upstream config seed {}: {err}",
+            seed_path.display()
+        ))
+    })?;
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(target_path, seed_text)?;
+    tracing::info!(
+        target = %target_path.display(),
+        seed = %seed_path.display(),
+        "seeded initial upstream config"
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -180,6 +238,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_PATH",
     )
     .unwrap_or_else(|| "/var/lib/private-ai-gateway/upstreams.json".to_string());
+    let upstream_config_seed_path = env_pref(
+        "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH",
+        "DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_SEED_PATH",
+    );
     let admin_token = env_pref(
         "PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
         "DSTACK_LLM_ROUTER_ADMIN_TOKEN",
@@ -285,6 +347,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let keys: Arc<dyn KeyProvider> = provider.clone();
     let quoter: Arc<dyn Quoter> = provider;
+    seed_upstream_config_if_empty(
+        Path::new(&upstream_config_path),
+        upstream_config_seed_path.as_deref(),
+    )?;
     let upstream_config = Arc::new(UpstreamConfigManager::load(
         upstream_config_path,
         UpstreamRuntimeOptions {
@@ -433,7 +499,7 @@ mod tests {
 
     use super::{
         parse_body_retention_seconds, parse_positive_seconds, parse_tls_cert_paths,
-        parse_tls_spki_list, resolve_tls_public_keys,
+        parse_tls_spki_list, resolve_tls_public_keys, seed_upstream_config_if_empty,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -468,6 +534,17 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         ));
         std::fs::write(&path, TEST_CERT_PEM).unwrap();
         path
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "private-ai-gateway-{name}-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 
     #[test]
@@ -618,6 +695,61 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     fn empty_upstream_config_is_allowed() {
         assert!(parse_config_text("").unwrap().is_empty());
         assert!(parse_config_text("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn seeds_upstream_config_when_target_missing() {
+        let target = temp_path("target");
+        let seed = temp_path("seed");
+        std::fs::write(
+            &seed,
+            r#"[{"name":"gpu-a","base_url":"https://gpu-a.example","models":{"public-a":"upstream-a"}}]"#,
+        )
+        .unwrap();
+
+        seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap())).unwrap();
+
+        let seeded = std::fs::read_to_string(&target).unwrap();
+        assert!(seeded.contains("\"public-a\""));
+        let _ = std::fs::remove_file(target);
+        let _ = std::fs::remove_file(seed);
+    }
+
+    #[test]
+    fn seed_does_not_overwrite_existing_upstream_config() {
+        let target = temp_path("target-existing");
+        let seed = temp_path("seed-existing");
+        std::fs::write(
+            &target,
+            r#"[{"name":"kept","base_url":"https://kept.example","models":{"kept":"kept"}}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &seed,
+            r#"[{"name":"seed","base_url":"https://seed.example","models":{"seed":"seed"}}]"#,
+        )
+        .unwrap();
+
+        seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap())).unwrap();
+
+        let kept = std::fs::read_to_string(&target).unwrap();
+        assert!(kept.contains("\"kept\""));
+        assert!(!kept.contains("\"seed\""));
+        let _ = std::fs::remove_file(target);
+        let _ = std::fs::remove_file(seed);
+    }
+
+    #[test]
+    fn seed_rejects_invalid_upstream_config() {
+        let target = temp_path("target-invalid-seed");
+        let seed = temp_path("seed-invalid");
+        std::fs::write(&seed, r#"[{"name":"","base_url":"","models":{}}]"#).unwrap();
+
+        let err = seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap()))
+            .expect_err("invalid seed must fail startup");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!target.exists());
+        let _ = std::fs::remove_file(seed);
     }
 
     #[test]

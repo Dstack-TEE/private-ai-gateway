@@ -5,22 +5,13 @@
 #   This script is owned by private-ai-gateway. It is not a launcher
 #   feature, a launcher contract, or part of the launcher image's
 #   responsibility. The launcher only knows three things about us: it cd's
-#   into REPO_SUBDIR after checking out the pinned commit, it exports our
-#   CHILD_ENV_FILE into the environment, and it `exec bash <our-entrypoint>`.
+#   into the configured repo/subdir after checking out the pinned commit, it
+#   exports our CHILD_ENV_FILE into the environment, and it `exec bash
+#   entrypoint.sh`.
 #   From there, *everything* - install, build, run - lives here and is
 #   covered by source provenance of the pinned commit. The launcher stays
 #   generic and build-system agnostic; how this aggregator gets its Rust
 #   toolchain is our concern, not the launcher's.
-#
-# Note on the script name
-#   The current trusted-workload-launcher hardcodes the legacy entry-script
-#   name (`tee-launch.sh`, legacy default, at
-#   bin/trusted-workload-launcher line ~278). This file is named
-#   `entrypoint.sh` because that is the better generic name and is the
-#   name we want the launcher to converge on. Until the launcher is
-#   updated to look for `entrypoint.sh` (or a configurable entry name),
-#   the deployment examples here will NOT run end-to-end on the
-#   unmodified launcher in default mode. See deploy/README.md.
 #
 # What it does
 #   1. If `cargo` is not on PATH, this aggregator chooses to bootstrap a
@@ -70,9 +61,9 @@ require_tool() {
   command -v "$1" >/dev/null 2>&1 || die "required tool not found in PATH: $1"
 }
 
-# The launcher cd's into REPO_SUBDIR before exec'ing us, so $PWD already
-# equals that target. We still anchor BUILD_DIR to the script's own
-# location so an accidental cd later does not move the build.
+# The launcher cd's into the selected repo root or subdir before exec'ing us,
+# so $PWD already equals that target. We still anchor BUILD_DIR to the
+# script's own location so an accidental cd later does not move the build.
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
 cd "$SCRIPT_DIR"
 

@@ -89,22 +89,15 @@ tests/
 This repo is designed to be launched by
 [`trusted-workload-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/trusted-workload-launcher).
 The launcher pulls the repo at a pinned commit, `cd`s into
-`REPO_SUBDIR=private-ai-gateway`, exports the `CHILD_ENV_FILE`, and
-runs an aggregator-owned entry script.
+the public gateway repo root, exports the `CHILD_ENV_FILE`, and runs the
+gateway-owned `entrypoint.sh`.
 
 **Ownership boundary.** The launcher is generic and build-system agnostic;
 it does not know we are written in Rust. `entrypoint.sh` is owned by this
 aggregator, and everything past `bash entrypoint.sh` — install, build,
 run — lives here. The launcher config stays minimal (`REPO_URL`,
-`COMMIT_SHA`, `REPO_SUBDIR`, `WORK_DIR`, `CHILD_ENV_FILE`); there is no
-`INSTALL_CMD` and no `RUN_CMD`.
-
-> **Required launcher-side follow-up:** the current
-> `trusted-workload-launcher` versions that still hardcode the legacy default
-> legacy entry name `tee-launch.sh` must be updated to look for `entrypoint.sh` (or a
-> configurable entry name). Until then, this slice does **not** run end-to-end
-> on the unmodified launcher in default mode. See `deploy/README.md` →
-> "Required launcher-side follow-up".
+`COMMIT_SHA`, `WORK_DIR`, `CHILD_ENV_FILE`); there is no `INSTALL_CMD` and no
+`RUN_CMD`.
 
 What `entrypoint.sh` does (once the launcher invokes it):
 
@@ -134,6 +127,7 @@ the `PRIVATE_AI_GATEWAY_*` value wins when both are set.
 | --- | --- |
 | Bind address | `PRIVATE_AI_GATEWAY_BIND` |
 | Upstream config file | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` |
+| Initial upstream config seed file | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` |
 | Admin API bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` |
 | Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` |
 | Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` |
@@ -254,6 +248,12 @@ JSON array:
   }
 ]
 ```
+
+For one-command compose deployments, set
+`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` to a read-only seed file mounted
+by compose. If the mutable config path is missing or whitespace-only at
+startup, the gateway validates the seed and copies it there once. Existing
+admin-updated config is never overwritten.
 
 `provider` defaults to `openai-compatible`. Supported values are
 `openai-compatible`, `aci-dcap`, `chutes`, `tinfoil`, and `near-ai`. The

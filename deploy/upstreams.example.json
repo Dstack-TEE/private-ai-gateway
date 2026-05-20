@@ -1,0 +1,31 @@
+[
+  {
+    "name": "tinfoil-glm51",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
+    "models": {
+      "glm51-tinfoil": "glm-5-1"
+    },
+    "bearer_token": "<tinfoil-api-key>"
+  },
+  {
+    "name": "near-ai-glm51",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "models": {
+      "glm51-near": "zai-org/GLM-5.1-FP8"
+    },
+    "bearer_token": "<near-ai-api-key>"
+  },
+  {
+    "name": "chutes-glm51",
+    "provider": "chutes",
+    "base_url": "https://api.chutes.ai",
+    "models": {
+      "glm51-chutes": "zai-org/GLM-5.1-TEE"
+    },
+    "bearer_token": "<chutes-api-key>",
+    "session_refresh_seconds": 45,
+    "chutes_e2ee_discovery_rounds": 3
+  }
+]
