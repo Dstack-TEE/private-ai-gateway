@@ -141,6 +141,31 @@ fn entrypoint_sh_apt_install_is_strict() {
 }
 
 #[test]
+fn entrypoint_sh_keeps_mutable_build_state_outside_checkout() {
+    // git-launcher scrubs the source checkout on every boot. Cargo/Rustup
+    // state and build artifacts must live in the gateway state volume, not
+    // under the pinned source tree.
+    let body = script_text();
+    for required in &[
+        r#"PRIVATE_AI_GATEWAY_CACHE_DIR=${PRIVATE_AI_GATEWAY_CACHE_DIR:-/var/lib/private-ai-gateway/cache}"#,
+        r#"CARGO_HOME=${CARGO_HOME:-$PRIVATE_AI_GATEWAY_CACHE_DIR/cargo}"#,
+        r#"RUSTUP_HOME=${RUSTUP_HOME:-$PRIVATE_AI_GATEWAY_CACHE_DIR/rustup}"#,
+        r#"CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PRIVATE_AI_GATEWAY_CACHE_DIR/target}"#,
+        r#"mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR""#,
+        r#"BIN="$CARGO_TARGET_DIR/release/private-ai-gateway""#,
+    ] {
+        assert!(
+            body.contains(required),
+            "entrypoint.sh must keep mutable build state outside the source checkout; missing {required:?}"
+        );
+    }
+    assert!(
+        !body.contains(r#"BIN="$SCRIPT_DIR/target/release/private-ai-gateway""#),
+        "entrypoint.sh must not execute a binary from the scrubbed source checkout target dir"
+    );
+}
+
+#[test]
 fn shellcheck_passes_on_entrypoint_sh() {
     if which("shellcheck").is_none() {
         eprintln!("skipping: shellcheck not on PATH; run shellcheck entrypoint.sh manually");

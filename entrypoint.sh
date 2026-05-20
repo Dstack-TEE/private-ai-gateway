@@ -67,6 +67,18 @@ require_tool() {
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
 cd "$SCRIPT_DIR"
 
+# The launcher scrubs WORK_DIR on every boot. Keep mutable Rust bootstrap and
+# build state in the gateway state volume instead of the measured source
+# checkout. These directories are an optimization only; source + Cargo.lock
+# remain authoritative.
+export PRIVATE_AI_GATEWAY_CACHE_DIR=${PRIVATE_AI_GATEWAY_CACHE_DIR:-/var/lib/private-ai-gateway/cache}
+export HOME=${HOME:-/root}
+export CARGO_HOME=${CARGO_HOME:-$PRIVATE_AI_GATEWAY_CACHE_DIR/cargo}
+export RUSTUP_HOME=${RUSTUP_HOME:-$PRIVATE_AI_GATEWAY_CACHE_DIR/rustup}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PRIVATE_AI_GATEWAY_CACHE_DIR/target}
+mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" "$CARGO_TARGET_DIR"
+export PATH="$CARGO_HOME/bin:$PATH"
+
 # Aggregator-internal bootstrap: if no Rust toolchain is present in the
 # image we are running on, this aggregator installs one. The launcher is
 # build-system agnostic and does not care what language we are written
@@ -92,13 +104,6 @@ if ! command -v cargo >/dev/null 2>&1; then
   # universe, the apt-get below fails loud and we exit before building.
   apt-get install -y --no-install-recommends ca-certificates rustup
 
-  # rustup writes its proxies under $CARGO_HOME/bin. The launcher image
-  # does not set HOME; default it sensibly and put the proxy dir on PATH.
-  export HOME=${HOME:-/root}
-  export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
-  export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
-  export PATH="$CARGO_HOME/bin:$PATH"
-
   # Install a current stable. --no-self-update so rustup does not silently
   # upgrade itself at runtime; --profile minimal keeps the install to
   # rustc + cargo + std.
@@ -112,6 +117,7 @@ require_tool rustc
 log "rustc: $(rustc --version)"
 log "cargo: $(cargo --version)"
 log "build dir: $SCRIPT_DIR"
+log "cache dir: $PRIVATE_AI_GATEWAY_CACHE_DIR"
 
 # --locked: refuse to update Cargo.lock. We want the exact dependency set the
 # pinned commit ships with, not whatever the registry happens to resolve to
@@ -122,7 +128,7 @@ log "build dir: $SCRIPT_DIR"
 log "cargo build --release --locked --bin private-ai-gateway"
 cargo build --release --locked --bin private-ai-gateway
 
-BIN="$SCRIPT_DIR/target/release/private-ai-gateway"
+BIN="$CARGO_TARGET_DIR/release/private-ai-gateway"
 [[ -x $BIN ]] || die "release binary not found at $BIN after build"
 
 log "exec $BIN"

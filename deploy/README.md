@@ -5,20 +5,20 @@ Private AI Gateway through
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 
 The launcher fetches a pinned `private-ai-gateway` commit, verifies `HEAD`,
-preserves the container environment, and runs the gateway repo's own
-[`../entrypoint.sh`](../entrypoint.sh). The launcher remains generic; install,
-build, run, and ACI policy live in this repo.
+scrubs the checkout, preserves the container environment, and runs the gateway
+repo's own [`../entrypoint.sh`](../entrypoint.sh). The launcher remains
+generic; install, build, run, and ACI policy live in this repo.
 
 ## One-Command Deploy
 
 The compose hard-codes the released launcher image:
 
 ```text
-docker.io/dstacktee/git-launcher@sha256:70b32e7929233865f354b8e3f329737deb78415def9b87a4a567b2e06e254bbe
+docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b
 ```
 
 That digest comes from
-[`git-launcher-v0.2.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.2.0).
+[`git-launcher-v0.3.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.3.0).
 
 Prepare an audited gateway commit, then run:
 
@@ -75,6 +75,22 @@ Everything after step 4 is gateway-owned:
 
 The public gateway repo root contains `entrypoint.sh`, so the launcher config
 does not set `REPO_SUBDIR`.
+
+## Volumes and Reboots
+
+The compose uses two persistent volumes with different meanings:
+
+| Volume | Mount | Meaning |
+| --- | --- | --- |
+| `gateway-checkout` | `/var/lib/git-launcher` | Source checkout cache owned by `git-launcher`. Scrubbed on every boot with `git reset --hard` and `git clean -ffdx`. |
+| `gateway-state` | `/var/lib/private-ai-gateway` | Gateway-owned mutable state: upstream config, receipt/body retention, and Rust build cache. |
+
+Do not put SQLite databases, retained bodies, uploaded files, or build artefacts
+under `WORK_DIR`. The source checkout is allowed to disappear and reclone. By
+default `entrypoint.sh` stores Cargo/Rustup/target state under
+`PRIVATE_AI_GATEWAY_CACHE_DIR=/var/lib/private-ai-gateway/cache`, so restarts
+can reuse the toolchain and crate/build cache without making the source checkout
+mutable.
 
 ## Upstream Config Seed
 
@@ -155,9 +171,9 @@ A verifier checks:
 
 | Layer | What to compare |
 | --- | --- |
-| Launcher image | The image digest in the attested compose equals `sha256:70b32e7929233865f354b8e3f329737deb78415def9b87a4a567b2e06e254bbe` and verifies through the `git-launcher-v0.2.0` Sigstore provenance. |
+| Launcher image | The image digest in the attested compose equals `sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b` and verifies through the `git-launcher-v0.3.0` Sigstore provenance. |
 | Launcher config | `REPO_URL` and `COMMIT_SHA` in `gateway-pin` match the audited gateway commit. |
-| Runtime env | Service `environment:` matches the non-secret deployment policy, including source-provenance fields and config paths. |
+| Runtime env | Service `environment:` matches the non-secret deployment policy, including source-provenance fields, config paths, and cache location. |
 | Upstream seed | `gateway-upstreams` is the reviewed initial provider policy. |
 | Gateway report | `/v1/attestation/report` binds the dstack KMS identity, ACI keyset, TLS SPKI if configured, and source provenance. |
 

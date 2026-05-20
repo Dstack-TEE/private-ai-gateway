@@ -112,6 +112,9 @@ What `entrypoint.sh` does (once the launcher invokes it):
 2. Runs `cargo build --release --locked --bin private-ai-gateway`. The
    `--locked` flag means a build that would change `Cargo.lock` is a hard
    failure, not silent dependency drift.
+   Cargo, Rustup, and build target state live under
+   `/var/lib/private-ai-gateway/cache` by default, outside the source checkout
+   that `git-launcher` scrubs on every boot.
 3. `exec`s the built binary.
 
 See `deploy/README.md` for the launcher `.conf`, the Compose runtime env, the

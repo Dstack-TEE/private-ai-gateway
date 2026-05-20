@@ -14,7 +14,7 @@
 
 services:
   private-ai-gateway:
-    image: docker.io/dstacktee/git-launcher@sha256:70b32e7929233865f354b8e3f329737deb78415def9b87a4a567b2e06e254bbe
+    image: docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b
     command: ["/etc/git-launcher/gateway.conf"]
     ports:
       - "8086:8086"
@@ -27,6 +27,7 @@ services:
       PRIVATE_AI_GATEWAY_BIND: "0.0.0.0:8086"
       PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /var/lib/private-ai-gateway/upstreams.json
       PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH: /etc/private-ai-gateway/upstreams.seed.json
+      PRIVATE_AI_GATEWAY_CACHE_DIR: /var/lib/private-ai-gateway/cache
       PRIVATE_AI_GATEWAY_ADMIN_TOKEN: ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN:?set PRIVATE_AI_GATEWAY_ADMIN_TOKEN}
       PRIVATE_AI_GATEWAY_REPO_URL: https://github.com/Dstack-TEE/private-ai-gateway.git
       PRIVATE_AI_GATEWAY_REPO_COMMIT: ${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
