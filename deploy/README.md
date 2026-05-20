@@ -5,7 +5,7 @@ Private AI Gateway through
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 
 The launcher fetches a pinned `private-ai-gateway` commit, verifies `HEAD`,
-exports a runtime env file, and runs the gateway repo's own
+preserves the container environment, and runs the gateway repo's own
 [`../entrypoint.sh`](../entrypoint.sh). The launcher remains generic; install,
 build, run, and ACI policy live in this repo.
 
@@ -14,11 +14,11 @@ build, run, and ACI policy live in this repo.
 The compose hard-codes the released launcher image:
 
 ```text
-docker.io/dstacktee/git-launcher@sha256:9a9d61abd4d9176ecc8b9f318e3b08fde5eec11f988fd83981d87c0f5d8a2c87
+docker.io/dstacktee/git-launcher@sha256:70b32e7929233865f354b8e3f329737deb78415def9b87a4a567b2e06e254bbe
 ```
 
 That digest comes from
-[`git-launcher-v0.1.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.1.0).
+[`git-launcher-v0.2.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.2.0).
 
 Prepare an audited gateway commit, then run:
 
@@ -29,11 +29,15 @@ PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token> \
 phala-h4xuser deploy -n private-ai-gateway -c compose.yaml
 ```
 
-You can also copy [`gateway.env.example`](./gateway.env.example), export those
-values from your shell, and run the same `phala-h4xuser deploy` command.
+For local/dev deploys, you can also copy
+[`gateway.env.example`](./gateway.env.example), export those values from your
+shell, and run the same `phala-h4xuser deploy` command. For production, pass
+secrets such as admin tokens through the deployment secret mechanism rather
+than keeping them in a plaintext env file.
 
-`compose.yaml` inlines the launcher config, runtime env, and initial upstream
-config. dstack therefore measures the whole launch policy into `compose_hash`.
+`compose.yaml` inlines the launcher config, non-secret runtime environment, and
+initial upstream config. dstack therefore measures the whole launch policy into
+`compose_hash`.
 After deployment, the gateway listens on port `8086`.
 
 The checked-in compose starts with an empty upstream seed:
@@ -55,7 +59,7 @@ does not contain a Cargo install command. Its default-mode contract is:
 
 1. Clone `REPO_URL`.
 2. Check out exactly `COMMIT_SHA`.
-3. Export `CHILD_ENV_FILE`.
+3. Preserve the container environment.
 4. Run `bash entrypoint.sh` from the pinned repo.
 
 Everything after step 4 is gateway-owned:
@@ -63,7 +67,7 @@ Everything after step 4 is gateway-owned:
 | Concern | Owner | Location |
 | --- | --- | --- |
 | Workload source pin | Launcher config | `gateway-pin` in `compose.yaml` |
-| Runtime env | Deployment compose | `gateway-runtime` in `compose.yaml` |
+| Non-secret runtime env | Deployment compose | service `environment:` in `compose.yaml` |
 | Initial upstream config | Deployment compose | `gateway-upstreams` in `compose.yaml` |
 | Toolchain bootstrap | Gateway repo | `../entrypoint.sh` |
 | Build and exec | Gateway repo | `../entrypoint.sh` |
@@ -102,9 +106,11 @@ Changing `gateway-upstreams` in a later compose revision does not overwrite an
 existing active config volume. Use the admin API to replace the config, or
 delete the `gateway-state` volume intentionally before redeploying.
 
-The seed and runtime env are part of the attested compose. API keys in the seed
-are therefore part of the deployment input and must be handled as secrets by
-the deployment environment.
+The seed and non-secret runtime env are part of the attested compose. API keys
+in the seed are therefore part of the deployment input and must be handled as
+secrets by the deployment environment. For production, pass secrets through
+dstack encrypted secrets, KMS, or mounted secret files rather than inline
+compose values.
 
 Example seed:
 
@@ -149,9 +155,9 @@ A verifier checks:
 
 | Layer | What to compare |
 | --- | --- |
-| Launcher image | The image digest in the attested compose equals `sha256:9a9d61abd4d9176ecc8b9f318e3b08fde5eec11f988fd83981d87c0f5d8a2c87` and verifies through the `git-launcher-v0.1.0` Sigstore provenance. |
+| Launcher image | The image digest in the attested compose equals `sha256:70b32e7929233865f354b8e3f329737deb78415def9b87a4a567b2e06e254bbe` and verifies through the `git-launcher-v0.2.0` Sigstore provenance. |
 | Launcher config | `REPO_URL` and `COMMIT_SHA` in `gateway-pin` match the audited gateway commit. |
-| Runtime env | `gateway-runtime` matches the deployment policy, including source-provenance fields and config paths. |
+| Runtime env | Service `environment:` matches the non-secret deployment policy, including source-provenance fields and config paths. |
 | Upstream seed | `gateway-upstreams` is the reviewed initial provider policy. |
 | Gateway report | `/v1/attestation/report` binds the dstack KMS identity, ACI keyset, TLS SPKI if configured, and source provenance. |
 

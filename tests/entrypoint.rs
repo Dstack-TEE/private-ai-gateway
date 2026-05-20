@@ -81,8 +81,8 @@ fn entrypoint_sh_execs_the_built_binary() {
 
 #[test]
 fn entrypoint_sh_does_not_export_runtime_policy() {
-    // Runtime policy lives in CHILD_ENV_FILE (audited deployment policy), not
-    // inside the workload bytes. entrypoint.sh must never bake it in.
+    // Runtime policy lives in audited deployment config, not inside the
+    // workload bytes. entrypoint.sh must never bake it in.
     let body = script_text();
     for needle in &[
         "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=",
@@ -91,7 +91,7 @@ fn entrypoint_sh_does_not_export_runtime_policy() {
         assert!(
             !body.contains(needle),
             "entrypoint.sh must not set runtime deployment policy itself \
-             (found {needle:?}); it belongs in CHILD_ENV_FILE so a verifier audits it"
+             (found {needle:?}); it belongs in compose environment so a verifier audits it"
         );
     }
 }
@@ -99,8 +99,8 @@ fn entrypoint_sh_does_not_export_runtime_policy() {
 #[test]
 fn entrypoint_sh_does_not_bake_upstream_config_policy() {
     // Upstream choice is trust-bearing deployment policy that must come
-    // from CHILD_ENV_FILE. The script must not set or default any of the
-    // upstream-related env names.
+    // from audited deployment config. The script must not set or default
+    // any of the upstream-related env names.
     let body = script_text();
     for needle in &[
         "PRIVATE_AI_GATEWAY_UPSTREAM_URL=",
@@ -115,7 +115,7 @@ fn entrypoint_sh_does_not_bake_upstream_config_policy() {
         assert!(
             !body.contains(needle),
             "entrypoint.sh must not set or export upstream config policy (found {needle:?}); \
-             upstream choice is deployment policy and belongs in CHILD_ENV_FILE"
+             upstream choice is deployment policy and belongs in compose environment"
         );
     }
 }
@@ -168,12 +168,7 @@ fn deploy_examples_exist_and_reference_entrypoint_sh() {
     // The deploy examples are part of the same pin and a verifier reads
     // them too. Keep them in lockstep with entrypoint.sh.
     let deploy = repo_root().join("deploy");
-    for name in &[
-        "aggregator.conf",
-        "aggregator.env",
-        "compose.yaml",
-        "README.md",
-    ] {
+    for name in &["aggregator.conf", "compose.yaml", "README.md"] {
         let p = deploy.join(name);
         assert!(p.exists(), "deploy/{name} must exist next to entrypoint.sh");
     }
@@ -201,8 +196,8 @@ fn no_stale_tee_launch_sh_references_remain() {
             "deploy/aggregator.conf",
         ),
         (
-            repo_root().join("deploy").join("aggregator.env"),
-            "deploy/aggregator.env",
+            repo_root().join("deploy").join("compose.yaml"),
+            "deploy/compose.yaml",
         ),
     ];
     for (path, label) in files.iter() {
@@ -233,8 +228,8 @@ fn deploy_text(name: &str) -> String {
 #[test]
 fn launcher_config_uses_only_default_mode_keys() {
     // aggregator.conf is the launcher config. The launcher contract is
-    // intentionally minimal: REPO_URL, COMMIT_SHA, WORK_DIR, and
-    // CHILD_ENV_FILE. Setting INSTALL_CMD or RUN_CMD would move
+    // intentionally minimal: REPO_URL, COMMIT_SHA, and WORK_DIR.
+    // Setting INSTALL_CMD or RUN_CMD would move
     // aggregator-owned install/run logic back into the launcher config,
     // which is exactly the boundary we keep out of.
     let body = deploy_text("aggregator.conf");
@@ -252,12 +247,18 @@ fn launcher_config_uses_only_default_mode_keys() {
         }
     }
     // Sanity: the keys we DO use are present.
-    for required in &["REPO_URL=", "COMMIT_SHA=", "WORK_DIR=", "CHILD_ENV_FILE="] {
+    for required in &["REPO_URL=", "COMMIT_SHA=", "WORK_DIR="] {
         assert!(
             body.contains(required),
             "aggregator.conf should set {required}... so the launcher has a complete default-mode pin"
         );
     }
+    assert!(
+        !body
+            .lines()
+            .any(|line| line.trim_start().starts_with("CHILD_ENV_FILE=")),
+        "aggregator.conf must not set CHILD_ENV_FILE; app config comes through compose environment"
+    );
     assert!(
         !body
             .lines()
@@ -283,6 +284,14 @@ fn compose_yaml_inlines_only_default_mode_keys() {
     assert!(
         !body.contains("REPO_SUBDIR="),
         "compose.yaml must not set REPO_SUBDIR now that the public repo root is the gateway"
+    );
+    assert!(
+        !body.contains("CHILD_ENV_FILE="),
+        "compose.yaml must not set CHILD_ENV_FILE; app config comes through service environment"
+    );
+    assert!(
+        body.contains("environment:"),
+        "compose.yaml must pass gateway runtime config through normal Compose environment"
     );
 }
 

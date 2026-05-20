@@ -6,8 +6,7 @@
 #   feature, a launcher contract, or part of the launcher image's
 #   responsibility. The launcher only knows three things about us: it cd's
 #   into the configured repo/subdir after checking out the pinned commit, it
-#   exports our CHILD_ENV_FILE into the environment, and it `exec bash
-#   entrypoint.sh`.
+#   preserves the container environment, and it `exec bash entrypoint.sh`.
 #   From there, *everything* - install, build, run - lives here and is
 #   covered by source provenance of the pinned commit. The launcher stays
 #   generic and build-system agnostic; how this aggregator gets its Rust
@@ -28,9 +27,10 @@
 #
 # What it deliberately does NOT do
 #   * Set the aggregator's upstream URL, identity subject, or any
-#     trust-bearing policy. Those flow in through the launcher's
-#     CHILD_ENV_FILE so a verifier audits them as deployment config, not
-#     as bytes inside this script.
+#     trust-bearing policy. Non-secret runtime policy flows in through Docker
+#     Compose `environment:` so a verifier audits it as deployment config, not
+#     as bytes inside this script. Secrets should come from encrypted secrets,
+#     KMS, or mounted secret files.
 #   * Fall back if any step fails. Build / install / exec failure is a
 #     hard exit.
 #

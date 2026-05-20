@@ -67,7 +67,7 @@ src/
 entrypoint.sh           // aggregator-owned entry script the launcher exec's
 scripts/
   phala_multi_upstream_smoke.sh // deploys two upstream ACI CVMs + one router CVM and asserts routing receipts
-deploy/                 // launcher .conf, runtime .env, dstack compose example
+deploy/                 // launcher .conf and dstack compose example
   README.md             // launcher wiring and deployment notes
 
 tests/
@@ -89,15 +89,16 @@ tests/
 This repo is designed to be launched by
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 The launcher pulls the repo at a pinned commit, `cd`s into
-the public gateway repo root, exports the `CHILD_ENV_FILE`, and runs the
-gateway-owned `entrypoint.sh`.
+the public gateway repo root, and runs the gateway-owned `entrypoint.sh`.
+Non-secret runtime config is passed through normal Docker Compose
+`environment:` entries; secrets should come from dstack encrypted secrets,
+KMS, or mounted secret files.
 
 **Ownership boundary.** The launcher is generic and build-system agnostic;
 it does not know we are written in Rust. `entrypoint.sh` is owned by this
 aggregator, and everything past `bash entrypoint.sh` — install, build,
 run — lives here. The launcher config stays minimal (`REPO_URL`,
-`COMMIT_SHA`, `WORK_DIR`, `CHILD_ENV_FILE`); there is no `INSTALL_CMD` and no
-`RUN_CMD`.
+`COMMIT_SHA`, `WORK_DIR`); there is no `INSTALL_CMD` and no `RUN_CMD`.
 
 What `entrypoint.sh` does (once the launcher invokes it):
 
@@ -113,9 +114,9 @@ What `entrypoint.sh` does (once the launcher invokes it):
    failure, not silent dependency drift.
 3. `exec`s the built binary.
 
-See `deploy/README.md` for the launcher `.conf`, the `CHILD_ENV_FILE`
-runtime env, the dstack compose example that puts both behind
-`compose_hash`, and the Rust-capable aggregator image recipe.
+See `deploy/README.md` for the launcher `.conf`, the Compose runtime env, the
+dstack compose example that puts both behind `compose_hash`, and the
+Rust-capable aggregator image recipe.
 
 ## Environment variables
 
