@@ -7,6 +7,7 @@
 //! request rewriting.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,10 +16,11 @@ mod common;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
+use futures_util::StreamExt as _;
 use private_ai_gateway::aci::canonical::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
     decrypt_with_secret_key, encrypt_for_public_key, public_key_from_secret, E2EE_VERSION_V2,
@@ -30,7 +32,8 @@ use private_ai_gateway::aci::keys::{
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, UpstreamVerifiedEvent, VerificationResult,
     EVENT_MIDDLEWARE_FORWARDED, EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED,
-    EVENT_RESPONSE_RETURNED, EVENT_ROUTE_SELECTED, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
+    EVENT_RESPONSE_RECEIVED, EVENT_RESPONSE_RETURNED, EVENT_ROUTE_SELECTED,
+    EVENT_TRANSPARENCY_REQUEST_MODIFIED, EVENT_TRANSPARENCY_RESPONSE_MODIFIED,
     EVENT_UPSTREAM_VERIFIED,
 };
 use private_ai_gateway::aci::types::{KeyedPublicKey, Receipt, ServiceCapabilities};
@@ -43,10 +46,12 @@ use private_ai_gateway::aggregator::service::{
     UpstreamVerifier,
 };
 use private_ai_gateway::http::{
-    build_internal_backend_router, build_router, build_router_with_http_middleware,
-    GatewayRequestStore, StoredGatewayRequest,
+    build_internal_backend_router, build_router, build_router_with_uds_middleware,
+    serve_unix_listener, GatewayRequestStore, MiddlewareReceiptJournal, StoredGatewayRequest,
 };
+use rand::RngCore;
 use serde_json::Value;
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use common::{StaticKeyProvider, StubQuoter};
@@ -209,13 +214,16 @@ struct HttpResult {
 struct MiddlewareCall {
     request_id: Option<String>,
     user_model: Option<String>,
+    authorization: Option<String>,
+    tenant_header: Option<String>,
     body: Vec<u8>,
 }
 
 #[derive(Clone)]
 struct FixtureMiddlewareState {
-    backend_url: String,
+    backend_socket: PathBuf,
     target_route_id: String,
+    response_body_override: Option<Vec<u8>>,
     calls: Arc<Mutex<Vec<MiddlewareCall>>>,
 }
 
@@ -276,9 +284,19 @@ async fn fixture_middleware_handler(
         .get("x-private-ai-gateway-user-model")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let tenant_header = headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     state.calls.lock().unwrap().push(MiddlewareCall {
         request_id: request_id.clone(),
         user_model,
+        authorization,
+        tenant_header,
         body: body.to_vec(),
     });
     let Some(request_id) = request_id else {
@@ -288,8 +306,11 @@ async fn fixture_middleware_handler(
             b"missing request id".to_vec(),
         );
     };
-    let resp = reqwest::Client::new()
-        .post(format!("{}/internal/forward", state.backend_url))
+    let resp = reqwest::Client::builder()
+        .unix_socket(state.backend_socket.clone())
+        .build()
+        .unwrap()
+        .post("http://private-ai-gateway/internal/forward")
         .header("x-private-ai-gateway-request-id", request_id)
         .header("x-private-ai-gateway-target", state.target_route_id)
         .body(body.to_vec())
@@ -309,7 +330,8 @@ async fn fixture_middleware_handler(
             out_headers.insert(name, value.clone());
         }
     }
-    let body = resp.bytes().await.unwrap().to_vec();
+    let backend_body = resp.bytes().await.unwrap().to_vec();
+    let body = state.response_body_override.clone().unwrap_or(backend_body);
     (status, out_headers, body)
 }
 
@@ -321,13 +343,87 @@ async fn fixture_middleware_models() -> impl IntoResponse {
     )
 }
 
-async fn serve_router(app: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+async fn fixture_middleware_rejects_with_forged_trust_headers() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert("x-receipt-id", HeaderValue::from_static("fake-receipt"));
+    headers.insert("x-e2ee-applied", HeaderValue::from_static("true"));
+    headers.insert("x-e2ee-version", HeaderValue::from_static("2"));
+    headers.insert("x-aci-identity", HeaderValue::from_static("sha256:forged"));
+    headers.insert(
+        "x-private-ai-gateway-request-id",
+        HeaderValue::from_static("forged"),
+    );
+    (
+        StatusCode::BAD_REQUEST,
+        headers,
+        br#"{"error":{"message":"middleware rejected","type":"middleware_error","code":null,"param":null}}"#.to_vec(),
+    )
+}
+
+async fn fixture_middleware_generated_chat() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        br#"{"id":"chat-middleware-generated","object":"chat.completion","model":"tenant-facing-model","choices":[{"index":0,"message":{"role":"assistant","content":"middleware-only"},"finish_reason":"stop"}]}"#.to_vec(),
+    )
+}
+
+#[derive(Clone)]
+struct StreamingMiddlewareState {
+    release_second: Arc<Notify>,
+}
+
+async fn fixture_middleware_streaming_handler(
+    State(state): State<StreamingMiddlewareState>,
+) -> impl IntoResponse {
+    let stream = futures_util::stream::unfold(0u8, move |step| {
+        let state = state.clone();
+        async move {
+            match step {
+                0 => Some((
+                    Ok::<_, std::convert::Infallible>(Bytes::from_static(
+                        b"data: {\"id\":\"middleware-stream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n",
+                    )),
+                    1,
+                )),
+                1 => {
+                    state.release_second.notified().await;
+                    Some((
+                        Ok::<_, std::convert::Infallible>(Bytes::from_static(
+                            b"data: [DONE]\n\n",
+                        )),
+                        2,
+                    ))
+                }
+                _ => None,
+            }
+        }
     });
-    format!("http://{addr}")
+    (
+        StatusCode::OK,
+        [("content-type", "text/event-stream")],
+        Body::from_stream(stream),
+    )
+}
+
+fn test_socket_path(name: &str) -> PathBuf {
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    std::env::temp_dir().join(format!(
+        "private-ai-gateway-{name}-{}-{}.sock",
+        std::process::id(),
+        hex::encode(bytes)
+    ))
+}
+
+async fn serve_router_uds(name: &str, app: Router) -> PathBuf {
+    let path = test_socket_path(name);
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        serve_unix_listener(listener, app).await.unwrap();
+    });
+    path
 }
 
 struct Harness {
@@ -692,6 +788,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         service.clone(),
         request_store.clone(),
     ));
+    let selected_journal = MiddlewareReceiptJournal::default();
     request_store.insert(
         "req-test-target-route".to_string(),
         StoredGatewayRequest {
@@ -701,6 +798,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
             requester: None,
             e2ee: None,
             user_model: Some("tenant-facing-model".to_string()),
+            receipt_journal: selected_journal.clone(),
         },
     );
     let selected_response = backend
@@ -721,10 +819,25 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         let forwarded: Value = serde_json::from_slice(&calls_b[0].body).unwrap();
         assert_eq!(forwarded["model"], "upstream-b-model");
     }
-    let receipt_id = header_str(&selected_response.headers, "x-receipt-id");
-    let selected_receipt = service
-        .get_receipt_by_receipt_id(receipt_id)
-        .expect("internal backend response must persist a receipt");
+    let receipt_id = header_str(&selected_response.headers, "x-receipt-id").to_string();
+    assert!(
+        service.get_receipt_by_receipt_id(&receipt_id).is_none(),
+        "internal backend must not finalize a middleware receipt before frontend observes the final response"
+    );
+    let selected_draft = selected_journal
+        .take()
+        .expect("internal backend must append a receipt draft");
+    let selected_finalized = service
+        .finalize_middleware_receipt(
+            selected_draft,
+            &selected_response.body,
+            Some(header_str(&selected_response.headers, "content-type")),
+            None,
+            None,
+        )
+        .unwrap();
+    let selected_receipt = selected_finalized.receipt;
+    assert_eq!(selected_receipt.receipt_id, receipt_id);
     assert_eq!(
         event(&selected_receipt, EVENT_REQUEST_RECEIVED)["body_hash"],
         sha256_hex(selected)
@@ -751,6 +864,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
             requester: None,
             e2ee: None,
             user_model: Some("tenant-facing-model".to_string()),
+            receipt_journal: MiddlewareReceiptJournal::default(),
         },
     );
     let bad_target = backend
@@ -780,6 +894,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
             requester: None,
             e2ee: None,
             user_model: Some("tenant-facing-model".to_string()),
+            receipt_journal: MiddlewareReceiptJournal::default(),
         },
     );
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -796,34 +911,44 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         .await;
     assert_eq!(expired.status, StatusCode::BAD_REQUEST);
 
-    let http_store = GatewayRequestStore::default();
-    let backend_url = serve_router(build_internal_backend_router(
-        service.clone(),
-        http_store.clone(),
-    ))
+    let uds_store = GatewayRequestStore::default();
+    let backend_socket = serve_router_uds(
+        "backend",
+        build_internal_backend_router(service.clone(), uds_store.clone()),
+    )
     .await;
     let middleware_calls = Arc::new(Mutex::new(Vec::new()));
-    let middleware_url = serve_router(
+    let middleware_socket = serve_router_uds(
+        "middleware",
         Router::new()
             .route("/v1/chat/completions", post(fixture_middleware_handler))
             .route("/v1/models", axum::routing::get(fixture_middleware_models))
             .with_state(FixtureMiddlewareState {
-                backend_url,
+                backend_socket: backend_socket.clone(),
                 target_route_id: "upstream-b:public-b".to_string(),
+                response_body_override: None,
                 calls: middleware_calls.clone(),
             }),
     )
     .await;
-    let public_with_middleware = MockRequester::new(build_router_with_http_middleware(
+    let public_with_middleware = MockRequester::new(build_router_with_uds_middleware(
         service.clone(),
-        http_store,
-        middleware_url,
+        uds_store.clone(),
+        middleware_socket,
     ));
     let middleware_models = public_with_middleware.get("/v1/models").await;
     assert_eq!(middleware_models.status, StatusCode::OK);
     let middleware_models = json_body(&middleware_models);
     assert_eq!(middleware_models["data"][0]["id"], "tenant-facing-model");
-    let middleware_response = public_with_middleware.post_chat(selected, &[]).await;
+    let middleware_response = public_with_middleware
+        .post_chat(
+            selected,
+            &[
+                ("authorization", "Bearer tenant-token"),
+                ("x-tenant-id", "tenant-a"),
+            ],
+        )
+        .await;
     assert_eq!(middleware_response.status, StatusCode::OK);
     {
         let calls = middleware_calls.lock().unwrap();
@@ -833,6 +958,11 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
             .as_deref()
             .is_some_and(|id| id.starts_with("req_")));
         assert_eq!(calls[0].user_model.as_deref(), Some("tenant-facing-model"));
+        assert_eq!(
+            calls[0].authorization.as_deref(),
+            Some("Bearer tenant-token")
+        );
+        assert_eq!(calls[0].tenant_header.as_deref(), Some("tenant-a"));
         assert_eq!(calls[0].body, selected);
     }
     {
@@ -861,6 +991,145 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
         "upstream-b:public-b"
     );
+    assert_eq!(
+        event(&receipt, EVENT_RESPONSE_RECEIVED)["cleartext_hash"],
+        event(&receipt, EVENT_RESPONSE_RETURNED)["cleartext_hash"],
+    );
+
+    let rejecting_middleware_socket = serve_router_uds(
+        "middleware-rejecting",
+        Router::new().route(
+            "/v1/chat/completions",
+            post(fixture_middleware_rejects_with_forged_trust_headers),
+        ),
+    )
+    .await;
+    let public_with_rejecting_middleware = MockRequester::new(build_router_with_uds_middleware(
+        service.clone(),
+        uds_store.clone(),
+        rejecting_middleware_socket,
+    ));
+    let rejected_response = public_with_rejecting_middleware
+        .post_chat(selected, &[])
+        .await;
+    assert_eq!(rejected_response.status, StatusCode::BAD_REQUEST);
+    assert!(rejected_response.headers.get("x-receipt-id").is_none());
+    assert!(rejected_response.headers.get("x-e2ee-applied").is_none());
+    assert!(rejected_response
+        .headers
+        .get("x-private-ai-gateway-request-id")
+        .is_none());
+    assert_eq!(
+        header_str(&rejected_response.headers, "x-aci-identity"),
+        service.workload_id()
+    );
+
+    let release_second = Arc::new(Notify::new());
+    let streaming_middleware_socket = serve_router_uds(
+        "middleware-streaming",
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(fixture_middleware_streaming_handler),
+            )
+            .with_state(StreamingMiddlewareState {
+                release_second: release_second.clone(),
+            }),
+    )
+    .await;
+    let public_streaming = build_router_with_uds_middleware(
+        service.clone(),
+        uds_store.clone(),
+        streaming_middleware_socket,
+    );
+    let streaming_request = br#"{"model":"tenant-facing-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+    let streaming_response = tokio::time::timeout(
+        Duration::from_millis(200),
+        public_streaming.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(streaming_request.to_vec()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("frontend must return middleware streaming response before the stream finishes")
+    .unwrap();
+    assert_eq!(streaming_response.status(), StatusCode::OK);
+    assert!(streaming_response.headers().get("x-receipt-id").is_none());
+    assert_eq!(
+        header_str(streaming_response.headers(), "content-type"),
+        "text/event-stream"
+    );
+    let mut streaming_body = streaming_response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_millis(200), streaming_body.next())
+        .await
+        .expect("first middleware SSE chunk should be available immediately")
+        .expect("stream should yield first chunk")
+        .unwrap();
+    assert_eq!(
+        first,
+        Bytes::from_static(
+            b"data: {\"id\":\"middleware-stream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"
+        )
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), streaming_body.next())
+            .await
+            .is_err(),
+        "frontend must not synthesize the second chunk before middleware sends it"
+    );
+    release_second.notify_waiters();
+    let second = tokio::time::timeout(Duration::from_millis(200), streaming_body.next())
+        .await
+        .expect("second middleware SSE chunk should be released")
+        .expect("stream should yield second chunk")
+        .unwrap();
+    assert_eq!(second, Bytes::from_static(b"data: [DONE]\n\n"));
+    assert!(streaming_body.next().await.is_none());
+
+    let provider_b_body = br#"{"id":"chat-route-b","object":"chat.completion","model":"upstream-b-model","choices":[{"index":0,"message":{"role":"assistant","content":"b"},"finish_reason":"stop"}]}"#;
+    let mutated_body = br#"{"id":"chat-route-b","object":"chat.completion","model":"upstream-b-model","choices":[{"index":0,"message":{"role":"assistant","content":"middleware changed"},"finish_reason":"stop"}]}"#;
+    let mutating_middleware_socket = serve_router_uds(
+        "middleware-mutating",
+        Router::new()
+            .route("/v1/chat/completions", post(fixture_middleware_handler))
+            .with_state(FixtureMiddlewareState {
+                backend_socket: backend_socket.clone(),
+                target_route_id: "upstream-b:public-b".to_string(),
+                response_body_override: Some(mutated_body.to_vec()),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+    )
+    .await;
+    let public_with_mutating_middleware = MockRequester::new(build_router_with_uds_middleware(
+        service.clone(),
+        uds_store.clone(),
+        mutating_middleware_socket,
+    ));
+    let mutated_response = public_with_mutating_middleware
+        .post_chat(selected, &[])
+        .await;
+    assert_eq!(mutated_response.status, StatusCode::OK);
+    assert_eq!(mutated_response.body, mutated_body);
+    let mutated_receipt_id = header_str(&mutated_response.headers, "x-receipt-id");
+    let mutated_receipt = service
+        .get_receipt_by_receipt_id(mutated_receipt_id)
+        .expect("frontend must finalize receipt after middleware response mutation");
+    assert_eq!(
+        event(&mutated_receipt, EVENT_RESPONSE_RECEIVED)["cleartext_hash"],
+        sha256_hex(provider_b_body)
+    );
+    assert_eq!(
+        event(&mutated_receipt, EVENT_RESPONSE_RETURNED)["cleartext_hash"],
+        sha256_hex(mutated_body)
+    );
+    assert!(mutated_receipt
+        .event_log
+        .iter()
+        .any(|event| event.event_type == EVENT_TRANSPARENCY_RESPONSE_MODIFIED));
 
     let client_secret = k256::SecretKey::from_slice(&[0x67; 32]).unwrap();
     let nonce = "nonce-middleware-route";
@@ -909,8 +1178,8 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
     }
     {
         let calls_b = calls_b.lock().unwrap();
-        assert_eq!(calls_b.len(), 3);
-        let forwarded: Value = serde_json::from_slice(&calls_b[2].body).unwrap();
+        assert_eq!(calls_b.len(), 4);
+        let forwarded: Value = serde_json::from_slice(&calls_b[3].body).unwrap();
         assert_eq!(forwarded["model"], "upstream-b-model");
         assert_eq!(forwarded["messages"][0]["content"], "hello");
     }
@@ -950,6 +1219,75 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         event(&e2ee_receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
         "upstream-b:public-b"
     );
+
+    let generated_middleware_socket = serve_router_uds(
+        "middleware-generated",
+        Router::new().route(
+            "/v1/chat/completions",
+            post(fixture_middleware_generated_chat),
+        ),
+    )
+    .await;
+    let public_with_generated_middleware = MockRequester::new(build_router_with_uds_middleware(
+        service.clone(),
+        uds_store.clone(),
+        generated_middleware_socket,
+    ));
+    let generated_nonce = "nonce-middleware-generated";
+    let generated_timestamp = 1_700_000_010u64;
+    let generated_request_aad = format!(
+        "v2|req|algo={}|model=tenant-facing-model|m=0|c=-|n={generated_nonce}|ts={generated_timestamp}",
+        model_key.algo
+    );
+    let generated_encrypted_content = encrypt_for_public_key(
+        &model_key.public_key_hex,
+        b"hello",
+        generated_request_aad.as_bytes(),
+    )
+    .unwrap();
+    let generated_encrypted_body = serde_json::to_vec(&serde_json::json!({
+        "model": "tenant-facing-model",
+        "messages": [{"role": "user", "content": generated_encrypted_content}],
+    }))
+    .unwrap();
+    let generated_response = public_with_generated_middleware
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-client-pub-key", public_key_from_secret(&client_secret))
+                .header("x-model-pub-key", model_key.public_key_hex.clone())
+                .header("x-e2ee-version", E2EE_VERSION_V2)
+                .header("x-e2ee-nonce", generated_nonce)
+                .header("x-e2ee-timestamp", generated_timestamp.to_string())
+                .body(Body::from(generated_encrypted_body))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(generated_response.status, StatusCode::OK);
+    assert!(generated_response.headers.get("x-receipt-id").is_none());
+    assert_eq!(
+        header_str(&generated_response.headers, "x-e2ee-applied"),
+        "true"
+    );
+    let generated_encrypted_response = json_body(&generated_response);
+    let generated_encrypted_answer = generated_encrypted_response["choices"][0]["message"]
+        ["content"]
+        .as_str()
+        .unwrap();
+    assert_ne!(generated_encrypted_answer, "middleware-only");
+    let generated_response_aad = format!(
+        "v2|resp|algo={}|model=tenant-facing-model|id=chat-middleware-generated|choice=0|field=content|n={generated_nonce}|ts={generated_timestamp}",
+        model_key.algo
+    );
+    let generated_decrypted = decrypt_with_secret_key(
+        &client_secret,
+        generated_encrypted_answer,
+        generated_response_aad.as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(generated_decrypted, b"middleware-only");
 }
 
 #[tokio::test]

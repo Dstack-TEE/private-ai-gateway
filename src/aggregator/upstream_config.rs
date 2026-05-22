@@ -543,7 +543,8 @@ fn unique_upstream_models(cfg: &UpstreamConfig) -> Vec<String> {
     let mut seen = HashSet::new();
     cfg.models
         .values()
-        .filter_map(|model_id| seen.insert(model_id.clone()).then(|| model_id.clone()))
+        .filter(|model_id| seen.insert((*model_id).clone()))
+        .cloned()
         .collect()
 }
 

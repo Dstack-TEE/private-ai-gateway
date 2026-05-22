@@ -19,7 +19,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
-| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime HTTP middleware mode, and middleware `/v1/models` pass-through are implemented. Stream-preserving middleware transport and production compose are still pending. |
+| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, and middleware `/v1/models` pass-through are implemented. Stream-preserving middleware transport and production compose are still pending. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
 
@@ -32,16 +32,15 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
 - Introduce internal request context keyed by `request_id`, with expiry for
   pending middleware requests. Implemented.
 - Split the current request path into frontend preparation, backend
-  verification/forwarding, and frontend response finalization. Partially
-  implemented; HTTP middleware responses are still buffered by the frontend
-  transport.
+  verification/forwarding, and frontend response finalization. Implemented for
+  the current UDS middleware path, including streaming response finalization.
 - Keep middleware-disabled mode as the default and prove it preserves current
   behavior. Implemented and covered by the full test suite.
 - Add a local backend endpoint or in-process backend callable guarded by
   request context lookup. Implemented as a separate internal router builder and
   runtime listener when middleware is enabled.
-- Add optional HTTP middleware mode with a fixture middleware for tests.
-  Implemented through `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL`.
+- Add optional UDS middleware mode with a fixture middleware for tests.
+  Implemented through `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH`.
 - Ensure external `X-Private-AI-Gateway-*` headers cannot steer the public
   frontend. Implemented by generating internal context server-side; covered by
   tests.
@@ -50,12 +49,18 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
 - Record route/backend receipt facts from backend observations, not middleware
   claims. Implemented with `middleware.forwarded`, `route.selected`, and final
   `request.forwarded` events.
+- Finalize middleware-mode receipts in the frontend after middleware returns,
+  with backend-owned `response.received` and frontend-owned
+  `response.returned`. Implemented.
 - Add E2EE tests proving ACI v2 response AAD uses the frontend-observed user
   model when middleware selects a separate target route. Implemented for the
-  current HTTP middleware path.
+  current UDS middleware path.
 - Update deploy docs after the middleware mode has a concrete production compose
   shape.
 - Add production compose wiring for a middleware container.
+- Keep the middleware developer contract current in
+  [middleware-integration.md](middleware-integration.md). Initial guide is
+  written.
 
 ### P0: Provider Soundness and Strict Pins
 
@@ -111,5 +116,6 @@ it does not expose arbitrary verifier commands or policy DSLs.
 - [README.md](../README.md)
 - [live-e2e-test-suite.md](live-e2e-test-suite.md)
 - [frontend-middleware-backend.md](frontend-middleware-backend.md)
+- [middleware-integration.md](middleware-integration.md)
 - [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md)
 - [router-mode-provider-review.md](router-mode-provider-review.md)

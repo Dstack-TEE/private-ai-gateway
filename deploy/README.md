@@ -12,10 +12,13 @@ generic; install, build, run, and ACI policy live in this repo.
 The checked-in compose runs in no-middleware mode: the public ACI frontend and
 verified-provider backend are the same process, and traffic is forwarded
 directly from frontend to backend. The binary can also run with a plaintext
-HTTP middleware slot by setting `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` and
-`PRIVATE_AI_GATEWAY_BACKEND_BIND`; this compose does not yet include a
-middleware container. See
-[`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md).
+HTTP-over-UDS middleware slot by setting
+`PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` and
+`PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH`; this compose does not yet include a
+middleware container or shared socket volume. See
+[`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md)
+and
+[`../docs/middleware-integration.md`](../docs/middleware-integration.md).
 
 ## One-Command Deploy
 

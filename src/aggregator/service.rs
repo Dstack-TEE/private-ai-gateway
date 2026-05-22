@@ -17,7 +17,7 @@
 //! [`UpstreamVerificationError`].
 
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -380,6 +380,100 @@ pub struct ForwardResult {
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
+    pub e2ee: Option<E2eeResponseInfo>,
+}
+
+pub enum MiddlewareForwardResult {
+    Forwarded(Box<MiddlewareForwarded>),
+    Stream(Box<MiddlewareStreamingForwarded>),
+    UpstreamError(StreamingUpstreamError),
+}
+
+pub struct MiddlewareForwarded {
+    pub receipt_id: String,
+    pub receipt: MiddlewareReceiptDraft,
+    pub upstream_status: u16,
+    pub upstream_body: Vec<u8>,
+    pub upstream_headers: std::collections::HashMap<String, String>,
+}
+
+pub struct MiddlewareStreamingForwarded {
+    pub receipt_id: String,
+    pub upstream_status: u16,
+    pub upstream_headers: std::collections::HashMap<String, String>,
+    pub body: ServiceResponseStream,
+}
+
+pub struct MiddlewareReceiptDraft {
+    receipt_id: String,
+    builder: ReceiptBuilder,
+    provider_response_hash: String,
+    forwarded_body: Vec<u8>,
+    endpoint_path: String,
+    request_mode: RequestMode,
+    response_model: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct MiddlewareReceiptJournal {
+    inner: Arc<Mutex<MiddlewareReceiptJournalState>>,
+}
+
+#[derive(Default)]
+struct MiddlewareReceiptJournalState {
+    receipt_id: Option<String>,
+    draft: Option<MiddlewareReceiptDraft>,
+}
+
+impl MiddlewareReceiptJournal {
+    pub fn reserve_receipt_id(&self, receipt_id: String) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .receipt_id = Some(receipt_id);
+    }
+
+    pub fn set(&self, draft: MiddlewareReceiptDraft) {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("middleware receipt journal poisoned");
+        inner.receipt_id = Some(draft.receipt_id.clone());
+        inner.draft = Some(draft);
+    }
+
+    pub fn take(&self) -> Option<MiddlewareReceiptDraft> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .draft
+            .take()
+    }
+
+    pub fn peek_receipt_id(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .receipt_id
+            .clone()
+    }
+}
+
+pub struct MiddlewareReceiptFinalization {
+    pub receipt: Receipt,
+    pub wire_body: Vec<u8>,
+    pub e2ee: Option<E2eeResponseInfo>,
+}
+
+pub type ServiceResponseStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServiceError>> + Send>>;
+
+pub struct MiddlewareStreamFinalization {
+    pub body: ServiceResponseStream,
+    pub e2ee: Option<E2eeResponseInfo>,
+}
+
+pub struct MiddlewareGeneratedFinalization {
+    pub wire_body: Vec<u8>,
     pub e2ee: Option<E2eeResponseInfo>,
 }
 
@@ -1073,6 +1167,230 @@ impl AciService {
         })
     }
 
+    /// Forward a middleware-selected request without finalizing the receipt.
+    ///
+    /// The backend records trust-critical provider facts into the returned
+    /// draft. The public frontend must append `response.returned`, sign, and
+    /// store the receipt after middleware returns the final user-visible body.
+    pub async fn forward_chat_completion_for_middleware(
+        &self,
+        req: ChatCompletionRequest<'_>,
+        stream: bool,
+        receipt_journal: MiddlewareReceiptJournal,
+    ) -> Result<MiddlewareForwardResult, ServiceError> {
+        let received_body = req.received_body;
+        let endpoint_path = req.endpoint_path;
+        let mode = if stream {
+            RequestMode::Streaming
+        } else {
+            RequestMode::Buffered
+        };
+        self.metrics
+            .record_request(endpoint_path, mode, req.e2ee.as_ref().is_some());
+
+        let target_route_id = req.context.target_route_id.clone();
+        let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
+        let middleware_forwarded_body =
+            target_route_id.as_ref().map(|_| backend_input_body.clone());
+        let prepared = self.upstream.prepare(UpstreamRequest {
+            body: backend_input_body,
+            path: Some(endpoint_path.to_string()),
+            target_route_id: target_route_id.clone(),
+            ..Default::default()
+        })?;
+        let forwarded_body = prepared.request.body.clone();
+        let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
+        let mut recorded_event = self
+            .recorded_upstream_event(
+                &prepared,
+                req.upstream_required,
+                req.upstream_verification_event,
+            )
+            .await?;
+
+        if stream {
+            let mut reverify_attempts = 0;
+            let upstream_response = loop {
+                match self
+                    .upstream
+                    .forward_stream_verified_prepared(prepared.clone(), &recorded_event)
+                    .await
+                {
+                    Ok(response) => break response,
+                    Err(UpstreamError::ChannelBindingMismatch(_))
+                        if !caller_supplied_upstream_event
+                            && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                    {
+                        reverify_attempts += 1;
+                        recorded_event = self
+                            .refresh_upstream_event(&prepared, req.upstream_required)
+                            .await?;
+                    }
+                    Err(err @ UpstreamError::ChannelBindingMismatch(_))
+                        if !caller_supplied_upstream_event =>
+                    {
+                        self.invalidate_upstream_event(&prepared, req.upstream_required);
+                        return Err(err.into());
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            };
+            if upstream_response.status_code != 200 {
+                self.metrics.record_upstream_response(
+                    endpoint_path,
+                    RequestMode::Streaming,
+                    upstream_response.status_code,
+                    None,
+                );
+                self.metrics
+                    .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
+                let upstream_status = upstream_response.status_code;
+                let upstream_headers = upstream_response.headers;
+                let upstream_body = collect_upstream_body(upstream_response.body).await?;
+                return Ok(MiddlewareForwardResult::UpstreamError(
+                    StreamingUpstreamError {
+                        upstream_status,
+                        upstream_headers,
+                        upstream_body,
+                    },
+                ));
+            }
+
+            let upstream_status = upstream_response.status_code;
+            let upstream_headers = upstream_response.headers;
+            let receipt_id = generate_receipt_id();
+            let served_at = self.clock.now_secs();
+            let mut builder = ReceiptBuilder::new(
+                receipt_id.clone(),
+                None,
+                self.workload_id.clone(),
+                self.workload_keyset_digest.clone(),
+                endpoint_path.to_string(),
+                "POST".to_string(),
+                served_at,
+            );
+            builder.add_request_received(received_body)?;
+            if let Some(body) = middleware_forwarded_body.as_deref() {
+                builder.add_middleware_forwarded(body)?;
+            }
+            if let Some(route_id) = target_route_id.as_deref() {
+                builder.add_route_selected(route_id)?;
+            }
+            builder.add_request_forwarded(&forwarded_body)?;
+            if received_body != forwarded_body.as_slice() {
+                builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+            }
+            builder.add_upstream_verified(recorded_event)?;
+            receipt_journal.reserve_receipt_id(receipt_id.clone());
+
+            let body = MiddlewareProviderResponseDraftingStream {
+                inner: upstream_response.body,
+                builder: Some(builder),
+                journal: receipt_journal,
+                provider_response_hasher: Sha256::new(),
+                receipt_id: receipt_id.clone(),
+                forwarded_body,
+                endpoint_path: endpoint_path.to_string(),
+                sse_parser: SseChatIdParser::default(),
+                metrics: self.metrics.clone(),
+                upstream_status,
+                upstream_ended: false,
+                finished: false,
+            };
+
+            return Ok(MiddlewareForwardResult::Stream(Box::new(
+                MiddlewareStreamingForwarded {
+                    receipt_id: receipt_id.clone(),
+                    upstream_status,
+                    upstream_headers,
+                    body: Box::pin(body),
+                },
+            )));
+        }
+
+        let mut reverify_attempts = 0;
+        let upstream_response = loop {
+            match self
+                .upstream
+                .forward_verified_prepared(prepared.clone(), &recorded_event)
+                .await
+            {
+                Ok(response) => break response,
+                Err(UpstreamError::ChannelBindingMismatch(_))
+                    if !caller_supplied_upstream_event
+                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                {
+                    reverify_attempts += 1;
+                    recorded_event = self
+                        .refresh_upstream_event(&prepared, req.upstream_required)
+                        .await?;
+                }
+                Err(err @ UpstreamError::ChannelBindingMismatch(_))
+                    if !caller_supplied_upstream_event =>
+                {
+                    self.invalidate_upstream_event(&prepared, req.upstream_required);
+                    return Err(err.into());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
+        let response_model =
+            accepted_response_model(upstream_response.status_code, &upstream_response.body);
+        recorded_event.model_id = response_model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        self.metrics.record_upstream_response(
+            endpoint_path,
+            RequestMode::Buffered,
+            upstream_response.status_code,
+            response_model.as_deref(),
+        );
+
+        let receipt_id = generate_receipt_id();
+        let served_at = self.clock.now_secs();
+        let chat_id = extract_chat_id(&upstream_response.body);
+        let mut builder = ReceiptBuilder::new(
+            receipt_id.clone(),
+            chat_id,
+            self.workload_id.clone(),
+            self.workload_keyset_digest.clone(),
+            endpoint_path.to_string(),
+            "POST".to_string(),
+            served_at,
+        );
+        builder.add_request_received(received_body)?;
+        if let Some(body) = middleware_forwarded_body.as_deref() {
+            builder.add_middleware_forwarded(body)?;
+        }
+        if let Some(route_id) = target_route_id.as_deref() {
+            builder.add_route_selected(route_id)?;
+        }
+        builder.add_request_forwarded(&forwarded_body)?;
+        if received_body != forwarded_body.as_slice() {
+            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+        }
+        builder.add_upstream_verified(recorded_event)?;
+        let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
+
+        Ok(MiddlewareForwardResult::Forwarded(Box::new(
+            MiddlewareForwarded {
+                receipt_id: receipt_id.clone(),
+                receipt: MiddlewareReceiptDraft {
+                    receipt_id: receipt_id.clone(),
+                    builder,
+                    provider_response_hash,
+                    forwarded_body,
+                    endpoint_path: endpoint_path.to_string(),
+                    request_mode: RequestMode::Buffered,
+                    response_model,
+                },
+                upstream_status: upstream_response.status_code,
+                upstream_body: upstream_response.body,
+                upstream_headers: upstream_response.headers,
+            },
+        )))
+    }
+
     /// Start a streaming chat completion. The response stream hashes
     /// every byte in order and stores the receipt only after the
     /// upstream stream completes.
@@ -1223,6 +1541,134 @@ impl AciService {
             e2ee: e2ee_response,
             body: Box::pin(body),
         }))
+    }
+
+    pub fn finalize_middleware_receipt(
+        &self,
+        mut draft: MiddlewareReceiptDraft,
+        final_cleartext_body: &[u8],
+        content_type: Option<&str>,
+        requester: Option<ReceiptOwner>,
+        e2ee: Option<E2eeRequestContext>,
+    ) -> Result<MiddlewareReceiptFinalization, ServiceError> {
+        let is_sse = is_sse_content_type(content_type);
+        if is_sse {
+            let mut parser = SseChatIdParser::default();
+            parser.observe(final_cleartext_body);
+            if parser.chat_id.is_some() {
+                draft.builder.set_chat_id(parser.chat_id);
+            }
+        } else if let Some(chat_id) = extract_chat_id(final_cleartext_body) {
+            draft.builder.set_chat_id(Some(chat_id));
+        }
+
+        let wire_body = match e2ee.as_ref() {
+            Some(ctx) => encrypt_e2ee_final_response(
+                final_cleartext_body,
+                ctx,
+                &draft.endpoint_path,
+                is_sse,
+            )?,
+            None => final_cleartext_body.to_vec(),
+        };
+        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+            version: ctx.version.clone(),
+            algo: ctx.algo.clone(),
+        });
+
+        let final_cleartext_hash = crate::aci::canonical::sha256_hex(final_cleartext_body);
+        if draft.provider_response_hash != final_cleartext_hash || wire_body != final_cleartext_body
+        {
+            draft
+                .builder
+                .add_transparency_event(TransparencyEventKind::ResponseModified)?;
+        }
+        draft
+            .builder
+            .add_response_returned(final_cleartext_body, &wire_body)?;
+        let receipt = draft
+            .builder
+            .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
+        self.store_receipt(receipt.clone(), requester, &draft.forwarded_body);
+        self.metrics.record_receipt_issued(
+            &draft.endpoint_path,
+            draft.request_mode,
+            draft.response_model.as_deref(),
+        );
+
+        Ok(MiddlewareReceiptFinalization {
+            receipt,
+            wire_body,
+            e2ee: e2ee_response,
+        })
+    }
+
+    pub fn finalize_middleware_generated_response(
+        &self,
+        endpoint_path: &str,
+        cleartext_body: &[u8],
+        content_type: Option<&str>,
+        e2ee: Option<E2eeRequestContext>,
+    ) -> Result<MiddlewareGeneratedFinalization, ServiceError> {
+        let is_sse = is_sse_content_type(content_type);
+        let wire_body = match e2ee.as_ref() {
+            Some(ctx) => encrypt_e2ee_final_response(cleartext_body, ctx, endpoint_path, is_sse)?,
+            None => cleartext_body.to_vec(),
+        };
+        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+            version: ctx.version.clone(),
+            algo: ctx.algo.clone(),
+        });
+        Ok(MiddlewareGeneratedFinalization {
+            wire_body,
+            e2ee: e2ee_response,
+        })
+    }
+
+    pub fn finalize_middleware_response_stream(
+        &self,
+        journal: MiddlewareReceiptJournal,
+        cleartext_stream: ServiceResponseStream,
+        endpoint_path: &str,
+        content_type: Option<&str>,
+        requester: Option<ReceiptOwner>,
+        e2ee: Option<E2eeRequestContext>,
+    ) -> Result<MiddlewareStreamFinalization, ServiceError> {
+        let is_sse = is_sse_content_type(content_type);
+        if e2ee.is_some() && !is_sse {
+            return Err(E2eeError::EncryptionFailed.into());
+        }
+        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+            version: ctx.version.clone(),
+            algo: ctx.algo.clone(),
+        });
+        let e2ee_transformer = e2ee
+            .clone()
+            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
+        let body = MiddlewareResponseFinalizingStream {
+            inner: cleartext_stream,
+            journal,
+            cleartext_hasher: Sha256::new(),
+            wire_hasher: Sha256::new(),
+            keys: self.keys.clone(),
+            receipt_store: self.receipt_store.clone(),
+            key_id: self.default_receipt_key_id.clone(),
+            requester,
+            body_retention_seconds: self.config.service_capabilities.body_retention_seconds,
+            receipt_ttl_seconds: self.config.receipt_ttl_seconds,
+            clock: self.clock.clone(),
+            metrics: self.metrics.clone(),
+            endpoint_path: endpoint_path.to_string(),
+            sse_parser: SseChatIdParser::default(),
+            e2ee_transformer,
+            response_modified_by_wire: e2ee_response.is_some(),
+            upstream_ended: false,
+            finished: false,
+        };
+        Ok(MiddlewareStreamFinalization {
+            body: Box::pin(body),
+            e2ee: e2ee_response,
+        })
     }
 
     async fn recorded_upstream_event(
@@ -1401,6 +1847,249 @@ impl AciService {
     /// E2EE protocol versions this workload has actually wired.
     pub fn supported_e2ee_versions(&self) -> &[String] {
         &self.config.service_capabilities.supported_e2ee_versions
+    }
+}
+
+struct MiddlewareProviderResponseDraftingStream {
+    inner: UpstreamBodyStream,
+    builder: Option<ReceiptBuilder>,
+    journal: MiddlewareReceiptJournal,
+    provider_response_hasher: Sha256,
+    receipt_id: String,
+    forwarded_body: Vec<u8>,
+    endpoint_path: String,
+    sse_parser: SseChatIdParser,
+    metrics: Arc<ServiceMetrics>,
+    upstream_status: u16,
+    upstream_ended: bool,
+    finished: bool,
+}
+
+impl Unpin for MiddlewareProviderResponseDraftingStream {}
+
+impl Stream for MiddlewareProviderResponseDraftingStream {
+    type Item = Result<Bytes, ServiceError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+
+        loop {
+            if this.upstream_ended {
+                this.finished = true;
+                return match this.publish_draft() {
+                    Ok(()) => Poll::Ready(None),
+                    Err(err) => {
+                        this.metrics.record_stream_error(
+                            &this.endpoint_path,
+                            StreamErrorKind::ReceiptFinalize,
+                        );
+                        Poll::Ready(Some(Err(err)))
+                    }
+                };
+            }
+
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.provider_response_hasher.update(&chunk);
+                    this.sse_parser.observe(&chunk);
+                    return Poll::Ready(Some(Ok(chunk)));
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    this.metrics
+                        .record_stream_error(&this.endpoint_path, StreamErrorKind::UpstreamRead);
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(ServiceError::Upstream(err))));
+                }
+                Poll::Ready(None) => {
+                    this.upstream_ended = true;
+                }
+            }
+        }
+    }
+}
+
+impl MiddlewareProviderResponseDraftingStream {
+    fn publish_draft(&mut self) -> Result<(), ServiceError> {
+        let provider_response_hash = format!(
+            "sha256:{}",
+            hex::encode(self.provider_response_hasher.clone().finalize())
+        );
+        let response_model = self.sse_parser.model_id.clone();
+        let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
+        builder.set_chat_id(self.sse_parser.chat_id.clone());
+        builder.set_upstream_verified_model_id(response_model.clone());
+        builder.add_response_received_hash(provider_response_hash.clone())?;
+        self.journal.set(MiddlewareReceiptDraft {
+            receipt_id: self.receipt_id.clone(),
+            builder,
+            provider_response_hash,
+            forwarded_body: self.forwarded_body.clone(),
+            endpoint_path: self.endpoint_path.clone(),
+            request_mode: RequestMode::Streaming,
+            response_model: response_model.clone(),
+        });
+        self.metrics.record_upstream_response(
+            &self.endpoint_path,
+            RequestMode::Streaming,
+            self.upstream_status,
+            response_model.as_deref(),
+        );
+        Ok(())
+    }
+}
+
+struct MiddlewareResponseFinalizingStream {
+    inner: ServiceResponseStream,
+    journal: MiddlewareReceiptJournal,
+    cleartext_hasher: Sha256,
+    wire_hasher: Sha256,
+    keys: Arc<dyn KeyProvider>,
+    receipt_store: Arc<dyn ReceiptStore>,
+    key_id: String,
+    requester: Option<ReceiptOwner>,
+    body_retention_seconds: u64,
+    receipt_ttl_seconds: u64,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<ServiceMetrics>,
+    endpoint_path: String,
+    sse_parser: SseChatIdParser,
+    e2ee_transformer: Option<E2eeSseTransformer>,
+    response_modified_by_wire: bool,
+    upstream_ended: bool,
+    finished: bool,
+}
+
+impl Unpin for MiddlewareResponseFinalizingStream {}
+
+impl Stream for MiddlewareResponseFinalizingStream {
+    type Item = Result<Bytes, ServiceError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+
+        loop {
+            if this.upstream_ended {
+                if let Some(mut transformer) = this.e2ee_transformer.take() {
+                    let wire = match transformer.finish() {
+                        Ok(wire) => wire,
+                        Err(err) => {
+                            this.metrics
+                                .record_stream_error(&this.endpoint_path, StreamErrorKind::E2ee);
+                            this.finished = true;
+                            return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
+                        }
+                    };
+                    if !wire.is_empty() {
+                        this.wire_hasher.update(&wire);
+                        return Poll::Ready(Some(Ok(Bytes::from(wire))));
+                    }
+                }
+                this.finished = true;
+                return match this.finalize_receipt() {
+                    Ok(()) => Poll::Ready(None),
+                    Err(err) => {
+                        this.metrics.record_stream_error(
+                            &this.endpoint_path,
+                            StreamErrorKind::ReceiptFinalize,
+                        );
+                        Poll::Ready(Some(Err(err)))
+                    }
+                };
+            }
+
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.cleartext_hasher.update(&chunk);
+                    this.sse_parser.observe(&chunk);
+
+                    if let Some(transformer) = this.e2ee_transformer.as_mut() {
+                        let wire = match transformer.push_chunk(&chunk) {
+                            Ok(wire) => wire,
+                            Err(err) => {
+                                this.metrics.record_stream_error(
+                                    &this.endpoint_path,
+                                    StreamErrorKind::E2ee,
+                                );
+                                this.finished = true;
+                                return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
+                            }
+                        };
+                        if wire.is_empty() {
+                            continue;
+                        }
+                        this.wire_hasher.update(&wire);
+                        return Poll::Ready(Some(Ok(Bytes::from(wire))));
+                    }
+
+                    this.wire_hasher.update(&chunk);
+                    return Poll::Ready(Some(Ok(chunk)));
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    this.metrics
+                        .record_stream_error(&this.endpoint_path, StreamErrorKind::UpstreamRead);
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Ready(None) => {
+                    this.upstream_ended = true;
+                }
+            }
+        }
+    }
+}
+
+impl MiddlewareResponseFinalizingStream {
+    fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
+        let Some(mut draft) = self.journal.take() else {
+            return Ok(());
+        };
+        let cleartext_hash = format!(
+            "sha256:{}",
+            hex::encode(self.cleartext_hasher.clone().finalize())
+        );
+        let wire_hash = format!(
+            "sha256:{}",
+            hex::encode(self.wire_hasher.clone().finalize())
+        );
+
+        if self.sse_parser.chat_id.is_some() {
+            draft.builder.set_chat_id(self.sse_parser.chat_id.clone());
+        }
+        if draft.provider_response_hash != cleartext_hash || self.response_modified_by_wire {
+            draft
+                .builder
+                .add_transparency_event(TransparencyEventKind::ResponseModified)?;
+        }
+        draft
+            .builder
+            .add_response_returned_hashes(cleartext_hash, wire_hash)?;
+        let receipt = draft.builder.finalize(self.keys.as_ref(), &self.key_id)?;
+
+        let now = self.clock.now_secs();
+        let expires_at = now.saturating_add(self.receipt_ttl_seconds);
+        self.receipt_store
+            .put(receipt, self.requester.clone(), expires_at);
+
+        if self.body_retention_seconds > 0 {
+            let body_expires_at = now.saturating_add(self.body_retention_seconds);
+            self.receipt_store
+                .put_body(&draft.receipt_id, draft.forwarded_body, body_expires_at);
+        }
+
+        self.metrics.record_receipt_issued(
+            &draft.endpoint_path,
+            draft.request_mode,
+            draft.response_model.as_deref(),
+        );
+        Ok(())
     }
 }
 
@@ -2106,6 +2795,27 @@ fn encrypt_e2ee_response_body(
     }
 
     serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
+}
+
+fn encrypt_e2ee_final_response(
+    cleartext_body: &[u8],
+    ctx: &E2eeRequestContext,
+    endpoint_path: &str,
+    is_sse: bool,
+) -> Result<Vec<u8>, E2eeError> {
+    if !is_sse {
+        return encrypt_e2ee_response_body(cleartext_body, ctx, endpoint_path);
+    }
+    let mut transformer = E2eeSseTransformer::new(ctx.clone(), endpoint_path.to_string());
+    let mut out = transformer.push_chunk(cleartext_body)?;
+    out.extend(transformer.finish()?);
+    Ok(out)
+}
+
+fn is_sse_content_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 fn encrypt_e2ee_stream_payload(

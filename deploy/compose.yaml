@@ -40,9 +40,9 @@ services:
       # PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256: <64-hex-spki-sha256>[,<64-hex-spki-sha256>]
       # PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT: unix:/var/run/dstack.sock
       # Middleware mode is optional and requires a middleware service in the
-      # same attested compose.
-      # PRIVATE_AI_GATEWAY_MIDDLEWARE_URL: http://127.0.0.1:19090
-      # PRIVATE_AI_GATEWAY_BACKEND_BIND: 127.0.0.1:19091
+      # same attested compose with a shared socket volume.
+      # PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH: /run/private-ai-gateway/middleware.sock
+      # PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH: /run/private-ai-gateway/backend.sock
     volumes:
       - gateway-checkout:/var/lib/git-launcher
       - gateway-state:/var/lib/private-ai-gateway

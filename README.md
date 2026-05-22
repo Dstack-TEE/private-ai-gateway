@@ -11,8 +11,10 @@ dstack v2 application VM.
 The next architecture target is documented in
 [`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md):
 one gateway process owns the downstream ACI frontend and verified-provider
-backend, with an optional plaintext HTTP middleware slot for routing and
-business logic.
+backend, with an optional plaintext HTTP-over-UDS middleware slot for routing
+and business logic.
+Middleware developers should start with
+[`docs/middleware-integration.md`](docs/middleware-integration.md).
 
 ## Status
 
@@ -44,7 +46,7 @@ business logic.
 | Runtime upstream config file + admin API | done |
 | Per-upstream verifier | done for ACI/DCAP, Tinfoil, NEAR AI gateway, and Chutes E2EE-key bindings |
 | Chutes provider transport | done for buffered and streaming E2EE over `/e2e/invoke` |
-| Frontend/middleware/backend framework | partial; runtime HTTP middleware mode wired |
+| Frontend/middleware/backend framework | partial; runtime UDS middleware mode wired |
 | Public receipt log | not done |
 | Replica-stable identity (KMS-released keys) | done for configured dstack key paths |
 
@@ -156,8 +158,8 @@ the `PRIVATE_AI_GATEWAY_*` value wins when both are set.
 | Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` |
 | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
 | dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` |
-| Optional plaintext HTTP middleware URL | `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` |
-| Internal backend bind address in middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_BIND` |
+| Optional middleware Unix socket path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` |
+| Internal backend Unix socket path in middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` |
 
 Provider-owned verifier bridges also read `PRIVATE_AI_VERIFIER_DIR` when they
 need the local `private-ai-verifier` checkout. If unset in this monorepo, the
@@ -276,11 +278,12 @@ expose a configurable verifier command.
 In no-middleware mode, the public model id is what clients send and what
 `/v1/models` returns. The gateway treats that id as the target route id and
 rewrites it to the upstream model id before upstream verification, forwarding,
-and receipt hashing. When `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` is set,
-`/v1/models` passes through middleware and middleware chooses a configured
-target route id by calling the internal backend; the frontend still preserves
-the user model name for downstream E2EE AAD. See
-[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md).
+and receipt hashing. When `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` is set,
+`/v1/models` passes through middleware over HTTP-on-UDS and middleware chooses
+a configured target route id by calling the internal backend UDS; the frontend
+still preserves the user model name for downstream E2EE AAD. See
+[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md)
+and [`docs/middleware-integration.md`](docs/middleware-integration.md).
 Per-upstream verifier fields override the global
 `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_*` settings when present.
 Chutes upstreams should put the provider API key in `bearer_token`. Optional
@@ -399,5 +402,6 @@ Artifacts are written to `/tmp/private-ai-gateway-smoke-router` by default. Set
 The current pending-task list lives in [`docs/roadmap.md`](docs/roadmap.md).
 The next major implementation item is hardening the
 [frontend/middleware/backend framework](docs/frontend-middleware-backend.md):
-stream-preserving middleware transport, production compose wiring, and E2EE
-middleware coverage.
+production compose wiring for a concrete middleware container.
+Middleware implementers can use
+[docs/middleware-integration.md](docs/middleware-integration.md).

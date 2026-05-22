@@ -387,13 +387,12 @@ async fn serve_chutes_provider_fixture_with_instances_and_lookup(
 }
 
 fn temp_config_path() -> std::path::PathBuf {
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
     std::env::temp_dir().join(format!(
         "private-ai-gateway-provider-e2e-{}-{}.json",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        hex::encode(bytes)
     ))
 }
 

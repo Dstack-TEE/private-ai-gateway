@@ -2,13 +2,14 @@
 
 Date: 2026-05-21 UTC.
 Status: implementation in progress. The no-middleware path carries an internal
-request context, the backend accepts out-of-band target routes, and a test-only
-HTTP middleware path exercises frontend -> middleware -> internal backend.
+request context, the backend accepts out-of-band target routes, and runtime
+HTTP-over-UDS middleware mode exercises frontend -> middleware -> internal
+backend.
 
 Private AI Gateway should be an ACI shell around optional routing logic. One
 gateway process owns the downstream ACI frontend and the verified-provider
 backend. A middleware slot, when configured, runs ordinary plaintext
-OpenAI-compatible HTTP logic between them.
+OpenAI-compatible HTTP logic between them over Unix domain sockets.
 
 ```text
 user
@@ -30,8 +31,8 @@ Frontend and backend live in the same gateway process. Middleware is optional.
 With no middleware, frontend calls backend directly and current behavior must
 stay unchanged.
 
-The backend is local-only: either in-process or bound to a Unix socket /
-`127.0.0.1`. It accepts configured route ids, never arbitrary upstream URLs.
+The backend is local-only: either in-process or bound to a Unix socket. It
+accepts configured route ids, never arbitrary upstream URLs.
 
 ## Request Flow
 
@@ -46,9 +47,9 @@ The backend is local-only: either in-process or bound to a Unix socket /
    effective_body = decrypted user body
    ```
 
-4. If middleware is enabled, frontend sends plaintext HTTP to middleware with
-   `request_id` and the frontend-observed user model. Middleware may rewrite
-   the body and select a configured target route id.
+4. If middleware is enabled, frontend sends plaintext HTTP over UDS to
+   middleware with `request_id` and the frontend-observed user model.
+   Middleware may rewrite the body and select a configured target route id.
 5. Backend validates `request_id` and target route id, refreshes the provider
    lease if needed, rewrites to the upstream model id, seals the request if the
    provider transport requires it, and forwards.
@@ -87,7 +88,7 @@ request_id
 user_model
 endpoint
 e2ee state
-receipt builder
+receipt journal
 frontend-observed request hashes
 backend-authored events
 ```
@@ -123,42 +124,46 @@ headers or claims.
 
 ## Config Sketch
 
-Disabled mode stays the default. If no middleware URL is configured, the
-frontend calls the backend directly in-process.
+Disabled mode stays the default. If no middleware socket path is configured,
+the frontend calls the backend directly in-process.
 
 ```text
 # no middleware variables required
 ```
 
-HTTP middleware mode is enabled by one URL. The gateway also starts an
-internal backend listener for the middleware to call:
+Middleware mode is enabled by one Unix socket path. The gateway also starts an
+internal backend Unix socket for the middleware to call:
 
 ```text
-PRIVATE_AI_GATEWAY_MIDDLEWARE_URL=http://127.0.0.1:19090
-PRIVATE_AI_GATEWAY_BACKEND_BIND=127.0.0.1:19091
+PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock
+PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
 ```
 
 The pending request-context TTL is 300 seconds. A middleware must call
 `POST /internal/forward` before the context expires.
 
+Middleware developers should implement the wire contract in
+[middleware-integration.md](middleware-integration.md).
+
 ## Implementation Tasks
 
 1. Introduce internal request context keyed by `request_id`. Done.
 2. Split the current path into frontend prep, backend verification/forwarding,
-   and frontend finalization. Partially done; middleware transport currently
-   proxies responses as buffered HTTP.
+   and frontend finalization. Done for the current UDS middleware path,
+   including streaming response finalization.
 3. Keep middleware-disabled mode as the default and preserve current tests. Done.
 4. Add local backend entrypoint guarded by request context lookup. Done.
-5. Add HTTP middleware mode with a fixture middleware test. Done.
+5. Add UDS middleware mode with a fixture middleware test. Done.
 6. Add tests for forged internal headers, target route validation, request
    context expiry, and E2EE AAD using the original user model. Done for the
-   current HTTP middleware path.
+   current UDS middleware path.
 7. Split receipt events into `middleware.forwarded`, `route.selected`, and
    final `request.forwarded`. Done for middleware-selected routes.
-8. Add deployment compose wiring for a concrete middleware container.
-
-## Open Questions
-
-- Should production middleware use only a Unix socket for the backend hop?
-  Current runtime supports `127.0.0.1`; Unix sockets are still preferred for a
-  hardened compose.
+8. Finalize middleware-mode receipts in the frontend after middleware returns
+   the final user-visible response. Done.
+9. Preserve streaming across backend, middleware, and frontend. Done.
+10. Pass user headers to middleware for middleware-owned auth. Done.
+11. Pass middleware-generated OpenAI-compatible responses through downstream
+    E2EE. Done.
+12. Add deployment compose wiring for a concrete middleware container.
+13. Publish the middleware developer integration guide. Done.

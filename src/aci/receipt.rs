@@ -16,6 +16,7 @@ pub const EVENT_REQUEST_FORWARDED: &str = "request.forwarded";
 pub const EVENT_MIDDLEWARE_FORWARDED: &str = "middleware.forwarded";
 pub const EVENT_ROUTE_SELECTED: &str = "route.selected";
 pub const EVENT_UPSTREAM_VERIFIED: &str = "upstream.verified";
+pub const EVENT_RESPONSE_RECEIVED: &str = "response.received";
 pub const EVENT_RESPONSE_RETURNED: &str = "response.returned";
 pub const EVENT_TRANSPARENCY_REQUEST_MODIFIED: &str = "transparency.request_modified";
 pub const EVENT_TRANSPARENCY_RESPONSE_MODIFIED: &str = "transparency.response_modified";
@@ -283,6 +284,22 @@ impl ReceiptBuilder {
         self.append(kind.event_type(), serde_json::json!({}))
     }
 
+    pub fn add_response_received(&mut self, cleartext: &[u8]) -> Result<String, ReceiptError> {
+        let digest = canonical::sha256_hex(cleartext);
+        self.add_response_received_hash(digest.clone())?;
+        Ok(digest)
+    }
+
+    pub fn add_response_received_hash(
+        &mut self,
+        cleartext_hash: String,
+    ) -> Result<(), ReceiptError> {
+        self.append(
+            EVENT_RESPONSE_RECEIVED,
+            serde_json::json!({ "cleartext_hash": cleartext_hash }),
+        )
+    }
+
     pub fn add_response_returned(
         &mut self,
         cleartext: &[u8],
@@ -317,6 +334,7 @@ impl ReceiptBuilder {
             EVENT_REQUEST_RECEIVED
             | EVENT_REQUEST_FORWARDED
             | EVENT_UPSTREAM_VERIFIED
+            | EVENT_RESPONSE_RECEIVED
             | EVENT_RESPONSE_RETURNED => {
                 Err(ReceiptError::ReservedEventType(event_type.to_string()))
             }

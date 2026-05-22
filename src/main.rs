@@ -30,8 +30,8 @@
 //! | Upstream read timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_READ_TIMEOUT_SECONDS` |
 //! | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
 //! | dstack endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | `DSTACK_LLM_ROUTER_DSTACK_ENDPOINT` |
-//! | Optional plaintext HTTP middleware URL | `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` | none |
-//! | Internal backend bind address for middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_BIND` | none |
+//! | Optional middleware Unix socket path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` | none |
+//! | Internal backend Unix socket path for middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | none |
 
 use std::io::Cursor;
 use std::path::Path;
@@ -52,8 +52,8 @@ use private_ai_gateway::aggregator::upstream_config::{
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::{
-    build_internal_backend_router, build_router_with_admin,
-    build_router_with_admin_and_http_middleware, GatewayRequestStore,
+    bind_unix_listener, build_internal_backend_router, build_router_with_admin,
+    build_router_with_admin_and_uds_middleware, serve_unix_listener, GatewayRequestStore,
 };
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
@@ -95,17 +95,6 @@ fn parse_comma_list(value: Option<&str>) -> Vec<String> {
 
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
-}
-
-fn validate_http_url(setting: &str, value: String) -> Result<String, std::io::Error> {
-    let url = reqwest::Url::parse(&value)
-        .map_err(|e| invalid_input(format!("invalid {setting} URL {value:?}: {e}")))?;
-    match url.scheme() {
-        "http" | "https" => Ok(value),
-        other => Err(invalid_input(format!(
-            "invalid {setting} URL {value:?}: unsupported scheme {other:?}"
-        ))),
-    }
 }
 
 fn parse_tls_spki_list(value: &str) -> Result<Vec<TlsSpki>, String> {
@@ -357,15 +346,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "DSTACK_LLM_ROUTER_DSTACK_QUOTER_URL",
         )
     });
-    let middleware_url = std::env::var("PRIVATE_AI_GATEWAY_MIDDLEWARE_URL")
+    let middleware_uds_path = std::env::var("PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| validate_http_url("PRIVATE_AI_GATEWAY_MIDDLEWARE_URL", value))
-        .transpose()?;
-    let backend_bind = std::env::var("PRIVATE_AI_GATEWAY_BACKEND_BIND")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let backend_uds_path = std::env::var("PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "127.0.0.1:19091".to_string());
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/run/private-ai-gateway/backend.sock".to_string());
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -432,26 +421,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(SystemClock),
     )?);
 
-    let app = if let Some(middleware_url) = middleware_url {
+    let app = if let Some(middleware_uds_path) = middleware_uds_path {
         let request_store = GatewayRequestStore::default();
         let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
-        let backend_listener = tokio::net::TcpListener::bind(&backend_bind).await?;
+        let backend_listener = bind_unix_listener(&backend_uds_path)?;
         tracing::info!(
-            %backend_bind,
-            middleware_url = %middleware_url,
-            "private-ai-gateway internal backend listening"
+            backend_uds_path = %backend_uds_path,
+            middleware_uds_path = %middleware_uds_path,
+            "private-ai-gateway internal backend listening on Unix socket"
         );
         tokio::spawn(async move {
-            if let Err(err) = axum::serve(backend_listener, backend_app).await {
+            if let Err(err) = serve_unix_listener(backend_listener, backend_app).await {
                 tracing::error!(error = %err, "private-ai-gateway internal backend stopped");
             }
         });
-        build_router_with_admin_and_http_middleware(
+        build_router_with_admin_and_uds_middleware(
             service,
             upstream_config,
             admin_token,
             request_store,
-            middleware_url,
+            middleware_uds_path,
         )
     } else {
         build_router_with_admin(service, upstream_config, admin_token)
@@ -548,7 +537,6 @@ mod tests {
     use super::{
         parse_body_retention_seconds, parse_positive_seconds, parse_tls_cert_paths,
         parse_tls_spki_list, resolve_tls_public_keys, seed_upstream_config_if_empty,
-        validate_http_url,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -831,13 +819,5 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     fn tls_cert_paths_and_explicit_spkis_are_mutually_exclusive() {
         let explicit = "aa".repeat(32);
         assert!(resolve_tls_public_keys(Some("/cert.pem"), Some(&explicit)).is_err());
-    }
-
-    #[test]
-    fn middleware_url_must_be_http_or_https() {
-        assert!(validate_http_url("middleware", "http://127.0.0.1:19090".to_string()).is_ok());
-        assert!(validate_http_url("middleware", "https://middleware.local".to_string()).is_ok());
-        assert!(validate_http_url("middleware", "127.0.0.1:19090".to_string()).is_err());
-        assert!(validate_http_url("middleware", "unix:/tmp/backend.sock".to_string()).is_err());
     }
 }
