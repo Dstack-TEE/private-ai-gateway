@@ -122,7 +122,7 @@ five-instance discovery window into full-fleet load balancing.
 ## Privacy Boundary
 
 The accepted Chutes path is application-level E2EE. Private AI Gateway forwards encrypted
-request material to Chutes and decrypts the response in the aggregator before
+request material to Chutes and decrypts the response in the gateway before
 normal ACI receipt hashing.
 
 Plain HTTPS to Chutes is not accepted for ACI-secured traffic unless Chutes

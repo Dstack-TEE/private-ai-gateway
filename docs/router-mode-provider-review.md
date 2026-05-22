@@ -18,7 +18,7 @@ Out of scope for this review:
 
 - Direct model endpoints where the client connects straight to the model CVM.
 - Chutes E2EE transport.
-- Private AI Gateway's own aggregator router, except as a comparison point.
+- Private AI Gateway's current internal model router, except as a comparison point.
 
 ## Acceptance Questions
 
@@ -87,7 +87,7 @@ Each note must include:
 - Evidence table: claim, evidence, source/code reference, confidence.
 - Concrete risks and open questions.
 - Live or unit tests performed.
-- Recommended changes to our aggregator/provider adapter.
+- Recommended changes to our gateway/provider adapter.
 
 ## Current Conclusions
 

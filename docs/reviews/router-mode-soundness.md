@@ -31,10 +31,10 @@ are out of scope here.
   Response/conversation features can persist content in JSONB unless higher
   layers encrypt or the storage plane is itself accepted as part of the TCB.
   These widen the trust assumption beyond "gateway TEE attests, model TEE
-  attests"; the aggregator must constrain which models and features it accepts
+  attests"; the gateway must constrain which models and features it accepts
   in router mode.
 - Router attestation alone is **not sufficient** for either provider in the
-  general case. The aggregator currently pins only the gateway TLS SPKI. That
+  general case. The gateway currently pins only the gateway TLS SPKI. That
   binds the network channel to the gateway TEE but does not by itself
   constrain (a) what runtime config the gateway uses to select downstream
   backends, (b) whether the chosen downstream backend is itself a verified
@@ -102,7 +102,7 @@ cat /tmp/nearai-cloud-api/Dockerfile  # reproducible-build prologue
 # NEAR cloud verifier
 cat /tmp/nearai-cloud-verifier/version_verifier.py
 
-# Aggregator side
+# Gateway side
 sed -n '740,840p' src/aci/verifier.rs
 sed -n '280,380p' scripts/private_ai_provider_verifier.py
 
@@ -149,9 +149,9 @@ missing.
 ## Risks / Open Questions - Tinfoil
 
 1. **Runtime config update URL is not integrity-pinned by default.** `main.go:72` defaults `UPDATE_CONFIG_URL` to `https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml`, and `config.Load` for the update flow is called with `sha256_required=false`. The dstack-pinned image makes the *initial embedded* `config.yml` part of the measurement, but the periodic refresh (default 5 minutes) overwrites it with whatever the `main` branch publishes at fetch time. Authentic Tinfoil GitHub branch protection is the only thing preventing a model->enclave swap. Mitigating: even if an attacker rewrote the config, `addEnclave` would still refuse a new enclave whose `verification.Measurement.Equals(model.SourceMeasurement)` fails. So the attacker could only swap to backends that also publish a valid sigstore attestation for the same `model.Repo`, or remove entries. Consequence is therefore availability + steering, not direct plaintext exfiltration. Still: from a soundness standpoint, runtime model->host mapping is not part of the router's attested state.
-2. **`X-Forwarded-Host` subdomain-based model routing is sensitive to upstream proxy honesty.** `parseModelFromSubdomain` reads `X-Forwarded-Host`. Outside of the public ingress shim, an attacker who can set this header could potentially confuse model selection. In ACI we forward to the router host directly and do not set `X-Forwarded-Host`, so this is informational rather than an aggregator-side bug - but the aggregator must continue to refrain from setting it.
-3. **`Tinfoil-Enclave` response header exposes which enclave answered.** Not sensitive on its own (the aggregator can use it for cross-checking), but if the aggregator forwards it to end users verbatim, downstream caches/log sinks see a per-request backend host. The aggregator should decide whether to strip it before relaying.
-4. **Billing/usage reporter ships per-request HMAC-signed events to `api.tinfoil.sh`.** The events do not carry content, but they do carry raw API keys (`APIKey: apiKey` at `billing/events.go:91`). For Private AI Gateway we own the API key in our own gateway, so the Tinfoil-side key is a per-gateway secret rather than per-user, which is fine. We should still confirm that the aggregator never accidentally forwards a user-supplied `Authorization` header to Tinfoil; today the adapter swaps to our credential, but a future change must keep that property.
+2. **`X-Forwarded-Host` subdomain-based model routing is sensitive to upstream proxy honesty.** `parseModelFromSubdomain` reads `X-Forwarded-Host`. Outside of the public ingress shim, an attacker who can set this header could potentially confuse model selection. In ACI we forward to the router host directly and do not set `X-Forwarded-Host`, so this is informational rather than a gateway-side bug - but the gateway must continue to refrain from setting it.
+3. **`Tinfoil-Enclave` response header exposes which enclave answered.** Not sensitive on its own (the gateway can use it for cross-checking), but if the gateway forwards it to end users verbatim, downstream caches/log sinks see a per-request backend host. The gateway should decide whether to strip it before relaying.
+4. **Billing/usage reporter ships per-request HMAC-signed events to `api.tinfoil.sh`.** The events do not carry content, but they do carry raw API keys (`APIKey: apiKey` at `billing/events.go:91`). For Private AI Gateway we own the API key in our own gateway, so the Tinfoil-side key is a per-gateway secret rather than per-user, which is fine. We should still confirm that the gateway never accidentally forwards a user-supplied `Authorization` header to Tinfoil; today the adapter swaps to our credential, but a future change must keep that property.
 5. **`/v1/models` proxies to `controlPlaneURL=api.tinfoil.sh` without TLS pinning** (`main.go:386-403`). Catalog only, no user content, but reminds us that not every endpoint is bound to a TEE.
 6. **MR_TD / RTMR1 / RTMR2 / RTMR3 of the router itself are not independently checked by our verifier bridge.** `verify_tinfoil` extracts `report_data[:32]` and treats it as the SPKI binding (`scripts/private_ai_provider_verifier.py:309-322`). The Phala "TeeVerifier.verify" call we delegate to does verify the quote chain, but our bridge does not surface or assert the router's compose hash or image digest. To gain confidence that the router code is exactly the v0.0.102 source above, we would need to also surface the compose hash and check it against an allowlist we maintain. Today this is implicit trust in Tinfoil's own publish-and-verify pipeline.
 7. **Debug build can be flipped at deploy time.** `--debug` is a runtime flag, not a compile-time choice. The dstack `tinfoil-config.yml` shown above does not pass it, but a redeploy with `DEBUG=1` env would re-mint the compose hash (so RTMR3 would change), which is detectable. The bridge should record and compare the compose hash to catch this - see action item below.
@@ -185,7 +185,7 @@ missing.
    accept arbitrary `model` strings for NEAR in router mode; it must restrict
    itself to model IDs for which a fresh per-request `/v1/attestation/report?model=...`
    call returns a non-empty `model_attestations[]` whose `tls_cert_fingerprint`
-   we then verify and pin. Current aggregator behavior (channel binding from
+   we then verify and pin. Current gateway behavior (channel binding from
    `gateway_attestation.tls_cert_fingerprint`) closes only the gateway leg.
 2. **Response/conversation plaintext at rest.** The source has API paths that
    store response/conversation items as plaintext JSONB in Postgres. I did not
@@ -215,7 +215,7 @@ missing.
    the gateway forwards prompts with an API key over a non-attested TLS link.
    This is correct for that backend type but obviously voids any TEE privacy
    claim for those models.
-7. **Aggregator's verifier bridge does not surface the gateway compose / image
+7. **Gateway's verifier bridge does not surface the gateway compose / image
    hash.** `scripts/private_ai_provider_verifier.py:327-376` returns only the
    gateway TLS SPKI as `channel_bindings`. We never assert the cloud-api
    image digest from the attested compose. As a result our verification "the
@@ -236,9 +236,9 @@ missing.
    code) that it will only forward to attested backends. That linkage is a
    software claim; it can be broken by config substitution (Tinfoil's
    `UPDATE_CONFIG_URL`) or model-routing policy (NEAR's external-provider
-   support). The aggregator should treat router-mode as "trust this accepted
+   support). The gateway should treat router-mode as "trust this accepted
    router TEE version to verify model TEEs on our behalf", not as "the model
-   TEE is directly verified by the aggregator".
+   TEE is directly verified by the gateway".
 2. **Plaintext crosses the trust boundary inside the router.** For both
    providers the user's request body is decrypted at the router TLS
    termination and re-encrypted under a different transport when forwarded
@@ -263,7 +263,7 @@ missing.
    trust model, while non-idempotent completion retries remain the client's
    responsibility.
 
-## Aggregator-Side Status (`private-ai-gateway`)
+## Gateway-Side Status (`private-ai-gateway`)
 
 What we do today (read-only review, no changes made):
 
@@ -295,7 +295,7 @@ Live probes (performed during this review, not artifact-archived):
   `model_attestations[]` entry including `intel_quote`, `nvidia_payload`,
   `event_log`, `tls_cert_fingerprint`, `ohttp_attestation`, and
   `compose_manager_attestation`.
-- Pre-existing aggregator artifacts at
+- Pre-existing gateway artifacts at
   `/tmp/private-ai-gateway-live-e2e/20260518-053809` (Tinfoil) and
   `/tmp/private-ai-gateway-live-e2e/20260518-053819` (NEAR AI) confirm the receipt
   chain currently accepts both providers in router mode.
@@ -321,7 +321,7 @@ suite):
    ID that NEAR serves via an external provider (if any are publicly enabled
    under the same `cloud-api.near.ai` URL). Confirm that
    `/v1/attestation/report?model=<that-id>&include_tls_fingerprint=true`
-   returns no `model_attestations[]` entry. The aggregator must refuse such
+   returns no `model_attestations[]` entry. The gateway must refuse such
    models in router mode. The presence/absence of `model_attestations[]`
    is the only public signal.
 2. **Tinfoil enclave-pin honesty.** For a request to `inference.tinfoil.sh`,
@@ -333,12 +333,12 @@ suite):
 3. **Compose-hash pinning for both gateways.** Extend the verifier bridge so
    that on `verify_tinfoil` / `verify_nearai` it also surfaces the gateway's
    RTMR3-derived `compose-hash` (or, for Tinfoil, the router-image digest
-   from the attested compose) and checks it against an aggregator-side
+   from the attested compose) and checks it against a gateway-side
    allowlist. Today we accept any compose hash that the router publishes
    under its own measurement; that delegates the "is this the audited
    source?" question entirely to the provider.
 4. **Tinfoil `LOCAL_MCP_ENDPOINT_*` absence.** From inside a router enclave we
-   cannot easily prove the absence of an env var, but on the aggregator side
+   cannot easily prove the absence of an env var, but on the gateway side
    we can refuse to accept a router whose published image digest is not on a
    known-good list (same allowlist as #3). The `--debug` flag does not flip
    the binary; it does flip behavior at runtime, but turning it on would
@@ -355,14 +355,14 @@ suite):
    confirm that requests to model IDs we don't accept produce a hard 503 with
    "no verified channel binding" rather than ever forwarding.
 
-## Recommended Changes to the Aggregator / Provider Adapter
+## Recommended Changes to the Gateway / Provider Adapter
 
 In priority order. None of these are implementation changes I made - they are
 items for the team to schedule, and they should be discussed before any code
 change.
 
 1. **(P0, NEAR) Enforce model allowlist for router mode.** The Private AI Gateway
-   aggregator must reject any model in NEAR router mode for which
+   gateway must reject any model in NEAR router mode for which
    `/v1/attestation/report?model=<id>&include_tls_fingerprint=true` does not
    return at least one `model_attestations[]` entry whose `tls_cert_fingerprint`,
    `intel_quote`, and `nvidia_payload` we can verify. The current
@@ -371,13 +371,13 @@ change.
    gateway. Without this, any user-visible "verified TEE" claim is wrong for
    external-routed models.
 2. **(P0, both) Surface gateway/router compose-hash in channel bindings and
-   pin to an aggregator-side allowlist.** Extend
+   pin to a gateway-side allowlist.** Extend
    `scripts/private_ai_provider_verifier.py:verify_tinfoil` /
    `verify_nearai` to extract the RTMR3 `compose-hash` (NEAR) /
    compose-image-digest (Tinfoil's `tinfoil-config.yml`-pinned image) and
    include it as a second channel binding (or as an
    `attested_source_digest`). Refuse verification when the value is not on
-   an aggregator-maintained allowlist that we update by reviewing the
+   a gateway-maintained allowlist that we update by reviewing the
    corresponding GitHub source/release. This converts "trust the provider's
    publish pipeline" into "trust this specific version we audited."
 3. **(P1, NEAR) Document and externally encode the "no plaintext at rest"
@@ -392,7 +392,7 @@ change.
    header before relaying.** If we want enclave-host visibility for our own
    logging, retain it on our side as an `X-ACI-Verified-Enclave-Hint`
    instead of forwarding the provider's raw header to end users.
-5. **(P2, both) Add an aggregator-side regression test that issues a chat
+5. **(P2, both) Add a gateway-side regression test that issues a chat
    request and asserts no provider-side stream frame, billing event, or
    error response carries the request marker string back out as a verifiable
    side channel.** We cannot inspect provider logs, but we can detect any

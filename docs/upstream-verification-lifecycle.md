@@ -6,10 +6,10 @@ ACI should stay simpler than this document.
 
 ## What We Proved
 
-The aggregator can run Chutes through config-backed credentials and E2EE
-transport without provider credentials in the aggregator process environment.
+The gateway can run Chutes through config-backed credentials and E2EE
+transport without provider credentials in the gateway process environment.
 The live launcher writes the provider key into upstream config as
-`bearer_token`, starts the aggregator, and strips the provider key env var from
+`bearer_token`, starts the gateway, and strips the provider key env var from
 the child process. The Rust Chutes adapter passes the config-backed key and
 Chutes tuning to the verifier bridge as structured stdin input.
 
@@ -35,7 +35,7 @@ The lease/session refresh check used explicit upstream config fields:
 `verification_refresh_seconds: 0`, `session_refresh_seconds: 30`, and
 `chutes_e2ee_discovery_rounds: 3`. It sent two warmed requests 65 seconds
 apart, beyond the local fallback nonce TTL. Both requests stayed fast:
-1.543s and 1.062s. Aggregator logs showed background session refreshes at
+1.543s and 1.062s. Gateway logs showed background session refreshes at
 05:29:13, 05:29:43, and 05:30:13 UTC with 20, 30, and 10 refreshed nonces.
 
 This is a lower bound, not a ceiling. It proves the warmed path can sustain at
@@ -91,7 +91,12 @@ verified TLS binding on that connection.
 The session lease is subordinate to the verification lease. Session material
 cannot extend trust after verification expires.
 
-## Current Lifecycle
+## Current No-Middleware Lifecycle
+
+The implementation today is equivalent to the framework's middleware-disabled
+mode: the public frontend and provider backend are one request path in the same
+process. The client `body.model` is both the user-facing model and the target
+route id.
 
 Startup:
 
@@ -102,12 +107,29 @@ Startup:
 
 Request path:
 
-1. Rewrite the public model id to the upstream model id.
-2. Verify the selected upstream, usually from a cached verification lease.
-3. Refuse forwarding if verification is required and no verified binding exists.
-4. Forward only through a backend that can enforce the verified binding.
-5. Record the verified upstream event and request/response hashes in the
+1. Treat the public model id as the target route id.
+2. Rewrite the target route id to the upstream model id.
+3. Verify the selected upstream, usually from a cached verification lease.
+4. Refuse forwarding if verification is required and no verified binding exists.
+5. Forward only through a backend that can enforce the verified binding.
+6. Record the verified upstream event and request/response hashes in the
    receipt.
+
+## Framework Lifecycle Target
+
+The frontend/middleware/backend framework keeps the same lease semantics but
+moves responsibility boundaries:
+
+1. Frontend terminates downstream E2EE and records the user-facing request.
+2. Optional middleware sees plaintext and may choose a target route id.
+3. Backend validates the target route id, then runs the same verification lease
+   and provider session lease path described here.
+4. Backend records provider verification and provider-facing forwarding facts in
+   shared request context.
+5. Frontend finalizes the user-facing response and signs the receipt.
+
+The verifier lease never belongs to middleware. Middleware may request a route;
+backend decides whether that route is configured, verified, and enforceable.
 
 Verification refresh:
 
@@ -173,7 +195,7 @@ The current compromises:
 - Chutes verification can record fresh nonces during verifier refresh, but the
   session refresh result currently reports `refreshed_nonces: 0` for the
   `refreshed_via_verifier` path. That is an instrumentation gap.
-- All provider sessions are in memory. Restarting the aggregator loses warmed
+- All provider sessions are in memory. Restarting the gateway loses warmed
   nonces and model-id cache, which is acceptable for now because those leases
   are short-lived.
 - We have short-window throughput lower bounds, not a long-window ceiling.
@@ -202,6 +224,11 @@ request falls back into slow evidence refresh.
 
 ## Open Questions
 
+- P0: preserve this lifecycle while splitting the implementation into the
+  frontend/middleware/backend framework documented in
+  [frontend-middleware-backend.md](frontend-middleware-backend.md). The
+  middleware-disabled path must remain behavior-compatible with the current
+  request path.
 - P0: finish strict-release pins from the provider reports under
   [reviews/providers](reviews/providers/README.md): NEAR AI gateway
   provenance/runtime policy, Tinfoil router compose/image identity, and Chutes

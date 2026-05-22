@@ -13,6 +13,8 @@ use super::types::{Receipt, ReceiptEvent, ReceiptSignature};
 
 pub const EVENT_REQUEST_RECEIVED: &str = "request.received";
 pub const EVENT_REQUEST_FORWARDED: &str = "request.forwarded";
+pub const EVENT_MIDDLEWARE_FORWARDED: &str = "middleware.forwarded";
+pub const EVENT_ROUTE_SELECTED: &str = "route.selected";
 pub const EVENT_UPSTREAM_VERIFIED: &str = "upstream.verified";
 pub const EVENT_RESPONSE_RETURNED: &str = "response.returned";
 pub const EVENT_TRANSPARENCY_REQUEST_MODIFIED: &str = "transparency.request_modified";
@@ -249,6 +251,22 @@ impl ReceiptBuilder {
             serde_json::json!({ "body_hash": digest }),
         )?;
         Ok(digest)
+    }
+
+    pub fn add_middleware_forwarded(&mut self, body: &[u8]) -> Result<String, ReceiptError> {
+        let digest = canonical::sha256_hex(body);
+        self.append(
+            EVENT_MIDDLEWARE_FORWARDED,
+            serde_json::json!({ "body_hash": digest }),
+        )?;
+        Ok(digest)
+    }
+
+    pub fn add_route_selected(&mut self, target_route_id: &str) -> Result<(), ReceiptError> {
+        self.append(
+            EVENT_ROUTE_SELECTED,
+            serde_json::json!({ "target_route_id": target_route_id }),
+        )
     }
 
     pub fn add_upstream_verified(

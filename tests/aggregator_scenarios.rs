@@ -8,22 +8,30 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 mod common;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::post;
 use axum::Router;
 use private_ai_gateway::aci::canonical::sha256_hex;
+use private_ai_gateway::aci::e2ee::{
+    decrypt_with_secret_key, encrypt_for_public_key, public_key_from_secret, E2EE_VERSION_V2,
+};
 use private_ai_gateway::aci::identity;
 use private_ai_gateway::aci::keys::{
     verify_keyset_endorsement, verify_receipt_signature, KeyProvider,
 };
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, UpstreamVerifiedEvent, VerificationResult,
-    EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
-    EVENT_TRANSPARENCY_REQUEST_MODIFIED, EVENT_UPSTREAM_VERIFIED,
+    EVENT_MIDDLEWARE_FORWARDED, EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED,
+    EVENT_RESPONSE_RETURNED, EVENT_ROUTE_SELECTED, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
+    EVENT_UPSTREAM_VERIFIED,
 };
 use private_ai_gateway::aci::types::{KeyedPublicKey, Receipt, ServiceCapabilities};
 use private_ai_gateway::aci::upstream::{
@@ -34,7 +42,10 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
-use private_ai_gateway::http::build_router;
+use private_ai_gateway::http::{
+    build_internal_backend_router, build_router, build_router_with_http_middleware,
+    GatewayRequestStore, StoredGatewayRequest,
+};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -194,6 +205,20 @@ struct HttpResult {
     body: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+struct MiddlewareCall {
+    request_id: Option<String>,
+    user_model: Option<String>,
+    body: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct FixtureMiddlewareState {
+    backend_url: String,
+    target_route_id: String,
+    calls: Arc<Mutex<Vec<MiddlewareCall>>>,
+}
+
 impl MockRequester {
     fn new(app: Router) -> Self {
         Self { app }
@@ -236,6 +261,73 @@ impl MockRequester {
             body,
         }
     }
+}
+
+async fn fixture_middleware_handler(
+    State(state): State<FixtureMiddlewareState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let request_id = headers
+        .get("x-private-ai-gateway-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let user_model = headers
+        .get("x-private-ai-gateway-user-model")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    state.calls.lock().unwrap().push(MiddlewareCall {
+        request_id: request_id.clone(),
+        user_model,
+        body: body.to_vec(),
+    });
+    let Some(request_id) = request_id else {
+        return (
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            b"missing request id".to_vec(),
+        );
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/internal/forward", state.backend_url))
+        .header("x-private-ai-gateway-request-id", request_id)
+        .header("x-private-ai-gateway-target", state.target_route_id)
+        .body(body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap();
+    let mut out_headers = HeaderMap::new();
+    for name in [
+        "content-type",
+        "x-receipt-id",
+        "x-e2ee-applied",
+        "x-e2ee-version",
+        "x-e2ee-algo",
+    ] {
+        if let Some(value) = resp.headers().get(name) {
+            out_headers.insert(name, value.clone());
+        }
+    }
+    let body = resp.bytes().await.unwrap().to_vec();
+    (status, out_headers, body)
+}
+
+async fn fixture_middleware_models() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        r#"{"object":"list","data":[{"id":"tenant-facing-model","object":"model","owned_by":"fixture-middleware"}]}"#,
+    )
+}
+
+async fn serve_router(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
 
 struct Harness {
@@ -491,7 +583,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities {
-        supported_e2ee_versions: vec![],
+        supported_e2ee_versions: vec![E2EE_VERSION_V2.to_string()],
         body_retention_seconds: 0,
     };
     let service = Arc::new(
@@ -557,7 +649,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
         .iter()
         .any(|event| event.event_type == EVENT_TRANSPARENCY_REQUEST_MODIFIED));
 
-    let requester = MockRequester::new(build_router(service));
+    let requester = MockRequester::new(build_router(service.clone()));
     let models = requester.get("/v1/models").await;
     assert_eq!(models.status, StatusCode::OK);
     let models = json_body(&models);
@@ -573,6 +665,291 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
     assert!(!models_text.contains("upstream-b"));
     assert!(!models_text.contains("upstream-a-model"));
     assert!(!models_text.contains("upstream-b-model"));
+
+    let forged = requester
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-private-ai-gateway-request-id", "req-attacker")
+                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .body(Body::from(received.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::OK);
+    assert_eq!(
+        calls_a.lock().unwrap().len(),
+        2,
+        "public frontend must ignore caller-supplied internal target headers"
+    );
+    assert!(calls_b.lock().unwrap().is_empty());
+
+    let selected = br#"{"model":"tenant-facing-model","messages":[]}"#;
+    let request_store = GatewayRequestStore::default();
+    let backend = MockRequester::new(build_internal_backend_router(
+        service.clone(),
+        request_store.clone(),
+    ));
+    request_store.insert(
+        "req-test-target-route".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: selected.to_vec(),
+            upstream_required: true,
+            requester: None,
+            e2ee: None,
+            user_model: Some("tenant-facing-model".to_string()),
+        },
+    );
+    let selected_response = backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-test-target-route")
+                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .body(Body::from(selected.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(selected_response.status, StatusCode::OK);
+    {
+        let calls_b = calls_b.lock().unwrap();
+        assert_eq!(calls_b.len(), 1);
+        let forwarded: Value = serde_json::from_slice(&calls_b[0].body).unwrap();
+        assert_eq!(forwarded["model"], "upstream-b-model");
+    }
+    let receipt_id = header_str(&selected_response.headers, "x-receipt-id");
+    let selected_receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("internal backend response must persist a receipt");
+    assert_eq!(
+        event(&selected_receipt, EVENT_REQUEST_RECEIVED)["body_hash"],
+        sha256_hex(selected)
+    );
+    assert_eq!(
+        event(&selected_receipt, EVENT_UPSTREAM_VERIFIED)["model_id"],
+        "upstream-b-model"
+    );
+    assert_eq!(
+        event(&selected_receipt, EVENT_MIDDLEWARE_FORWARDED)["body_hash"],
+        sha256_hex(selected)
+    );
+    assert_eq!(
+        event(&selected_receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
+
+    request_store.insert(
+        "req-test-bad-route".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: selected.to_vec(),
+            upstream_required: true,
+            requester: None,
+            e2ee: None,
+            user_model: Some("tenant-facing-model".to_string()),
+        },
+    );
+    let bad_target = backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-test-bad-route")
+                .header("x-private-ai-gateway-target", "missing:route")
+                .body(Body::from(selected.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(bad_target.status, StatusCode::BAD_REQUEST);
+
+    let expiring_store = GatewayRequestStore::new(Duration::from_millis(1));
+    let expiring_backend = MockRequester::new(build_internal_backend_router(
+        service.clone(),
+        expiring_store.clone(),
+    ));
+    expiring_store.insert(
+        "req-test-expired".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: selected.to_vec(),
+            upstream_required: true,
+            requester: None,
+            e2ee: None,
+            user_model: Some("tenant-facing-model".to_string()),
+        },
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let expired = expiring_backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-test-expired")
+                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .body(Body::from(selected.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+
+    let http_store = GatewayRequestStore::default();
+    let backend_url = serve_router(build_internal_backend_router(
+        service.clone(),
+        http_store.clone(),
+    ))
+    .await;
+    let middleware_calls = Arc::new(Mutex::new(Vec::new()));
+    let middleware_url = serve_router(
+        Router::new()
+            .route("/v1/chat/completions", post(fixture_middleware_handler))
+            .route("/v1/models", axum::routing::get(fixture_middleware_models))
+            .with_state(FixtureMiddlewareState {
+                backend_url,
+                target_route_id: "upstream-b:public-b".to_string(),
+                calls: middleware_calls.clone(),
+            }),
+    )
+    .await;
+    let public_with_middleware = MockRequester::new(build_router_with_http_middleware(
+        service.clone(),
+        http_store,
+        middleware_url,
+    ));
+    let middleware_models = public_with_middleware.get("/v1/models").await;
+    assert_eq!(middleware_models.status, StatusCode::OK);
+    let middleware_models = json_body(&middleware_models);
+    assert_eq!(middleware_models["data"][0]["id"], "tenant-facing-model");
+    let middleware_response = public_with_middleware.post_chat(selected, &[]).await;
+    assert_eq!(middleware_response.status, StatusCode::OK);
+    {
+        let calls = middleware_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0]
+            .request_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("req_")));
+        assert_eq!(calls[0].user_model.as_deref(), Some("tenant-facing-model"));
+        assert_eq!(calls[0].body, selected);
+    }
+    {
+        let calls_b = calls_b.lock().unwrap();
+        assert_eq!(calls_b.len(), 2);
+        let forwarded: Value = serde_json::from_slice(&calls_b[1].body).unwrap();
+        assert_eq!(forwarded["model"], "upstream-b-model");
+    }
+    let receipt_id = header_str(&middleware_response.headers, "x-receipt-id");
+    let receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("middleware response must persist a receipt");
+    assert_eq!(
+        event(&receipt, EVENT_REQUEST_RECEIVED)["body_hash"],
+        sha256_hex(selected)
+    );
+    assert_eq!(
+        event(&receipt, EVENT_UPSTREAM_VERIFIED)["model_id"],
+        "upstream-b-model"
+    );
+    assert_eq!(
+        event(&receipt, EVENT_MIDDLEWARE_FORWARDED)["body_hash"],
+        sha256_hex(selected)
+    );
+    assert_eq!(
+        event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
+
+    let client_secret = k256::SecretKey::from_slice(&[0x67; 32]).unwrap();
+    let nonce = "nonce-middleware-route";
+    let timestamp = 1_700_000_000u64;
+    let model_key = &service.keyset().e2ee_public_keys[0];
+    let request_aad = format!(
+        "v2|req|algo={}|model=tenant-facing-model|m=0|c=-|n={nonce}|ts={timestamp}",
+        model_key.algo
+    );
+    let encrypted_content =
+        encrypt_for_public_key(&model_key.public_key_hex, b"hello", request_aad.as_bytes())
+            .unwrap();
+    let encrypted_body = serde_json::to_vec(&serde_json::json!({
+        "model": "tenant-facing-model",
+        "messages": [{"role": "user", "content": encrypted_content}],
+    }))
+    .unwrap();
+    let e2ee_response = public_with_middleware
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-client-pub-key", public_key_from_secret(&client_secret))
+                .header("x-model-pub-key", model_key.public_key_hex.clone())
+                .header("x-e2ee-version", E2EE_VERSION_V2)
+                .header("x-e2ee-nonce", nonce)
+                .header("x-e2ee-timestamp", timestamp.to_string())
+                .body(Body::from(encrypted_body))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        e2ee_response.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&e2ee_response.body)
+    );
+    assert_eq!(header_str(&e2ee_response.headers, "x-e2ee-applied"), "true");
+    {
+        let calls = middleware_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let body: Value = serde_json::from_slice(&calls[1].body).unwrap();
+        assert_eq!(body["model"], "tenant-facing-model");
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+    {
+        let calls_b = calls_b.lock().unwrap();
+        assert_eq!(calls_b.len(), 3);
+        let forwarded: Value = serde_json::from_slice(&calls_b[2].body).unwrap();
+        assert_eq!(forwarded["model"], "upstream-b-model");
+        assert_eq!(forwarded["messages"][0]["content"], "hello");
+    }
+    let encrypted_response = json_body(&e2ee_response);
+    let encrypted_answer = encrypted_response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+    assert_ne!(encrypted_answer, "b");
+    let response_aad = format!(
+        "v2|resp|algo={}|model=tenant-facing-model|id=chat-route-b|choice=0|field=content|n={nonce}|ts={timestamp}",
+        model_key.algo
+    );
+    let decrypted =
+        decrypt_with_secret_key(&client_secret, encrypted_answer, response_aad.as_bytes()).unwrap();
+    assert_eq!(decrypted, b"b");
+    let upstream_model_aad =
+        response_aad.replace("model=tenant-facing-model", "model=upstream-b-model");
+    assert!(decrypt_with_secret_key(
+        &client_secret,
+        encrypted_answer,
+        upstream_model_aad.as_bytes()
+    )
+    .is_err());
+    let e2ee_receipt_id = header_str(&e2ee_response.headers, "x-receipt-id");
+    let e2ee_receipt = service
+        .get_receipt_by_receipt_id(e2ee_receipt_id)
+        .expect("middleware E2EE response must persist a receipt");
+    let middleware_forwarded_hash = {
+        let calls = middleware_calls.lock().unwrap();
+        sha256_hex(&calls[1].body)
+    };
+    assert_eq!(
+        event(&e2ee_receipt, EVENT_MIDDLEWARE_FORWARDED)["body_hash"],
+        middleware_forwarded_hash
+    );
+    assert_eq!(
+        event(&e2ee_receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
 }
 
 #[tokio::test]

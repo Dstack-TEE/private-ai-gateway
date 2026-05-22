@@ -26,8 +26,9 @@ use private_ai_gateway::aci::verifier::{
     AciDcapUpstreamVerifier, AciDcapVerifierPolicy, PreverifiedUpstreamVerifier,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, InMemoryReceiptStore,
-    SystemClock, UpstreamVerificationRequest, UpstreamVerifier, CHAT_COMPLETIONS_PATH,
+    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
+    InMemoryReceiptStore, SystemClock, UpstreamVerificationRequest, UpstreamVerifier,
+    CHAT_COMPLETIONS_PATH,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::build_router;
@@ -320,6 +321,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
+            context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: CHAT_REQUEST,
             forwarded_body: None,

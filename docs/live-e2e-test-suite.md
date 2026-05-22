@@ -1,7 +1,7 @@
 # Live E2E Test Suite Design
 
-This document defines the live E2E scripts for the ACI
-aggregator. The suite sends real traffic to supported upstream providers,
+This document defines the live E2E scripts for Private AI Gateway. The suite
+sends real traffic to supported upstream providers,
 verifies upstream attestation and channel binding, checks API fidelity, and
 proves the output back to a relying party through ACI reports and receipts.
 See [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md)
@@ -11,13 +11,17 @@ throughput findings.
 ## Goals
 
 - Verify each supported provider before sending sensitive traffic.
-- Verify that the aggregator enforces the provider binding it accepted.
-- Exercise real OpenAI-compatible traffic through the aggregator, not only
+- Verify that the gateway enforces the provider binding it accepted.
+- Exercise real OpenAI-compatible traffic through the gateway, not only
   provider fixture tests.
+- Prove the no-middleware path remains behavior-compatible with the current
+  gateway.
+- Prove the middleware path can rewrite requests and select a target route
+  while backend-owned provider verification facts remain unforgeable.
 - Check API fidelity for the surfaces users rely on: streaming, tool calls,
   structured outputs, multimodal inputs, context limits, and cache metadata.
 - Give users a concrete verification story for "I received this API response;
-  how do I know it came from the verified aggregator and a verified upstream?"
+  how do I know it came from the verified gateway and a verified upstream?"
 
 ## Non-Goals
 
@@ -29,7 +33,7 @@ throughput findings.
 - Do not hide provider bugs with response post-processing. The fidelity tests
   should show the real behavior.
 
-## Script Layout
+## Target Script Layout
 
 Directory:
 
@@ -39,9 +43,11 @@ scripts/live_e2e/
   bfcl_v4.py
   preflight.py
   provider_verify.py
-  launch_aggregator.py
+  launch_gateway.py
   cases/
     lifecycle.py
+    framework_no_middleware.py
+    framework_middleware.py
     fidelity_text.py
     fidelity_streaming.py
     fidelity_tools.py
@@ -60,6 +66,10 @@ examples/
   verify_aci_artifacts.rs
 ```
 
+The current tree still has some older helper names, such as
+`launch_aggregator.py`. Rename those as part of the framework test work rather
+than treating the old names as product concepts.
+
 `run.py` is the orchestrator. It accepts:
 
 ```bash
@@ -72,7 +82,7 @@ uv run python scripts/live_e2e/bfcl_v4.py \
   --test-category simple_python \
   --max-cases 2
 uv run python scripts/live_e2e/user_verify.py \
-  --base-url https://router.example \
+  --base-url https://gateway.example \
   --chat-id chatcmpl-... \
   --request-body request.json \
   --response-body response.json
@@ -88,7 +98,7 @@ Profiles:
 
 - `quick`: one non-streaming request per provider plus receipt verification.
 - `full`: all capability-enabled fidelity cases.
-- `strict-release`: full profile plus vendored reference pins, aggregator code
+- `strict-release`: full profile plus vendored reference pins, gateway code
   provenance, launcher/image provenance, and fail-closed negative checks.
 - `user-verify`: no provider secrets. Verifies an already received response.
 
@@ -189,7 +199,7 @@ Provider-specific rules:
   NVIDIA evidence when present, and hash the decoded ML-KEM public-key bytes
   for the binding enforced by the transport. Strict production entries should
   pin upstream model ids to concrete `chute_id` UUIDs with `chutes_chute_ids`;
-  the verifier and aggregator config use the same pins.
+  the verifier and gateway config use the same pins.
 - ACI/DCAP: verify `/v1/attestation/report?nonce=...`, quote report data,
   dstack KMS identity custody, accepted workload id or image digest, accepted
   KMS root, and attested TLS SPKI.
@@ -207,8 +217,8 @@ Checks:
 - `PRIVATE_AI_VERIFIER_DIR` exists or the sibling verifier checkout exists.
 - `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI/DCAP tests.
 - `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` or a local dstack socket exists for
-  aggregator attestation tests.
-- The aggregator binary builds.
+  gateway attestation tests.
+- The gateway binary builds.
 - No live server is already bound to the selected local port.
 
 ### 10 Provider Attestation
@@ -227,10 +237,10 @@ Negative checks:
 - For Chutes, mutate `key_id` or public-key digest and assert `/e2e/invoke`
   is never called.
 
-### 20 Aggregator Launch
+### 20 Gateway Launch
 
 The script writes a temporary upstream config from `providers.json`, starts a
-local aggregator against the real dstack socket, and deletes the config on
+local gateway against the real dstack socket, and deletes the config on
 exit because it contains live bearer tokens.
 
 Checks:
@@ -248,7 +258,7 @@ Checks:
 
 For each provider and enabled request mode:
 
-- Send request through the aggregator.
+- Send request through the gateway.
 - Assert response status and OpenAI-compatible shape.
 - Fetch `/v1/receipt/{chat_id}` with the original bearer token.
 - Verify receipt signature using the receipt key from the attested keyset.
@@ -267,8 +277,32 @@ verification path. The verifier intentionally uses the Rust protocol code for
 ACI canonicalization, keyset binding, and receipt signature checks instead of
 reimplementing those rules in Python.
 
+### 35 Framework Compatibility
+
+Run the same lifecycle cases in two gateway modes:
+
+- **No middleware:** frontend calls backend directly. Assert behavior matches
+  the current request path: `body.model` is the target route id, backend rewrites
+  to the upstream model, and receipts contain the same verification and hash
+  facts as today.
+- **Fixture middleware:** frontend forwards plaintext to a local middleware
+  fixture. The fixture rewrites the request and selects a different configured
+  target route id. Backend must validate that route, verify the provider, and
+  record backend-authored route/provider facts that the middleware cannot forge.
+
+Middleware fixture checks:
+
+- Public requests with forged `X-Private-AI-Gateway-*` headers are sanitized by
+  the frontend.
+- Middleware cannot claim `upstream.verified`; backend must author that event.
+- E2EE AAD uses the original user model even when middleware selects a
+  provider-qualified target route.
+- The final receipt distinguishes `request.received`, `middleware.forwarded`,
+  `route.selected`, `upstream.forwarded`, `upstream.verified`, and
+  `response.returned`.
+
 The `bfcl_v4.py` wrapper runs the Berkeley Function Calling Leaderboard v4
-through the local aggregator over OpenAI-compatible Chat Completions. It is
+through the local gateway over OpenAI-compatible Chat Completions. It is
 intentionally separate from `run.py`: BFCL is useful for native tool-call
 fidelity and multi-turn agentic behavior, while the ACI runner remains the
 source of truth for report, receipt, and upstream binding verification.
@@ -387,7 +421,7 @@ for structured values the prompt constrains.
 
 Inputs:
 
-- Aggregator base URL.
+- Gateway base URL.
 - Chat id or receipt id.
 - Original request body, optional.
 - Response body or captured stream bytes, optional.
@@ -444,8 +478,10 @@ providers. Our suite should explicitly cover the same classes of behavior:
 1. `user_verify.py` for already captured responses.
 2. `provider_verify.py` plus `provider_refs`.
 3. `run.py --profile quick` for Tinfoil, NEAR AI, Chutes.
-4. Streaming and receipt hash verification.
-5. Tool and structured-output cases.
-6. Multimodal and context cases.
-7. Cache observability.
-8. Strict-release source provenance and launcher/image provenance checks.
+4. Framework no-middleware compatibility case.
+5. Framework fixture-middleware case with route selection and rewrite receipts.
+6. Streaming and receipt hash verification.
+7. Tool and structured-output cases.
+8. Multimodal and context cases.
+9. Cache observability.
+10. Strict-release source provenance and launcher/image provenance checks.

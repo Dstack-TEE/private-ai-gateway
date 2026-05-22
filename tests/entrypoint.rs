@@ -241,7 +241,7 @@ fn no_stale_tee_launch_sh_references_remain() {
 
 // ---------- Ownership-boundary invariants ----------
 //
-// The launcher is generic and build-system agnostic; the aggregator owns
+// The launcher is generic and build-system agnostic; the gateway owns
 // its install/build/run logic. These tests pin that boundary so a
 // well-meaning change can't drift either side back across it.
 
@@ -255,7 +255,7 @@ fn launcher_config_uses_only_default_mode_keys() {
     // aggregator.conf is the launcher config. The launcher contract is
     // intentionally minimal: REPO_URL, COMMIT_SHA, and WORK_DIR.
     // Setting INSTALL_CMD or RUN_CMD would move
-    // aggregator-owned install/run logic back into the launcher config,
+    // gateway-owned install/run logic back into the launcher config,
     // which is exactly the boundary we keep out of.
     let body = deploy_text("aggregator.conf");
     for forbidden in &["INSTALL_CMD", "RUN_CMD"] {
@@ -267,7 +267,7 @@ fn launcher_config_uses_only_default_mode_keys() {
             }
             assert!(
                 !trimmed.starts_with(&format!("{forbidden}=")),
-                "aggregator.conf must not set {forbidden}; the aggregator owns its install/run via entrypoint.sh"
+                "aggregator.conf must not set {forbidden}; the gateway owns its install/run via entrypoint.sh"
             );
         }
     }
@@ -300,11 +300,11 @@ fn compose_yaml_inlines_only_default_mode_keys() {
     let body = deploy_text("compose.yaml");
     assert!(
         !body.contains("INSTALL_CMD="),
-        "compose.yaml must not set INSTALL_CMD; the aggregator owns its install via entrypoint.sh"
+        "compose.yaml must not set INSTALL_CMD; the gateway owns its install via entrypoint.sh"
     );
     assert!(
         !body.contains("RUN_CMD="),
-        "compose.yaml must not set RUN_CMD; the aggregator owns its run via entrypoint.sh"
+        "compose.yaml must not set RUN_CMD; the gateway owns its run via entrypoint.sh"
     );
     assert!(
         !body.contains("REPO_SUBDIR="),
@@ -335,8 +335,8 @@ fn deploy_readme_states_ownership_boundary() {
         "deploy/README.md must describe the launcher as build-system agnostic"
     );
     assert!(
-        body.contains("aggregator-owned image"),
-        "deploy/README.md must describe the production image as aggregator-owned"
+        body.contains("gateway-owned image"),
+        "deploy/README.md must describe the production image as gateway-owned"
     );
     assert!(
         !body.contains("launcher-derived image"),
@@ -362,7 +362,7 @@ fn deploy_readme_documents_one_command_deploy_and_seed_config() {
 }
 
 #[test]
-fn entrypoint_sh_header_claims_aggregator_ownership() {
+fn entrypoint_sh_header_claims_gateway_ownership() {
     // Make sure the script's own header tells future readers who owns it.
     let body = script_text();
     assert!(

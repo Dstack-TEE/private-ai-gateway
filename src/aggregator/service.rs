@@ -427,6 +427,7 @@ pub struct LegacySignatureResult {
 /// [`AciService::forward_chat_completion`] is a thin wrapper that
 /// forwards `requester: None`.
 pub struct ChatCompletionRequest<'a> {
+    pub context: GatewayRequestContext,
     pub endpoint_path: &'a str,
     /// Bytes the service observed after TLS / E2EE termination.
     pub received_body: &'a [u8],
@@ -446,6 +447,13 @@ pub struct ChatCompletionRequest<'a> {
     /// receipt that any caller can retrieve.
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GatewayRequestContext {
+    pub request_id: String,
+    pub user_model: Option<String>,
+    pub target_route_id: Option<String>,
 }
 
 pub struct AciService {
@@ -921,6 +929,7 @@ impl AciService {
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<ForwardResult, ServiceError> {
         self.forward_chat_completion_request(ChatCompletionRequest {
+            context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body,
             forwarded_body,
@@ -946,9 +955,14 @@ impl AciService {
             RequestMode::Buffered,
             req.e2ee.as_ref().is_some(),
         );
+        let target_route_id = req.context.target_route_id.clone();
+        let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
+        let middleware_forwarded_body =
+            target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
-            body: req.forwarded_body.unwrap_or_else(|| received_body.to_vec()),
+            body: backend_input_body,
             path: Some(endpoint_path.to_string()),
+            target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
         let forwarded_body = prepared.request.body.clone();
@@ -1026,6 +1040,12 @@ impl AciService {
             served_at,
         );
         builder.add_request_received(received_body)?;
+        if let Some(body) = middleware_forwarded_body.as_deref() {
+            builder.add_middleware_forwarded(body)?;
+        }
+        if let Some(route_id) = target_route_id.as_deref() {
+            builder.add_route_selected(route_id)?;
+        }
         builder.add_request_forwarded(&forwarded_body)?;
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
@@ -1067,9 +1087,14 @@ impl AciService {
             RequestMode::Streaming,
             req.e2ee.as_ref().is_some(),
         );
+        let target_route_id = req.context.target_route_id.clone();
+        let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
+        let middleware_forwarded_body =
+            target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
-            body: req.forwarded_body.unwrap_or_else(|| received_body.to_vec()),
+            body: backend_input_body,
             path: Some(endpoint_path.to_string()),
+            target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
         let forwarded_body = prepared.request.body.clone();
@@ -1146,6 +1171,12 @@ impl AciService {
             served_at,
         );
         builder.add_request_received(received_body)?;
+        if let Some(body) = middleware_forwarded_body.as_deref() {
+            builder.add_middleware_forwarded(body)?;
+        }
+        if let Some(route_id) = target_route_id.as_deref() {
+            builder.add_route_selected(route_id)?;
+        }
         builder.add_request_forwarded(&forwarded_body)?;
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;

@@ -11,7 +11,7 @@ user traffic. Unknowns are written as TODOs and block strict inclusion until
 resolved.
 
 Each provider can use provider-specific evidence and verifier code. The common
-output to the aggregator is always the same: a verified lease with enforceable
+output to the gateway is always the same: a verified lease with enforceable
 channel binding and enough provider-owned claims for receipts and audits.
 
 ## Core Principle
@@ -24,9 +24,9 @@ itself. For a gateway or router provider, the gateway can be the trust boundary
 if its verified code and configuration enforce verification of the downstream
 model path.
 
-The aggregator should not port every provider verifier into Rust. Provider
+The gateway should not port every provider verifier into Rust. Provider
 adapters may call provider-owned verifiers, local scripts, SDKs, or compact
-Rust code. The Rust aggregator consumes the verified lease and enforces the
+Rust code. The Rust gateway consumes the verified lease and enforces the
 transport binding.
 
 ## Required Criteria
@@ -211,7 +211,7 @@ verification lease.
 
 ### 9. Request Fidelity
 
-The provider must preserve the OpenAI-compatible behavior the aggregator
+The provider must preserve the OpenAI-compatible behavior the gateway
 exposes for that model.
 
 Required checks:
@@ -361,7 +361,7 @@ user-configurable policy hook.
 
 ## What We Should Avoid
 
-Avoid adding unnecessary complexity to the protocol or aggregator:
+Avoid adding unnecessary complexity to the protocol or gateway:
 
 - no generic policy DSL
 - no Rust port of every provider's native verifier unless it is clearly the
@@ -374,7 +374,7 @@ Avoid adding unnecessary complexity to the protocol or aggregator:
 - no provider-specific measurement pinning in generic dstack verifier config
 
 The right abstraction is a provider adapter that establishes a verified lease.
-The Rust aggregator should stay small: select the lease, enforce the channel,
+The Rust gateway should stay small: select the lease, enforce the channel,
 forward the request, and record the receipt.
 
 ## Current Provider Status

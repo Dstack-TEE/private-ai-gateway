@@ -1,12 +1,18 @@
 # private-ai-gateway
 
 Developer-preview Rust implementation of the **Attested Confidential Inference
-(ACI)** aggregator service.
+(ACI)** gateway service.
 
 The protocol it speaks is the draft ACI specification proposed in
 [`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694).
-This crate is the program `git-launcher` (separate repo) can
-fetch, install, and run inside a dstack v2 application VM.
+This repo is the workload `git-launcher` can fetch, install, and run inside a
+dstack v2 application VM.
+
+The next architecture target is documented in
+[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md):
+one gateway process owns the downstream ACI frontend and verified-provider
+backend, with an optional plaintext HTTP middleware slot for routing and
+business logic.
 
 ## Status
 
@@ -34,10 +40,11 @@ fetch, install, and run inside a dstack v2 application VM.
 | Client-facing E2EE v2 streaming | done for chat/completions |
 | vLLM-proxy-compatible ECDSA v1/v2 and Ed25519/X25519 E2EE | done for chat/completions |
 | `/v1/models` upstream proxying | done |
-| `/v1/metrics` aggregator-owned Prometheus metrics | done |
+| `/v1/metrics` gateway-owned Prometheus metrics | done |
 | Runtime upstream config file + admin API | done |
 | Per-upstream verifier | done for ACI/DCAP, Tinfoil, NEAR AI gateway, and Chutes E2EE-key bindings |
 | Chutes provider transport | done for buffered and streaming E2EE over `/e2e/invoke` |
+| Frontend/middleware/backend framework | partial; runtime HTTP middleware mode wired |
 | Public receipt log | not done |
 | Replica-stable identity (KMS-released keys) | done for configured dstack key paths |
 
@@ -64,9 +71,9 @@ src/
   http/
     app.rs              // axum router for the ACI/OpenAI-compatible endpoints
 
-entrypoint.sh           // aggregator-owned entry script the launcher exec's
+entrypoint.sh           // gateway-owned entry script the launcher exec's
 scripts/
-  phala_multi_upstream_smoke.sh // deploys two upstream ACI CVMs + one router CVM and asserts routing receipts
+  phala_multi_upstream_smoke.sh // deploys two upstream ACI CVMs + one gateway CVM and asserts routing receipts
 deploy/                 // launcher .conf and dstack compose example
   README.md             // launcher wiring and deployment notes
 
@@ -77,7 +84,7 @@ tests/
   ecdsa_recoverable.rs  // §9.4 65-byte recoverable, reject 64-byte, no double hash
   service.rs            // fail-closed defaults, X-Upstream-Verification: none
   http.rs               // end-to-end report / chat / receipt
-  aggregator_scenarios.rs // full ACI aggregator happy/error path scenarios
+  aggregator_scenarios.rs // current no-middleware gateway happy/error path scenarios
   auth_and_retention.rs // receipt owner auth, retained body expiry, ACI headers
   aci_service_surface.rs // implemented surfaces plus ignored future specs
   entrypoint.rs         // shellcheck-lints and shape-checks entrypoint.sh
@@ -96,18 +103,18 @@ KMS, or mounted secret files.
 
 **Ownership boundary.** The launcher is generic and build-system agnostic;
 it does not know we are written in Rust. `entrypoint.sh` is owned by this
-aggregator, and everything past `bash entrypoint.sh` — install, build,
+gateway, and everything past `bash entrypoint.sh` — install, build,
 run — lives here. The launcher config stays minimal (`REPO_URL`,
 `COMMIT_SHA`, `WORK_DIR`); there is no `INSTALL_CMD` and no `RUN_CMD`.
 
 What `entrypoint.sh` does (once the launcher invokes it):
 
-1. If `cargo` is not on `PATH`, this aggregator installs a Rust toolchain
+1. If `cargo` is not on `PATH`, this gateway installs a Rust toolchain
    via `apt-get install -y --no-install-recommends ca-certificates rustup`
-   + `rustup default stable`. **This is an aggregator implementation
+   + `rustup default stable`. **This is a gateway implementation
    choice for the first slice**, not a launcher capability. Production
-   should publish a Rust-capable aggregator image (see `deploy/README.md`
-   pattern B) so the toolchain is covered by an aggregator-owned image
+   should publish a Rust-capable gateway image (see `deploy/README.md`
+   pattern B) so the toolchain is covered by a gateway-owned image
    digest.
 2. Runs `cargo build --release --locked --bin private-ai-gateway`. The
    `--locked` flag means a build that would change `Cargo.lock` is a hard
@@ -119,7 +126,7 @@ What `entrypoint.sh` does (once the launcher invokes it):
 
 See `deploy/README.md` for the launcher `.conf`, the Compose runtime env, the
 dstack compose example that puts both behind `compose_hash`, and the
-Rust-capable aggregator image recipe.
+Rust-capable gateway image recipe.
 
 ## Environment variables
 
@@ -149,17 +156,19 @@ the `PRIVATE_AI_GATEWAY_*` value wins when both are set.
 | Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` |
 | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
 | dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` |
+| Optional plaintext HTTP middleware URL | `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` |
+| Internal backend bind address in middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_BIND` |
 
 Provider-owned verifier bridges also read `PRIVATE_AI_VERIFIER_DIR` when they
 need the local `private-ai-verifier` checkout. If unset in this monorepo, the
-aggregator uses the sibling `../private-ai-verifier` path. Chutes credentials
+gateway uses the sibling `../private-ai-verifier` path. Chutes credentials
 and E2EE tuning are upstream config fields, not deployment env vars:
 `bearer_token`, `chutes_e2ee_api_base`, `chutes_chute_ids`,
 `chutes_e2ee_discovery_rounds`, and
 `chutes_e2ee_discovery_interval_seconds`. The Rust adapter passes those values
 to the verifier bridge internally.
 
-Prefer `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS`: the aggregator reads the mounted
+Prefer `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS`: the gateway reads the mounted
 leaf certificate, computes `sha256(SPKI)`, and publishes that digest in the
 attested keyset. `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` remains for manual or
 test deployments. Set only one of the two.
@@ -201,7 +210,7 @@ out-of-band trust during bring-up.
 
 Upstream forwarding defaults to a 10 second connect timeout and a 600 second
 read idle timeout. The read timeout is not a total generation deadline; for
-streaming responses it bounds how long the aggregator waits between upstream
+streaming responses it bounds how long the gateway waits between upstream
 chunks. Upstream ACI/DCAP verification uses the same connect timeout and a 60
 second total verification timeout by default, covering report fetch, collateral
 fetch, and quote checks. The timeout env vars set global defaults; per-upstream
@@ -211,7 +220,7 @@ config can override them with
 DCAP, and NRAS checks; configure a higher per-upstream verifier timeout if the
 default is too low for the selected chute.
 
-The aggregator prewarms upstream verification at startup. It also proactively
+The gateway prewarms upstream verification at startup. It also proactively
 refreshes cached verification before expiry; by default the refresh loop runs at
 the verifier cache TTL minus 60 seconds, so the normal 300 second cache
 refreshes every 240 seconds. If multiple upstreams configure different positive
@@ -228,7 +237,7 @@ reuses cached verified E2EE key bindings and only refills single-use invocation
 nonces, so user traffic does not have to wait for nonce discovery when the pool
 is low or expired.
 
-The aggregator has one upstream config file. Set
+The gateway has one upstream config file. Set
 `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` to its path; if unset, the default is
 `/var/lib/private-ai-gateway/upstreams.json`. A missing, empty, or whitespace-only
 file is valid and means no upstreams are configured yet. The file contains a
@@ -264,10 +273,16 @@ admin-updated config is never overwritten.
 non-default providers select concrete Rust verifier adapters; they do not
 expose a configurable verifier command.
 
-The public model id is what clients send and what `/v1/models` returns. The
-aggregator rewrites it to the upstream model id before upstream verification,
-forwarding, and receipt hashing. Per-upstream verifier fields override the
-global `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_*` settings when present.
+In no-middleware mode, the public model id is what clients send and what
+`/v1/models` returns. The gateway treats that id as the target route id and
+rewrites it to the upstream model id before upstream verification, forwarding,
+and receipt hashing. When `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` is set,
+`/v1/models` passes through middleware and middleware chooses a configured
+target route id by calling the internal backend; the frontend still preserves
+the user model name for downstream E2EE AAD. See
+[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md).
+Per-upstream verifier fields override the global
+`PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_*` settings when present.
 Chutes upstreams should put the provider API key in `bearer_token`. Optional
 Chutes fields are `chutes_e2ee_api_base`, `chutes_chute_ids`,
 `chutes_e2ee_discovery_rounds` (default `3`),
@@ -291,7 +306,7 @@ curl -X PUT -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
 
 The admin view redacts bearer tokens and returns the active `config_digest`.
 `PUT` validates the replacement config, writes it to the single configured file,
-and swaps the live upstream router. If no admin token is configured, the admin
+and swaps the live upstream router/backend state. If no admin token is configured, the admin
 endpoint returns `404`.
 
 ## Dependencies
@@ -317,7 +332,7 @@ with the reason it is in the tree:
 | `dcap-qvl` | Pure-Rust Intel DCAP quote verification for ACI upstream reports. |
 | `thiserror` | Library error types. |
 | `tracing`, `tracing-subscriber` | Structured logging. |
-| `prometheus` | Aggregator-owned `/v1/metrics` counters. The service does not expose upstream metrics. |
+| `prometheus` | Gateway-owned `/v1/metrics` counters. The service does not expose upstream metrics. |
 | `async-trait` | Async trait helpers on `UpstreamBackend`. |
 
 No NVIDIA / nvtrust crates. GPU attestation is a per-upstream concern
@@ -349,11 +364,11 @@ receipt hashing, dynamic upstream config, or model metrics:
 scripts/local_multi_upstream_smoke.sh
 ```
 
-It runs two upstream ACI aggregators plus one router ACI aggregator under local
+It runs two upstream ACI services plus one gateway under local
 Docker Compose. All three mount the forwarded dstack socket from
 `DSTACK_SOCK` (default `/tmp/aci-dstack-sock-dev.dstack.sock`), so it exercises
 real dstack KMS keys and quotes while avoiding a full Phala deployment. The
-router starts with an empty config file, receives its upstream routes through
+gateway starts with an empty config file, receives its upstream routes through
 `PUT /v1/admin/upstreams`, then performs the same routing, receipt, and metrics
 assertions as the Phala smoke.
 
@@ -366,7 +381,7 @@ scripts/phala_multi_upstream_smoke.sh
 
 It builds and pushes `Dockerfile.smoke` to `ttl.sh`, deploys two mocked
 upstream ACI services, fetches each upstream attestation report to derive the
-dstack KMS root policy, then deploys one router with a single upstream config
+dstack KMS root policy, then deploys one gateway with a single upstream config
 file mounted into the CVM. It asserts:
 
 - `/v1/models` returns only public model ids
@@ -379,16 +394,10 @@ Artifacts are written to `/tmp/private-ai-gateway-smoke-router` by default. Set
 `IMAGE_REF=<existing-image-ref>` to skip the Docker build/push, or
 `WORK_DIR=<path>` to keep artifacts elsewhere.
 
-## ACI roadmap
+## Roadmap
 
-Order matches the design doc §9 phases.
-
-1. **Provider-specific verifier policies** - add Chutes / Tinfoil /
-   NEAR AI policy adapters on top of the ACI/DCAP verifier when their
-   public attestation surfaces are stable.
-2. **Persistent receipt and retained-body store** - the current
-   `GET /v1/receipt/{chat_id}/body` implementation is in-memory
-   with expiry. Replace it with a regional store for production
-   topology.
-3. **Multi-region** - GeoDNS + replicated KMS app-id; no protocol
-   change.
+The current pending-task list lives in [`docs/roadmap.md`](docs/roadmap.md).
+The next major implementation item is hardening the
+[frontend/middleware/backend framework](docs/frontend-middleware-backend.md):
+stream-preserving middleware transport, production compose wiring, and E2EE
+middleware coverage.

@@ -1,10 +1,10 @@
 # Private AI Gateway Roadmap
 
-Date: 2026-05-19 UTC.
-Current phase: hardening a feature-complete prototype into a strict review
-candidate.
+Date: 2026-05-21 UTC.
+Current phase: refactoring the feature-complete prototype into a gateway
+framework, then hardening it into a strict review candidate.
 
-This document is the aggregator-local progress tracker. The ACI spec defines
+This document is the gateway-local progress tracker. The ACI spec defines
 the protocol. This repo proves an adoptable implementation: OpenAI-compatible
 surface, ACI receipts, dstack identity, upstream verification, and provider
 adapters that fail closed when binding material cannot be enforced.
@@ -14,15 +14,50 @@ adapters that fail closed when binding material cannot be enforced.
 | Area | Status | Notes |
 | --- | --- | --- |
 | OpenAI-compatible chat/completions surface | Done | `/v1/chat/completions`, `/v1/completions`, streaming, E2EE addon, legacy aliases, and vLLM-compatible error behavior are covered by tests. |
-| Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing. |
+| Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing in no-middleware mode. |
 | ACI identity and self-attestation | In progress | dstack KMS-backed identity, keyset endorsement, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
-| Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
+| Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
+| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime HTTP middleware mode, and middleware `/v1/models` pass-through are implemented. Stream-preserving middleware transport and production compose are still pending. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
 
-## P0 Queue
+## Pending Tasks
+
+### P0: Frontend / Middleware / Backend Refactor
+
+Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
+
+- Introduce internal request context keyed by `request_id`, with expiry for
+  pending middleware requests. Implemented.
+- Split the current request path into frontend preparation, backend
+  verification/forwarding, and frontend response finalization. Partially
+  implemented; HTTP middleware responses are still buffered by the frontend
+  transport.
+- Keep middleware-disabled mode as the default and prove it preserves current
+  behavior. Implemented and covered by the full test suite.
+- Add a local backend endpoint or in-process backend callable guarded by
+  request context lookup. Implemented as a separate internal router builder and
+  runtime listener when middleware is enabled.
+- Add optional HTTP middleware mode with a fixture middleware for tests.
+  Implemented through `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL`.
+- Ensure external `X-Private-AI-Gateway-*` headers cannot steer the public
+  frontend. Implemented by generating internal context server-side; covered by
+  tests.
+- Make backend validate target route ids and reject arbitrary upstream URLs.
+  Implemented for in-process route selection.
+- Record route/backend receipt facts from backend observations, not middleware
+  claims. Implemented with `middleware.forwarded`, `route.selected`, and final
+  `request.forwarded` events.
+- Add E2EE tests proving ACI v2 response AAD uses the frontend-observed user
+  model when middleware selects a separate target route. Implemented for the
+  current HTTP middleware path.
+- Update deploy docs after the middleware mode has a concrete production compose
+  shape.
+- Add production compose wiring for a middleware container.
+
+### P0: Provider Soundness and Strict Pins
 
 - NEAR AI: pin reviewed gateway source/image/compose provenance and runtime
   policy, then document the exact release accepted by the adapter.
@@ -35,13 +70,27 @@ adapters that fail closed when binding material cannot be enforced.
   blindly trusting new workloads.
 - Chutes: use explicit per-model `chute_id` pins in production configs and
   complete long-window nonce-throughput testing.
-- Live E2E: split quick/full/strict profiles and make the strict profile cover
-  tool calls, structured output, media input, context size, cache-affinity
-  behavior where observable, streaming, and receipts.
-- Receipts: decide the persistent receipt/body store boundary. The current
-  in-memory store is acceptable only for prototype and short-lived tests.
-- Launcher: finish the end-to-end provenance/attestation guide and link it from
-  the aggregator deployment path.
+
+### P0: Live E2E and User Verification
+
+- Split quick/full/strict profiles in the live E2E suite.
+- Add framework tests for no-middleware compatibility and fixture middleware
+  route selection.
+- Make strict profile cover tool calls, structured output, media input, context
+  size, cache-affinity behavior where observable, streaming, receipts, and
+  source/launcher provenance.
+- Finish the user verification script for already captured responses.
+
+### P1: Production State and Operations
+
+- Decide the persistent receipt/body store boundary. The current in-memory
+  store is acceptable only for prototype and short-lived tests.
+- Add durable provider lease/session observability and Chutes nonce pool
+  metrics.
+- Replace runtime apt/rustup bootstrap with a gateway-owned runner image or
+  prebuilt binary image.
+- Define multi-region behavior: replicated KMS app id, receipt locality, and
+  retained-body storage.
 
 ## Provider Soundness
 
@@ -61,5 +110,6 @@ it does not expose arbitrary verifier commands or policy DSLs.
 
 - [README.md](../README.md)
 - [live-e2e-test-suite.md](live-e2e-test-suite.md)
+- [frontend-middleware-backend.md](frontend-middleware-backend.md)
 - [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md)
 - [router-mode-provider-review.md](router-mode-provider-review.md)

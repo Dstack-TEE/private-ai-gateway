@@ -61,6 +61,7 @@ pub struct UpstreamRequest {
     pub body: Vec<u8>,
     pub headers: HashMap<String, String>,
     pub path: Option<String>,
+    pub target_route_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +296,13 @@ impl ModelRouterBackend {
         })
     }
 
+    fn route_for_id(&self, route_id: &str) -> Result<&ModelRoute, UpstreamError> {
+        self.routes
+            .values()
+            .find(|route| route.route_id == route_id)
+            .ok_or_else(|| UpstreamError::Routing(format!("unknown target route {route_id:?}")))
+    }
+
     fn route_from_prepared(
         &self,
         req: &PreparedUpstreamRequest,
@@ -302,18 +310,7 @@ impl ModelRouterBackend {
         let route_id = req.route_id.as_deref().ok_or_else(|| {
             UpstreamError::Routing("prepared router request is missing route id".to_string())
         })?;
-        let public_model_id = self
-            .order
-            .iter()
-            .find(|public| {
-                self.routes
-                    .get(public.as_str())
-                    .is_some_and(|route| route.route_id == route_id)
-            })
-            .ok_or_else(|| {
-                UpstreamError::Routing(format!("prepared router route id {route_id:?} is unknown"))
-            })?;
-        self.route_for(public_model_id)
+        self.route_for_id(route_id)
     }
 }
 
@@ -328,10 +325,13 @@ impl UpstreamBackend for ModelRouterBackend {
     }
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
-        let public_model_id = request_model_id(&req.body).ok_or_else(|| {
+        let body_model_id = request_model_id(&req.body).ok_or_else(|| {
             UpstreamError::Routing("request body must contain a string model field".to_string())
         })?;
-        let route = self.route_for(&public_model_id)?;
+        let route = match req.target_route_id.as_deref() {
+            Some(route_id) => self.route_for_id(route_id)?,
+            None => self.route_for(&body_model_id)?,
+        };
         let mut request = req;
         request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
         Ok(PreparedUpstreamRequest {

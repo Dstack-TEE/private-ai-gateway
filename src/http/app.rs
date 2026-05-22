@@ -33,7 +33,9 @@
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
 //! including error paths.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{
     body::{Body, Bytes},
@@ -45,6 +47,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::StreamExt;
+use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -57,9 +60,9 @@ use crate::aci::keys::{
 use crate::aci::types::AttestationReport;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeRequestParts, E2eeResponseInfo, ReceiptOwner,
-    ServiceError, StreamingForwardResult, UpstreamVerificationError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH,
+    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeRequestParts,
+    E2eeResponseInfo, GatewayRequestContext, ReceiptOwner, ServiceError, StreamingForwardResult,
+    UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
 };
 use crate::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigError, UpstreamConfigManager,
@@ -70,10 +73,85 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
+    middleware: Option<HttpMiddleware>,
+    request_store: GatewayRequestStore,
+}
+
+#[derive(Clone)]
+struct HttpMiddleware {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+#[derive(Clone)]
+pub struct GatewayRequestStore {
+    inner: Arc<Mutex<HashMap<String, PendingGatewayRequest>>>,
+    ttl: Duration,
+}
+
+#[derive(Clone)]
+struct PendingGatewayRequest {
+    expires_at: Instant,
+    request: StoredGatewayRequest,
+}
+
+#[derive(Clone)]
+pub struct StoredGatewayRequest {
+    pub endpoint_path: &'static str,
+    pub received_body: Vec<u8>,
+    pub upstream_required: bool,
+    pub requester: Option<ReceiptOwner>,
+    pub e2ee: Option<E2eeRequestContext>,
+    pub user_model: Option<String>,
+}
+
+impl GatewayRequestStore {
+    const DEFAULT_TTL: Duration = Duration::from_secs(300);
+
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            ttl,
+        }
+    }
+
+    pub fn insert(&self, request_id: String, request: StoredGatewayRequest) {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().expect("gateway request store poisoned");
+        inner.retain(|_, pending| pending.expires_at > now);
+        inner.insert(
+            request_id,
+            PendingGatewayRequest {
+                expires_at: now + self.ttl,
+                request,
+            },
+        );
+    }
+
+    fn take(&self, request_id: &str) -> Option<StoredGatewayRequest> {
+        let pending = self
+            .inner
+            .lock()
+            .expect("gateway request store poisoned")
+            .remove(request_id)?;
+        (pending.expires_at > Instant::now()).then_some(pending.request)
+    }
+}
+
+impl Default for GatewayRequestStore {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_TTL)
+    }
+}
+
+#[derive(Clone)]
+struct InternalBackendState {
+    service: Arc<AciService>,
+    request_store: GatewayRequestStore,
 }
 
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None)
+    build_router_inner(service, None, None, None, GatewayRequestStore::default())
 }
 
 pub fn build_router_with_admin(
@@ -81,18 +159,69 @@ pub fn build_router_with_admin(
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
 ) -> Router {
-    build_router_inner(service, Some(upstream_config), admin_token)
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        None,
+        GatewayRequestStore::default(),
+    )
+}
+
+pub fn build_router_with_admin_and_http_middleware(
+    service: Arc<AciService>,
+    upstream_config: Arc<UpstreamConfigManager>,
+    admin_token: Option<String>,
+    request_store: GatewayRequestStore,
+    middleware_url: impl Into<String>,
+) -> Router {
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        Some(http_middleware(middleware_url)),
+        request_store,
+    )
+}
+
+pub fn build_router_with_http_middleware(
+    service: Arc<AciService>,
+    request_store: GatewayRequestStore,
+    middleware_url: impl Into<String>,
+) -> Router {
+    build_router_inner(
+        service,
+        None,
+        None,
+        Some(http_middleware(middleware_url)),
+        request_store,
+    )
+}
+
+fn http_middleware(middleware_url: impl Into<String>) -> HttpMiddleware {
+    let mut base_url = middleware_url.into();
+    while base_url.ends_with('/') {
+        base_url.pop();
+    }
+    HttpMiddleware {
+        base_url,
+        client: reqwest::Client::new(),
+    }
 }
 
 fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
+    middleware: Option<HttpMiddleware>,
+    request_store: GatewayRequestStore,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
+        middleware,
+        request_store,
     };
     Router::new()
         .route("/", get(root))
@@ -115,6 +244,18 @@ fn build_router_inner(
         .with_state(state)
 }
 
+pub fn build_internal_backend_router(
+    service: Arc<AciService>,
+    request_store: GatewayRequestStore,
+) -> Router {
+    Router::new()
+        .route("/internal/forward", post(internal_forward))
+        .with_state(InternalBackendState {
+            service,
+            request_store,
+        })
+}
+
 #[derive(Deserialize)]
 struct AttestationQuery {
     nonce: Option<String>,
@@ -135,6 +276,9 @@ async fn root(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn models(State(state): State<AppState>) -> Response {
+    if let Some(middleware) = state.middleware.clone() {
+        return get_from_middleware(middleware, "/v1/models").await;
+    }
     match state.service.upstream().models().await {
         Ok(upstream) => upstream_direct_response(upstream, "application/json"),
         Err(err) => upstream_proxy_error_response(err),
@@ -406,22 +550,124 @@ async fn openai_completion_endpoint(
     let requester = extract_bearer(&headers)
         .as_deref()
         .map(ReceiptOwner::from_bearer);
+    let context = GatewayRequestContext {
+        request_id: generate_request_id(),
+        user_model: parsed
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        target_route_id: None,
+    };
 
-    if parsed
+    let stream = parsed
         .get("stream")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let result = state
-            .service
-            .forward_chat_completion_stream_request(ChatCompletionRequest {
+        .unwrap_or(false);
+    if let Some(middleware) = state.middleware.clone() {
+        let forwarded_body = forwarded_body.unwrap_or_else(|| service_body.clone());
+        let request_id = context.request_id.clone();
+        state.request_store.insert(
+            request_id.clone(),
+            StoredGatewayRequest {
                 endpoint_path,
-                received_body: &service_body,
-                forwarded_body,
-                upstream_required: Some(upstream_required),
-                upstream_verification_event: None,
+                received_body: service_body,
+                upstream_required,
                 requester,
-                e2ee: e2ee.clone(),
+                e2ee,
+                user_model: context.user_model.clone(),
+            },
+        );
+        let response =
+            forward_to_middleware(middleware, endpoint_path, context, forwarded_body).await;
+        state.request_store.take(&request_id);
+        return response;
+    }
+
+    forward_to_backend(
+        state.service,
+        BackendForwardInput {
+            context,
+            endpoint_path,
+            received_body: service_body,
+            forwarded_body,
+            upstream_required,
+            requester,
+            e2ee,
+            stream,
+        },
+    )
+    .await
+}
+
+async fn forward_to_middleware(
+    middleware: HttpMiddleware,
+    endpoint_path: &'static str,
+    context: GatewayRequestContext,
+    body: Vec<u8>,
+) -> Response {
+    let url = format!("{}{}", middleware.base_url, endpoint_path);
+    let mut builder = middleware
+        .client
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-private-ai-gateway-request-id", context.request_id);
+    if let Some(user_model) = context.user_model {
+        builder = builder.header("x-private-ai-gateway-user-model", user_model);
+    }
+    middleware_response(builder.body(body).send().await).await
+}
+
+async fn get_from_middleware(middleware: HttpMiddleware, path: &'static str) -> Response {
+    let url = format!("{}{}", middleware.base_url, path);
+    middleware_response(middleware.client.get(url).send().await).await
+}
+
+async fn middleware_response(result: Result<reqwest::Response, reqwest::Error>) -> Response {
+    match result {
+        Ok(resp) => {
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let headers = reqwest_response_headers(resp.headers());
+            match resp.bytes().await {
+                Ok(body) => (status, headers, body.to_vec()).into_response(),
+                Err(err) => error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "middleware_error",
+                    format!("middleware response read failed: {err}"),
+                ),
+            }
+        }
+        Err(err) => error_response(
+            StatusCode::BAD_GATEWAY,
+            "middleware_error",
+            format!("middleware request failed: {err}"),
+        ),
+    }
+}
+
+struct BackendForwardInput {
+    context: GatewayRequestContext,
+    endpoint_path: &'static str,
+    received_body: Vec<u8>,
+    forwarded_body: Option<Vec<u8>>,
+    upstream_required: bool,
+    requester: Option<ReceiptOwner>,
+    e2ee: Option<E2eeRequestContext>,
+    stream: bool,
+}
+
+async fn forward_to_backend(service: Arc<AciService>, input: BackendForwardInput) -> Response {
+    if input.stream {
+        let result = service
+            .forward_chat_completion_stream_request(ChatCompletionRequest {
+                context: input.context,
+                endpoint_path: input.endpoint_path,
+                received_body: &input.received_body,
+                forwarded_body: input.forwarded_body,
+                upstream_required: Some(input.upstream_required),
+                upstream_verification_event: None,
+                requester: input.requester,
+                e2ee: input.e2ee,
             })
             .await;
         return match result {
@@ -464,16 +710,16 @@ async fn openai_completion_endpoint(
         };
     }
 
-    let result = state
-        .service
+    let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
-            endpoint_path,
-            received_body: &service_body,
-            forwarded_body,
-            upstream_required: Some(upstream_required),
+            context: input.context,
+            endpoint_path: input.endpoint_path,
+            received_body: &input.received_body,
+            forwarded_body: input.forwarded_body,
+            upstream_required: Some(input.upstream_required),
             upstream_verification_event: None,
-            requester,
-            e2ee,
+            requester: input.requester,
+            e2ee: input.e2ee,
         })
         .await;
     match result {
@@ -497,6 +743,77 @@ async fn openai_completion_endpoint(
     }
 }
 
+async fn internal_forward(
+    State(state): State<InternalBackendState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(request_id) = header_str(&headers, "x-private-ai-gateway-request-id") else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_internal_request",
+            "missing X-Private-AI-Gateway-Request-Id",
+        );
+    };
+    let request_id = request_id.to_string();
+    let Some(target_route_id) = header_str(&headers, "x-private-ai-gateway-target") else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_internal_request",
+            "missing X-Private-AI-Gateway-Target",
+        );
+    };
+    if target_route_id.trim().is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_internal_request",
+            "empty X-Private-AI-Gateway-Target",
+        );
+    }
+    let target_route_id = target_route_id.to_string();
+    let Some(stored) = state.request_store.take(&request_id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_internal_request",
+            "unknown or expired request id",
+        );
+    };
+
+    let parsed = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("invalid json: {e}"),
+            );
+        }
+    };
+    let stream = parsed
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    forward_to_backend(
+        state.service,
+        BackendForwardInput {
+            context: GatewayRequestContext {
+                request_id,
+                user_model: stored.user_model,
+                target_route_id: Some(target_route_id),
+            },
+            endpoint_path: stored.endpoint_path,
+            received_body: stored.received_body,
+            forwarded_body: Some(body.to_vec()),
+            upstream_required: stored.upstream_required,
+            requester: stored.requester,
+            e2ee: stored.e2ee,
+            stream,
+        },
+    )
+    .await
+}
+
 fn strip_empty_tool_calls(mut payload: Value) -> (Value, bool) {
     let mut changed = false;
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -518,6 +835,12 @@ fn strip_empty_tool_calls(mut payload: Value) -> (Value, bool) {
     }
 
     (payload, changed)
+}
+
+fn generate_request_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("req_{}", hex::encode(bytes))
 }
 
 fn chat_response_headers(
@@ -574,6 +897,21 @@ fn upstream_direct_response_headers(
             continue;
         };
         resp_headers.insert(header_name, header_value);
+    }
+    resp_headers
+}
+
+fn reqwest_response_headers(upstream_headers: &reqwest::header::HeaderMap) -> HeaderMap {
+    let mut resp_headers = HeaderMap::new();
+    for (name, value) in upstream_headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "connection" | "transfer-encoding" | "content-length"
+        ) {
+            continue;
+        }
+        resp_headers.insert(name.clone(), value.clone());
     }
     resp_headers
 }

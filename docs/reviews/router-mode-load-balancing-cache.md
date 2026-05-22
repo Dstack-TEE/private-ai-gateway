@@ -18,7 +18,7 @@ Reviewer: private-ai-gateway working tree, 2026-05-18 UTC.
 
 Both providers are acceptable for the request paths Private AI Gateway currently uses
 (non-sticky chat completions, sticky `/v1/signature/{chat_id}` lookups). Our
-aggregator must not advertise cache-aware routing on top of either provider
+gateway must not advertise cache-aware routing on top of either provider
 without operator-visible evidence per request.
 
 ## Repos and Commits Inspected
@@ -329,7 +329,7 @@ Two failure modes break locality silently:
 ### Risks and Open Questions
 
 - Fallback-client path silently drops prefix-cache routing on attestation
-  flakiness. Aggregator cannot detect this from response headers.
+  flakiness. Gateway cannot detect this from response headers.
 - L4 passthrough mapping (bucket TCP -> vllm-proxy instance) is not part of
   any public document we found. The cache-locality claim depends on this
   mapping being stable across requests.
@@ -386,19 +386,19 @@ The locality tests above need a budget (8k-prompt requests cost real
 tokens) so they should be run once during adapter sign-off and re-run only
 when NEAR changes the gateway image digest.
 
-## Recommended Changes to Aggregator/Provider Adapter
+## Recommended Changes to Gateway/Provider Adapter
 
 These are observations for the upstream maintainers, not implementation
 asks for this review. The reviewer who owns the Tinfoil/NEAR adapter
 should weigh them.
 
-1. **Aggregator must not advertise prompt-cache awareness in router mode.**
+1. **Gateway must not advertise prompt-cache awareness in router mode.**
    The current `RoutingUpstreamVerifier` only attests the gateway. Surface
    load-balancing as "best-effort" in receipts; do not infer cache
    locality from provider verification.
 
 2. **Tinfoil adapter: record `Tinfoil-Enclave` per request.** Today the
-   aggregator does not extract this header (no hits for `tinfoil-enclave`
+   gateway does not extract this header (no hits for `tinfoil-enclave`
    in `src/`). Recording it in the receipt is cheap, makes router-pick
    auditable, and lets users replay a session against the same enclave
    for signature verification.

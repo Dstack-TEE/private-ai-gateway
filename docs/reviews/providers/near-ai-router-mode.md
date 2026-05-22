@@ -328,7 +328,7 @@ Live probes during review:
   bucket id, or cache-hit metadata.
 - `/v1/signature/<bogus-chat-id>` returned a chat-id keyed not-found shape,
   confirming the signature lookup path exists.
-- Existing aggregator live artifact:
+- Existing gateway live artifact:
   `/tmp/private-ai-gateway-live-e2e/20260518-053819`.
 
 ## Required Adapter Changes
@@ -339,7 +339,7 @@ P0:
   verify gateway identity/provenance/TLS binding, then require a model-scoped
   attestation report over the verified gateway channel.
 - Stop treating nested `model_attestations[]` verification as a Rust
-  aggregator responsibility. The provider verifier may record the nested
+  gateway responsibility. The provider verifier may record the nested
   evidence digest, but Rust should enforce only the verified gateway lease and
   channel binding.
 - Treat `/v1/model/list` catalog flags as hints. They may help choose models to
@@ -364,7 +364,7 @@ P2:
 
 - Add a live external-provider sentinel test: choose a known external model if
   one is public, verify `model_attestations[]` is empty, and assert the
-  aggregator refuses to forward it in verified mode.
+  gateway refuses to forward it in verified mode.
 - Add an opt-in prefix-cache locality probe using a large stable prompt prefix
   and a short changing suffix. Treat timing-only evidence as weak unless NEAR
   exposes backend or cache metadata.

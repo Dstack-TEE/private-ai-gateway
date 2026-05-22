@@ -691,6 +691,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             body: CHAT_REQUEST.to_vec(),
             headers: Default::default(),
             path: None,
+            target_route_id: None,
         })
         .unwrap();
     let event = UpstreamVerifiedEvent {

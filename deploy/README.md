@@ -9,6 +9,14 @@ scrubs the checkout, preserves the container environment, and runs the gateway
 repo's own [`../entrypoint.sh`](../entrypoint.sh). The launcher remains
 generic; install, build, run, and ACI policy live in this repo.
 
+The checked-in compose runs in no-middleware mode: the public ACI frontend and
+verified-provider backend are the same process, and traffic is forwarded
+directly from frontend to backend. The binary can also run with a plaintext
+HTTP middleware slot by setting `PRIVATE_AI_GATEWAY_MIDDLEWARE_URL` and
+`PRIVATE_AI_GATEWAY_BACKEND_BIND`; this compose does not yet include a
+middleware container. See
+[`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md).
+
 ## One-Command Deploy
 
 The compose hard-codes the released launcher image:
@@ -71,7 +79,9 @@ Everything after step 4 is gateway-owned:
 | Initial upstream config | Deployment compose | `gateway-upstreams` in `compose.yaml` |
 | Toolchain bootstrap | Gateway repo | `../entrypoint.sh` |
 | Build and exec | Gateway repo | `../entrypoint.sh` |
-| ACI verification and receipts | Gateway binary | `../src` |
+| Downstream ACI frontend | Gateway binary | `../src` |
+| Verified-provider backend | Gateway binary | `../src` |
+| Optional routing middleware | Gateway deployment | Runtime-supported; not wired in this compose yet |
 
 The public gateway repo root contains `entrypoint.sh`, so the launcher config
 does not set `REPO_SUBDIR`.
@@ -186,7 +196,7 @@ The current `entrypoint.sh` can bootstrap Rust with apt + rustup inside the
 TEE. That keeps the first deploy path simple, but it is a development-grade
 trust surface.
 
-The production target is an aggregator-owned image that already contains the
+The production target is a gateway-owned image that already contains the
 Rust toolchain, or eventually the prebuilt gateway binary. The launcher still
 does not own that toolchain; the image would be built and attested by this repo
 and referenced by digest in `compose.yaml`.

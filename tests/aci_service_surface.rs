@@ -33,8 +33,9 @@ use private_ai_gateway::aci::upstream::{
     UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, InMemoryReceiptStore,
-    ReceiptOwner, UpstreamVerificationRequest, UpstreamVerifier, CHAT_COMPLETIONS_PATH,
+    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
+    InMemoryReceiptStore, ReceiptOwner, UpstreamVerificationRequest, UpstreamVerifier,
+    CHAT_COMPLETIONS_PATH,
 };
 use private_ai_gateway::http::build_router;
 use serde_json::Value;
@@ -663,6 +664,7 @@ async fn retained_body_endpoint_returns_post_rewrite_body_only_to_authorized_req
     let result = h
         .service
         .forward_chat_completion_request(ChatCompletionRequest {
+            context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: original,
             forwarded_body: Some(forwarded.to_vec()),

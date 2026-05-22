@@ -102,7 +102,7 @@ Important caveats:
 - `--debug` is a runtime flag. Enabling it would change compose arguments and
   therefore the measured compose hash, so a compose-hash allowlist should
   catch it.
-- `X-Forwarded-Host` participates in subdomain model routing. Our aggregator
+- `X-Forwarded-Host` participates in subdomain model routing. Our gateway
   should not set it when forwarding to the router.
 - `/v1/models` uses the Tinfoil control plane and is not itself a TEE-bound
   user-content path.
@@ -144,7 +144,7 @@ Cache locality:
 Backend observability:
 
 - The router returns `Tinfoil-Enclave: <host>` on responses, including error
-  paths. This is enough for the aggregator to record which backend was chosen.
+  paths. This is enough for the gateway to record which backend was chosen.
 
 ## Live Evidence
 
@@ -156,7 +156,7 @@ Live probes during review:
   configured enclaves.
 - Repeated `kimi-k2-6` requests exposed cached prompt token metadata only on
   the single configured enclave.
-- Existing aggregator live artifact:
+- Existing gateway live artifact:
   `/tmp/private-ai-gateway-live-e2e/20260518-053809`.
 
 ## Required Adapter Changes
