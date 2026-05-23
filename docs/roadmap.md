@@ -75,6 +75,15 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   blindly trusting new workloads.
 - Chutes: use explicit per-model `chute_id` pins in production configs and
   complete long-window nonce-throughput testing.
+- SecretAI: review complete (SEV-SNP + NVIDIA Hopper, single-VM trust
+  boundary; see [reviews/providers/secret-ai.md](reviews/providers/secret-ai.md)).
+  Adapter implementation deferred until SCRT addresses partner feedback sent
+  2026-05-23 — SPKI binding, per-release build provenance, downstream image
+  digest pins, journald policy, and open-sourcing `secret-vm-attest-rest-server`
+  (feedback: <https://hackmd.io/@h4x3rotab/H1b2ECA1Ml>). Resume by adding
+  `UpstreamProvider::SecretAi` and `SecretAiProviderVerifier` parallel to
+  the existing Chutes/Tinfoil/NEAR adapters; the review's "Required Adapter
+  Behavior" section captures wiring requirements.
 
 ### P0: Live E2E and User Verification
 
@@ -106,6 +115,7 @@ The current provider reports are:
 - [reviews/providers/tinfoil-router-mode.md](reviews/providers/tinfoil-router-mode.md)
 - [reviews/providers/near-ai-router-mode.md](reviews/providers/near-ai-router-mode.md)
 - [reviews/providers/chutes-e2ee.md](reviews/providers/chutes-e2ee.md)
+- [reviews/providers/secret-ai.md](reviews/providers/secret-ai.md)
 
 The implementation should stay minimal: each provider adapter owns its
 transport and verification rules. The config selects a provider and model map;

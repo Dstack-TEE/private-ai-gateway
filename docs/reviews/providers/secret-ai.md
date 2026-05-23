@@ -6,9 +6,6 @@ Ollama-via-Caddy inference on `:21434`).
 Trust boundary: single verified SecretVM running AMD SEV-SNP with NVIDIA H100
 ("HOPPER") GPU, fronted by `secret-ai-caddy`.
 
-Status: review complete, adapter implementation deferred. See
-[Implementation Status](#implementation-status) below.
-
 Source repos reviewed:
 
 - `scrtlabs/secretvm` at `ed4115cfe266365ffa0e34a0c4effadb6066040f`
@@ -478,46 +475,6 @@ The provider test suite must include:
   allowlist and confirm rejection.
 - Force a verifier failure on a refresh and confirm the previous lease is
   not replaced and that traffic stops when it expires.
-
-## Implementation Status
-
-TODO: implement the SecretAI adapter once SCRT confirms or pushes back on the
-partner-facing feedback. Feedback sent 2026-05-23 (HackMD:
-<https://hackmd.io/@h4x3rotab/H1b2ECA1Ml>) and tracks five items:
-
-1. Bind SPKI instead of full DER cert in `report_data[0:32]`.
-2. Publish per-release build provenance alongside `sev.json`.
-3. Pin downstream images by digest in the production compose.
-4. Drop request-body DEBUG logging in `secret-ai-caddy`, or document that the
-   in-VM journal is never forwarded off-VM.
-5. Open-source `secret-vm-attest-rest-server` (the binary that assembles
-   `report_data`).
-
-Resume conditions:
-
-- Items 1, 3, and 4 are mergeable in principle without further design
-  discussion. They unblock strict-mode adapter inclusion.
-- Item 2 (build provenance) is the main blocker for `acceptable` (not
-  `acceptable with conditions`). Without a pre-publication channel for new
-  measurements, the adapter must pin a reviewed `secretvm-verify` commit and
-  refuse new entries until re-reviewed.
-- Item 5 (source for the attestation REST server) is a request, not a hard
-  blocker. Reverse-engineering is possible but slow.
-
-Adapter wiring sketch when work resumes (see existing patterns):
-
-- `src/aggregator/upstream_config.rs:134` — add `UpstreamProvider::SecretAi`
-  variant plus `secret_ai_artifacts_ver_pins`,
-  `secret_ai_accepted_templates`, `secret_ai_compose_sha256_pin` fields.
-- `src/aci/verifier.rs` — add `SecretAiProviderVerifier` alongside
-  `ChutesProviderVerifier`, `TinfoilProviderVerifier`, `NearAiProviderVerifier`.
-  Probably shells out to the `secretvm-verify` Python SDK rather than porting
-  the SEV-SNP launch-digest math to Rust.
-- `src/aci/upstream.rs` — extend `ChannelBinding` to support
-  `tls_cert_sha256` (today's SPKI-only binding does not cover SecretAI's
-  full-DER digest unless they ship item 1).
-- `examples/` — add a live-e2e verify example mirroring
-  `verify_aci_artifacts.rs`.
 
 ## Open Questions
 
