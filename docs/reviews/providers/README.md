@@ -18,6 +18,12 @@ Provider reports:
 - [tinfoil-router-mode.md](tinfoil-router-mode.md)
 - [near-ai-router-mode.md](near-ai-router-mode.md)
 - [chutes-e2ee.md](chutes-e2ee.md)
+- [secret-ai.md](secret-ai.md)
 
 Chutes is not a router-mode provider. Its report covers direct E2EE instance
 binding, catalog risks, and nonce-throughput limits.
+
+SecretAI is not a router-mode provider either. Its report covers single-VM
+SEV-SNP attestation with `report_data = sha256(tls_cert) || gpu_nonce`
+binding, compose-into-cmdline launch-measurement binding, and the
+`secret-ai-caddy` plaintext-egress review.
