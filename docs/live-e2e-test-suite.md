@@ -46,6 +46,7 @@ scripts/live_e2e/
   launch_gateway.py
   cases/
     lifecycle.py
+    embeddings.py
     framework_no_middleware.py
     framework_middleware.py
     fidelity_text.py
@@ -276,6 +277,31 @@ The first runnable slice covers the non-streaming lifecycle and relying-party
 verification path. The verifier intentionally uses the Rust protocol code for
 ACI canonicalization, keyset binding, and receipt signature checks instead of
 reimplementing those rules in Python.
+
+### 32 Embeddings
+
+Capability-gated on `embeddings`. For each provider that lists it, the runner:
+
+- Sends `POST /v1/embeddings` through the gateway with a fixed `input` string.
+- Asserts the OpenAI-compatible response shape (`object: "list"`, non-empty
+  `data[]` with a numeric `embedding[]` whose components are not all zero).
+- Fetches `/v1/receipt/{receipt_id}` using the `x-receipt-id` header value as
+  the lookup id, since OpenAI embeddings responses carry no `id` field. The
+  gateway's receipt endpoint accepts either `chat_id` or `receipt_id` as the
+  path parameter.
+- Runs the same `verify_aci_artifacts` example against the receipt + request +
+  response bodies to confirm canonical request/forwarded/response hashes,
+  receipt signature, and channel binding.
+- Asserts `receipt.endpoint == "/v1/embeddings"` and that `upstream.verified`
+  carries the provider's declared binding (e.g. `e2ee_public_key_sha256` for
+  Chutes embeddings).
+
+The first wired model is `Qwen/Qwen3-Embedding-8B-TEE` on Chutes (chute_id
+`21822836-bfa6-5426-b27e-dd5fdda1249e`), routed via the same
+`ChutesProviderBackend` E2EE path as chat. There is currently no Phala-deployed
+TEE embedding model in `Dstack-TEE/vllm-proxy` (the proxy does not register a
+`/v1/embeddings` route yet), and no Tinfoil/NEAR embedding entry — the matrix
+will expand once those land.
 
 ### 35 Framework Compatibility
 

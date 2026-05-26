@@ -64,6 +64,9 @@ const PROVIDER_CHAT_REQUEST: &[u8] =
     br#"{"model":"provider-model","messages":[{"role":"user","content":"hello"}]}"#;
 const CHAT_RESPONSE: &[u8] =
     br#"{"id":"chat-provider-1","object":"chat.completion","model":"provider-model","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}]}"#;
+const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"public-embed","input":"the quick brown fox"}"#;
+const EMBEDDINGS_RESPONSE: &[u8] =
+    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"provider-embed-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
 const STREAM_CHAT_REQUEST: &[u8] =
     br#"{"model":"provider-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
 const STREAM_CHAT_RESPONSE_EVENT: &[u8] =
@@ -148,10 +151,45 @@ async fn models_handler() -> impl IntoResponse {
     }))
 }
 
+async fn embeddings_handler(
+    State(state): State<ProviderState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    state.calls.lock().unwrap().push(ProviderCall {
+        path: "/v1/embeddings".to_string(),
+        authorization: headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        accept: headers
+            .get("accept")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        content_type: headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_chute_id: None,
+        x_instance_id: None,
+        x_e2e_nonce: None,
+        x_e2e_stream: None,
+        x_e2e_path: None,
+        body: body.to_vec(),
+        decrypted_body: None,
+    });
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        EMBEDDINGS_RESPONSE,
+    )
+}
+
 async fn serve_openai_provider_fixture() -> (String, Arc<Mutex<Vec<ProviderCall>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_handler))
+        .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/models", get(models_handler))
         .with_state(ProviderState {
             calls: calls.clone(),
@@ -645,6 +683,94 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(upstream_verified["vendor"], "openai-compatible-provider");
     assert_eq!(upstream_verified["model_id"], "provider-model");
+    assert_eq!(upstream_verified["url_origin"], base_url);
+    assert_eq!(
+        upstream_verified["verifier_id"],
+        "preverified/out-of-band/v1"
+    );
+    assert_eq!(upstream_verified["result"], "verified");
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
+    let (base_url, provider_calls) = serve_openai_provider_fixture().await;
+    let path = temp_config_path();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
+            .unwrap(),
+    );
+    manager
+        .replace(vec![UpstreamConfig {
+            name: "openai-compatible-provider".to_string(),
+            provider: UpstreamProvider::OpenAiCompatible,
+            base_url: base_url.clone(),
+            models: BTreeMap::from([
+                ("public-model".to_string(), "provider-model".to_string()),
+                (
+                    "public-embed".to_string(),
+                    "provider-embed-model".to_string(),
+                ),
+            ]),
+            bearer_token: Some("provider-secret".to_string()),
+            accepted_workload_ids: None,
+            accepted_image_digests: None,
+            accepted_dstack_kms_root_public_keys: None,
+            pccs_url: None,
+            verifier_cache_seconds: None,
+            connect_timeout_seconds: None,
+            read_timeout_seconds: None,
+            verifier_request_timeout_seconds: None,
+            verification_refresh_seconds: None,
+            session_refresh_seconds: None,
+            chutes_e2ee_api_base: None,
+            chutes_chute_ids: None,
+            chutes_e2ee_discovery_rounds: None,
+            chutes_e2ee_discovery_interval_seconds: None,
+        }])
+        .unwrap();
+    let service = service_for_manager(manager);
+    let app = build_router(service.clone());
+
+    let (status, headers, body) = call(app, "POST", "/v1/embeddings", EMBEDDINGS_REQUEST).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(body, EMBEDDINGS_RESPONSE);
+    let receipt_id = headers
+        .get("x-receipt-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("successful provider response must include x-receipt-id");
+
+    let calls = provider_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.path, "/v1/embeddings");
+    assert_eq!(
+        call.authorization.as_deref(),
+        Some("Bearer provider-secret")
+    );
+    assert_eq!(call.accept.as_deref(), Some("application/json"));
+    let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
+    // Model alias rewritten to the upstream model id before
+    // forwarding, identical to chat completions behavior.
+    assert_eq!(forwarded["model"], "provider-embed-model");
+    assert_eq!(forwarded["input"], "the quick brown fox");
+
+    let receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("provider embeddings response must persist a receipt");
+    assert_eq!(receipt.endpoint, "/v1/embeddings");
+    assert!(
+        receipt.chat_id.is_none(),
+        "embeddings responses have no id field; receipt chat_id should be empty"
+    );
+    assert_eq!(
+        receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+        sha256_hex(&call.body)
+    );
+    let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
+    assert_eq!(upstream_verified["vendor"], "openai-compatible-provider");
+    assert_eq!(upstream_verified["model_id"], "provider-embed-model");
     assert_eq!(upstream_verified["url_origin"], base_url);
     assert_eq!(
         upstream_verified["verifier_id"],

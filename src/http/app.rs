@@ -14,20 +14,32 @@
 //!   forwards legacy prompt completions through the same ACI receipt
 //!   path as chat completions. ACI E2EE is an optional add-on here;
 //!   plaintext OpenAI-compatible requests remain unchanged.
+//! * `POST /v1/embeddings` - OpenAI-shaped embeddings forwarding.
+//!   Buffered-only; any client-sent `stream:true` is forced back to
+//!   buffered before forwarding. The aggregator hashes the body and
+//!   issues a receipt the same way as `/v1/chat/completions`; ACI
+//!   E2EE is supported and operates on the `input` request field and
+//!   each `data[].embedding` response field.
 //! * `GET  /v1/models` - proxy the upstream OpenAI-compatible model list.
 //! * `GET  /v1/metrics` - expose aggregator-owned Prometheus metrics.
 //! * `GET  /v1/admin/upstreams` - authenticated admin view of the
 //!   current upstream config, with secrets redacted.
 //! * `PUT  /v1/admin/upstreams` - authenticated admin replacement of
 //!   the single upstream config file.
-//! * `GET  /v1/receipt/{chat_id}` - fetch the canonical receipt
-//!   response. The top-level fields match dstack-vllm-proxy's legacy
-//!   signature response; the signed ACI receipt is carried in
+//! * `GET  /v1/receipt/{id}` - fetch the canonical receipt response.
+//!   The path parameter accepts either the upstream-issued `chat_id`
+//!   (chat/completions responses carry this) or the gateway-issued
+//!   `receipt_id` (always present on the `x-receipt-id` response
+//!   header; the only handle for `/v1/embeddings` receipts which have
+//!   no chat_id). The top-level fields match dstack-vllm-proxy's
+//!   legacy signature response; the signed ACI receipt is carried in
 //!   `receipt`.
-//! * `GET  /v1/signature/{chat_id}` - alias of `/v1/receipt/{chat_id}`.
-//! * `GET  /v1/receipt/{chat_id}/body` - fetch the retained
-//!   post-rewrite request body. Returns `receipt_body_not_retained`
-//!   when retention is zero or the entry expired.
+//! * `GET  /v1/signature/{id}` - alias of `/v1/receipt/{id}` with the
+//!   same chat_id-or-receipt_id semantics.
+//! * `GET  /v1/receipt/{id}/body` - fetch the retained post-rewrite
+//!   request body. Same id semantics. Returns
+//!   `receipt_body_not_retained` when retention is zero or the entry
+//!   expired.
 //!
 //! The router installs a middleware that emits `X-ACI-Version`,
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
@@ -71,7 +83,7 @@ use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeRequestParts,
     E2eeResponseInfo, GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptJournal,
     ReceiptOwner, ServiceError, ServiceResponseStream, StreamingForwardResult,
-    UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
 };
 use crate::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigError, UpstreamConfigManager,
@@ -245,6 +257,7 @@ fn build_router_inner(
         .route("/v1/attestation/report", get(attestation_report))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
         .route("/v1/receipt/:chat_id", get(receipt_by_chat_id))
         .route("/v1/signature/:chat_id", get(receipt_by_chat_id))
         .route("/v1/receipt/:chat_id/body", get(get_receipt_body))
@@ -544,7 +557,14 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    openai_completion_endpoint(state, headers, body, CHAT_COMPLETIONS_PATH).await
+    openai_completion_endpoint(state, headers, body, CHAT_COMPLETIONS_PATH, false).await
+}
+
+async fn embeddings(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // OpenAI embeddings is buffered-only: any client-sent `stream:true`
+    // is forced back to buffered so the receipt/E2EE pipeline runs the
+    // single non-streaming response path.
+    openai_completion_endpoint(state, headers, body, EMBEDDINGS_PATH, true).await
 }
 
 async fn openai_completion_endpoint(
@@ -552,6 +572,7 @@ async fn openai_completion_endpoint(
     headers: HeaderMap,
     body: Bytes,
     endpoint_path: &'static str,
+    force_buffered: bool,
 ) -> Response {
     let has_e2ee = has_e2ee_headers(&headers);
     if has_e2ee && state.service.supported_e2ee_versions().is_empty() {
@@ -632,10 +653,11 @@ async fn openai_completion_endpoint(
         target_route_id: None,
     };
 
-    let stream = parsed
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let stream = !force_buffered
+        && parsed
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if let Some(middleware) = state.middleware.clone() {
         let forwarded_body = forwarded_body.unwrap_or_else(|| service_body.clone());
         let request_id = context.request_id.clone();
@@ -1442,20 +1464,24 @@ fn routing_error_response(message: String) -> Response {
 }
 
 async fn completions(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH).await
+    openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH, false).await
 }
 
 async fn receipt_by_chat_id(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(chat_id): Path<String>,
+    Path(id): Path<String>,
     Query(q): Query<SignatureQuery>,
 ) -> Response {
-    let Some(receipt) = state.service.get_receipt_by_chat_id(&chat_id) else {
+    let Some(receipt) = state
+        .service
+        .get_receipt_by_chat_id(&id)
+        .or_else(|| state.service.get_receipt_by_receipt_id(&id))
+    else {
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Chat id not found or expired",
+            "Receipt id (chat_id or receipt_id) not found or expired",
         );
     };
     if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
@@ -1482,13 +1508,17 @@ async fn receipt_by_chat_id(
 async fn get_receipt_body(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(chat_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    let Some(receipt) = state.service.get_receipt_by_chat_id(&chat_id) else {
+    let Some(receipt) = state
+        .service
+        .get_receipt_by_chat_id(&id)
+        .or_else(|| state.service.get_receipt_by_receipt_id(&id))
+    else {
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Chat id not found or expired",
+            "Receipt id (chat_id or receipt_id) not found or expired",
         );
     };
     let receipt_id = receipt.receipt_id.clone();

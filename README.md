@@ -28,6 +28,7 @@ Middleware developers should start with
 | Inference receipts (event log, signing) | done |
 | Non-streaming `POST /v1/chat/completions` forwarding | done |
 | `POST /v1/completions` forwarding | done |
+| `POST /v1/embeddings` forwarding (buffered) | done |
 | Streaming chat/completions forwarding | done |
 | `GET /v1/attestation/report` | done |
 | `GET /v1/receipt/{chat_id}` | done |
@@ -38,9 +39,9 @@ Middleware developers should start with
 | E2EE-header fail-closed guard | done |
 | dstack SDK quoter over HTTP(S) or Unix socket | done |
 | dstack KMS-backed identity + receipt + E2EE keys | done |
-| Client-facing E2EE v2 termination | done for chat/completions |
+| Client-facing E2EE v2 termination | done for chat/completions/embeddings |
 | Client-facing E2EE v2 streaming | done for chat/completions |
-| vLLM-proxy-compatible ECDSA v1/v2 and Ed25519/X25519 E2EE | done for chat/completions |
+| vLLM-proxy-compatible ECDSA v1/v2 and Ed25519/X25519 E2EE | done for chat/completions/embeddings |
 | `/v1/models` upstream proxying | done |
 | `/v1/metrics` gateway-owned Prometheus metrics | done |
 | Runtime upstream config file + admin API | done |

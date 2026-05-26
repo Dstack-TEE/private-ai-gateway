@@ -50,6 +50,7 @@ use crate::aggregator::metrics::{MetricsSnapshot, RequestMode, ServiceMetrics, S
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 
 #[derive(Debug, thiserror::Error)]
@@ -2536,6 +2537,20 @@ fn completion_request_aad(
     format!("v2|req|algo={algo}|model={model}|field={field_name}|n={nonce}|ts={timestamp}")
 }
 
+fn embedding_response_aad(
+    algo: &str,
+    model: &str,
+    response_id: &str,
+    data_index: u64,
+    field_name: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> String {
+    format!(
+        "v2|resp|algo={algo}|model={model}|id={response_id}|data={data_index}|field={field_name}|n={nonce}|ts={timestamp}"
+    )
+}
+
 fn response_aad(
     algo: &str,
     model: &str,
@@ -2567,6 +2582,9 @@ fn decrypt_request_payload(
 ) -> Result<(), E2eeError> {
     if endpoint_path == COMPLETIONS_PATH {
         return decrypt_completion_prompt(crypto, payload);
+    }
+    if endpoint_path == EMBEDDINGS_PATH {
+        return decrypt_embedding_input(crypto, payload);
     }
 
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -2612,6 +2630,49 @@ fn decrypt_completion_prompt(
                     continue;
                 };
                 let field_name = format!("prompt.{index}");
+                let aad = completion_request_aad_for_crypto(crypto, &field_name)?;
+                let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
+                *ciphertext_hex =
+                    String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
+                decrypted_count += 1;
+            }
+            decrypted_count
+        }
+        _ => 0,
+    };
+
+    if decrypted_count == 0 {
+        return Err(E2eeError::DecryptionFailed);
+    }
+    Ok(())
+}
+
+fn decrypt_embedding_input(
+    crypto: &E2eeFieldCrypto<'_>,
+    payload: &mut Value,
+) -> Result<(), E2eeError> {
+    let Some(input) = payload.get_mut("input") else {
+        return Err(E2eeError::DecryptionFailed);
+    };
+
+    let decrypted_count = match input {
+        Value::String(ciphertext_hex) => {
+            let aad = completion_request_aad_for_crypto(crypto, "input")?;
+            let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
+            *ciphertext_hex =
+                String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
+            1
+        }
+        Value::Array(items) => {
+            // OpenAI accepts string arrays AND integer token-id arrays
+            // for `input`. Only encrypted strings carry E2EE field
+            // ciphertext; numeric arrays pass through.
+            let mut decrypted_count = 0usize;
+            for (index, item) in items.iter_mut().enumerate() {
+                let Value::String(ciphertext_hex) = item else {
+                    continue;
+                };
+                let field_name = format!("input.{index}");
                 let aad = completion_request_aad_for_crypto(crypto, &field_name)?;
                 let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
                 *ciphertext_hex =
@@ -2753,6 +2814,11 @@ fn encrypt_e2ee_response_body(
         return Err(E2eeError::EncryptionFailed);
     }
 
+    if endpoint_path == EMBEDDINGS_PATH {
+        encrypt_embedding_data(&mut payload, ctx, &response_model, &response_id)?;
+        return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
+    }
+
     let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     };
@@ -2797,6 +2863,80 @@ fn encrypt_e2ee_response_body(
     serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
 }
 
+fn encrypt_embedding_data(
+    payload: &mut Value,
+    ctx: &E2eeRequestContext,
+    response_model: &str,
+    response_id: &str,
+) -> Result<(), E2eeError> {
+    let Some(items) = payload.get_mut("data").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for (position, item) in items.iter_mut().enumerate() {
+        let data_index = item
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or(position as u64);
+        let Some(entry) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(embedding) = entry.get_mut("embedding") else {
+            continue;
+        };
+        // OpenAI emits `embedding` as a float array by default and as a
+        // base64 string when the client passes `encoding_format=base64`.
+        // We serialize to compact JSON before encryption so the
+        // decrypted plaintext round-trips through `serde_json` back to
+        // the original type, mirroring how chat content arrays are
+        // recovered.
+        let plaintext = serde_json::to_vec(embedding).map_err(|_| E2eeError::EncryptionFailed)?;
+        let aad = embedding_response_aad_for_context(
+            ctx,
+            response_model,
+            response_id,
+            data_index,
+            "embedding",
+        )?;
+        let ciphertext_hex = encrypt_response_plaintext(ctx, &plaintext, aad.as_deref())?;
+        *embedding = Value::String(ciphertext_hex);
+    }
+    Ok(())
+}
+
+fn embedding_response_aad_for_context(
+    ctx: &E2eeRequestContext,
+    response_model: &str,
+    response_id: &str,
+    data_index: u64,
+    field_name: &str,
+) -> Result<Option<String>, E2eeError> {
+    if !ctx.aad_mode.uses_aad() {
+        return Ok(None);
+    }
+    if aad_component_is_ambiguous(field_name) {
+        return Err(E2eeError::EncryptionFailed);
+    }
+    let model = match ctx.aad_mode {
+        E2eeAadMode::AciV2 => ctx.request_model.as_str(),
+        E2eeAadMode::LegacyV2 => response_model,
+        E2eeAadMode::LegacyV1 => return Ok(None),
+    };
+    if aad_component_is_ambiguous(model) {
+        return Err(E2eeError::EncryptionFailed);
+    }
+    let nonce = ctx.nonce.as_deref().ok_or(E2eeError::EncryptionFailed)?;
+    let timestamp = ctx.timestamp.ok_or(E2eeError::EncryptionFailed)?;
+    Ok(Some(embedding_response_aad(
+        &ctx.algo,
+        model,
+        response_id,
+        data_index,
+        field_name,
+        nonce,
+        timestamp,
+    )))
+}
+
 fn encrypt_e2ee_final_response(
     cleartext_body: &[u8],
     ctx: &E2eeRequestContext,
@@ -2823,6 +2963,12 @@ fn encrypt_e2ee_stream_payload(
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
 ) -> Result<Vec<u8>, E2eeError> {
+    if endpoint_path == EMBEDDINGS_PATH {
+        // OpenAI's embeddings endpoint is buffered-only; the router
+        // forces stream=false, so reaching here means an internal
+        // inconsistency that we fail closed on.
+        return Err(E2eeError::EncryptionFailed);
+    }
     let mut payload: Value =
         serde_json::from_slice(cleartext_payload).map_err(|_| E2eeError::EncryptionFailed)?;
     let response_id = payload

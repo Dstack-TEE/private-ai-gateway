@@ -5,6 +5,9 @@
   "accepted_models": {
     "moonshotai/Kimi-K2.5-TEE": {
       "expected_binding": "e2ee_public_key_sha256"
+    },
+    "Qwen/Qwen3-Embedding-8B-TEE": {
+      "expected_binding": "e2ee_public_key_sha256"
     }
   }
 }

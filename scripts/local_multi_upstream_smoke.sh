@@ -147,6 +147,36 @@ post_chat_until_ok() {
   die "routed request did not return HTTP 200 for ${public_model}"
 }
 
+post_embeddings_until_ok() {
+  local public_model="$1"
+  local headers="$WORK_DIR/router-${public_model}.embed.headers"
+  local response="$WORK_DIR/router-${public_model}.embed.response.json"
+  local body
+  body=$(printf '{"model":"%s","input":"hello"}' "$public_model")
+
+  for attempt in $(seq 1 "$READY_ATTEMPTS"); do
+    local status
+    status=$(
+      curl -sS --max-time 60 \
+        -D "$headers" \
+        -H 'content-type: application/json' \
+        --data "$body" \
+        -o "$response" \
+        -w '%{http_code}' \
+        "$ROUTER_URL/v1/embeddings"
+    )
+    if [[ "$status" == "200" ]]; then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    log "waiting for embeddings request ${public_model} (${attempt}/${READY_ATTEMPTS}); status=${status}"
+    sleep 2
+  done
+  cat "$headers" >&2 || true
+  cat "$response" >&2 || true
+  die "embeddings request did not return HTTP 200 for ${public_model}"
+}
+
 assert_route_receipt() {
   local suffix="$1"
   local public_model="public-${suffix}"
@@ -180,6 +210,49 @@ assert_route_receipt() {
   ' "$receipt" >/dev/null
 }
 
+assert_embeddings_receipt() {
+  local public_model="public-embed"
+  local upstream_model="routed-upstream-a-embed-model"
+  local response
+  local response_headers="$WORK_DIR/router-${public_model}.embed.headers"
+  local receipt="$WORK_DIR/router-${public_model}.embed.receipt.json"
+  local received_body
+  local forwarded_body
+  local receipt_id
+
+  response=$(post_embeddings_until_ok "$public_model")
+  jq -e --arg model "$upstream_model" '
+    (.object == "list") and (.model == $model) and ((.data | length) == 1)
+  ' "$response" >/dev/null
+
+  # Embeddings responses carry no `id`; look up the receipt by the
+  # x-receipt-id header instead of /v1/receipt/{chat_id}.
+  receipt_id=$(awk -F': ' 'tolower($1) == "x-receipt-id" { sub(/\r/, "", $2); print $2 }' \
+    "$response_headers" | tr -d '[:space:]')
+  if [[ -z "$receipt_id" ]]; then
+    cat "$response_headers" >&2
+    die "embeddings response did not include x-receipt-id"
+  fi
+  wait_for_http_ok "${ROUTER_URL}/v1/receipt/${receipt_id}" "$receipt"
+
+  received_body=$(printf '{"model":"%s","input":"hello"}' "$public_model")
+  forwarded_body=$(printf '{"model":"%s","input":"hello"}' "$upstream_model")
+
+  jq -e --arg endpoint "/v1/embeddings" '
+    .receipt.endpoint == $endpoint
+  ' "$receipt" >/dev/null
+  jq -e --arg h "$(sha256_prefixed "$received_body")" '
+    .receipt.event_log | any(.type == "request.received" and .body_hash == $h)
+  ' "$receipt" >/dev/null
+  jq -e --arg h "$(sha256_prefixed "$forwarded_body")" '
+    .receipt.event_log | any(.type == "request.forwarded" and .body_hash == $h)
+  ' "$receipt" >/dev/null
+  jq -e --arg model "$upstream_model" '
+    .receipt.event_log
+    | any(.type == "upstream.verified" and .result == "verified" and .model_id == $model)
+  ' "$receipt" >/dev/null
+}
+
 write_upstream_config() {
   local suffix="$1"
   local model="$2"
@@ -197,6 +270,26 @@ write_upstream_config() {
 JSON
 }
 
+# Upstream A also routes an embedding model. Embeddings ride the same
+# OpenAI-compatible passthrough; only the model map is wider.
+write_upstream_a_config_with_embed() {
+  local chat_model="$1"
+  local embed_model="$2"
+  local output="$WORK_DIR/upstream-a.json"
+  cat >"$output" <<JSON
+[
+  {
+    "name": "mock-a",
+    "base_url": "http://mock-a:9000",
+    "models": {
+      "${chat_model}": "${chat_model}",
+      "${embed_model}": "${embed_model}"
+    }
+  }
+]
+JSON
+}
+
 write_compose() {
   cat >"$WORK_DIR/compose.yml" <<'YAML'
 services:
@@ -206,6 +299,7 @@ services:
       MOCK_MODEL: routed-upstream-a-model
       MOCK_CHAT_ID: chatcmpl-route-a
       MOCK_CONTENT: route a ok
+      MOCK_EMBED_MODEL: routed-upstream-a-embed-model
     command: &mock-command
       - python
       - -u
@@ -218,6 +312,7 @@ services:
         MODEL = os.environ["MOCK_MODEL"]
         CHAT_ID = os.environ["MOCK_CHAT_ID"]
         CONTENT = os.environ["MOCK_CONTENT"]
+        EMBED_MODEL = os.environ.get("MOCK_EMBED_MODEL", "")
 
         class Handler(BaseHTTPRequestHandler):
             def _send(self, status, body, content_type="application/json"):
@@ -230,7 +325,10 @@ services:
 
             def do_GET(self):
                 if self.path == "/v1/models":
-                    self._send(200, {"object":"list","data":[{"id":MODEL,"object":"model","owned_by":"smoke"}]})
+                    data = [{"id":MODEL,"object":"model","owned_by":"smoke"}]
+                    if EMBED_MODEL:
+                        data.append({"id":EMBED_MODEL,"object":"model","owned_by":"smoke"})
+                    self._send(200, {"object":"list","data":data})
                 else:
                     self._send(404, {"error":{"message":"not found","type":"not_found"}})
 
@@ -247,6 +345,17 @@ services:
                             "message": {"role": "assistant", "content": CONTENT},
                             "finish_reason": "stop"
                         }]
+                    })
+                elif self.path == "/v1/embeddings" and EMBED_MODEL:
+                    self._send(200, {
+                        "object": "list",
+                        "data": [{
+                            "object": "embedding",
+                            "index": 0,
+                            "embedding": [0.1, 0.2, 0.3]
+                        }],
+                        "model": EMBED_MODEL,
+                        "usage": {"prompt_tokens": 1, "total_tokens": 1}
                     })
                 else:
                     self._send(404, {"error":{"message":"not found","type":"not_found"}})
@@ -320,7 +429,7 @@ YAML
 export COMMIT_SHA
 export ADMIN_TOKEN
 
-write_upstream_config a routed-upstream-a-model
+write_upstream_a_config_with_embed routed-upstream-a-model routed-upstream-a-embed-model
 write_upstream_config b routed-upstream-b-model
 write_compose
 
@@ -357,7 +466,10 @@ jq -cn \
     {
       name: "route-a",
       base_url: "http://upstream-a:8086",
-      models: {"public-a": "routed-upstream-a-model"},
+      models: {
+        "public-a": "routed-upstream-a-model",
+        "public-embed": "routed-upstream-a-embed-model"
+      },
       bearer_token: "router-secret-a",
       accepted_workload_ids: [$wid_a],
       accepted_dstack_kms_root_public_keys: [$kms_a]
@@ -413,10 +525,10 @@ jq -e '
 wait_for_http_ok "${ROUTER_URL}/v1/models" "$WORK_DIR/router-models.json"
 jq -e '
   (.object == "list")
-  and ([.data[].id] == ["public-a", "public-b"])
+  and (([.data[].id] | sort) == ["public-a", "public-b", "public-embed"])
 ' "$WORK_DIR/router-models.json" >/dev/null
 models_text=$(jq -c . "$WORK_DIR/router-models.json")
-for forbidden in route-a route-b routed-upstream-a-model routed-upstream-b-model; do
+for forbidden in route-a route-b routed-upstream-a-model routed-upstream-b-model routed-upstream-a-embed-model; do
   if grep -Fq "$forbidden" <<<"$models_text"; then
     die "/v1/models leaked ${forbidden}: ${models_text}"
   fi
@@ -424,15 +536,20 @@ done
 
 assert_route_receipt a
 assert_route_receipt b
+assert_embeddings_receipt
 
 wait_for_http_ok "${ROUTER_URL}/v1/metrics" "$WORK_DIR/router.prom"
 grep -F 'model_id="routed-upstream-a-model"' "$WORK_DIR/router.prom" >/dev/null
 grep -F 'model_id="routed-upstream-b-model"' "$WORK_DIR/router.prom" >/dev/null
+grep -F 'model_id="routed-upstream-a-embed-model"' "$WORK_DIR/router.prom" >/dev/null
 if grep -F 'model_id="public-a"' "$WORK_DIR/router.prom" >/dev/null; then
   die "metrics leaked public-a model alias"
 fi
 if grep -F 'model_id="public-b"' "$WORK_DIR/router.prom" >/dev/null; then
   die "metrics leaked public-b model alias"
+fi
+if grep -F 'model_id="public-embed"' "$WORK_DIR/router.prom" >/dev/null; then
+  die "metrics leaked public-embed model alias"
 fi
 
 cat <<EOF

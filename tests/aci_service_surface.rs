@@ -1432,3 +1432,412 @@ async fn completions_endpoint_streams_and_hashes_complete_response() {
         receipt_id
     );
 }
+
+// ---------------------------------------------------------------------------
+// /v1/embeddings surface
+// ---------------------------------------------------------------------------
+
+const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
+const E2EE_EMBEDDINGS_RESPONSE: &[u8] =
+    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25,1.0]}],"model":"aci-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
+const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
+    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
+
+fn e2ee_embeddings_request_string(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+    nonce: &str,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model = "aci-model";
+    let timestamp = 1_700_000_000u64;
+    let model_key = &h.service.keyset().e2ee_public_keys[0];
+    let aad = format!(
+        "v2|req|algo={}|model={model}|field=input|n={nonce}|ts={timestamp}",
+        model_key.algo
+    );
+    let encrypted_input =
+        encrypt_for_public_key(&model_key.public_key_hex, b"hello", aad.as_bytes()).unwrap();
+    let body = serde_json::json!({
+        "model": model,
+        "input": encrypted_input,
+    });
+    let headers = vec![
+        ("x-client-pub-key", public_key_from_secret(client_secret)),
+        ("x-model-pub-key", model_key.public_key_hex.clone()),
+        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
+        ("x-e2ee-nonce", nonce.to_string()),
+        ("x-e2ee-timestamp", timestamp.to_string()),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+fn e2ee_embeddings_request_array(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+    nonce: &str,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model = "aci-model";
+    let timestamp = 1_700_000_000u64;
+    let model_key = &h.service.keyset().e2ee_public_keys[0];
+    let aad_0 = format!(
+        "v2|req|algo={}|model={model}|field=input.0|n={nonce}|ts={timestamp}",
+        model_key.algo
+    );
+    let aad_1 = format!(
+        "v2|req|algo={}|model={model}|field=input.1|n={nonce}|ts={timestamp}",
+        model_key.algo
+    );
+    let enc_0 =
+        encrypt_for_public_key(&model_key.public_key_hex, b"first", aad_0.as_bytes()).unwrap();
+    let enc_1 =
+        encrypt_for_public_key(&model_key.public_key_hex, b"second", aad_1.as_bytes()).unwrap();
+    let body = serde_json::json!({
+        "model": model,
+        "input": [enc_0, enc_1],
+    });
+    let headers = vec![
+        ("x-client-pub-key", public_key_from_secret(client_secret)),
+        ("x-model-pub-key", model_key.public_key_hex.clone()),
+        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
+        ("x-e2ee-nonce", nonce.to_string()),
+        ("x-e2ee-timestamp", timestamp.to_string()),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+fn legacy_ecdsa_embeddings_request(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model_key = legacy_model_public_key(h, E2EE_ALGO_LEGACY_ECDSA);
+    let encrypted_input =
+        encrypt_legacy_for_public_key(E2EE_ALGO_LEGACY_ECDSA, &model_key, b"hello", None).unwrap();
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "input": encrypted_input,
+    });
+    let headers = vec![
+        ("x-signing-algo", E2EE_ALGO_LEGACY_ECDSA.to_string()),
+        (
+            "x-client-pub-key",
+            legacy_ecdsa_public_key_from_secret(client_secret),
+        ),
+        ("x-model-pub-key", model_key),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+fn legacy_ed25519_v2_embeddings_request(
+    h: &Harness,
+    client_secret: &ed25519_dalek::SigningKey,
+    nonce: &str,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model = "aci-model";
+    let timestamp = 1_700_000_000u64;
+    let model_key = legacy_model_public_key(h, E2EE_ALGO_LEGACY_ED25519);
+    let aad = format!("v2|req|algo=ed25519|model={model}|field=input|n={nonce}|ts={timestamp}");
+    let encrypted_input = encrypt_legacy_for_public_key(
+        E2EE_ALGO_LEGACY_ED25519,
+        &model_key,
+        b"hello",
+        Some(aad.as_bytes()),
+    )
+    .unwrap();
+    let body = serde_json::json!({
+        "model": model,
+        "input": encrypted_input,
+    });
+    let headers = vec![
+        ("x-signing-algo", E2EE_ALGO_LEGACY_ED25519.to_string()),
+        ("x-client-pub-key", ed25519_public_key_hex(client_secret)),
+        ("x-model-pub-key", model_key),
+        ("x-e2ee-nonce", nonce.to_string()),
+        ("x-e2ee-timestamp", timestamp.to_string()),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
+    let h = harness_with_body_retention_and_upstream(
+        0,
+        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
+    );
+
+    let resp = h
+        .requester
+        .post("/v1/embeddings", EMBEDDINGS_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, EMBEDDINGS_PLAIN_RESPONSE);
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "false");
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/embeddings"));
+        assert_eq!(calls[0].body, EMBEDDINGS_REQUEST);
+    }
+
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(receipt.endpoint, "/v1/embeddings");
+    // OpenAI embeddings responses carry no `id`; the gateway leaves
+    // the receipt chat_id empty for those.
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        receipt_event(&receipt, "request.received")["body_hash"],
+        sha256_hex(EMBEDDINGS_REQUEST)
+    );
+    assert_eq!(
+        receipt_event(&receipt, "request.forwarded")["body_hash"],
+        sha256_hex(EMBEDDINGS_REQUEST)
+    );
+    assert_eq!(
+        receipt_event(&receipt, "response.returned")["wire_hash"],
+        sha256_hex(EMBEDDINGS_PLAIN_RESPONSE)
+    );
+}
+
+#[tokio::test]
+async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
+    // Embeddings responses have no `id`, so the `/v1/receipt/{id}`
+    // route must fall back to receipt_id lookup or callers have no way
+    // to retrieve the receipt issued via the `x-receipt-id` header.
+    let h = harness_with_body_retention_and_upstream(
+        0,
+        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
+    );
+
+    let resp = h
+        .requester
+        .post("/v1/embeddings", EMBEDDINGS_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let receipt_id = header(&resp.headers, "x-receipt-id").to_string();
+
+    let fetched = h
+        .requester
+        .get(&format!("/v1/receipt/{receipt_id}"), &[])
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK);
+    let body = json_body(&fetched);
+    assert_eq!(
+        body["receipt"]["receipt_id"].as_str().unwrap(),
+        receipt_id,
+        "receipt lookup by receipt_id must return the same receipt"
+    );
+    assert!(
+        body["receipt"]["chat_id"].is_null(),
+        "embeddings receipts have no chat_id"
+    );
+    assert_eq!(body["receipt"]["endpoint"], "/v1/embeddings");
+
+    let unknown = h.requester.get("/v1/receipt/rcpt-deadbeef", &[]).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_forces_buffered_even_when_client_sets_stream_true() {
+    let h = harness_with_body_retention_and_upstream(
+        0,
+        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
+    );
+    let request = br#"{"model":"aci-model","input":"hi","stream":true}"#;
+
+    let resp = h.requester.post("/v1/embeddings", request, &[]).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    // Buffered JSON, never SSE.
+    let content_type = header(&resp.headers, "content-type");
+    assert!(
+        content_type.starts_with("application/json"),
+        "expected JSON, got {content_type}"
+    );
+    assert_eq!(resp.body, EMBEDDINGS_PLAIN_RESPONSE);
+    // The cache/x-accel headers stay off on the buffered path.
+    assert!(resp.headers.get("x-accel-buffering").is_none());
+    let calls = h.upstream_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].path.as_deref(), Some("/v1/embeddings"));
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_supports_aci_v2_e2ee_with_string_input() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
+        E2EE_EMBEDDINGS_RESPONSE,
+    ));
+    let client_secret = k256::SecretKey::from_slice(&[0x71; 32]).unwrap();
+    let nonce = "nonce-embed-string";
+    let (encrypted_body, headers) = e2ee_embeddings_request_string(&h, &client_secret, nonce);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
+
+    // The forwarded body must be cleartext "hello".
+    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
+    let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();
+    assert_eq!(upstream_json["input"], "hello");
+    assert_eq!(upstream_json["model"], "aci-model");
+
+    // The response embedding must be encrypted under the request model AAD.
+    assert_ne!(resp.body, E2EE_EMBEDDINGS_RESPONSE);
+    let encrypted_response = json_body(&resp);
+    let encrypted_embedding = encrypted_response["data"][0]["embedding"]
+        .as_str()
+        .expect("data[0].embedding must be encrypted hex string after E2EE");
+    let model_key = &h.service.keyset().e2ee_public_keys[0];
+    let response_aad = format!(
+        "v2|resp|algo={}|model=aci-model|id=|data=0|field=embedding|n={nonce}|ts=1700000000",
+        model_key.algo
+    );
+    let decrypted =
+        decrypt_with_secret_key(&client_secret, encrypted_embedding, response_aad.as_bytes())
+            .unwrap();
+    let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
+    assert_eq!(decoded, serde_json::json!([0.5, -0.25, 1.0]));
+
+    // Receipt records cleartext + wire hashes of the response, like chat.
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(receipt.endpoint, "/v1/embeddings");
+    assert_eq!(
+        receipt_event(&receipt, "response.returned")["cleartext_hash"],
+        sha256_hex(E2EE_EMBEDDINGS_RESPONSE)
+    );
+    assert_eq!(
+        receipt_event(&receipt, "response.returned")["wire_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_supports_aci_v2_e2ee_with_array_input() {
+    let response_with_two = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[1.0]},{"object":"embedding","index":1,"embedding":[2.0]}],"model":"aci-model","usage":{"prompt_tokens":4,"total_tokens":4}}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response_with_two));
+    let client_secret = k256::SecretKey::from_slice(&[0x72; 32]).unwrap();
+    let nonce = "nonce-embed-array";
+    let (encrypted_body, headers) = e2ee_embeddings_request_array(&h, &client_secret, nonce);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+
+    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
+    let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();
+    assert_eq!(upstream_json["input"][0], "first");
+    assert_eq!(upstream_json["input"][1], "second");
+
+    let model_key = &h.service.keyset().e2ee_public_keys[0];
+    let encrypted_response = json_body(&resp);
+    for (idx, expected) in [(0u64, [1.0]), (1u64, [2.0])] {
+        let ciphertext = encrypted_response["data"][idx as usize]["embedding"]
+            .as_str()
+            .unwrap();
+        let response_aad = format!(
+            "v2|resp|algo={}|model=aci-model|id=|data={idx}|field=embedding|n={nonce}|ts=1700000000",
+            model_key.algo
+        );
+        let plaintext =
+            decrypt_with_secret_key(&client_secret, ciphertext, response_aad.as_bytes()).unwrap();
+        let decoded: Value = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(decoded, serde_json::json!(expected));
+    }
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_supports_legacy_v1_e2ee() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
+        E2EE_EMBEDDINGS_RESPONSE,
+    ));
+    let client_secret = k256::SecretKey::from_slice(&[0x73; 32]).unwrap();
+    let (encrypted_body, headers) = legacy_ecdsa_embeddings_request(&h, &client_secret);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    assert_eq!(header(&resp.headers, "x-e2ee-version"), "1");
+    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ecdsa");
+
+    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
+    let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();
+    assert_eq!(upstream_json["input"], "hello");
+
+    let encrypted_response = json_body(&resp);
+    let encrypted_embedding = encrypted_response["data"][0]["embedding"].as_str().unwrap();
+    let decrypted =
+        decrypt_legacy_ecdsa_with_secret_key(&client_secret, encrypted_embedding, None).unwrap();
+    let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
+    assert_eq!(decoded, serde_json::json!([0.5, -0.25, 1.0]));
+}
+
+#[tokio::test]
+async fn embeddings_endpoint_supports_legacy_ed25519_v2_e2ee() {
+    let upstream_response = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[7.5]}],"model":"private-upstream-model","usage":{"prompt_tokens":1,"total_tokens":1}}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(upstream_response));
+    let client_secret = ed25519_dalek::SigningKey::from_bytes(&[0x74; 32]);
+    let nonce = "legacy-ed25519-embed-nonce";
+    let (encrypted_body, headers) = legacy_ed25519_v2_embeddings_request(&h, &client_secret, nonce);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
+    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ed25519");
+
+    let encrypted_response = json_body(&resp);
+    let encrypted_embedding = encrypted_response["data"][0]["embedding"].as_str().unwrap();
+    // Legacy v2 binds the response model (not the request model) into AAD.
+    let response_aad =
+        "v2|resp|algo=ed25519|model=private-upstream-model|id=|data=0|field=embedding|n=legacy-ed25519-embed-nonce|ts=1700000000";
+    let decrypted = decrypt_legacy_ed25519_with_secret_key(
+        &client_secret,
+        encrypted_embedding,
+        Some(response_aad.as_bytes()),
+    )
+    .unwrap();
+    let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
+    assert_eq!(decoded, serde_json::json!([7.5]));
+
+    // Request-model AAD must NOT decrypt under legacy v2.
+    let wrong_aad = response_aad.replace("model=private-upstream-model", "model=aci-model");
+    assert!(decrypt_legacy_ed25519_with_secret_key(
+        &client_secret,
+        encrypted_embedding,
+        Some(wrong_aad.as_bytes()),
+    )
+    .is_err());
+}

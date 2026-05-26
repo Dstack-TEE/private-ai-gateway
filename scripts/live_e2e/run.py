@@ -12,6 +12,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from live_e2e.cases.embeddings import run_embeddings_case  # noqa: E402
 from live_e2e.cases.fidelity_structured_outputs import (  # noqa: E402
     run_structured_outputs_case,
 )
@@ -89,6 +90,8 @@ def main() -> None:
             }
             lifecycle = []
             for provider in providers:
+                if not provider.has_capability("chat"):
+                    continue
                 lifecycle.append(
                     run_lifecycle_case(
                         base_url=aggregator.base_url,
@@ -97,6 +100,19 @@ def main() -> None:
                     )
                 )
             summary["phases"]["lifecycle"] = lifecycle
+
+            embeddings = []
+            for provider in providers:
+                if not provider.has_capability("embeddings"):
+                    continue
+                embeddings.append(
+                    run_embeddings_case(
+                        base_url=aggregator.base_url,
+                        provider=provider,
+                        artifact_dir=artifact_dir,
+                    )
+                )
+            summary["phases"]["embeddings"] = embeddings
 
             if args.profile in ("full", "strict-release"):
                 structured = []

@@ -32,5 +32,20 @@
     "capabilities": ["chat", "streaming", "context"],
     "session_refresh_seconds": 45,
     "chutes_e2ee_discovery_rounds": 3
+  },
+  {
+    "name": "chutes-live-embed",
+    "provider": "chutes",
+    "base_url": "https://api.chutes.ai",
+    "public_model": "live-chutes-embed",
+    "upstream_model": "Qwen/Qwen3-Embedding-8B-TEE",
+    "api_key_env": "CHUTES_API_KEY",
+    "binding": "e2ee_public_key_sha256",
+    "capabilities": ["embeddings"],
+    "session_refresh_seconds": 45,
+    "chutes_e2ee_discovery_rounds": 3,
+    "chutes_chute_ids": {
+      "Qwen/Qwen3-Embedding-8B-TEE": "21822836-bfa6-5426-b27e-dd5fdda1249e"
+    }
   }
 ]
