@@ -21,6 +21,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
 | Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
+| Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
 
@@ -95,6 +96,23 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   size, cache-affinity behavior where observable, streaming, receipts, and
   source/launcher provenance.
 - Finish the user verification script for already captured responses.
+
+### P1: Local Backend Proxy Mode
+
+- Add a mode that runs only the verified-provider backend as a local
+  OpenAI-compatible proxy for end users and agents. This mode should not require
+  a local TEE, dstack KMS, or gateway self-attestation because the process runs
+  on the user's own machine and is part of the user's local trust boundary.
+- Reuse the same provider adapters, upstream verification lifecycle, and
+  transport/session binding logic as the gateway backend. The local proxy must
+  fail closed when the upstream provider cannot be verified or when the verified
+  binding cannot be enforced.
+- Keep the configuration minimal: local bind address, upstream config path, and
+  provider credentials. Avoid adding a separate verifier DSL or local policy
+  system.
+- Document the trust model clearly: local proxy mode verifies upstream
+  providers for the local user, but it does not claim to provide a TEE-backed
+  ACI service identity to downstream clients.
 
 ### P1: Production State and Operations
 
