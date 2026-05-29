@@ -20,7 +20,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
-| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, and middleware `/v1/models` pass-through are implemented. Stream-preserving middleware transport and production compose are still pending. |
+| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
 

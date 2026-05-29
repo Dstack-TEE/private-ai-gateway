@@ -1,408 +1,393 @@
-# private-ai-gateway
+# Private AI Gateway
 
-Developer-preview Rust implementation of the **Attested Confidential Inference
-(ACI)** gateway service.
+Private AI Gateway is a Rust implementation of an **Attested Confidential
+Inference (ACI)** service. It exposes OpenAI-compatible inference APIs, proves
+the gateway workload identity through dstack attestation, verifies configured
+upstream providers before forwarding private prompts, and signs receipts that
+bind requests, responses, rewrites, and upstream verification facts.
 
-The protocol it speaks is the draft ACI specification proposed in
-[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694).
-This repo is the workload `git-launcher` can fetch, install, and run inside a
-dstack v2 application VM.
+Use it when you need an AI inference gateway whose downstream users can verify
+which workload handled their request, which provider route was used, and what
+the gateway observed before and after optional middleware logic.
 
-The next architecture target is documented in
-[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md):
-one gateway process owns the downstream ACI frontend and verified-provider
-backend, with an optional plaintext HTTP-over-UDS middleware slot for routing
-and business logic.
-Middleware developers should start with
-[`docs/middleware-integration.md`](docs/middleware-integration.md).
+This repository is a developer preview for the ACI draft in
+[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694). It is
+also the workload that
+[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher)
+can fetch, build, and run inside a dstack v2 application VM.
+
+## What It Does
+
+- Serves OpenAI-compatible `/v1/chat/completions`, `/v1/completions`,
+  `/v1/embeddings`, and `/v1/models`.
+- Publishes `/v1/attestation/report` for the gateway workload identity and
+  keyset.
+- Issues signed ACI receipts through `/v1/receipt/{chat_id}` and the legacy
+  `/v1/signature/{chat_id}` alias.
+- Supports downstream ACI E2EE and vLLM-proxy-compatible legacy E2EE profiles.
+- Verifies upstream providers before forwarding when verification is required.
+- Supports Tinfoil, NEAR AI, Chutes, ACI/DCAP upstreams, and generic
+  OpenAI-compatible upstreams with explicit TLS binding.
+- Runs with or without a plaintext middleware slot for auth, billing, policy,
+  cache-aware routing, model catalog shaping, request rewrites, and response
+  post-processing.
 
 ## Status
 
-`0.1.0` - developer preview. Production-blocking work is explicit below.
+`0.1.0` is a developer preview. The request path is implemented, but production
+release still depends on provider strict-release review, durable operational
+storage decisions, and production compose wiring for a concrete middleware
+container.
 
-| Surface | Status |
+| Area | Status |
 | --- | --- |
-| Canonical JSON (RFC 8785 subset) | done |
-| Workload identity / keyset digests | done |
-| Attestation report (assembly + endorsement) | done |
-| Inference receipts (event log, signing) | done |
-| Non-streaming `POST /v1/chat/completions` forwarding | done |
-| `POST /v1/completions` forwarding | done |
-| `POST /v1/embeddings` forwarding (buffered) | done |
-| Streaming chat/completions forwarding | done |
-| `GET /v1/attestation/report` | done |
-| `GET /v1/receipt/{chat_id}` | done |
-| `GET /v1/signature/{chat_id}` alias | done |
-| Upstream verification fail-closed by default | done |
-| ECDSA-secp256k1 65-byte recoverable receipt sig | done |
-| Receipt owner auth + retained body endpoint | done (in-memory; retention defaults to 0) |
-| E2EE-header fail-closed guard | done |
-| dstack SDK quoter over HTTP(S) or Unix socket | done |
-| dstack KMS-backed identity + receipt + E2EE keys | done |
-| Client-facing E2EE v2 termination | done for chat/completions/embeddings |
-| Client-facing E2EE v2 streaming | done for chat/completions |
-| vLLM-proxy-compatible ECDSA v1/v2 and Ed25519/X25519 E2EE | done for chat/completions/embeddings |
-| `/v1/models` upstream proxying | done |
-| `/v1/metrics` gateway-owned Prometheus metrics | done |
-| Runtime upstream config file + admin API | done |
-| Per-upstream verifier | done for ACI/DCAP, Tinfoil, NEAR AI gateway, and Chutes E2EE-key bindings |
-| Chutes provider transport | done for buffered and streaming E2EE over `/e2e/invoke` |
-| Frontend/middleware/backend framework | partial; runtime UDS middleware mode wired |
-| Public receipt log | not done |
-| Replica-stable identity (KMS-released keys) | done for configured dstack key paths |
+| Workload identity, keyset digest, attestation report | Implemented |
+| Signed receipts and transparency event log | Implemented |
+| Chat/completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
+| Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
+| Runtime upstream config file and admin API | Implemented |
+| Gateway-owned Prometheus metrics | Implemented |
+| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, ACI/DCAP, and OpenAI-compatible TLS-bound upstreams |
+| Middleware framework | Implemented over HTTP on Unix domain sockets |
+| Receipt/body store | In-memory; receipt TTL is configurable, body retention defaults to disabled |
+| Public transparency log | Not implemented |
 
-The binary has no ephemeral-key or stub-quote startup path. It loads
-identity, receipt-signing, and E2EE keys from dstack KMS through the Rust
-dstack SDK, and it uses the same SDK for TDX quotes.
+The binary has no ephemeral-key or stub-quote startup mode. It loads identity,
+receipt-signing, and E2EE keys from dstack KMS through the Rust `dstack-sdk`,
+and it uses the same SDK for TDX quotes.
 
-## Layout
+## Architecture
 
-```
-src/
-  lib.rs
-  main.rs               // binary entrypoint
-  dstack.rs             // dstack SDK KMS key provider + quote provider
-  aci/
-    canonical.rs        // JCS subset, UTF-16 key sort, sha256 helpers
-    types.rs            // wire structs (WorkloadKeyset, Receipt, ...)
-    identity.rs         // workload_id, keyset digest, report_data
-    keys.rs             // KeyProvider / Quoter traits and signature verifiers
-    receipt.rs          // ReceiptBuilder + signing-bytes function
-    upstream.rs         // UpstreamBackend trait + OpenAI-compatible client
-  aggregator/
-    service.rs          // AciService: report, forward, receipt store
-  http/
-    app.rs              // axum router for the ACI/OpenAI-compatible endpoints
-
-entrypoint.sh           // gateway-owned entry script the launcher exec's
-scripts/
-  phala_multi_upstream_smoke.sh // deploys two upstream ACI CVMs + one gateway CVM and asserts routing receipts
-deploy/                 // launcher .conf and dstack compose example
-  README.md             // launcher wiring and deployment notes
-
-tests/
-  canonical.rs          // JCS stability, UTF-16 sort, float rejection
-  identity.rs           // workload_id excludes subject, keyset digest includes it
-  receipt.rs            // event ordering, finalization, signing bytes
-  ecdsa_recoverable.rs  // §9.4 65-byte recoverable, reject 64-byte, no double hash
-  service.rs            // fail-closed defaults, X-Upstream-Verification: none
-  http.rs               // end-to-end report / chat / receipt
-  aggregator_scenarios.rs // current no-middleware gateway happy/error path scenarios
-  auth_and_retention.rs // receipt owner auth, retained body expiry, ACI headers
-  aci_service_surface.rs // implemented surfaces plus ignored future specs
-  entrypoint.rs         // shellcheck-lints and shape-checks entrypoint.sh
-  smoke_scripts.rs      // shellcheck + invariant checks for scripts/
+```text
+downstream user / OpenAI SDK
+  -> ACI frontend
+  -> optional middleware over UDS
+  -> verified-provider backend
+  -> upstream provider
 ```
 
-## Launcher wiring (`entrypoint.sh`)
+The frontend owns downstream ACI behavior: request parsing, downstream E2EE
+termination, user-facing model names, response E2EE, and receipt finalization.
 
-This repo is designed to be launched by
-[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
-The launcher pulls the repo at a pinned commit, `cd`s into
-the public gateway repo root, and runs the gateway-owned `entrypoint.sh`.
-Non-secret runtime config is passed through normal Docker Compose
-`environment:` entries; secrets should come from dstack encrypted secrets,
-KMS, or mounted secret files.
+The backend owns provider trust: configured target validation, model rewrite,
+upstream verification leases, upstream TLS or E2EE channel binding, provider
+request forwarding, and backend-authored receipt facts.
 
-**Ownership boundary.** The launcher is generic and build-system agnostic;
-it does not know we are written in Rust. `entrypoint.sh` is owned by this
-gateway, and everything past `bash entrypoint.sh` — install, build,
-run — lives here. The launcher config stays minimal (`REPO_URL`,
-`COMMIT_SHA`, `WORK_DIR`); there is no `INSTALL_CMD` and no `RUN_CMD`.
+Middleware is optional. It sees plaintext after downstream E2EE termination and
+may implement business logic, but it does not own ACI signing or provider
+verification. Middleware chooses a configured target route and calls the
+internal backend over a Unix domain socket. The frontend signs the receipt only
+after middleware returns the final user-visible response.
 
-What `entrypoint.sh` does (once the launcher invokes it):
+See:
 
-1. If `cargo` is not on `PATH`, this gateway installs a Rust toolchain
-   via `apt-get install -y --no-install-recommends ca-certificates rustup`
-   + `rustup default stable`. **This is a gateway implementation
-   choice for the first slice**, not a launcher capability. Production
-   should publish a Rust-capable gateway image (see `deploy/README.md`
-   pattern B) so the toolchain is covered by a gateway-owned image
-   digest.
-2. Runs `cargo build --release --locked --bin private-ai-gateway`. The
-   `--locked` flag means a build that would change `Cargo.lock` is a hard
-   failure, not silent dependency drift.
-   Cargo, Rustup, and build target state live under
-   `/var/lib/private-ai-gateway/cache` by default, outside the source checkout
-   that `git-launcher` scrubs on every boot.
-3. `exec`s the built binary.
+- [Frontend, Middleware, Backend Design](docs/frontend-middleware-backend.md)
+- [Middleware Integration Guide](docs/middleware-integration.md)
+- [Upstream Verification and Lease Lifecycle](docs/upstream-verification-lifecycle.md)
 
-See `deploy/README.md` for the launcher `.conf`, the Compose runtime env, the
-dstack compose example that puts both behind `compose_hash`, and the
-Rust-capable gateway image recipe.
+## Quick Start For Local Development
 
-## Environment variables
+Prerequisites:
 
-Use the `PRIVATE_AI_GATEWAY_*` prefix for runtime configuration. The binary
-also accepts the older `DSTACK_LLM_ROUTER_*` names as compatibility aliases;
-the `PRIVATE_AI_GATEWAY_*` value wins when both are set.
+- Rust stable toolchain.
+- A reachable dstack SDK endpoint. By default the gateway uses
+  `/var/run/dstack.sock`; for local development you can point
+  `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` at a forwarded dstack socket.
+- An upstream config file. An empty file is valid, but inference routes require
+  at least one configured upstream.
 
-| Setting | Name |
-| --- | --- |
-| Bind address | `PRIVATE_AI_GATEWAY_BIND` |
-| Upstream config file | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` |
-| Initial upstream config seed file | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` |
-| Admin API bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` |
-| Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` |
-| Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` |
-| Body retention seconds | `PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS` |
-| Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` |
-| TLS certificate paths, comma-separated | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` |
-| TLS SPKI SHA-256 digests, comma-separated | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` |
-| Upstream verifier mode: `none`, `preverified`, `aci-dcap` | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` |
-| Accepted upstream workload IDs, comma-separated | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS` |
-| Accepted upstream image digests, comma-separated | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` |
-| Accepted upstream dstack KMS root public keys, comma-separated | `PRIVATE_AI_GATEWAY_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS` |
-| Upstream verifier PCCS URL | `PRIVATE_AI_GATEWAY_UPSTREAM_PCCS_URL` |
-| Upstream verifier cache seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS` |
-| Upstream TCP/TLS connect timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS` |
-| Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` |
-| Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
-| dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` |
-| Optional middleware Unix socket path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` |
-| Internal backend Unix socket path in middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` |
+Run checks:
 
-Provider-owned verifier bridges also read `PRIVATE_AI_VERIFIER_DIR` when they
-need the local `private-ai-verifier` checkout. If unset in this monorepo, the
-gateway uses the sibling `../private-ai-verifier` path. Chutes credentials
-and E2EE tuning are upstream config fields, not deployment env vars:
-`bearer_token`, `chutes_e2ee_api_base`, `chutes_chute_ids`,
-`chutes_e2ee_discovery_rounds`, and
-`chutes_e2ee_discovery_interval_seconds`. The Rust adapter passes those values
-to the verifier bridge internally.
+```bash
+cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
 
-Prefer `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS`: the gateway reads the mounted
-leaf certificate, computes `sha256(SPKI)`, and publishes that digest in the
-attested keyset. `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` remains for manual or
-test deployments. Set only one of the two.
+Run a local gateway:
 
-`PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` accepts an HTTP(S) endpoint or a Unix
-socket endpoint such as `unix:/var/run/dstack.sock`. If unset, the dstack SDK
-uses `/var/run/dstack.sock` or `DSTACK_SIMULATOR_ENDPOINT`. For local testing
-with an SSH-forwarded CVM socket, use
-`unix:/tmp/aci-dstack-sock-dev.dstack.sock`. The older
-`PRIVATE_AI_GATEWAY_DSTACK_QUOTER_URL` name is still accepted as a compatibility
-alias.
+```bash
+cat >/tmp/private-ai-gateway-upstreams.json <<'JSON'
+[
+  {
+    "name": "local",
+    "provider": "openai-compatible",
+    "base_url": "https://example-upstream.invalid",
+    "models": {
+      "local-model": "upstream-model"
+    },
+    "tls_spki_sha256": ["<64-hex-spki-sha256>"]
+  }
+]
+JSON
 
-The default upstream-verification mode is `none`, while the request path is
-fail-closed by default. `aci-dcap` is only for upstreams that expose the ACI
-attestation report shape on dstack. Configure it with at least one accepted
-upstream workload ID or image digest, and the accepted dstack KMS root public
-key. The verifier fetches the upstream's `/v1/attestation/report`, validates
-the ACI workload/keyset binding, verifies the embedded Intel DCAP quote through
-`dcap-qvl`, replays the dstack event log against the quote's RTMR3, verifies
-the identity key's dstack KMS signature chain to the configured KMS root, and
-caches a successful result for 300 seconds unless overridden.
-Provider adapters are Rust implementations, not configured shell commands. The
-adapter owns the provider-specific transport path and may outsource
-attestation verification to provider-owned verifier logic. The call is selected
-by the Rust adapter, not by upstream config. Tinfoil uses the
-`private-ai-verifier` bridge and returns the TLS SPKI bound in the Tinfoil
-attestation document. NEAR AI requests its report with TLS fingerprint binding
-enabled and returns that SPKI once the dstack verification dependency is
-available. Chutes verifies the E2EE public key against TDX `report_data`,
-Intel DCAP status, Chutes' public measurement profiles, and NVIDIA NRAS nonce
-binding using the upstream config `bearer_token`. Its backend then fetches a
-live nonce/key batch, selects only an instance whose E2EE public key matches the
-verified binding, encrypts the OpenAI JSON body with Chutes' ML-KEM-768 +
-HKDF-SHA256 + ChaCha20-Poly1305 transport, and decrypts buffered or streaming
-responses before the receipt pipeline hashes them. The OpenAI-compatible backend
-enforces `tls_spki_sha256` and `tls_certificate_sha256` bindings against the
-actual upstream HTTPS handshake. `preverified` is only for explicit
-out-of-band trust during bring-up.
+PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=unix:/tmp/aci-dstack-sock-dev.dstack.sock \
+PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git \
+PRIVATE_AI_GATEWAY_REPO_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/tmp/private-ai-gateway-upstreams.json \
+cargo run --release --bin private-ai-gateway
+```
 
-Upstream forwarding defaults to a 10 second connect timeout and a 600 second
-read idle timeout. The read timeout is not a total generation deadline; for
-streaming responses it bounds how long the gateway waits between upstream
-chunks. Upstream ACI/DCAP verification uses the same connect timeout and a 60
-second total verification timeout by default, covering report fetch, collateral
-fetch, and quote checks. The timeout env vars set global defaults; per-upstream
-config can override them with
-`connect_timeout_seconds`, `read_timeout_seconds`, and
-`verifier_request_timeout_seconds`. Chutes verification does live evidence,
-DCAP, and NRAS checks; configure a higher per-upstream verifier timeout if the
-default is too low for the selected chute.
+The gateway listens on `127.0.0.1:8086` by default.
 
-The gateway prewarms upstream verification at startup. It also proactively
-refreshes cached verification before expiry; by default the refresh loop runs at
-the verifier cache TTL minus 60 seconds, so the normal 300 second cache
-refreshes every 240 seconds. If multiple upstreams configure different positive
-refresh intervals, the loop uses the shortest active interval. External provider
-verifier refresh keeps the current good cache entry while the new evidence is
-fetched, so user requests can continue using the previous verified identity
-during refresh. Set an upstream's `verification_refresh_seconds` to `0` to skip
-that upstream during proactive verifier refresh.
+Check the identity surface:
 
-Provider session material refreshes every 45 seconds by default for adapters
-that have session material today. Set an upstream's `session_refresh_seconds`
-to `0` to disable that loop. For Chutes, session refresh is lightweight: it
-reuses cached verified E2EE key bindings and only refills single-use invocation
-nonces, so user traffic does not have to wait for nonce discovery when the pool
-is low or expired.
+```bash
+curl -sS http://127.0.0.1:8086/
+curl -sS 'http://127.0.0.1:8086/v1/attestation/report?nonce=test'
+```
 
-The gateway has one upstream config file. Set
-`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` to its path; if unset, the default is
-`/var/lib/private-ai-gateway/upstreams.json`. A missing, empty, or whitespace-only
-file is valid and means no upstreams are configured yet. The file contains a
-JSON array:
+Send an OpenAI-compatible request:
+
+```bash
+curl -sS http://127.0.0.1:8086/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "local-model",
+    "messages": [{"role": "user", "content": "Say hello in one sentence."}]
+  }'
+```
+
+For a complete local multi-upstream smoke test that exercises real dstack KMS
+keys and quotes through a forwarded socket, run:
+
+```bash
+scripts/local_multi_upstream_smoke.sh
+```
+
+## Deploy With Git Launcher
+
+The recommended dstack deployment path uses `git-launcher`:
+
+1. `git-launcher` clones this repo at a pinned commit.
+2. It runs this repo's `entrypoint.sh`.
+3. `entrypoint.sh` builds `private-ai-gateway` with `cargo build --release
+   --locked --bin private-ai-gateway`.
+4. The built binary runs with runtime config from Compose environment, mounted
+   files, dstack encrypted secrets, and dstack KMS.
+
+The launcher stays generic. Build, install, and run logic belongs to this repo.
+For production, prefer a Rust-capable gateway image so the toolchain is covered
+by a gateway-owned image digest instead of installing Rust at boot.
+
+Deployment files:
+
+- [deploy/README.md](deploy/README.md)
+- [deploy/compose.yaml](deploy/compose.yaml)
+- [deploy/upstreams.example.json](deploy/upstreams.example.json)
+- [entrypoint.sh](entrypoint.sh)
+
+## Configure Upstreams
+
+The gateway has one mutable upstream config file. Set
+`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH`; if unset, the default is
+`/var/lib/private-ai-gateway/upstreams.json`.
+
+A missing, empty, or whitespace-only file is valid and means no upstreams are
+configured yet. The config is a JSON array:
 
 ```json
 [
   {
-    "name": "gpu-a",
-    "provider": "aci-dcap",
-    "base_url": "https://gpu-a.example",
+    "name": "tinfoil-glm51",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
     "models": {
-      "public-model-a": "upstream-model-a"
+      "glm51-tinfoil": "glm-5-1"
     },
-    "accepted_workload_ids": ["aci:workload:..."],
-    "accepted_dstack_kms_root_public_keys": ["02..."],
-    "connect_timeout_seconds": 10,
-    "read_timeout_seconds": 600,
-    "verifier_request_timeout_seconds": 60,
-    "verification_refresh_seconds": 240
+    "bearer_token": "<tinfoil-api-key>"
   }
 ]
 ```
 
-For one-command compose deployments, set
-`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` to a read-only seed file mounted
-by compose. If the mutable config path is missing or whitespace-only at
-startup, the gateway validates the seed and copies it there once. Existing
-admin-updated config is never overwritten.
+`models` maps public model ids to provider-facing upstream model ids. In
+no-middleware mode, the public model id is also the target route id. In
+middleware mode, middleware selects a backend target route of this form:
 
-`provider` defaults to `openai-compatible`. Supported values are
-`openai-compatible`, `aci-dcap`, `chutes`, `tinfoil`, and `near-ai`. The
-non-default providers select concrete Rust verifier adapters; they do not
-expose a configurable verifier command.
+```text
+<upstream name>:<public model id in upstream config>
+```
 
-In no-middleware mode, the public model id is what clients send and what
-`/v1/models` returns. The gateway treats that id as the target route id and
-rewrites it to the upstream model id before upstream verification, forwarding,
-and receipt hashing. When `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` is set,
-`/v1/models` passes through middleware over HTTP-on-UDS and middleware chooses
-a configured target route id by calling the internal backend UDS; the frontend
-still preserves the user model name for downstream E2EE AAD. See
-[`docs/frontend-middleware-backend.md`](docs/frontend-middleware-backend.md)
-and [`docs/middleware-integration.md`](docs/middleware-integration.md).
-Per-upstream verifier fields override the global
-`PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_*` settings when present.
-Chutes upstreams should put the provider API key in `bearer_token`. Optional
-Chutes fields are `chutes_e2ee_api_base`, `chutes_chute_ids`,
-`chutes_e2ee_discovery_rounds` (default `3`),
-`chutes_e2ee_discovery_interval_seconds` (default `0`), and
-`session_refresh_seconds` (default `45`). `chutes_chute_ids` maps configured
-upstream model ids to concrete Chutes `chute_id` UUIDs; production Chutes
-routes should use it instead of catalog name lookup.
+Supported `provider` values:
 
-When `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is set, an admin can inspect and replace
-the same config file at runtime:
+| Provider | Use |
+| --- | --- |
+| `openai-compatible` | Generic OpenAI-compatible upstream with configured TLS SPKI or certificate binding. |
+| `aci-dcap` | Upstream ACI service that exposes ACI attestation and dstack/DCAP evidence. |
+| `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
+| `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
+| `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
+
+For one-command Compose deployments, set
+`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` to a read-only seed file. The
+gateway copies the seed only when the mutable config path is missing or empty.
+An existing admin-updated config is never overwritten.
+
+When `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is set, operators can inspect and replace
+the live config:
 
 ```bash
 curl -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
   http://127.0.0.1:8086/v1/admin/upstreams
 
-curl -X PUT -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+curl -X PUT \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
   -H "content-type: application/json" \
   --data-binary @upstreams.json \
   http://127.0.0.1:8086/v1/admin/upstreams
 ```
 
 The admin view redacts bearer tokens and returns the active `config_digest`.
-`PUT` validates the replacement config, writes it to the single configured file,
-and swaps the live upstream router/backend state. If no admin token is configured, the admin
-endpoint returns `404`.
+If no admin token is configured, the admin endpoint returns `404`.
 
-## Dependencies
+## Enable Middleware
 
-The dependency list is intentionally small. Each crate is named below
-with the reason it is in the tree:
+Middleware mode is enabled by a middleware Unix socket path. The gateway also
+starts an internal backend socket for middleware to call:
 
-| Crate | Role |
-| --- | --- |
-| `serde`, `serde_json` | ACI wire types and JCS input. `preserve_order` so existing JSON structure is preserved through round-trips. |
-| `dstack-sdk` | dstack KMS key release, `/Info`, and `/GetQuote` over the guest-agent socket or HTTP endpoint. |
-| `sha2` | SHA-256 for canonical digests, report data, receipt signing. |
-| `ed25519-dalek` | Workload identity / receipt Ed25519 signing. |
-| `k256` | secp256k1 ECDSA recoverable signing per ACI §9.4. |
-| `curve25519-dalek`, `x25519-dalek` | dstack-vLLM-proxy Ed25519/X25519 E2EE compatibility profile. |
-| `aes-gcm`, `hkdf` | ACI E2EE field encryption. |
-| `base64`, `chacha20poly1305`, `flate2`, `ml-kem` | Chutes provider E2EE transport compatible with `chutes-e2ee`. |
-| `rand`, `rand_core` | Receipt id randomness. |
-| `hex` | Hex encoding for public keys, digests, signatures. |
-| `rustls-pemfile`, `x509-parser`, `rustls`, `webpki-roots` | Parse mounted TLS leaf certificates, publish attested SPKI digests, and enforce upstream SPKI bindings. |
-| `axum`, `tokio`, `tower` | HTTP server. Axum 0.7 + tokio multi-thread runtime. |
-| `reqwest` (rustls-tls) | Upstream HTTP client. Rustls avoids a system OpenSSL dependency inside the dstack image. |
-| `dcap-qvl` | Pure-Rust Intel DCAP quote verification for ACI upstream reports. |
-| `thiserror` | Library error types. |
-| `tracing`, `tracing-subscriber` | Structured logging. |
-| `prometheus` | Gateway-owned `/v1/metrics` counters. The service does not expose upstream metrics. |
-| `async-trait` | Async trait helpers on `UpstreamBackend`. |
-
-No NVIDIA / nvtrust crates. GPU attestation is a per-upstream concern
-and will arrive with the verifier traits.
-
-## Running
-
+```bash
+PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock
+PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
 ```
-cargo test                                  # all unit + integration tests
+
+In middleware mode:
+
+- Public `/v1/models` is forwarded to middleware.
+- Public inference requests are decrypted and normalized by the
+  frontend, then forwarded to middleware as plaintext HTTP over UDS.
+- User headers, including `Authorization`, are forwarded to middleware for
+  middleware-owned auth and routing. Gateway-owned and stale E2EE protocol
+  headers are stripped.
+- Middleware calls `POST /internal/forward` with a one-use request id and a
+  configured target route.
+- Streaming responses stay streaming across backend, middleware, and frontend.
+- Middleware-generated OpenAI-compatible responses are passed through downstream
+  E2EE when the original user request used E2EE.
+
+Read [docs/middleware-integration.md](docs/middleware-integration.md) before
+writing middleware.
+
+## API Surface
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /` | Basic ACI version, workload id, and keyset digest. |
+| `GET /v1/models` | OpenAI-compatible model list from backend or middleware. |
+| `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
+| `POST /v1/completions` | OpenAI-compatible legacy completions. |
+| `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
+| `GET /v1/attestation/report?nonce=<n>` | Gateway workload identity and keyset evidence. |
+| `GET /v1/receipt/{chat_id}` | Signed ACI receipt by chat id. |
+| `GET /v1/signature/{chat_id}` | Legacy alias of the receipt endpoint. |
+| `GET /v1/receipt/{chat_id}/body` | Retained provider-facing request body when retention is enabled. |
+| `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
+| `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |
+| `PUT /v1/admin/upstreams` | Authenticated upstream config replacement. |
+
+## Trust Model
+
+The downstream relying party verifies the gateway first, then uses the verified
+gateway identity to evaluate responses and receipts.
+
+1. `GET /v1/attestation/report` proves the gateway workload identity, keyset,
+   source provenance, and optional client-facing TLS SPKI binding.
+2. The gateway keyset endorses receipt signing keys and E2EE keys.
+3. Each request receipt records the frontend-observed request, middleware route
+   selection when present, provider-facing request, upstream verification event,
+   provider response hash, final returned response hash, and any request or
+   response modification events.
+4. Upstream verification is fail-closed by default. If a request requires
+   upstream verification and no verified enforceable binding exists, the
+   gateway does not forward the prompt.
+
+Provider-specific verification stays inside provider adapters. The upstream
+config selects a provider and model map; it does not expose arbitrary verifier
+commands or policy DSLs.
+
+## Runtime Configuration
+
+Use `PRIVATE_AI_GATEWAY_*` variables. Older `DSTACK_LLM_ROUTER_*` aliases are
+still accepted for compatibility; the `PRIVATE_AI_GATEWAY_*` value wins when
+both are set.
+
+| Setting | Variable | Default |
+| --- | --- | --- |
+| Public bind address | `PRIVATE_AI_GATEWAY_BIND` | `127.0.0.1:8086` |
+| Upstream config path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` | `/var/lib/private-ai-gateway/upstreams.json` |
+| Initial upstream config seed | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` | unset |
+| Admin bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | unset; admin API returns `404` |
+| Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` | required |
+| Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | required |
+| Body retention seconds | `PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS` | `0` |
+| Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `3600` |
+| TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | unset |
+| TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | unset |
+| Upstream verifier mode | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` | `none` |
+| Upstream verifier cache seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS` | `300` |
+| Upstream connect timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `10` |
+| Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `600` |
+| Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `60` |
+| dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | dstack SDK default socket |
+| Middleware UDS path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` | unset; middleware disabled |
+| Internal backend UDS path | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | `/run/private-ai-gateway/backend.sock` |
+
+Prefer `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` for client-facing TLS binding. The
+gateway reads the mounted leaf certificate, computes `sha256(SPKI)`, and
+publishes that digest in the attested keyset. Use
+`PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` only for manual or test deployments. Set
+only one of the two.
+
+`PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` accepts HTTP(S) endpoints and Unix socket
+endpoints such as `unix:/var/run/dstack.sock`.
+
+## Test And Smoke Suites
+
+Run the standard local checks:
+
+```bash
+cargo test
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-printf '[{"name":"local","base_url":"http://127.0.0.1:9000","models":{"local-model":"local-model"}}]\n' \
-  >/tmp/private-ai-gateway-upstreams.json
-PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=unix:/tmp/aci-dstack-sock-dev.dstack.sock \
-PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git \
-PRIVATE_AI_GATEWAY_REPO_COMMIT=0123456789abcdef0123456789abcdef01234567 \
-PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/tmp/private-ai-gateway-upstreams.json \
-cargo run --release
 ```
 
-The dev binary listens on `127.0.0.1:8086` by default.
-
-## Phala multi-upstream smoke
-
-Run the local Docker smoke first after changing routing, upstream verification,
-receipt hashing, dynamic upstream config, or model metrics:
+Run local multi-upstream smoke after changing routing, upstream verification,
+receipt hashing, dynamic upstream config, or metrics:
 
 ```bash
 scripts/local_multi_upstream_smoke.sh
 ```
 
-It runs two upstream ACI services plus one gateway under local
-Docker Compose. All three mount the forwarded dstack socket from
-`DSTACK_SOCK` (default `/tmp/aci-dstack-sock-dev.dstack.sock`), so it exercises
-real dstack KMS keys and quotes while avoiding a full Phala deployment. The
-gateway starts with an empty config file, receives its upstream routes through
-`PUT /v1/admin/upstreams`, then performs the same routing, receipt, and metrics
-assertions as the Phala smoke.
-
-Run the slower real Phala smoke when you need to validate the dstack deployment
+Run the slower Phala deployment smoke when you need to validate the deployment
 surface:
 
 ```bash
 scripts/phala_multi_upstream_smoke.sh
 ```
 
-It builds and pushes `Dockerfile.smoke` to `ttl.sh`, deploys two mocked
-upstream ACI services, fetches each upstream attestation report to derive the
-dstack KMS root policy, then deploys one gateway with a single upstream config
-file mounted into the CVM. It asserts:
+The Phala smoke deploys two mocked upstream ACI services and one gateway CVM,
+then asserts model routing, provider-facing request hashes, verified upstream
+events, and metrics model ids.
 
-- `/v1/models` returns only public model ids
-- each public model id routes to the expected upstream
-- `request.forwarded` hashes the rewritten upstream request body
-- `upstream.verified` is recorded as verified with the upstream model id
-- metrics record upstream model ids and never public aliases
+## Repository Map
 
-Artifacts are written to `/tmp/private-ai-gateway-smoke-router` by default. Set
-`IMAGE_REF=<existing-image-ref>` to skip the Docker build/push, or
-`WORK_DIR=<path>` to keep artifacts elsewhere.
+```text
+src/main.rs                    binary entrypoint and runtime config
+src/dstack.rs                  dstack SDK KMS key provider and quote provider
+src/aci/                       ACI wire types, canonical JSON, keys, receipts, upstreams
+src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
+src/aggregator/upstream_config.rs runtime upstream config and provider adapters
+src/http/app.rs                Axum HTTP routers and middleware/backend wiring
+docs/                          design notes, provider reviews, middleware guide
+deploy/                        git-launcher and dstack compose examples
+scripts/                       local and Phala smoke tests
+tests/                         unit and integration coverage
+```
 
-## Roadmap
+## More Docs
 
-The current pending-task list lives in [`docs/roadmap.md`](docs/roadmap.md).
-The next major implementation item is hardening the
-[frontend/middleware/backend framework](docs/frontend-middleware-backend.md):
-production compose wiring for a concrete middleware container.
-Middleware implementers can use
-[docs/middleware-integration.md](docs/middleware-integration.md).
+- [Deployment guide](deploy/README.md)
+- [Middleware integration guide](docs/middleware-integration.md)
+- [Frontend/middleware/backend architecture](docs/frontend-middleware-backend.md)
+- [Live E2E test suite](docs/live-e2e-test-suite.md)
+- [Provider audit criteria](docs/reviews/providers/audit-criteria.md)
+- [Roadmap](docs/roadmap.md)
