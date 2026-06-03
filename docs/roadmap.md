@@ -1,6 +1,6 @@
 # Private AI Gateway Roadmap
 
-Date: 2026-05-21 UTC.
+Date: 2026-06-03 UTC.
 Current phase: refactoring the feature-complete prototype into a gateway
 framework, then hardening it into a strict review candidate.
 
@@ -18,14 +18,51 @@ adapters that fail closed when binding material cannot be enforced.
 | Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing in no-middleware mode. |
 | ACI identity and self-attestation | In progress | dstack KMS-backed identity, keyset endorsement, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
+| Attested sessions | Planned | Define the shared session concept for downstream and upstream connections. Each verified TLS/SPKI or E2EE session should get a session id, audit bundle, audit-log entry, and receipt reference. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
 | Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
+| Multi-domain downstream TLS binding | Planned | Support multiple downstream custom domains by mapping a requested domain to its certificate/SPKI binding and publishing the matching binding in the gateway evidence path. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
 
 ## Pending Tasks
+
+### P0: Attested Sessions and Audit Log
+
+An attested session is a connection or application-level encryption context that
+has been verified against attestation evidence and enforceable binding material.
+Both downstream user sessions and upstream provider sessions should use this
+concept.
+
+- Define the session record shape: session id, direction, peer/provider,
+  verification time, expiry, attestation evidence summary, binding type, binding
+  material digest, verifier result, and related workload identity.
+- Treat TLS with SPKI pinning and provider/client E2EE as supported binding
+  types. The verifier must fail closed when the binding cannot be enforced.
+- Write each successful session verification to an audit log that can be queried
+  by session id.
+- Make receipts reference the downstream session id and upstream session id
+  used for the request, instead of embedding all session evidence directly in
+  every receipt.
+- Keep the implementation small: reuse the existing upstream lease lifecycle
+  where possible, and avoid introducing a policy DSL.
+
+### P0: Multi-Domain Downstream TLS Binding
+
+The gateway currently assumes one downstream TLS identity. Production deployments
+may need multiple custom domains bound to the same gateway workload.
+
+- Add runtime config for a domain-to-certificate mapping.
+- Select the served certificate from the requested domain, using the TLS SNI
+  value where available and the HTTP host only for evidence/report selection.
+- Publish the SPKI binding for the requested downstream domain in the gateway
+  attestation/evidence response.
+- Ensure receipts and attested-session audit records identify the downstream
+  domain/session used by the request.
+- Keep certificate issuance and renewal out of scope for this repo; another
+  component may mount certificates for the gateway to serve.
 
 ### P0: Frontend / Middleware / Backend Refactor
 
