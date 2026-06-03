@@ -18,7 +18,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing in no-middleware mode. |
 | ACI identity and self-attestation | In progress | dstack KMS-backed identity, keyset endorsement, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
-| Attested sessions | Planned | Define the shared session concept for downstream and upstream connections. Each verified TLS/SPKI or E2EE session should get a session id, audit bundle, audit-log entry, and receipt reference. |
+| Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
 | Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
@@ -38,14 +38,17 @@ concept.
 
 - Define the session record shape: session id, direction, peer/provider,
   verification time, expiry, attestation evidence summary, binding type, binding
-  material digest, verifier result, and related workload identity.
+  material digest, verifier result, and related workload identity. Implemented
+  for upstream sessions.
 - Treat TLS with SPKI pinning and provider/client E2EE as supported binding
-  types. The verifier must fail closed when the binding cannot be enforced.
-- Write each successful session verification to an audit log that can be queried
-  by session id.
-- Make receipts reference the downstream session id and upstream session id
-  used for the request, instead of embedding all session evidence directly in
-  every receipt.
+  types. Implemented for upstream sessions.
+- Write each successful upstream session verification to an audit log that can
+  be queried by session id. Implemented at
+  `GET /v1/audit/sessions/{session_id}`.
+- Make receipts reference the upstream session id used for the request.
+  Implemented as `upstream.verified.session_id` when a verified binding exists.
+- Add downstream session ids once the gateway can select and report
+  domain-specific TLS bindings.
 - Keep the implementation small: reuse the existing upstream lease lifecycle
   where possible, and avoid introducing a policy DSL.
 

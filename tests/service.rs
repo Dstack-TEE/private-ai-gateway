@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 mod common;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
@@ -53,6 +53,14 @@ impl UpstreamBackend for StubUpstream {
             body: self.body.clone(),
             headers: Default::default(),
         })
+    }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward(req.request).await
     }
 }
 
@@ -190,6 +198,56 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
     assert_eq!(
         uv.fields.get("verifier_id").unwrap().as_str().unwrap(),
         "stub-verifier-1"
+    );
+}
+
+#[tokio::test]
+async fn verified_upstream_binding_creates_attested_session() {
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let event = UpstreamVerifiedEvent {
+        vendor: "stub-upstream".to_string(),
+        model_id: "x".to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
+        evidence_ref: Some("https://stub-upstream/v1/attestation/report".to_string()),
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: Some(serde_json::json!({"release": "fixture"})),
+    };
+
+    let result = svc
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .await
+        .unwrap();
+    let uv = result
+        .receipt
+        .event_log
+        .iter()
+        .find(|e| e.event_type == "upstream.verified")
+        .expect("must emit upstream.verified");
+    let session_id = uv
+        .fields
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .expect("verified binding should produce a session id");
+    let session = svc
+        .get_attested_session(session_id)
+        .expect("session audit record should be queryable");
+    assert_eq!(session.session_id, session_id);
+    assert_eq!(session.direction, "upstream");
+    assert_eq!(session.peer, "stub-upstream");
+    assert_eq!(session.model_id.as_deref(), Some("x"));
+    assert_eq!(session.verifier_id, "stub-verifier-1");
+    assert_eq!(session.channel_bindings.len(), 1);
+    assert_eq!(
+        session.channel_bindings[0]["spki_sha256"],
+        serde_json::Value::String("aa".repeat(32))
     );
 }
 

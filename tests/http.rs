@@ -13,10 +13,12 @@ use axum::{
     http::{Request, StatusCode},
 };
 use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
-use private_ai_gateway::aci::receipt::canonical_bytes_for_signing;
+use private_ai_gateway::aci::receipt::{
+    canonical_bytes_for_signing, ChannelBinding, UpstreamVerifiedEvent, VerificationResult,
+};
 use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
@@ -63,6 +65,14 @@ impl UpstreamBackend for StubUpstream {
             body: self.body.clone(),
             headers,
         })
+    }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward(req.request).await
     }
 }
 
@@ -333,6 +343,59 @@ async fn chat_x_request_hash_is_ignored() {
     );
     let expected = private_ai_gateway::aci::canonical::sha256_hex(&request_bytes);
     assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn attested_session_lookup_returns_audit_record() {
+    let h = make_harness();
+    let event = UpstreamVerifiedEvent {
+        vendor: "stub-upstream".to_string(),
+        model_id: "x".to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
+        evidence_ref: Some("https://stub-upstream/v1/attestation/report".to_string()),
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: None,
+    };
+    let result = h
+        .service
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .await
+        .unwrap();
+    let session_id = result
+        .receipt
+        .event_log
+        .iter()
+        .find(|e| e.event_type == "upstream.verified")
+        .and_then(|e| e.fields.get("session_id"))
+        .and_then(|v| v.as_str())
+        .expect("receipt should reference session")
+        .to_string();
+
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/audit/sessions/{session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(body["api_version"], "aci/1");
+    assert_eq!(body["session"]["session_id"], session_id);
+    assert_eq!(body["session"]["direction"], "upstream");
+    assert_eq!(body["session"]["verifier_id"], "stub-verifier-1");
 }
 
 #[tokio::test]

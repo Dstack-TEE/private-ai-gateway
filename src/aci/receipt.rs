@@ -277,6 +277,21 @@ impl ReceiptBuilder {
         self.append(EVENT_UPSTREAM_VERIFIED, event.to_fields())
     }
 
+    pub fn add_upstream_verified_with_session(
+        &mut self,
+        event: UpstreamVerifiedEvent,
+        session_id: Option<&str>,
+    ) -> Result<(), ReceiptError> {
+        let mut fields = event.to_fields();
+        if let (Some(session_id), Value::Object(obj)) = (session_id, &mut fields) {
+            obj.insert(
+                "session_id".to_string(),
+                Value::String(session_id.to_string()),
+            );
+        }
+        self.append(EVENT_UPSTREAM_VERIFIED, fields)
+    }
+
     pub fn add_transparency_event(
         &mut self,
         kind: TransparencyEventKind,

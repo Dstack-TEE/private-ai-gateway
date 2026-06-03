@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -242,6 +243,26 @@ impl ReceiptOwner {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AttestedSessionRecord {
+    pub api_version: String,
+    pub session_id: String,
+    pub direction: String,
+    pub peer: String,
+    pub model_id: Option<String>,
+    pub url_origin: Option<String>,
+    pub established_at: u64,
+    pub expires_at: u64,
+    pub verifier_id: String,
+    pub evidence_digest: Option<String>,
+    pub evidence_ref: Option<String>,
+    pub binding_material_digest: String,
+    pub channel_bindings: Vec<Value>,
+    pub provider_claims: Option<Value>,
+    pub workload_id: String,
+    pub workload_keyset_digest: String,
+}
+
 /// Stored receipts plus optional retained request bodies. The default
 /// in-memory implementation is enough for the first increment; a
 /// regional persistent store comes in a follow-up.
@@ -260,6 +281,10 @@ pub trait ReceiptStore: Send + Sync {
     fn put_body(&self, receipt_id: &str, body: Vec<u8>, expires_at: u64);
     /// Fetch the retained body if it exists and `now < expires_at`.
     fn get_body(&self, receipt_id: &str, now: u64) -> Option<Vec<u8>>;
+    /// Store a verified attested-session audit record.
+    fn put_attested_session(&self, session: AttestedSessionRecord);
+    /// Fetch an attested-session audit record if it exists and is not expired.
+    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord>;
 }
 
 #[derive(Default)]
@@ -272,6 +297,7 @@ struct InMemoryReceiptStoreInner {
     by_receipt: std::collections::HashMap<String, StoredReceipt>,
     by_chat: std::collections::HashMap<String, String>,
     bodies: std::collections::HashMap<String, RetainedBody>,
+    sessions: std::collections::HashMap<String, AttestedSessionRecord>,
 }
 
 struct StoredReceipt {
@@ -362,6 +388,21 @@ impl ReceiptStore for InMemoryReceiptStore {
             return Some(entry.bytes.clone());
         }
         None
+    }
+
+    fn put_attested_session(&self, session: AttestedSessionRecord) {
+        let mut guard = self.inner.write().expect("receipt store poisoned");
+        guard.sessions.insert(session.session_id.clone(), session);
+    }
+
+    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord> {
+        let mut guard = self.inner.write().expect("receipt store poisoned");
+        let expires_at = guard.sessions.get(session_id)?.expires_at;
+        if now >= expires_at {
+            guard.sessions.remove(session_id);
+            return None;
+        }
+        guard.sessions.get(session_id).cloned()
     }
 }
 
@@ -1145,7 +1186,9 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        builder.add_upstream_verified(recorded_event)?;
+        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+        builder
+            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
         if upstream_response.body != wire_response_body {
             builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
         }
@@ -1281,7 +1324,11 @@ impl AciService {
             if received_body != forwarded_body.as_slice() {
                 builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
             }
-            builder.add_upstream_verified(recorded_event)?;
+            let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+            builder.add_upstream_verified_with_session(
+                recorded_event,
+                upstream_session_id.as_deref(),
+            )?;
             receipt_journal.reserve_receipt_id(receipt_id.clone());
 
             let body = MiddlewareProviderResponseDraftingStream {
@@ -1370,7 +1417,9 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        builder.add_upstream_verified(recorded_event)?;
+        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+        builder
+            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
         let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
@@ -1500,7 +1549,9 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        builder.add_upstream_verified(recorded_event)?;
+        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+        builder
+            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
 
         let e2ee_response = req.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -1774,6 +1825,66 @@ impl AciService {
         }
     }
 
+    fn record_attested_upstream_session(
+        &self,
+        event: &UpstreamVerifiedEvent,
+    ) -> Result<Option<String>, ServiceError> {
+        if event.result != VerificationResult::Verified || event.channel_bindings.is_empty() {
+            return Ok(None);
+        }
+
+        let now = self.clock.now_secs();
+        let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
+        let channel_bindings = event
+            .channel_bindings
+            .iter()
+            .map(|binding| binding.to_value())
+            .collect::<Vec<_>>();
+        let binding_material = json!({
+            "channel_bindings": channel_bindings,
+        });
+        let binding_material_digest = crate::aci::canonical::jcs_sha256_hex(&binding_material)?;
+        let session_material = json!({
+            "direction": "upstream",
+            "peer": event.vendor,
+            "model_id": event.model_id,
+            "url_origin": event.url_origin,
+            "verifier_id": event.verifier_id,
+            "evidence_digest": event.evidence_digest,
+            "evidence_ref": event.evidence_ref,
+            "binding_material_digest": binding_material_digest,
+            "workload_id": self.workload_id,
+            "workload_keyset_digest": self.workload_keyset_digest,
+        });
+        let session_digest = crate::aci::canonical::jcs_sha256_hex(&session_material)?;
+        let session_id = format!(
+            "as_{}",
+            session_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(session_digest.as_str())
+        );
+        let record = AttestedSessionRecord {
+            api_version: "aci/1".to_string(),
+            session_id: session_id.clone(),
+            direction: "upstream".to_string(),
+            peer: event.vendor.clone(),
+            model_id: Some(event.model_id.clone()),
+            url_origin: event.url_origin.clone(),
+            established_at: now,
+            expires_at,
+            verifier_id: event.verifier_id.clone(),
+            evidence_digest: event.evidence_digest.clone(),
+            evidence_ref: event.evidence_ref.clone(),
+            binding_material_digest,
+            channel_bindings,
+            provider_claims: event.provider_claims.clone(),
+            workload_id: self.workload_id.clone(),
+            workload_keyset_digest: self.workload_keyset_digest.clone(),
+        };
+        self.receipt_store.put_attested_session(record);
+        Ok(Some(session_id))
+    }
+
     fn store_receipt(
         &self,
         receipt: Receipt,
@@ -1838,6 +1949,11 @@ impl AciService {
     pub fn get_retained_body(&self, receipt_id: &str) -> Option<Vec<u8>> {
         self.receipt_store
             .get_body(receipt_id, self.clock.now_secs())
+    }
+
+    pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSessionRecord> {
+        self.receipt_store
+            .get_attested_session(session_id, self.clock.now_secs())
     }
 
     /// Body retention window in seconds, or 0 if bodies are not retained.

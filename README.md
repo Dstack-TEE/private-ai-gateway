@@ -104,6 +104,7 @@ Use this checklist before treating a deployment as private inference.
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
+| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
 | Provider is admissible | Review the provider-specific report in `docs/reviews/providers/` against `docs/reviews/providers/audit-criteria.md`. |
@@ -121,6 +122,8 @@ additional ACI artifacts are:
   to.
 - `x-receipt-id`: returned on provider-backed inference responses.
 - `GET /v1/receipt/{id}`: fetches the signed receipt by chat id or receipt id.
+- `GET /v1/audit/sessions/{session_id}`: fetches an attested-session audit
+  record referenced by a receipt.
 - Optional ACI E2EE headers: encrypt selected request/response fields when the
   client wants application-level encryption in addition to TLS.
 
@@ -157,6 +160,7 @@ container.
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
 | Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, ACI/DCAP, and generic OpenAI-compatible upstreams |
+| Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
 | Middleware framework | Implemented over HTTP on Unix domain sockets |
 | Receipt/body store | In-memory; receipt TTL is configurable, body retention defaults to disabled |
 | Public transparency log | Not implemented |
@@ -390,6 +394,7 @@ writing middleware.
 | `GET /v1/receipt/{id}` | Signed ACI receipt by chat id or receipt id. |
 | `GET /v1/signature/{id}` | Legacy alias of the receipt endpoint. |
 | `GET /v1/receipt/{id}/body` | Retained provider-facing request body when retention is enabled. |
+| `GET /v1/audit/sessions/{session_id}` | Attested-session audit record referenced by a receipt. |
 | `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
 | `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |
 | `PUT /v1/admin/upstreams` | Authenticated upstream config replacement. |

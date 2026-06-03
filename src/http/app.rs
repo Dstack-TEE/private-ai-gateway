@@ -40,6 +40,8 @@
 //!   request body. Same id semantics. Returns
 //!   `receipt_body_not_retained` when retention is zero or the entry
 //!   expired.
+//! * `GET  /v1/audit/sessions/{session_id}` - fetch the attested-session
+//!   audit record referenced by a receipt.
 //!
 //! The router installs a middleware that emits `X-ACI-Version`,
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
@@ -261,6 +263,7 @@ fn build_router_inner(
         .route("/v1/receipt/:chat_id", get(receipt_by_chat_id))
         .route("/v1/signature/:chat_id", get(receipt_by_chat_id))
         .route("/v1/receipt/:chat_id/body", get(get_receipt_body))
+        .route("/v1/audit/sessions/:session_id", get(attested_session))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             aci_headers_middleware,
@@ -1547,6 +1550,24 @@ async fn get_receipt_body(
             "receipt body not retained",
         ),
     }
+}
+
+async fn attested_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(session) = state.service.get_attested_session(&session_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Attested session not found or expired",
+        );
+    };
+    Json(json!({
+        "api_version": "aci/1",
+        "session": session,
+    }))
+    .into_response()
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
