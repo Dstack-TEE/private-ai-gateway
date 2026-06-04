@@ -144,6 +144,26 @@ Useful terms:
 - **SPKI digest**: a SHA-256 digest of a TLS public key used as channel-binding
   evidence when a verifier or attested keyset supplies it.
 
+## Evidence Encoding
+
+ACI evidence objects are byte-preserving:
+
+```json
+{
+  "digest": "sha256:<sha256-of-decoded-data-bytes>",
+  "data": "data:<content-type>;base64,<exact-bytes>"
+}
+```
+
+The gateway computes `digest` over the bytes obtained by decoding the data URI,
+not over a parsed JSON value. When a verifier needs to preserve multiple
+upstream responses, `data` may be a `multipart/mixed` data URI whose parts carry
+their original content type, source URL, and body bytes.
+
+Do not infer provider semantics from the generic evidence wrapper. Provider
+meaning belongs to the provider verifier and the provider review document. The
+gateway enforces only the generic verifier result and channel binding.
+
 ## Project Status
 
 `0.1.0` is a developer preview. The request path is implemented, but production

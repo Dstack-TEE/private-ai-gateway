@@ -463,7 +463,7 @@ Procedure:
 5. Verify receipt workload id and keyset digest match the verified report.
 6. Verify request/response hashes when bodies are supplied.
 7. Inspect `upstream.verified` and show provider, model id, verifier id,
-   evidence digest/ref, result, and binding type.
+   evidence digest, evidence data URI content type, result, and binding type.
 
 The final output should be a human-readable summary plus a machine-readable
 JSON result:

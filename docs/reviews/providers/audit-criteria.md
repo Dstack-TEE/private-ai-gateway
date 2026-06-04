@@ -256,8 +256,11 @@ Receipts should record:
 - transparency-log events for request or response rewrites
 
 Receipts should not require users to understand every provider's native
-attestation format. The detailed evidence can be stored by digest or exposed as
-provider-specific audit material.
+attestation format. Detailed verifier evidence should use the common evidence
+object: a `sha256:` digest over the decoded bytes and a data URI that preserves
+the exact bytes and content type. If a verifier needs several upstream bodies,
+use one `multipart/mixed` data URI rather than provider-specific JSON
+gymnastics.
 
 ### 12. Negative Checks
 
@@ -357,6 +360,10 @@ Every provider adapter should return the same class of result to Rust:
 The exact `provider_claims` fields are provider-owned. Rust should enforce the
 generic fields and the channel binding. Provider-specific meaning belongs in
 the adapter and review document.
+
+`evidence.digest` is computed over the decoded bytes from `evidence.data`.
+Provider adapters must not rebuild evidence into a normalized JSON shape unless
+that JSON is exactly the input fed to the verifier.
 
 Provider verifiers may call provider-owned tools, local scripts, SDKs, or Rust
 libraries. The verifier command itself is part of the provider adapter, not a

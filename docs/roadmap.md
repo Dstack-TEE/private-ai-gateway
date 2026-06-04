@@ -36,10 +36,10 @@ has been verified against attestation evidence and enforceable binding material.
 Both downstream user sessions and upstream provider sessions should use this
 concept.
 
-- Define the session record shape: session id, direction, peer/provider,
-  verification time, expiry, attestation evidence summary, binding type, binding
-  material digest, verifier result, and related workload identity. Implemented
-  for upstream sessions.
+- Define the session record shape: session id, direction, upstream/provider,
+  verification time, expiry, byte-preserving verifier evidence, verified claim
+  tags, and enforceable session binding material. Implemented for upstream
+  sessions.
 - Treat TLS with SPKI pinning and provider/client E2EE as supported binding
   types. Implemented for upstream sessions.
 - Write each successful upstream session verification to an audit log that can
