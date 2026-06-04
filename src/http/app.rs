@@ -455,9 +455,15 @@ async fn admin_put_upstreams(
 
 async fn attestation_report(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<AttestationQuery>,
 ) -> Response {
-    match state.service.attestation_report(q.nonce).await {
+    let domain = request_host_domain(&headers);
+    match state
+        .service
+        .attestation_report_for_domain(q.nonce, domain.as_deref())
+        .await
+    {
         Ok(report) => {
             match report_with_legacy_attestation_fields(report, q.signing_algo.as_deref()) {
                 Ok(value) => Json(value).into_response(),
@@ -1584,6 +1590,33 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+fn request_host_domain(headers: &HeaderMap) -> Option<String> {
+    normalize_host_domain(header_str(headers, "host")?)
+}
+
+fn normalize_host_domain(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let host = if let Some(rest) = raw.strip_prefix('[') {
+        let end = rest.find(']')?;
+        &rest[..end]
+    } else {
+        raw.split_once(':').map_or(raw, |(host, _)| host)
+    };
+    let domain = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.contains('/')
+        || domain.contains('=')
+        || domain.contains(',')
+        || domain.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(domain)
 }
 
 fn has_e2ee_headers(headers: &HeaderMap) -> bool {

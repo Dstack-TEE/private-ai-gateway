@@ -437,6 +437,8 @@ both are set.
 | Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `3600` |
 | TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | unset |
 | TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | unset |
+| Domain TLS certificate map | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` | unset |
+| Domain TLS SPKI SHA-256 map | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256` | unset |
 | Upstream verifier mode | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` | `none` |
 | Accepted upstream workload IDs | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS` | unset |
 | Accepted upstream image digests | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` | unset |
@@ -450,11 +452,25 @@ both are set.
 | Middleware UDS path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` | unset; middleware disabled |
 | Internal backend UDS path | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | `/run/private-ai-gateway/backend.sock` |
 
-Prefer `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` for client-facing TLS binding. The
-gateway reads the mounted leaf certificate, computes `sha256(SPKI)`, and
-publishes that digest in the attested keyset. Use
-`PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` only for manual or test deployments. Set
-only one of the two.
+Prefer certificate-path variables for client-facing TLS binding. The gateway
+reads each mounted leaf certificate, computes `sha256(SPKI)`, and publishes
+that digest in the attested keyset. Use SPKI variables only for manual or test
+deployments.
+
+Use `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` when the gateway serves multiple
+custom domains:
+
+```bash
+PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS=api.example.com=/run/certs/api.pem,chat.example.com=/run/certs/chat.pem
+```
+
+The equivalent manual form is
+`PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256=api.example.com=<hex>,chat.example.com=<hex>`.
+Set only one TLS binding source among the service-wide and domain-mapped
+variables. When domain bindings are configured,
+`GET /v1/attestation/report` uses the request `Host` to add the matching
+`attestation.evidence.downstream_tls_binding` entry while keeping all configured
+TLS keys in the attested keyset.
 
 `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` accepts HTTP(S) endpoints and Unix socket
 endpoints such as `unix:/var/run/dstack.sock`.

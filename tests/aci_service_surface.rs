@@ -262,6 +262,7 @@ fn harness_with_body_retention_upstream_and_e2ee(
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {
+        domain: None,
         spki_sha256_hex: "configured-spki-sha256-hex".to_string(),
     }]);
     let service = Arc::new(
@@ -1199,6 +1200,7 @@ async fn plaintext_https_keyset_publishes_configured_tls_spki() {
     let report = h.service.attestation_report(None).await.unwrap();
     let tls_keys = report.attestation.workload_keyset.tls_public_keys;
     assert_eq!(tls_keys.len(), 1);
+    assert_eq!(tls_keys[0].domain, None);
     assert_eq!(tls_keys[0].spki_sha256_hex, "configured-spki-sha256-hex");
 }
 

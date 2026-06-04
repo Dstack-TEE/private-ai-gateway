@@ -30,6 +30,7 @@ fn sample_keyset(subject: Option<&str>, epoch_version: u64) -> WorkloadKeyset {
             public_key_hex: "22".repeat(32),
         }],
         tls_public_keys: vec![TlsSpki {
+            domain: None,
             spki_sha256_hex: "33".repeat(32),
         }],
     }

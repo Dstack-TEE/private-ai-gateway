@@ -173,6 +173,20 @@ pub fn validate_source_provenance(sp: &SourceProvenance) -> Result<(), ServiceEr
     }
 }
 
+fn normalize_downstream_domain(raw: &str) -> Option<String> {
+    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.contains('/')
+        || domain.contains(':')
+        || domain.contains('=')
+        || domain.contains(',')
+        || domain.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(domain)
+}
+
 /// Configuration accepted by [`AciService::new`].
 pub struct AciServiceConfig {
     pub vendor: String,
@@ -799,6 +813,17 @@ impl AciService {
         &self,
         nonce: Option<String>,
     ) -> Result<AttestationReport, ServiceError> {
+        self.attestation_report_for_domain(nonce, None).await
+    }
+
+    /// Build a fresh attestation report and annotate it with the downstream
+    /// TLS binding selected for `domain`, when the configured keyset contains
+    /// an exact domain match.
+    pub async fn attestation_report_for_domain(
+        &self,
+        nonce: Option<String>,
+        domain: Option<&str>,
+    ) -> Result<AttestationReport, ServiceError> {
         let statement = attestation_statement(&self.keyset, nonce)?;
         let rd = report_data(&statement)?;
         let quote = self.quoter.get_quote(rd).await?;
@@ -826,6 +851,9 @@ impl AciService {
         if !key_custody.is_null() {
             evidence["key_custody"] = key_custody;
         }
+        if let Some(binding) = domain.and_then(|domain| self.downstream_tls_binding(domain)) {
+            evidence["downstream_tls_binding"] = binding;
+        }
 
         let envelope = AttestationEnvelope {
             vendor: self.config.vendor.clone(),
@@ -845,6 +873,20 @@ impl AciService {
             attestation: envelope,
             service_capabilities: self.config.service_capabilities.clone(),
         })
+    }
+
+    fn downstream_tls_binding(&self, domain: &str) -> Option<Value> {
+        let domain = normalize_downstream_domain(domain)?;
+        self.keyset
+            .tls_public_keys
+            .iter()
+            .find(|key| key.domain.as_deref() == Some(domain.as_str()))
+            .map(|key| {
+                json!({
+                    "domain": domain,
+                    "spki_sha256": key.spki_sha256_hex,
+                })
+            })
     }
 
     pub fn prepare_e2ee_v2_request(

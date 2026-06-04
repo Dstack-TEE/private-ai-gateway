@@ -21,6 +21,8 @@
 //! | Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS` |
 //! | TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | `DSTACK_LLM_ROUTER_TLS_CERT_PATHS` |
 //! | TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | `DSTACK_LLM_ROUTER_TLS_SPKI_SHA256` |
+//! | Domain TLS certificate map (`domain=path`) | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` | `DSTACK_LLM_ROUTER_TLS_DOMAIN_CERT_PATHS` |
+//! | Domain TLS SPKI map (`domain=sha256`) | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256` | `DSTACK_LLM_ROUTER_TLS_DOMAIN_SPKI_SHA256` |
 //! | Upstream verifier mode (`none`, `preverified`, `aci-dcap`) | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` | `DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER` |
 //! | Accepted upstream workload IDs | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS` | `DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_WORKLOAD_IDS` |
 //! | Accepted upstream image digests | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` | `DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` |
@@ -107,11 +109,36 @@ fn parse_tls_spki_list(value: &str) -> Result<Vec<TlsSpki>, String> {
             ));
         }
         keys.push(TlsSpki {
+            domain: None,
             spki_sha256_hex: item.to_ascii_lowercase(),
         });
     }
     if keys.is_empty() {
         return Err("TLS SPKI SHA-256 list must not be empty".to_string());
+    }
+    Ok(keys)
+}
+
+fn parse_domain_spki_map(value: &str) -> Result<Vec<TlsSpki>, String> {
+    let mut keys = Vec::new();
+    let mut domains = std::collections::BTreeSet::new();
+    for raw in value.split(',') {
+        let (domain, spki) = parse_domain_value(raw, "TLS domain SPKI")?;
+        if !domains.insert(domain.clone()) {
+            return Err(format!("TLS domain {domain:?} is duplicated"));
+        }
+        if spki.len() != 64 || !spki.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+            return Err(format!(
+                "invalid TLS SPKI SHA-256 digest {spki:?}: expected 64 hex characters"
+            ));
+        }
+        keys.push(TlsSpki {
+            domain: Some(domain),
+            spki_sha256_hex: spki.to_ascii_lowercase(),
+        });
+    }
+    if keys.is_empty() {
+        return Err("TLS domain SPKI map must not be empty".to_string());
     }
     Ok(keys)
 }
@@ -131,6 +158,50 @@ fn parse_tls_cert_paths(value: &str) -> Result<Vec<TlsSpki>, String> {
     Ok(keys)
 }
 
+fn parse_domain_cert_paths(value: &str) -> Result<Vec<TlsSpki>, String> {
+    let mut keys = Vec::new();
+    let mut domains = std::collections::BTreeSet::new();
+    for raw in value.split(',') {
+        let (domain, path) = parse_domain_value(raw, "TLS domain certificate")?;
+        if !domains.insert(domain.clone()) {
+            return Err(format!("TLS domain {domain:?} is duplicated"));
+        }
+        let mut key = tls_spki_from_cert_path(Path::new(&path))?;
+        key.domain = Some(domain);
+        keys.push(key);
+    }
+    if keys.is_empty() {
+        return Err("TLS domain certificate map must not be empty".to_string());
+    }
+    Ok(keys)
+}
+
+fn parse_domain_value(raw: &str, label: &str) -> Result<(String, String), String> {
+    let (domain, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("{label} entry must be domain=value, got {raw:?}"))?;
+    let domain = normalize_config_domain(domain)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} entry for {domain:?} has an empty value"));
+    }
+    Ok((domain, value.to_string()))
+}
+
+fn normalize_config_domain(raw: &str) -> Result<String, String> {
+    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.contains('/')
+        || domain.contains(':')
+        || domain.contains('=')
+        || domain.contains(',')
+        || domain.chars().any(char::is_whitespace)
+    {
+        return Err(format!("invalid TLS domain {raw:?}"));
+    }
+    Ok(domain)
+}
+
 fn tls_spki_from_cert_path(path: &Path) -> Result<TlsSpki, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("failed to read TLS certificate {}: {e}", path.display()))?;
@@ -140,6 +211,7 @@ fn tls_spki_from_cert_path(path: &Path) -> Result<TlsSpki, String> {
         .map_err(|e| format!("failed to parse X.509 certificate {}: {e}", path.display()))?;
     let digest = Sha256::digest(cert.public_key().raw);
     Ok(TlsSpki {
+        domain: None,
         spki_sha256_hex: hex::encode(digest),
     })
 }
@@ -158,16 +230,39 @@ fn leaf_certificate_der(bytes: &[u8]) -> Result<Vec<u8>, String> {
 fn resolve_tls_public_keys(
     cert_paths: Option<&str>,
     explicit_spkis: Option<&str>,
+    domain_cert_paths: Option<&str>,
+    domain_spkis: Option<&str>,
 ) -> Result<Option<Vec<TlsSpki>>, String> {
-    match (cert_paths, explicit_spkis) {
-        (Some(_), Some(_)) => Err(
-            "set either PRIVATE_AI_GATEWAY_TLS_CERT_PATHS or PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256, not both"
+    let configured = [
+        cert_paths.is_some(),
+        explicit_spkis.is_some(),
+        domain_cert_paths.is_some(),
+        domain_spkis.is_some(),
+    ]
+    .into_iter()
+    .filter(|configured| *configured)
+    .count();
+    if configured > 1 {
+        return Err(
+            "set only one TLS binding source: PRIVATE_AI_GATEWAY_TLS_CERT_PATHS, \
+             PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256, PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS, \
+             or PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256"
                 .to_string(),
-        ),
-        (Some(paths), None) => parse_tls_cert_paths(paths).map(Some),
-        (None, Some(spkis)) => parse_tls_spki_list(spkis).map(Some),
-        (None, None) => Ok(None),
+        );
     }
+    if let Some(paths) = cert_paths {
+        return parse_tls_cert_paths(paths).map(Some);
+    }
+    if let Some(spkis) = explicit_spkis {
+        return parse_tls_spki_list(spkis).map(Some);
+    }
+    if let Some(paths) = domain_cert_paths {
+        return parse_domain_cert_paths(paths).map(Some);
+    }
+    if let Some(spkis) = domain_spkis {
+        return parse_domain_spki_map(spkis).map(Some);
+    }
+    Ok(None)
 }
 
 fn seed_upstream_config_if_empty(
@@ -280,7 +375,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256",
         "DSTACK_LLM_ROUTER_TLS_SPKI_SHA256",
     );
-    let tls_public_keys = resolve_tls_public_keys(tls_cert_paths.as_deref(), tls_spkis.as_deref())?;
+    let tls_domain_cert_paths = env_pref(
+        "PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS",
+        "DSTACK_LLM_ROUTER_TLS_DOMAIN_CERT_PATHS",
+    );
+    let tls_domain_spkis = env_pref(
+        "PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256",
+        "DSTACK_LLM_ROUTER_TLS_DOMAIN_SPKI_SHA256",
+    );
+    let tls_public_keys = resolve_tls_public_keys(
+        tls_cert_paths.as_deref(),
+        tls_spkis.as_deref(),
+        tls_domain_cert_paths.as_deref(),
+        tls_domain_spkis.as_deref(),
+    )?;
     let upstream_verifier_mode = env_pref(
         "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER",
         "DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER",
@@ -535,8 +643,9 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        parse_body_retention_seconds, parse_positive_seconds, parse_tls_cert_paths,
-        parse_tls_spki_list, resolve_tls_public_keys, seed_upstream_config_if_empty,
+        parse_body_retention_seconds, parse_domain_spki_map, parse_positive_seconds,
+        parse_tls_cert_paths, parse_tls_spki_list, resolve_tls_public_keys,
+        seed_upstream_config_if_empty,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -607,8 +716,37 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let second = "bb".repeat(32);
         let parsed = parse_tls_spki_list(&format!("{first},{second}")).unwrap();
         assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].domain, None);
         assert_eq!(parsed[0].spki_sha256_hex, "aa".repeat(32));
         assert_eq!(parsed[1].spki_sha256_hex, "bb".repeat(32));
+    }
+
+    #[test]
+    fn parses_domain_tls_spki_map_as_lowercase_domains_and_digests() {
+        let parsed = parse_domain_spki_map(&format!(
+            "Api.Example.COM={first},chat.example.com={second}",
+            first = "AA".repeat(32),
+            second = "bb".repeat(32),
+        ))
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].domain.as_deref(), Some("api.example.com"));
+        assert_eq!(parsed[0].spki_sha256_hex, "aa".repeat(32));
+        assert_eq!(parsed[1].domain.as_deref(), Some("chat.example.com"));
+        assert_eq!(parsed[1].spki_sha256_hex, "bb".repeat(32));
+    }
+
+    #[test]
+    fn rejects_invalid_domain_tls_spki_map() {
+        assert!(parse_domain_spki_map("api.example.com").is_err());
+        assert!(parse_domain_spki_map(&format!("api.example.com={}", "aa")).is_err());
+        assert!(parse_domain_spki_map(&format!("api:443={}", "aa".repeat(32))).is_err());
+        assert!(parse_domain_spki_map(&format!(
+            "api.example.com={},API.example.com={}",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        ))
+        .is_err());
     }
 
     #[test]
@@ -818,6 +956,13 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     #[test]
     fn tls_cert_paths_and_explicit_spkis_are_mutually_exclusive() {
         let explicit = "aa".repeat(32);
-        assert!(resolve_tls_public_keys(Some("/cert.pem"), Some(&explicit)).is_err());
+        assert!(resolve_tls_public_keys(Some("/cert.pem"), Some(&explicit), None, None).is_err());
+        assert!(resolve_tls_public_keys(
+            None,
+            Some(&explicit),
+            None,
+            Some(&format!("api.example.com={}", "bb".repeat(32)))
+        )
+        .is_err());
     }
 }

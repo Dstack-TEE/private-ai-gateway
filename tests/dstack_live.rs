@@ -390,6 +390,7 @@ async fn dstack_live_aci_dcap_upstream_verifier_accepts_real_aci_service() {
         image_provenance: None,
     };
     cfg.tls_public_keys = Some(vec![TlsSpki {
+        domain: None,
         spki_sha256_hex: "aa".repeat(32),
     }]);
 

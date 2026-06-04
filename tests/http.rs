@@ -16,7 +16,7 @@ use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, ChannelBinding, UpstreamVerifiedEvent, VerificationResult,
 };
-use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities};
+use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
@@ -83,6 +83,10 @@ struct TestHarness {
 }
 
 fn make_harness() -> TestHarness {
+    make_harness_with_tls_public_keys(None)
+}
+
+fn make_harness_with_tls_public_keys(tls_public_keys: Option<Vec<TlsSpki>>) -> TestHarness {
     let keys = Arc::new(StaticKeyProvider::default());
     let receipt_keys = keys.receipt_keys();
     let quoter = Arc::new(StubQuoter::default());
@@ -91,6 +95,7 @@ fn make_harness() -> TestHarness {
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities::default();
+    cfg.tls_public_keys = tls_public_keys;
     let svc = AciService::new(
         keys,
         quoter,
@@ -161,6 +166,48 @@ async fn attestation_report_endpoint_shape() {
             .get("supported_e2ee_versions")
             .unwrap(),
         &serde_json::Value::Array(vec![])
+    );
+}
+
+#[tokio::test]
+async fn attestation_report_selects_domain_tls_binding_from_host_header() {
+    let h = make_harness_with_tls_public_keys(Some(vec![
+        TlsSpki {
+            domain: Some("api.example.com".to_string()),
+            spki_sha256_hex: "aa".repeat(32),
+        },
+        TlsSpki {
+            domain: Some("chat.example.com".to_string()),
+            spki_sha256_hex: "bb".repeat(32),
+        },
+    ]));
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/attestation/report?nonce=abcd")
+                .header("host", "Api.Example.COM:443")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    let tls_keys = body["attestation"]["workload_keyset"]["tls_public_keys"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tls_keys.len(), 2);
+    assert_eq!(tls_keys[0]["domain"], "api.example.com");
+    assert_eq!(tls_keys[0]["spki_sha256"], "aa".repeat(32));
+    assert_eq!(
+        body["attestation"]["evidence"]["downstream_tls_binding"],
+        serde_json::json!({
+            "domain": "api.example.com",
+            "spki_sha256": "aa".repeat(32),
+        })
     );
 }
 

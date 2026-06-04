@@ -57,13 +57,19 @@ impl KeyedPublicKey {
 /// SPKI digest of a TLS endpoint certificate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TlsSpki {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     #[serde(rename = "spki_sha256")]
     pub spki_sha256_hex: String,
 }
 
 impl TlsSpki {
     pub fn to_canonical_value(&self) -> Value {
-        json!({ "spki_sha256": self.spki_sha256_hex })
+        let mut value = json!({ "spki_sha256": self.spki_sha256_hex });
+        if let (Some(domain), Some(obj)) = (&self.domain, value.as_object_mut()) {
+            obj.insert("domain".to_string(), Value::String(domain.clone()));
+        }
+        value
     }
 }
 

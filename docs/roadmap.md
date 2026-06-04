@@ -22,7 +22,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, and Chutes have concrete adapters. OpenAI-compatible and ACI/DCAP paths remain useful for deployment bring-up and internal dstack upstreams. |
 | Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
-| Multi-domain downstream TLS binding | Planned | Support multiple downstream custom domains by mapping a requested domain to its certificate/SPKI binding and publishing the matching binding in the gateway evidence path. |
+| Multi-domain downstream TLS binding | In progress | Domain-tagged TLS SPKIs can be configured, published in the keyset, and selected in report evidence from the HTTP `Host`. Downstream session ids are still pending. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
@@ -57,15 +57,18 @@ concept.
 The gateway currently assumes one downstream TLS identity. Production deployments
 may need multiple custom domains bound to the same gateway workload.
 
-- Add runtime config for a domain-to-certificate mapping.
-- Select the served certificate from the requested domain, using the TLS SNI
-  value where available and the HTTP host only for evidence/report selection.
-- Publish the SPKI binding for the requested downstream domain in the gateway
-  attestation/evidence response.
+- Add runtime config for a domain-to-certificate mapping. Implemented through
+  `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` and
+  `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256`.
+- Publish all configured domain SPKI bindings in the attested keyset.
+  Implemented.
+- Select the configured downstream domain binding from the HTTP `Host` and
+  publish it in the gateway attestation evidence. Implemented.
 - Ensure receipts and attested-session audit records identify the downstream
   domain/session used by the request.
-- Keep certificate issuance and renewal out of scope for this repo; another
-  component may mount certificates for the gateway to serve.
+- Keep certificate issuance, renewal, and TLS serving out of scope for this
+  repo; another component may mount certificates and terminate TLS for the
+  gateway deployment.
 
 ### P0: Frontend / Middleware / Backend Refactor
 
