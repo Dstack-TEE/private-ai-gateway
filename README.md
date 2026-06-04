@@ -492,6 +492,18 @@ receipt hashing, dynamic upstream config, or metrics:
 scripts/local_multi_upstream_smoke.sh
 ```
 
+Run live upstream smoke after changing provider adapters, attested sessions, or
+receipt audit fields:
+
+```bash
+uv run python scripts/live_e2e/run.py --profile quick --port 0
+```
+
+The live smoke verifies every configured upstream in
+`scripts/live_e2e/providers.json`, sends one request per supported surface, then
+checks each receipt's `upstream.verified.session_id` against
+`GET /v1/audit/sessions/{session_id}`.
+
 Run the slower Phala deployment smoke when you need to validate the deployment
 surface:
 
