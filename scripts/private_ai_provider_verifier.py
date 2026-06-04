@@ -52,6 +52,80 @@ def sha256_json_prefixed(value: Any) -> str:
     return f"sha256:{sha256_json(value)}"
 
 
+def sha256_bytes_prefixed(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+def json_bytes(value: Any) -> bytes:
+    return json.dumps(value, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def data_uri(data: bytes, content_type: str) -> str:
+    return f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def evidence_bundle(
+    data: bytes,
+    source_url: str | None = None,
+    content_type: str = "application/octet-stream",
+) -> dict[str, Any]:
+    bundle = {
+        "digest": sha256_bytes_prefixed(data),
+        "data": data_uri(data, content_type),
+    }
+    if source_url:
+        bundle["source_url"] = source_url
+    return bundle
+
+
+def json_evidence_bundle(value: Any, source_url: str | None = None) -> dict[str, Any]:
+    return evidence_bundle(json_bytes(value), source_url, "application/json")
+
+
+def raw_http_item(name: str, source_url: str, content_type: str, body: bytes) -> dict[str, Any]:
+    return {
+        "name": name,
+        "source_url": source_url,
+        "sha256": sha256_bytes_prefixed(body),
+        "content_type": content_type,
+        "body": body,
+    }
+
+
+def response_content_type(response: Any) -> str:
+    return str(response.headers.get("content-type") or "application/octet-stream")
+
+
+def raw_http_bundle_evidence(
+    items: list[dict[str, Any]],
+    *,
+    source_url: str | None = None,
+) -> dict[str, Any]:
+    boundary = "aci-evidence-" + hashlib.sha256(
+        b"".join(item["body"] for item in items)
+    ).hexdigest()[:24]
+    chunks: list[bytes] = []
+    for item in items:
+        headers = [
+            f"--{boundary}",
+            f"Content-Type: {item['content_type']}",
+            f"Content-Location: {item['source_url']}",
+            f"Content-ID: <{item['name']}>",
+            f"Digest: sha-256={base64.b64encode(hashlib.sha256(item['body']).digest()).decode('ascii')}",
+            "",
+            "",
+        ]
+        chunks.append("\r\n".join(headers).encode("utf-8"))
+        chunks.append(item["body"])
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return evidence_bundle(
+        b"".join(chunks),
+        source_url,
+        f"multipart/mixed;boundary={boundary}",
+    )
+
+
 def sha256_base64_key(value: str) -> str:
     return hashlib.sha256(base64.b64decode(value.strip())).hexdigest()
 
@@ -314,18 +388,16 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         report = await verifier.fetch_report(provider, request["model_id"])
         result = await verifier.verify(report)
     report_obj = model_dump(report)
-    result_obj = model_dump(result)
-    evidence_ref = request.get("url_origin")
-    if evidence_ref:
-        evidence_ref = f"{evidence_ref.rstrip('/')}/.well-known/tinfoil-attestation"
+    attestation_url = request.get("url_origin")
+    if attestation_url:
+        attestation_url = f"{attestation_url.rstrip('/')}/.well-known/tinfoil-attestation"
     else:
-        evidence_ref = "https://inference.tinfoil.sh/.well-known/tinfoil-attestation"
+        attestation_url = "https://inference.tinfoil.sh/.well-known/tinfoil-attestation"
     if not result.model_verified:
         failed(
             provider,
             result.error or "Tinfoil verification failed",
-            evidence_digest=sha256_json(report_obj),
-            evidence_ref=evidence_ref,
+            evidence=json_evidence_bundle(report_obj, attestation_url),
         )
         return
     report_data = tinfoil_report_data(report.raw or {}, report.intel_quote)
@@ -333,8 +405,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         {
             "result": "verified",
             "verifier_id": "private-ai-verifier/tinfoil/v1",
-            "evidence_digest": sha256_json({"report": report_obj, "result": result_obj}),
-            "evidence_ref": evidence_ref,
+            "evidence": json_evidence_bundle(report_obj, attestation_url),
             "channel_bindings": [
                 {
                     "type": "tls_spki_sha256",
@@ -363,13 +434,12 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             report.request_nonce,
         )
     report_obj = model_dump(report)
-    evidence_ref = "https://cloud-api.near.ai/v1/attestation/report"
+    attestation_url = "https://cloud-api.near.ai/v1/attestation/report"
     if not gateway:
         failed(
             provider,
             "NEAR AI report did not include gateway_attestation",
-            evidence_digest=sha256_json(report_obj),
-            evidence_ref=evidence_ref,
+            evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
         return
@@ -378,8 +448,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI report did not include TLS SPKI binding",
-            evidence_digest=sha256_json(report_obj),
-            evidence_ref=evidence_ref,
+            evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
         return
@@ -388,8 +457,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             provider,
             "; ".join(gateway_result.get("errors") or [])
             or "NEAR AI gateway verification failed",
-            evidence_digest=sha256_json({"report": report_obj, "gateway": gateway_result}),
-            evidence_ref=evidence_ref,
+            evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
         return
@@ -400,8 +468,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI model-scoped report did not include model_attestations",
-            evidence_digest=sha256_json(report_obj),
-            evidence_ref=evidence_ref,
+            evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
         return
@@ -411,8 +478,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             failed(
                 provider,
                 f"NEAR AI model_attestations[{index}] did not include intel_quote",
-                evidence_digest=sha256_json(report_obj),
-                evidence_ref=evidence_ref,
+                evidence=json_evidence_bundle(report_obj, attestation_url),
                 verifier_id=verifier_id,
             )
             return
@@ -421,20 +487,19 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             failed(
                 provider,
                 f"NEAR AI model_attestations[{index}] nonce did not match request nonce",
-                evidence_digest=sha256_json(report_obj),
-                evidence_ref=evidence_ref,
+                evidence=json_evidence_bundle(report_obj, attestation_url),
                 verifier_id=verifier_id,
             )
             return
 
-    model_evidence_digest = sha256_json_prefixed(model_attestations)
+    model_attestations_sha256 = sha256_json_prefixed(model_attestations)
     provider_claims = {
         "trust_boundary": "near-ai-gateway",
         "gateway_verified": True,
         "gateway_tls_spki_sha256": spki,
         "model_evidence_present": True,
         "model_attestation_count": len(model_attestations),
-        "model_attestations_sha256": model_evidence_digest,
+        "model_attestations_sha256": model_attestations_sha256,
         "nested_model_attestations_checked_by_gateway": False,
         "canonical_model_id": report.model_id,
     }
@@ -445,14 +510,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         {
             "result": "verified",
             "verifier_id": verifier_id,
-            "evidence_digest": sha256_json(
-                {
-                    "report": report_obj,
-                    "gateway_result": gateway_result,
-                    "provider_claims": provider_claims,
-                }
-            ),
-            "evidence_ref": evidence_ref,
+            "evidence": json_evidence_bundle(report_obj, attestation_url),
             "channel_bindings": [
                 {
                     "type": "tls_spki_sha256",
@@ -472,18 +530,23 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     api_key = (options.get("chutes_api_key") or "").strip()
     api_base = chutes_api_base(options)
     if not api_key:
-        evidence_ref = f"{api_base}/servers/tee/measurements"
+        measurements_url = f"{api_base}/servers/tee/measurements"
+        evidence = None
         try:
-            with urllib.request.urlopen(evidence_ref, timeout=15) as response:
-                measurements = json.loads(response.read().decode("utf-8"))
-            evidence_digest = sha256_json(measurements)
+            with urllib.request.urlopen(measurements_url, timeout=15) as response:
+                body = response.read()
+                json.loads(body.decode("utf-8"))
+                evidence = evidence_bundle(
+                    body,
+                    measurements_url,
+                    response_content_type(response),
+                )
         except Exception:
-            evidence_digest = None
+            pass
         failed(
             provider,
             "Chutes bearer_token is required to fetch per-instance E2EE attestation evidence",
-            evidence_digest=evidence_digest,
-            evidence_ref=evidence_ref,
+            evidence=evidence,
         )
         return
 
@@ -498,24 +561,42 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         api_base,
         options,
     )
-    evidence_ref = f"{api_base}/chutes/{chute_id}/evidence"
+    attestation_url = f"{api_base}/chutes/{chute_id}/evidence"
 
     measurements_response = requests.get(
         f"{api_base}/servers/tee/measurements", timeout=timeout
     )
     measurements_response.raise_for_status()
-    measurements = measurements_response.json()
+    measurements_body = measurements_response.content
+    measurements = json.loads(measurements_body.decode("utf-8"))
+    raw_items = [
+        raw_http_item(
+            "chutes.measurements",
+            f"{api_base}/servers/tee/measurements",
+            response_content_type(measurements_response),
+            measurements_body,
+        )
+    ]
 
     nonce = secrets.token_hex(32)
     evidence_response = requests.get(
-        evidence_ref,
+        attestation_url,
         params={"nonce": nonce},
         headers=headers,
         timeout=timeout,
     )
     evidence_response.raise_for_status()
-    evidence_data = evidence_response.json()
+    evidence_body = evidence_response.content
+    evidence_data = json.loads(evidence_body.decode("utf-8"))
     evidence_items = evidence_data.get("evidence") or []
+    raw_items.append(
+        raw_http_item(
+            "chutes.attestation_evidence",
+            f"{attestation_url}?nonce={nonce}",
+            response_content_type(evidence_response),
+            evidence_body,
+        )
+    )
 
     discovery_rounds = chutes_discovery_rounds(options)
     discovery_interval = chutes_discovery_interval_seconds(options)
@@ -531,8 +612,17 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             timeout=timeout,
         )
         pubkeys_response.raise_for_status()
-        pubkeys_data = pubkeys_response.json()
+        pubkeys_body = pubkeys_response.content
+        pubkeys_data = json.loads(pubkeys_body.decode("utf-8"))
         pubkeys_responses.append(pubkeys_data)
+        raw_items.append(
+            raw_http_item(
+                f"chutes.e2ee_instances.{round_index}",
+                f"{api_base}/e2e/instances/{chute_id}",
+                response_content_type(pubkeys_response),
+                pubkeys_body,
+            )
+        )
         if pubkeys_data.get("nonce_expires_in") is not None:
             nonce_expires_in = (
                 pubkeys_data["nonce_expires_in"]
@@ -568,10 +658,10 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Chutes did not return any E2EE public keys for this chute",
-            evidence_digest=sha256_json(
-                {"measurements": measurements, "pubkeys": pubkeys_responses}
+            evidence=raw_http_bundle_evidence(
+                raw_items,
+                source_url=f"{api_base}/e2e/instances/{chute_id}",
             ),
-            evidence_ref=f"{api_base}/e2e/instances/{chute_id}",
         )
         return
 
@@ -604,33 +694,20 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             provider,
             "Chutes verification did not produce any verified E2EE key binding"
             + (f": {'; '.join(errors)}" if errors else ""),
-            evidence_digest=sha256_json(
-                {
-                    "measurements": measurements,
-                    "pubkeys": pubkeys_responses,
-                    "evidence": evidence_data,
-                    "errors": errors,
-                    "skipped_without_key": skipped_without_key,
-                }
+            evidence=raw_http_bundle_evidence(
+                raw_items,
+                source_url=attestation_url,
             ),
-            evidence_ref=evidence_ref,
         )
         return
     emit(
         {
             "result": "verified",
             "verifier_id": "private-ai-verifier/chutes/v1",
-            "evidence_digest": sha256_json(
-                {
-                    "measurements": measurements,
-                    "pubkeys": pubkeys_responses,
-                    "evidence": evidence_data,
-                    "verified": verified,
-                    "errors": errors,
-                    "skipped_without_key": skipped_without_key,
-                }
+            "evidence": raw_http_bundle_evidence(
+                raw_items,
+                source_url=attestation_url,
             ),
-            "evidence_ref": evidence_ref,
             "channel_bindings": bindings,
             "chutes_session": {
                 "chute_id": chute_id,

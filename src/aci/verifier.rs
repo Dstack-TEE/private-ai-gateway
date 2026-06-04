@@ -32,6 +32,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
 use rand::RngCore;
@@ -77,8 +78,7 @@ impl StaticUpstreamVerifier {
             result: VerificationResult::Verified,
             required: true,
             reason: None,
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         })
@@ -94,8 +94,7 @@ impl StaticUpstreamVerifier {
             result: VerificationResult::Failed,
             required: true,
             reason: Some(reason.into()),
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         })
@@ -152,8 +151,7 @@ impl UpstreamVerifier for PreverifiedUpstreamVerifier {
             result: VerificationResult::Verified,
             required: request.required,
             reason: None,
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -466,8 +464,7 @@ impl ExternalProviderVerifier {
             result,
             required: request.required,
             reason: output.reason.clone(),
-            evidence_digest: output.evidence_digest.clone(),
-            evidence_ref: output.evidence_ref.clone(),
+            evidence: output.evidence.clone(),
             channel_bindings,
             provider_claims: output.provider_claims.clone(),
         })
@@ -502,8 +499,7 @@ impl ExternalProviderVerifier {
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some(reason.into()),
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -573,8 +569,7 @@ struct ExternalProviderVerifierOutput {
     result: String,
     verifier_id: Option<String>,
     reason: Option<String>,
-    evidence_digest: Option<String>,
-    evidence_ref: Option<String>,
+    evidence: Option<Value>,
     #[serde(default)]
     channel_bindings: Vec<ExternalChannelBinding>,
     #[serde(default)]
@@ -911,8 +906,7 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some("no verifier configured for selected upstream".to_string()),
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -935,8 +929,7 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some("no verifier configured for selected upstream".to_string()),
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -960,7 +953,7 @@ pub struct ValidatedAciReport {
     pub workload_id: String,
     pub workload_keyset_digest: String,
     pub report_data: [u8; 32],
-    pub evidence_digest: Option<String>,
+    pub evidence: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1053,8 +1046,19 @@ pub fn validate_aci_report_binding(
         workload_id: report.workload_id.clone(),
         workload_keyset_digest: report.workload_keyset_digest.clone(),
         report_data: expected_report_data,
-        evidence_digest: raw_report_body.map(sha256_hex),
+        evidence: raw_report_body.map(|body| raw_evidence(body, "application/json", None)),
     })
+}
+
+fn raw_evidence(data: &[u8], content_type: &str, source_url: Option<&str>) -> Value {
+    let mut evidence = serde_json::json!({
+        "digest": sha256_hex(data),
+        "data": format!("data:{content_type};base64,{}", BASE64.encode(data)),
+    });
+    if let Some(source_url) = source_url {
+        evidence["source_url"] = Value::String(source_url.to_string());
+    }
+    evidence
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1187,8 +1191,7 @@ enum AciDcapVerificationError {
 struct CachedAciDcapVerification {
     expires_at: u64,
     vendor: String,
-    evidence_digest: Option<String>,
-    evidence_ref: Option<String>,
+    evidence: Option<Value>,
     channel_bindings: Vec<ChannelBinding>,
 }
 
@@ -1206,8 +1209,7 @@ impl CachedAciDcapVerification {
             result: VerificationResult::Verified,
             required: request.required,
             reason: None,
-            evidence_digest: self.evidence_digest.clone(),
-            evidence_ref: self.evidence_ref.clone(),
+            evidence: self.evidence.clone(),
             channel_bindings: self.channel_bindings.clone(),
             provider_claims: None,
         }
@@ -1309,8 +1311,8 @@ impl AciDcapUpstreamVerifier {
 
     async fn verify_uncached(&self) -> Result<CachedAciDcapVerification, AciDcapVerificationError> {
         let nonce = random_nonce_hex();
-        let evidence_ref = format!("{}/v1/attestation/report", self.report_base_url);
-        let url = format!("{evidence_ref}?nonce={nonce}");
+        let report_url = format!("{}/v1/attestation/report", self.report_base_url);
+        let url = format!("{report_url}?nonce={nonce}");
         let response = self
             .client
             .get(&url)
@@ -1359,8 +1361,7 @@ impl AciDcapUpstreamVerifier {
         Ok(CachedAciDcapVerification {
             expires_at,
             vendor: report.attestation.vendor,
-            evidence_digest: validated.evidence_digest,
-            evidence_ref: Some(evidence_ref),
+            evidence: validated.evidence,
             channel_bindings,
         })
     }
@@ -1459,8 +1460,7 @@ impl UpstreamVerifier for AciDcapUpstreamVerifier {
                 result: VerificationResult::Failed,
                 required: request.required,
                 reason: Some(err.to_string()),
-                evidence_digest: None,
-                evidence_ref: Some(format!("{}/v1/attestation/report", self.report_base_url)),
+                evidence: None,
                 channel_bindings: Vec::new(),
                 provider_claims: None,
             },
@@ -1806,8 +1806,10 @@ mod tests {
         let output = json!({
             "result": "verified",
             "verifier_id": verifier_id,
-            "evidence_digest": format!("sha256:{}", "11".repeat(32)),
-            "evidence_ref": format!("{provider}://evidence/provider-model"),
+            "evidence": {
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+            },
             "channel_bindings": [binding],
             "provider_claims": {
                 "fixture_provider": provider,
@@ -1834,8 +1836,10 @@ esac"#
         let output = json!({
             "result": "verified",
             "verifier_id": verifier_id,
-            "evidence_digest": format!("sha256:{}", "11".repeat(32)),
-            "evidence_ref": format!("{provider}://evidence/provider-model"),
+            "evidence": {
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+            },
             "channel_bindings": [binding],
         })
         .to_string();
@@ -1925,8 +1929,10 @@ esac"#
         let output = json!({
             "result": "verified",
             "verifier_id": "chutes/external-test/v1",
-            "evidence_digest": format!("sha256:{}", "11".repeat(32)),
-            "evidence_ref": "chutes://evidence/provider-model",
+            "evidence": {
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+            },
             "channel_bindings": [{
                 "type": "e2ee_public_key_sha256",
                 "provider": "chutes",
@@ -2118,8 +2124,10 @@ esac"#
         let output = json!({
             "result": "verified",
             "verifier_id": "tinfoil/external-test/v1",
-            "evidence_digest": format!("sha256:{}", "11".repeat(32)),
-            "evidence_ref": "tinfoil://evidence/provider-model",
+            "evidence": {
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+            },
             "channel_bindings": [{
                 "type": "tls_spki_sha256",
                 "origin": "https://provider.example",
@@ -2180,8 +2188,10 @@ fi"#
         let cached = CachedAciDcapVerification {
             expires_at: 10,
             vendor: "gpu-a".to_string(),
-            evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-            evidence_ref: Some("https://gpu-a.example/v1/attestation/report".to_string()),
+            evidence: Some(json!({
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
+            })),
             channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
                 origin: "https://gpu-a.example".to_string(),
                 spki_sha256: "aa".repeat(32),

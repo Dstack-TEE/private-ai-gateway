@@ -51,8 +51,7 @@ pub struct UpstreamVerifiedEvent {
     pub result: VerificationResult,
     pub required: bool,
     pub reason: Option<String>,
-    pub evidence_digest: Option<String>,
-    pub evidence_ref: Option<String>,
+    pub evidence: Option<Value>,
     pub channel_bindings: Vec<ChannelBinding>,
     pub provider_claims: Option<Value>,
 }
@@ -165,8 +164,7 @@ impl UpstreamVerifiedEvent {
             "result": self.result.as_str(),
             "required": self.required,
             "reason": self.reason,
-            "evidence_digest": self.evidence_digest,
-            "evidence_ref": self.evidence_ref,
+            "evidence": self.evidence.clone(),
             "channel_bindings": self
                 .channel_bindings
                 .iter()

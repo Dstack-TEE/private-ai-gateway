@@ -356,8 +356,10 @@ async fn attested_session_lookup_returns_audit_record() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("https://stub-upstream/v1/attestation/report".to_string()),
+        evidence: Some(serde_json::json!({
+            "digest": format!("sha256:{}", "11".repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
+        })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://stub-upstream".to_string(),
             spki_sha256: "aa".repeat(32),
@@ -395,7 +397,23 @@ async fn attested_session_lookup_returns_audit_record() {
     assert_eq!(body["api_version"], "aci/1");
     assert_eq!(body["session"]["session_id"], session_id);
     assert_eq!(body["session"]["direction"], "upstream");
-    assert_eq!(body["session"]["verifier_id"], "stub-verifier-1");
+    assert_eq!(
+        body["session"]["verification"]["verifier_id"],
+        "stub-verifier-1"
+    );
+    assert_eq!(body["session"]["upstream"]["provider"], "stub-upstream");
+    assert_eq!(
+        body["session"]["upstream"]["endpoint_origin"],
+        "https://stub-upstream"
+    );
+    assert_eq!(
+        body["session"]["verification"]["verified_claims"][0],
+        "encrypted-session-verified"
+    );
+    assert_eq!(
+        body["session"]["session_binding"][0]["type"],
+        "tls_spki_sha256"
+    );
 }
 
 #[tokio::test]

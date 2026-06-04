@@ -88,8 +88,7 @@ fn event_seqs_strictly_increasing_and_first_is_request_received() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: Vec::new(),
         provider_claims: None,
     })
@@ -120,8 +119,7 @@ fn upstream_verified_event_records_channel_bindings() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: vec![
             ChannelBinding::TlsSpkiSha256 {
                 origin: "https://upstream.example".to_string(),

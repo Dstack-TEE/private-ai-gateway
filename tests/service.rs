@@ -176,8 +176,7 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: Vec::new(),
         provider_claims: None,
     };
@@ -212,13 +211,18 @@ async fn verified_upstream_binding_creates_attested_session() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("https://stub-upstream/v1/attestation/report".to_string()),
+        evidence: Some(serde_json::json!({
+            "digest": format!("sha256:{}", "11".repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
+        })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://stub-upstream".to_string(),
             spki_sha256: "aa".repeat(32),
         }],
-        provider_claims: Some(serde_json::json!({"release": "fixture"})),
+        provider_claims: Some(serde_json::json!({
+            "release": "fixture",
+            "verified_claims": ["source-verified"]
+        })),
     };
 
     let result = svc
@@ -241,12 +245,23 @@ async fn verified_upstream_binding_creates_attested_session() {
         .expect("session audit record should be queryable");
     assert_eq!(session.session_id, session_id);
     assert_eq!(session.direction, "upstream");
-    assert_eq!(session.peer, "stub-upstream");
-    assert_eq!(session.model_id.as_deref(), Some("x"));
-    assert_eq!(session.verifier_id, "stub-verifier-1");
-    assert_eq!(session.channel_bindings.len(), 1);
+    assert_eq!(session.upstream.provider, "stub-upstream");
+    assert_eq!(session.upstream.model_id.as_deref(), Some("x"));
     assert_eq!(
-        session.channel_bindings[0]["spki_sha256"],
+        session.upstream.endpoint_origin.as_deref(),
+        Some("https://stub-upstream")
+    );
+    assert_eq!(session.verification.verifier_id, "stub-verifier-1");
+    assert_eq!(
+        session.verification.verified_claims,
+        vec![
+            "encrypted-session-verified".to_string(),
+            "source-verified".to_string()
+        ]
+    );
+    assert_eq!(session.session_binding.len(), 1);
+    assert_eq!(
+        session.session_binding[0]["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
     );
 }
@@ -262,8 +277,7 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
         result: VerificationResult::Failed,
         required: true,
         reason: Some("quote did not match expected app-id".to_string()),
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: Vec::new(),
         provider_claims: None,
     };

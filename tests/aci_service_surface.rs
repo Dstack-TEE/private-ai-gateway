@@ -208,8 +208,10 @@ impl UpstreamVerifier for AlwaysVerified {
             result: VerificationResult::Verified,
             required: request.required,
             reason: None,
-            evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-            evidence_ref: Some("mock://surface-evidence".to_string()),
+            evidence: Some(serde_json::json!({
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
+            })),
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -677,8 +679,10 @@ async fn retained_body_endpoint_returns_post_rewrite_body_only_to_authorized_req
                 result: VerificationResult::Verified,
                 required: true,
                 reason: None,
-                evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-                evidence_ref: Some("mock://surface-evidence".to_string()),
+                evidence: Some(serde_json::json!({
+                    "digest": format!("sha256:{}", "11".repeat(32)),
+                    "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
+                })),
                 channel_bindings: Vec::new(),
                 provider_claims: None,
             }),

@@ -430,8 +430,7 @@ async fn dstack_live_aci_dcap_upstream_verifier_accepts_real_aci_service() {
         event.reason
     );
     assert_eq!(event.verifier_id, "aci-dcap/v1");
-    assert!(event.evidence_digest.is_some());
-    assert!(event.evidence_ref.is_some());
+    assert!(event.evidence.is_some());
     assert_eq!(
         event.channel_bindings,
         vec![

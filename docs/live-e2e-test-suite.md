@@ -228,7 +228,7 @@ For each provider:
 
 - Run the provider verifier directly.
 - Assert `result == verified`.
-- Assert `evidence_digest`, `evidence_ref`, and at least one channel binding.
+- Assert embedded `evidence.digest`, data-URI `evidence.data`, and at least one channel binding.
 - Assert binding type matches the provider transport.
 - In strict mode, compare evidence claims to `provider_refs/<provider>.json`.
 

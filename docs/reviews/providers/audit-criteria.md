@@ -334,7 +334,10 @@ Every provider adapter should return the same class of result to Rust:
   "provider": "near-ai",
   "model_id": "canonical-model",
   "verifier_id": "provider-verifier/version",
-  "evidence_digest": "sha256:...",
+  "evidence": {
+    "digest": "sha256:...",
+    "data": "data:application/json;base64,<exact-verifier-input-bytes>"
+  },
   "verified_at": "2026-05-18T00:00:00Z",
   "expires_at": "2026-05-18T00:05:00Z",
   "channel_bindings": [

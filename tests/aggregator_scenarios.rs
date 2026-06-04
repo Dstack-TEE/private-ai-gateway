@@ -147,8 +147,7 @@ impl UpstreamBackend for MockUpstream {
 struct ScriptedVerifier {
     result: VerificationResult,
     reason: Option<String>,
-    evidence_digest: Option<String>,
-    evidence_ref: Option<String>,
+    evidence: Option<serde_json::Value>,
     calls: Arc<Mutex<Vec<UpstreamVerificationRequest>>>,
 }
 
@@ -170,8 +169,10 @@ impl ScriptedVerifier {
             Self {
                 result,
                 reason,
-                evidence_digest: Some(format!("sha256:{}", "ab".repeat(32))),
-                evidence_ref: Some("mock://evidence/upstream-1".to_string()),
+                evidence: Some(serde_json::json!({
+                    "digest": format!("sha256:{}", "ab".repeat(32)),
+                    "data": "data:application/json;base64,eyJmaXh0dXJlIjoidXBzdHJlYW0tMSJ9",
+                })),
                 calls: calls.clone(),
             },
             calls,
@@ -191,8 +192,7 @@ impl UpstreamVerifier for ScriptedVerifier {
             result: self.result,
             required: request.required,
             reason: self.reason.clone(),
-            evidence_digest: self.evidence_digest.clone(),
-            evidence_ref: self.evidence_ref.clone(),
+            evidence: self.evidence.clone(),
             channel_bindings: Vec::new(),
             provider_claims: None,
         }
@@ -1551,8 +1551,10 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "cd".repeat(32))),
-        evidence_ref: None,
+        evidence: Some(serde_json::json!({
+            "digest": format!("sha256:{}", "cd".repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJpdmF0ZS11cHN0cmVhbS1uYW1lIn0=",
+        })),
         channel_bindings: Vec::new(),
         provider_claims: None,
     };

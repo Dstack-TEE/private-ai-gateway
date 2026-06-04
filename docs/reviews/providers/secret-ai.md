@@ -397,7 +397,10 @@ Recommended lease shape for the SecretAI adapter:
   "provider": "secret-ai",
   "model_id": "<configured-canonical>",
   "verifier_id": "secretvm-verify/<commit>",
-  "evidence_digest": "sha256:<cpu_quote || gpu_evidence || compose>",
+  "evidence": {
+    "digest": "sha256:<cpu_quote || gpu_evidence || compose>",
+    "data": "data:multipart/mixed;boundary=<boundary>;base64,<exact-evidence-parts>"
+  },
   "verified_at": "...",
   "expires_at": "...",
   "channel_bindings": [

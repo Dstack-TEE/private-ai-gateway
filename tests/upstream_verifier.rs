@@ -73,7 +73,7 @@ async fn aci_report_binding_validation_accepts_self_consistent_report() {
         validated.workload_keyset_digest,
         report.workload_keyset_digest
     );
-    assert!(validated.evidence_digest.is_some());
+    assert!(validated.evidence.is_some());
 }
 
 #[tokio::test]
@@ -114,8 +114,7 @@ async fn service_fails_if_selected_backend_cannot_enforce_channel_binding() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://noop-upstream.example".to_string(),
             spki_sha256: "aa".repeat(32),

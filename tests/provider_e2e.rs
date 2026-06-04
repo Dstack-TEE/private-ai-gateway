@@ -501,6 +501,16 @@ fn receipt_event<'a>(
         .fields
 }
 
+fn provider_evidence_fixture(name: &str) -> Value {
+    json!({
+        "digest": format!("sha256:{}", "11".repeat(32)),
+        "data": format!(
+            "data:application/json;base64,{}",
+            BASE64.encode(format!(r#"{{"fixture":"{name}"}}"#).as_bytes())
+        ),
+    })
+}
+
 fn chutes_key_binding(e2e_pubkey: &str) -> private_ai_gateway::aci::receipt::ChannelBinding {
     chutes_key_binding_for(CHUTES_INSTANCE_ID, e2e_pubkey)
 }
@@ -827,8 +837,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("attestation")),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: base_url,
             spki_sha256: "aa".repeat(32),
@@ -864,8 +873,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("attestation")),
         channel_bindings: vec![
             private_ai_gateway::aci::receipt::ChannelBinding::TlsSpkiSha256 {
                 origin: base_url,
@@ -916,8 +924,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         provider_claims: None,
     });
@@ -983,8 +990,7 @@ async fn chutes_provider_requires_exact_catalog_match() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(e2e_pubkey)],
         provider_claims: None,
     });
@@ -1039,8 +1045,7 @@ async fn chutes_provider_uses_configured_chute_id_pin() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(e2e_pubkey)],
         provider_claims: None,
     });
@@ -1088,8 +1093,7 @@ async fn chutes_provider_pools_verified_single_use_nonces() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         provider_claims: None,
     });
@@ -1175,8 +1179,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         provider_claims: None,
     });
@@ -1231,8 +1234,7 @@ async fn chutes_provider_refreshes_verified_nonce_pool_without_forwarding() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         provider_claims: None,
     };
@@ -1301,8 +1303,7 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![
             chutes_key_binding_for(
                 CHUTES_INSTANCE_ID,
@@ -1377,8 +1378,7 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         provider_claims: None,
     });
@@ -1425,8 +1425,7 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: Some(format!("sha256:{}", "11".repeat(32))),
-        evidence_ref: Some("fixture://chutes-attestation".to_string()),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![
             private_ai_gateway::aci::receipt::ChannelBinding::E2eePublicKeySha256 {
                 provider: "chutes".to_string(),

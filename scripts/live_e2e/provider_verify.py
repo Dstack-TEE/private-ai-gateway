@@ -81,10 +81,15 @@ def assert_verified_provider_output(provider: Provider, output: dict[str, Any]) 
         raise RuntimeError(
             f"{provider.name} verifier failed: {output.get('reason') or output}"
         )
-    if not output.get("evidence_digest"):
-        raise RuntimeError(f"{provider.name} verifier did not return evidence_digest")
-    if not output.get("evidence_ref"):
-        raise RuntimeError(f"{provider.name} verifier did not return evidence_ref")
+    evidence = output.get("evidence")
+    data = evidence.get("data") if isinstance(evidence, dict) else None
+    if (
+        not isinstance(evidence, dict)
+        or not evidence.get("digest")
+        or not isinstance(data, str)
+        or not data.startswith("data:")
+    ):
+        raise RuntimeError(f"{provider.name} verifier did not return embedded evidence")
     bindings = output.get("channel_bindings")
     if not isinstance(bindings, list) or not bindings:
         raise RuntimeError(f"{provider.name} verifier did not return channel bindings")

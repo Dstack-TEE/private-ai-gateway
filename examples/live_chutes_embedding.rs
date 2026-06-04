@@ -104,8 +104,7 @@ async fn run() -> Result<(), String> {
         result: VerificationResult::Verified,
         required: true,
         reason: None,
-        evidence_digest: None,
-        evidence_ref: None,
+        evidence: None,
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),
             key_id: Some(instance.instance_id.clone()),

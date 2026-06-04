@@ -106,8 +106,13 @@ fn run() -> Result<(), String> {
                 "vendor": event_field_str(event, "vendor"),
                 "model_id": event_field_str(event, "model_id"),
                 "verifier_id": event_field_str(event, "verifier_id"),
-                "evidence_digest": event_field_str(event, "evidence_digest"),
-                "evidence_ref": event_field_str(event, "evidence_ref"),
+                "evidence": {
+                    "digest": event
+                    .fields
+                    .get("evidence")
+                    .and_then(|evidence| evidence.get("digest"))
+                    .and_then(Value::as_str),
+                },
                 "channel_binding_count": event
                     .fields
                     .get("channel_bindings")
@@ -136,7 +141,13 @@ fn run() -> Result<(), String> {
         "response_hash_valid": response_hash_valid,
         "workload_id": validated.workload_id,
         "workload_keyset_digest": validated.workload_keyset_digest,
-        "report_evidence_digest": validated.evidence_digest,
+        "report_evidence": {
+            "digest": validated
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.get("digest"))
+            .and_then(Value::as_str),
+        },
         "receipt_id": receipt.receipt_id,
         "chat_id": receipt.chat_id,
         "upstream_events": upstream_events,

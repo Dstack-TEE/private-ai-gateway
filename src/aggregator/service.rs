@@ -248,19 +248,26 @@ pub struct AttestedSessionRecord {
     pub api_version: String,
     pub session_id: String,
     pub direction: String,
-    pub peer: String,
-    pub model_id: Option<String>,
-    pub url_origin: Option<String>,
     pub established_at: u64,
     pub expires_at: u64,
+    pub upstream: AttestedSessionUpstream,
+    pub verification: AttestedSessionVerification,
+    pub session_binding: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AttestedSessionUpstream {
+    pub provider: String,
+    pub model_id: Option<String>,
+    pub endpoint_origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AttestedSessionVerification {
     pub verifier_id: String,
-    pub evidence_digest: Option<String>,
-    pub evidence_ref: Option<String>,
-    pub binding_material_digest: String,
-    pub channel_bindings: Vec<Value>,
+    pub verified_claims: Vec<String>,
+    pub evidence: Option<Value>,
     pub provider_claims: Option<Value>,
-    pub workload_id: String,
-    pub workload_keyset_digest: String,
 }
 
 /// Stored receipts plus optional retained request bodies. The default
@@ -1756,8 +1763,7 @@ impl AciService {
             result: VerificationResult::Failed,
             required: upstream_required,
             reason: Some("no upstream verifier configured".to_string()),
-            evidence_digest: None,
-            evidence_ref: None,
+            evidence: None,
             channel_bindings: Vec::new(),
             provider_claims: None,
         });
@@ -1841,20 +1847,18 @@ impl AciService {
             .map(|binding| binding.to_value())
             .collect::<Vec<_>>();
         let binding_material = json!({
-            "channel_bindings": channel_bindings,
+            "session_binding": channel_bindings,
         });
         let binding_material_digest = crate::aci::canonical::jcs_sha256_hex(&binding_material)?;
         let session_material = json!({
             "direction": "upstream",
-            "peer": event.vendor,
-            "model_id": event.model_id,
-            "url_origin": event.url_origin,
+            "upstream": {
+                "provider": event.vendor,
+                "model_id": event.model_id,
+                "endpoint_origin": event.url_origin,
+            },
             "verifier_id": event.verifier_id,
-            "evidence_digest": event.evidence_digest,
-            "evidence_ref": event.evidence_ref,
-            "binding_material_digest": binding_material_digest,
-            "workload_id": self.workload_id,
-            "workload_keyset_digest": self.workload_keyset_digest,
+            "session_binding_digest": binding_material_digest,
         });
         let session_digest = crate::aci::canonical::jcs_sha256_hex(&session_material)?;
         let session_id = format!(
@@ -1867,19 +1871,20 @@ impl AciService {
             api_version: "aci/1".to_string(),
             session_id: session_id.clone(),
             direction: "upstream".to_string(),
-            peer: event.vendor.clone(),
-            model_id: Some(event.model_id.clone()),
-            url_origin: event.url_origin.clone(),
             established_at: now,
             expires_at,
-            verifier_id: event.verifier_id.clone(),
-            evidence_digest: event.evidence_digest.clone(),
-            evidence_ref: event.evidence_ref.clone(),
-            binding_material_digest,
-            channel_bindings,
-            provider_claims: event.provider_claims.clone(),
-            workload_id: self.workload_id.clone(),
-            workload_keyset_digest: self.workload_keyset_digest.clone(),
+            upstream: AttestedSessionUpstream {
+                provider: event.vendor.clone(),
+                model_id: Some(event.model_id.clone()),
+                endpoint_origin: event.url_origin.clone(),
+            },
+            verification: AttestedSessionVerification {
+                verifier_id: event.verifier_id.clone(),
+                verified_claims: verified_claims_for_session(event),
+                evidence: session_evidence(event),
+                provider_claims: event.provider_claims.clone(),
+            },
+            session_binding: channel_bindings,
         };
         self.receipt_store.put_attested_session(record);
         Ok(Some(session_id))
@@ -1965,6 +1970,30 @@ impl AciService {
     pub fn supported_e2ee_versions(&self) -> &[String] {
         &self.config.service_capabilities.supported_e2ee_versions
     }
+}
+
+fn verified_claims_for_session(event: &UpstreamVerifiedEvent) -> Vec<String> {
+    let mut claims = std::collections::BTreeSet::new();
+    claims.insert("encrypted-session-verified".to_string());
+
+    if let Some(provider_claims) = event.provider_claims.as_ref() {
+        if let Some(items) = provider_claims
+            .get("verified_claims")
+            .and_then(serde_json::Value::as_array)
+        {
+            for item in items {
+                if let Some(tag) = item.as_str().map(str::trim).filter(|tag| !tag.is_empty()) {
+                    claims.insert(tag.to_string());
+                }
+            }
+        }
+    }
+
+    claims.into_iter().collect()
+}
+
+fn session_evidence(event: &UpstreamVerifiedEvent) -> Option<Value> {
+    event.evidence.clone()
 }
 
 struct MiddlewareProviderResponseDraftingStream {
