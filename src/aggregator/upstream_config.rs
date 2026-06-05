@@ -33,6 +33,12 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub provider: UpstreamProvider,
     pub base_url: String,
+    /// Per-upstream POST path the generic forwarder targets (e.g.
+    /// `/v1/messages` for native Anthropic upstreams), appended to
+    /// `base_url`. When omitted the downstream surface path is used
+    /// verbatim, matching today's OpenAI-compatible behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
@@ -71,6 +77,8 @@ pub struct PublicUpstreamConfig {
     pub name: String,
     pub provider: UpstreamProvider,
     pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +117,7 @@ impl UpstreamConfig {
             name: self.name.clone(),
             provider: self.provider,
             base_url: self.base_url.clone(),
+            path: self.path.clone(),
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
             accepted_workload_ids: self.accepted_workload_ids.clone(),
@@ -799,12 +808,27 @@ fn build_model_router(
                         backend.clone(),
                         format!("{}:{public_model}", cfg.name),
                     )
-                    .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+                    .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+                    .with_path(cfg.path.clone())
+                    .with_is_tee(Some(provider_is_tee(cfg.provider))),
                 )
                 .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;
         }
     }
     Ok(router)
+}
+
+/// Whether a provider performs hardware attestation (TEE). Non-TEE
+/// providers (plain OpenAI-compatible cloud APIs) are forwarded with
+/// TLS endpoint binding only and never fail closed for lack of evidence.
+fn provider_is_tee(provider: UpstreamProvider) -> bool {
+    match provider {
+        UpstreamProvider::OpenAiCompatible => false,
+        UpstreamProvider::AciDcap
+        | UpstreamProvider::Chutes
+        | UpstreamProvider::Tinfoil
+        | UpstreamProvider::NearAi => true,
+    }
 }
 
 fn build_provider_backend(
@@ -1310,6 +1334,7 @@ mod tests {
             name: "provider-a".to_string(),
             provider: UpstreamProvider::Tinfoil,
             base_url: "https://provider-a.example/".to_string(),
+            path: None,
             models: BTreeMap::from([
                 ("public-a".to_string(), "upstream-a".to_string()),
                 ("public-b".to_string(), "upstream-a".to_string()),

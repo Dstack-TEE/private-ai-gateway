@@ -83,9 +83,10 @@ use crate::aci::types::AttestationReport;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeRequestParts,
-    E2eeResponseInfo, GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptJournal,
-    ReceiptOwner, ServiceError, ServiceResponseStream, StreamingForwardResult,
-    UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
+    E2eeResponseInfo, ForwardCandidate, GatewayRequestContext, MiddlewareForwardResult,
+    MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
+    StreamingForwardResult, UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    EMBEDDINGS_PATH,
 };
 use crate::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigError, UpstreamConfigManager,
@@ -1219,21 +1220,6 @@ async fn internal_forward(
         );
     };
     let request_id = request_id.to_string();
-    let Some(target_route_id) = header_str(&headers, "x-private-ai-gateway-target") else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_internal_request",
-            "missing X-Private-AI-Gateway-Target",
-        );
-    };
-    if target_route_id.trim().is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_internal_request",
-            "empty X-Private-AI-Gateway-Target",
-        );
-    }
-    let target_route_id = target_route_id.to_string();
     let Some(stored) = state.request_store.take(&request_id) else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -1252,10 +1238,10 @@ async fn internal_forward(
             );
         }
     };
-    let stream = parsed
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let (candidates, stream) = match build_forward_candidates(&headers, &body, &parsed) {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
 
     let journal = stored.receipt_journal;
     let received_body = stored.received_body;
@@ -1266,16 +1252,17 @@ async fn internal_forward(
                 context: GatewayRequestContext {
                     request_id,
                     user_model: stored.user_model,
-                    target_route_id: Some(target_route_id),
+                    target_route_id: None,
                 },
                 endpoint_path: stored.endpoint_path,
                 received_body: &received_body,
-                forwarded_body: Some(body.to_vec()),
+                forwarded_body: None,
                 upstream_required: Some(stored.upstream_required),
                 upstream_verification_event: None,
                 requester: stored.requester,
                 e2ee: stored.e2ee,
             },
+            candidates,
             stream,
             journal.clone(),
         )
@@ -1305,6 +1292,12 @@ async fn internal_forward(
                     HeaderValue::from_static("no-cache"),
                 );
             }
+            insert_attribution_headers(
+                &mut resp_headers,
+                &forward.selected_route,
+                forward.attempts,
+                forward.session_id.as_deref(),
+            );
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
             (status, resp_headers, forward.upstream_body).into_response()
         }
@@ -1323,6 +1316,12 @@ async fn internal_forward(
             resp_headers.insert(
                 HeaderName::from_static("cache-control"),
                 HeaderValue::from_static("no-cache"),
+            );
+            insert_attribution_headers(
+                &mut resp_headers,
+                &forward.selected_route,
+                forward.attempts,
+                forward.session_id.as_deref(),
             );
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
             let body = Body::from_stream(
@@ -1590,6 +1589,160 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+/// Parse the `x-private-ai-gateway-targets` header + request body into
+/// ordered failover candidates. Supports the simple form (one shared body +
+/// the ordered targets header) and the envelope form
+/// (`{"candidates":[{"target","body"},...]}`, where each candidate carries
+/// its own body). Returns `(candidates, stream_flag)` or an error `Response`.
+#[allow(clippy::result_large_err)]
+fn build_forward_candidates(
+    headers: &HeaderMap,
+    body: &[u8],
+    parsed: &Value,
+) -> Result<(Vec<ForwardCandidate>, bool), Response> {
+    let header_targets: Vec<String> = header_str(headers, "x-private-ai-gateway-targets")
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Envelope form: a top-level `candidates` array of {target, body}.
+    if let Some(items) = parsed.get("candidates").and_then(Value::as_array) {
+        let mut candidates = Vec::with_capacity(items.len());
+        let mut envelope_targets = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(target) = item.get("target").and_then(Value::as_str) else {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_internal_request",
+                    "candidate is missing a string target",
+                ));
+            };
+            let target = target.trim();
+            if target.is_empty() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_internal_request",
+                    "candidate has an empty target",
+                ));
+            }
+            let Some(body_value) = item.get("body") else {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_internal_request",
+                    "candidate is missing a body",
+                ));
+            };
+            let body_bytes = match serde_json::to_vec(body_value) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return Err(error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        format!("invalid candidate body: {e}"),
+                    ));
+                }
+            };
+            envelope_targets.push(target.to_string());
+            candidates.push(ForwardCandidate {
+                route_id: target.to_string(),
+                body: body_bytes,
+            });
+        }
+        if candidates.is_empty() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_internal_request",
+                "candidate envelope is empty",
+            ));
+        }
+        if !header_targets.is_empty() && header_targets != envelope_targets {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_internal_request",
+                "x-private-ai-gateway-targets does not match the candidate envelope",
+            ));
+        }
+        // The backend picks buffered vs streaming once for the whole
+        // failover list, so every candidate must agree on `stream`.
+        let stream = items[0]
+            .get("body")
+            .and_then(|b| b.get("stream"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mismatched_stream = items.iter().any(|item| {
+            item.get("body")
+                .and_then(|b| b.get("stream"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                != stream
+        });
+        if mismatched_stream {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_internal_request",
+                "all candidates must agree on the stream flag",
+            ));
+        }
+        return Ok((candidates, stream));
+    }
+
+    // Simple form: one shared body forwarded to each ordered target.
+    if header_targets.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_internal_request",
+            "missing X-Private-AI-Gateway-Targets",
+        ));
+    }
+    let stream = parsed
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let candidates = header_targets
+        .into_iter()
+        .map(|route_id| ForwardCandidate {
+            route_id,
+            body: body.to_vec(),
+        })
+        .collect();
+    Ok((candidates, stream))
+}
+
+/// Set the route-attribution response headers for the caller. These are
+/// internal only; the frontend strips any leaked `x-private-ai-gateway-*`
+/// before the user sees the response.
+fn insert_attribution_headers(
+    headers: &mut HeaderMap,
+    selected_route: &str,
+    attempts: usize,
+    session_id: Option<&str>,
+) {
+    if let Ok(value) = HeaderValue::from_str(selected_route) {
+        headers.insert(
+            HeaderName::from_static("x-private-ai-gateway-selected-route"),
+            value,
+        );
+    }
+    if let Ok(value) = HeaderValue::from_str(&attempts.to_string()) {
+        headers.insert(
+            HeaderName::from_static("x-private-ai-gateway-attempts"),
+            value,
+        );
+    }
+    if let Some(session_id) = session_id {
+        if let Ok(value) = HeaderValue::from_str(session_id) {
+            headers.insert(
+                HeaderName::from_static("x-private-ai-gateway-session-id"),
+                value,
+            );
+        }
+    }
 }
 
 fn request_host_domain(headers: &HeaderMap) -> Option<String> {

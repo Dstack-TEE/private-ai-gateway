@@ -458,6 +458,11 @@ pub struct MiddlewareForwarded {
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
+    /// Which route served the request, how many routes were tried, and the
+    /// attested session id (if any) — returned to the caller as headers.
+    pub selected_route: String,
+    pub attempts: usize,
+    pub session_id: Option<String>,
 }
 
 pub struct MiddlewareStreamingForwarded {
@@ -465,6 +470,11 @@ pub struct MiddlewareStreamingForwarded {
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub body: ServiceResponseStream,
+    /// Which route served the request, how many routes were tried, and the
+    /// attested session id (if any) — returned to the caller as headers.
+    pub selected_route: String,
+    pub attempts: usize,
+    pub session_id: Option<String>,
 }
 
 pub struct MiddlewareReceiptDraft {
@@ -611,6 +621,31 @@ pub struct GatewayRequestContext {
     pub request_id: String,
     pub user_model: Option<String>,
     pub target_route_id: Option<String>,
+}
+
+/// One ordered failover candidate: a route id to try plus the request
+/// body to send to it. Callers may share a single body across candidates
+/// or give each candidate its own body. Candidates are tried in order
+/// until one succeeds.
+#[derive(Debug, Clone)]
+pub struct ForwardCandidate {
+    pub route_id: String,
+    pub body: Vec<u8>,
+}
+
+/// Provider HTTP statuses that trigger failover to the next candidate when
+/// returned before the first response byte. Tentative set, subject to change.
+fn is_retryable_provider_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Track the highest-priority failover error so that, when every candidate
+/// fails, the returned error reflects the most informative failure.
+/// Priority order: verification (3), then transport (2), then routing (1).
+fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: ServiceError) {
+    if slot.as_ref().map(|(p, _)| priority >= *p).unwrap_or(true) {
+        *slot = Some((priority, err));
+    }
 }
 
 pub struct AciService {
@@ -1265,9 +1300,51 @@ impl AciService {
     /// The backend records trust-critical provider facts into the returned
     /// draft. The public frontend must append `response.returned`, sign, and
     /// store the receipt after middleware returns the final user-visible body.
+    /// Build the receipt event prefix shared by the buffered and
+    /// streaming commit paths: request.received → middleware.forwarded →
+    /// route.selected → request.forwarded (+transparency) →
+    /// upstream.verified. The caller appends response.received afterwards
+    /// (buffered now, streaming at end). Failover is not recorded in the
+    /// receipt — the receipt attests only the served (selected) route; the
+    /// attempt count is surfaced to ops via an attribution header.
+    #[allow(clippy::too_many_arguments)]
+    fn build_middleware_receipt_prefix(
+        &self,
+        receipt_id: &str,
+        chat_id: Option<String>,
+        served_at: u64,
+        endpoint_path: &str,
+        received_body: &[u8],
+        middleware_forwarded_body: &[u8],
+        selected_route_id: &str,
+        forwarded_body: &[u8],
+        recorded_event: UpstreamVerifiedEvent,
+        upstream_session_id: Option<&str>,
+    ) -> Result<ReceiptBuilder, ServiceError> {
+        let mut builder = ReceiptBuilder::new(
+            receipt_id.to_string(),
+            chat_id,
+            self.workload_id.clone(),
+            self.workload_keyset_digest.clone(),
+            endpoint_path.to_string(),
+            "POST".to_string(),
+            served_at,
+        );
+        builder.add_request_received(received_body)?;
+        builder.add_middleware_forwarded(middleware_forwarded_body)?;
+        builder.add_route_selected(selected_route_id)?;
+        builder.add_request_forwarded(forwarded_body)?;
+        if received_body != forwarded_body {
+            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+        }
+        builder.add_upstream_verified_with_session(recorded_event, upstream_session_id)?;
+        Ok(builder)
+    }
+
     pub async fn forward_chat_completion_for_middleware(
         &self,
         req: ChatCompletionRequest<'_>,
+        candidates: Vec<ForwardCandidate>,
         stream: bool,
         receipt_journal: MiddlewareReceiptJournal,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
@@ -1281,213 +1358,326 @@ impl AciService {
         self.metrics
             .record_request(endpoint_path, mode, req.e2ee.as_ref().is_some());
 
-        let target_route_id = req.context.target_route_id.clone();
-        let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
-        let middleware_forwarded_body =
-            target_route_id.as_ref().map(|_| backend_input_body.clone());
-        let prepared = self.upstream.prepare(UpstreamRequest {
-            body: backend_input_body,
-            path: Some(endpoint_path.to_string()),
-            target_route_id: target_route_id.clone(),
-            ..Default::default()
-        })?;
-        let forwarded_body = prepared.request.body.clone();
-        let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let mut recorded_event = self
-            .recorded_upstream_event(
-                &prepared,
-                req.upstream_required,
-                req.upstream_verification_event,
-            )
-            .await?;
+        if candidates.is_empty() {
+            return Err(ServiceError::Upstream(UpstreamError::Routing(
+                "no candidate routes supplied".to_string(),
+            )));
+        }
+        // A caller-supplied verifier event only applies to a single
+        // explicit candidate (non-failover). With an ordered list the
+        // backend always computes per-candidate events.
+        let caller_supplied_upstream_event =
+            req.upstream_verification_event.is_some() && candidates.len() == 1;
+        let single_caller_event = if caller_supplied_upstream_event {
+            req.upstream_verification_event.clone()
+        } else {
+            None
+        };
+        let candidate_route_ids: Vec<String> =
+            candidates.iter().map(|c| c.route_id.clone()).collect();
+        let last_index = candidates.len() - 1;
 
-        if stream {
+        // Highest-priority error across exhausted candidates, returned if
+        // no candidate succeeds.
+        //
+        // The number of candidates attempted (`index + 1` when one succeeds)
+        // is surfaced via a response header for the caller's metrics. Failover
+        // is internal to this forwarder and is NOT recorded in the user-facing
+        // receipt; the receipt attests only the served request (route.selected
+        // + upstream.verified + hashes).
+        let mut aggregated_err: Option<(u8, ServiceError)> = None;
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            let route_id = candidate.route_id.clone();
+            let is_last = index == last_index;
+
+            let prepared = match self.upstream.prepare(UpstreamRequest {
+                body: candidate.body.clone(),
+                path: Some(endpoint_path.to_string()),
+                target_route_id: Some(route_id.clone()),
+                ..Default::default()
+            }) {
+                Ok(prepared) => prepared,
+                Err(UpstreamError::Routing(message)) => {
+                    upgrade_err(
+                        &mut aggregated_err,
+                        1,
+                        ServiceError::Upstream(UpstreamError::Routing(message)),
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    upgrade_err(&mut aggregated_err, 2, err.into());
+                    continue;
+                }
+            };
+
+            // Per-route fail-closed mode: explicitly non-TEE routes never
+            // fail closed; TEE and unclassified routes honour the
+            // request-level `upstream_required` flag.
+            let non_tee = prepared.is_tee == Some(false);
+            let candidate_required = if non_tee {
+                Some(false)
+            } else {
+                req.upstream_required
+            };
+
+            let mut recorded_event = match self
+                .recorded_upstream_event(&prepared, candidate_required, single_caller_event.clone())
+                .await
+            {
+                Ok(event) => event,
+                Err(ServiceError::UpstreamVerification(uv)) => {
+                    upgrade_err(
+                        &mut aggregated_err,
+                        3,
+                        ServiceError::UpstreamVerification(uv),
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+
+            let forwarded_body = prepared.request.body.clone();
+
+            if stream {
+                let mut reverify_attempts = 0;
+                let upstream_response = loop {
+                    match self
+                        .upstream
+                        .forward_stream_verified_prepared(prepared.clone(), &recorded_event)
+                        .await
+                    {
+                        Ok(response) => break Some(response),
+                        Err(UpstreamError::ChannelBindingMismatch(_))
+                            if !caller_supplied_upstream_event
+                                && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                        {
+                            reverify_attempts += 1;
+                            match self
+                                .refresh_upstream_event(&prepared, candidate_required)
+                                .await
+                            {
+                                Ok(event) => recorded_event = event,
+                                // A reverify failure must fail over to the
+                                // next candidate, not abort the whole list.
+                                Err(err) => {
+                                    let priority =
+                                        if matches!(err, ServiceError::UpstreamVerification(_)) {
+                                            3
+                                        } else {
+                                            2
+                                        };
+                                    upgrade_err(&mut aggregated_err, priority, err);
+                                    break None;
+                                }
+                            }
+                        }
+                        Err(err @ UpstreamError::ChannelBindingMismatch(_)) => {
+                            self.invalidate_upstream_event(&prepared, candidate_required);
+                            upgrade_err(&mut aggregated_err, 2, err.into());
+                            break None;
+                        }
+                        Err(err) => {
+                            upgrade_err(&mut aggregated_err, 2, err.into());
+                            break None;
+                        }
+                    }
+                };
+                let Some(upstream_response) = upstream_response else {
+                    continue;
+                };
+
+                let status = upstream_response.status_code;
+                if status != 200 {
+                    self.metrics.record_upstream_response(
+                        endpoint_path,
+                        RequestMode::Streaming,
+                        status,
+                        None,
+                    );
+                    if is_retryable_provider_status(status) && !is_last {
+                        continue;
+                    }
+                    self.metrics
+                        .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
+                    let upstream_headers = upstream_response.headers;
+                    let upstream_body = collect_upstream_body(upstream_response.body).await?;
+                    return Ok(MiddlewareForwardResult::UpstreamError(
+                        StreamingUpstreamError {
+                            upstream_status: status,
+                            upstream_headers,
+                            upstream_body,
+                        },
+                    ));
+                }
+
+                // Commit this candidate.
+                let upstream_headers = upstream_response.headers;
+                let receipt_id = generate_receipt_id();
+                let served_at = self.clock.now_secs();
+                let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+                let builder = self.build_middleware_receipt_prefix(
+                    &receipt_id,
+                    None,
+                    served_at,
+                    endpoint_path,
+                    received_body,
+                    &candidate.body,
+                    &route_id,
+                    &forwarded_body,
+                    recorded_event,
+                    upstream_session_id.as_deref(),
+                )?;
+                receipt_journal.reserve_receipt_id(receipt_id.clone());
+
+                let body = MiddlewareProviderResponseDraftingStream {
+                    inner: upstream_response.body,
+                    builder: Some(builder),
+                    journal: receipt_journal,
+                    provider_response_hasher: Sha256::new(),
+                    receipt_id: receipt_id.clone(),
+                    forwarded_body,
+                    endpoint_path: endpoint_path.to_string(),
+                    sse_parser: SseChatIdParser::default(),
+                    metrics: self.metrics.clone(),
+                    upstream_status: status,
+                    upstream_ended: false,
+                    finished: false,
+                };
+
+                return Ok(MiddlewareForwardResult::Stream(Box::new(
+                    MiddlewareStreamingForwarded {
+                        receipt_id: receipt_id.clone(),
+                        upstream_status: status,
+                        upstream_headers,
+                        body: Box::pin(body),
+                        selected_route: route_id.clone(),
+                        attempts: index + 1,
+                        session_id: upstream_session_id,
+                    },
+                )));
+            }
+
+            // Buffered forward.
             let mut reverify_attempts = 0;
             let upstream_response = loop {
                 match self
                     .upstream
-                    .forward_stream_verified_prepared(prepared.clone(), &recorded_event)
+                    .forward_verified_prepared(prepared.clone(), &recorded_event)
                     .await
                 {
-                    Ok(response) => break response,
+                    Ok(response) => break Some(response),
                     Err(UpstreamError::ChannelBindingMismatch(_))
                         if !caller_supplied_upstream_event
                             && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
                     {
                         reverify_attempts += 1;
-                        recorded_event = self
-                            .refresh_upstream_event(&prepared, req.upstream_required)
-                            .await?;
+                        match self
+                            .refresh_upstream_event(&prepared, candidate_required)
+                            .await
+                        {
+                            Ok(event) => recorded_event = event,
+                            // A reverify failure must fail over to the next
+                            // candidate, not abort the whole list.
+                            Err(err) => {
+                                let priority =
+                                    if matches!(err, ServiceError::UpstreamVerification(_)) {
+                                        3
+                                    } else {
+                                        2
+                                    };
+                                upgrade_err(&mut aggregated_err, priority, err);
+                                break None;
+                            }
+                        }
                     }
-                    Err(err @ UpstreamError::ChannelBindingMismatch(_))
-                        if !caller_supplied_upstream_event =>
-                    {
-                        self.invalidate_upstream_event(&prepared, req.upstream_required);
-                        return Err(err.into());
+                    Err(err @ UpstreamError::ChannelBindingMismatch(_)) => {
+                        self.invalidate_upstream_event(&prepared, candidate_required);
+                        upgrade_err(&mut aggregated_err, 2, err.into());
+                        break None;
                     }
-                    Err(err) => return Err(err.into()),
+                    Err(err) => {
+                        upgrade_err(&mut aggregated_err, 2, err.into());
+                        break None;
+                    }
                 }
             };
-            if upstream_response.status_code != 200 {
+            let Some(upstream_response) = upstream_response else {
+                continue;
+            };
+
+            let status = upstream_response.status_code;
+            if is_retryable_provider_status(status) && !is_last {
                 self.metrics.record_upstream_response(
                     endpoint_path,
-                    RequestMode::Streaming,
-                    upstream_response.status_code,
+                    RequestMode::Buffered,
+                    status,
                     None,
                 );
-                self.metrics
-                    .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
-                let upstream_status = upstream_response.status_code;
-                let upstream_headers = upstream_response.headers;
-                let upstream_body = collect_upstream_body(upstream_response.body).await?;
-                return Ok(MiddlewareForwardResult::UpstreamError(
-                    StreamingUpstreamError {
-                        upstream_status,
-                        upstream_headers,
-                        upstream_body,
-                    },
-                ));
+                continue;
             }
 
-            let upstream_status = upstream_response.status_code;
-            let upstream_headers = upstream_response.headers;
+            // Commit this candidate.
+            let response_model = accepted_response_model(status, &upstream_response.body);
+            recorded_event.model_id = response_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            self.metrics.record_upstream_response(
+                endpoint_path,
+                RequestMode::Buffered,
+                status,
+                response_model.as_deref(),
+            );
+
             let receipt_id = generate_receipt_id();
             let served_at = self.clock.now_secs();
-            let mut builder = ReceiptBuilder::new(
-                receipt_id.clone(),
-                None,
-                self.workload_id.clone(),
-                self.workload_keyset_digest.clone(),
-                endpoint_path.to_string(),
-                "POST".to_string(),
-                served_at,
-            );
-            builder.add_request_received(received_body)?;
-            if let Some(body) = middleware_forwarded_body.as_deref() {
-                builder.add_middleware_forwarded(body)?;
-            }
-            if let Some(route_id) = target_route_id.as_deref() {
-                builder.add_route_selected(route_id)?;
-            }
-            builder.add_request_forwarded(&forwarded_body)?;
-            if received_body != forwarded_body.as_slice() {
-                builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
-            }
+            let chat_id = extract_chat_id(&upstream_response.body);
             let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-            builder.add_upstream_verified_with_session(
+            let mut builder = self.build_middleware_receipt_prefix(
+                &receipt_id,
+                chat_id,
+                served_at,
+                endpoint_path,
+                received_body,
+                &candidate.body,
+                &route_id,
+                &forwarded_body,
                 recorded_event,
                 upstream_session_id.as_deref(),
             )?;
-            receipt_journal.reserve_receipt_id(receipt_id.clone());
+            let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
 
-            let body = MiddlewareProviderResponseDraftingStream {
-                inner: upstream_response.body,
-                builder: Some(builder),
-                journal: receipt_journal,
-                provider_response_hasher: Sha256::new(),
-                receipt_id: receipt_id.clone(),
-                forwarded_body,
-                endpoint_path: endpoint_path.to_string(),
-                sse_parser: SseChatIdParser::default(),
-                metrics: self.metrics.clone(),
-                upstream_status,
-                upstream_ended: false,
-                finished: false,
-            };
-
-            return Ok(MiddlewareForwardResult::Stream(Box::new(
-                MiddlewareStreamingForwarded {
+            return Ok(MiddlewareForwardResult::Forwarded(Box::new(
+                MiddlewareForwarded {
                     receipt_id: receipt_id.clone(),
-                    upstream_status,
-                    upstream_headers,
-                    body: Box::pin(body),
+                    receipt: MiddlewareReceiptDraft {
+                        receipt_id: receipt_id.clone(),
+                        builder,
+                        provider_response_hash,
+                        forwarded_body,
+                        endpoint_path: endpoint_path.to_string(),
+                        request_mode: RequestMode::Buffered,
+                        response_model,
+                    },
+                    upstream_status: status,
+                    upstream_body: upstream_response.body,
+                    upstream_headers: upstream_response.headers,
+                    selected_route: route_id.clone(),
+                    attempts: index + 1,
+                    session_id: upstream_session_id,
                 },
             )));
         }
 
-        let mut reverify_attempts = 0;
-        let upstream_response = loop {
-            match self
-                .upstream
-                .forward_verified_prepared(prepared.clone(), &recorded_event)
-                .await
-            {
-                Ok(response) => break response,
-                Err(UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event
-                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
-                {
-                    reverify_attempts += 1;
-                    recorded_event = self
-                        .refresh_upstream_event(&prepared, req.upstream_required)
-                        .await?;
-                }
-                Err(err @ UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event =>
-                {
-                    self.invalidate_upstream_event(&prepared, req.upstream_required);
-                    return Err(err.into());
-                }
-                Err(err) => return Err(err.into()),
-            }
-        };
-        let response_model =
-            accepted_response_model(upstream_response.status_code, &upstream_response.body);
-        recorded_event.model_id = response_model
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        self.metrics.record_upstream_response(
-            endpoint_path,
-            RequestMode::Buffered,
-            upstream_response.status_code,
-            response_model.as_deref(),
-        );
-
-        let receipt_id = generate_receipt_id();
-        let served_at = self.clock.now_secs();
-        let chat_id = extract_chat_id(&upstream_response.body);
-        let mut builder = ReceiptBuilder::new(
-            receipt_id.clone(),
-            chat_id,
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
-            endpoint_path.to_string(),
-            "POST".to_string(),
-            served_at,
-        );
-        builder.add_request_received(received_body)?;
-        if let Some(body) = middleware_forwarded_body.as_deref() {
-            builder.add_middleware_forwarded(body)?;
-        }
-        if let Some(route_id) = target_route_id.as_deref() {
-            builder.add_route_selected(route_id)?;
-        }
-        builder.add_request_forwarded(&forwarded_body)?;
-        if received_body != forwarded_body.as_slice() {
-            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
-        }
-        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-        builder
-            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
-        let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
-
-        Ok(MiddlewareForwardResult::Forwarded(Box::new(
-            MiddlewareForwarded {
-                receipt_id: receipt_id.clone(),
-                receipt: MiddlewareReceiptDraft {
-                    receipt_id: receipt_id.clone(),
-                    builder,
-                    provider_response_hash,
-                    forwarded_body,
-                    endpoint_path: endpoint_path.to_string(),
-                    request_mode: RequestMode::Buffered,
-                    response_model,
-                },
-                upstream_status: upstream_response.status_code,
-                upstream_body: upstream_response.body,
-                upstream_headers: upstream_response.headers,
-            },
-        )))
+        // No candidate succeeded. Return the highest-priority failure, with
+        // the attempted route ids for context.
+        Err(aggregated_err.map(|(_, err)| err).unwrap_or_else(|| {
+            ServiceError::Upstream(UpstreamError::Routing(format!(
+                "all upstream routes failed (attempted: {})",
+                candidate_route_ids.join(", ")
+            )))
+        }))
     }
 
     /// Start a streaming chat completion. The response stream hashes

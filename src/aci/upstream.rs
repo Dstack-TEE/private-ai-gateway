@@ -71,6 +71,14 @@ pub struct PreparedUpstreamRequest {
     pub url_origin: Option<String>,
     pub model_id: String,
     pub route_id: Option<String>,
+    /// Whether the selected route is an attested (TEE) provider.
+    /// `Some(true)` = TEE (verification is fail-closed), `Some(false)` =
+    /// non-TEE (TLS endpoint bound, never fail-closed, and its
+    /// `upstream.verified` event carries no attestation evidence),
+    /// `None` = unclassified (the caller's request-level `upstream_required`
+    /// decides, preserving the behaviour of routes built directly via
+    /// [`ModelRoute::new`]).
+    pub is_tee: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +129,7 @@ pub trait UpstreamBackend: Send + Sync {
             url_origin: self.url_origin().map(str::to_string),
             model_id,
             route_id: None,
+            is_tee: None,
         })
     }
 
@@ -207,6 +216,14 @@ pub struct ModelRoute {
     pub upstream_model_id: String,
     pub upstream: Arc<dyn UpstreamBackend>,
     pub route_id: String,
+    /// Per-upstream POST path (e.g. `/v1/messages` for native Anthropic
+    /// upstreams). `None` keeps the caller-supplied request path unchanged.
+    pub path: Option<String>,
+    /// Whether this route's provider is an attested (TEE) provider.
+    /// `None` means unclassified (routes built directly via
+    /// [`Self::new`], e.g. in tests, defer to request-level
+    /// `upstream_required`). See [`PreparedUpstreamRequest::is_tee`].
+    pub is_tee: Option<bool>,
 }
 
 impl ModelRoute {
@@ -239,7 +256,27 @@ impl ModelRoute {
             upstream_model_id,
             upstream,
             route_id,
+            path: None,
+            is_tee: None,
         })
+    }
+
+    /// Set the per-upstream POST path. A leading `/` is enforced. `None`
+    /// leaves the caller-supplied downstream path untouched.
+    pub fn with_path(mut self, path: Option<String>) -> Self {
+        self.path = path.map(|mut p| {
+            if !p.starts_with('/') {
+                p.insert(0, '/');
+            }
+            p
+        });
+        self
+    }
+
+    /// Classify whether this route's provider is attested (TEE).
+    pub fn with_is_tee(mut self, is_tee: Option<bool>) -> Self {
+        self.is_tee = is_tee;
+        self
     }
 }
 
@@ -334,12 +371,27 @@ impl UpstreamBackend for ModelRouterBackend {
         };
         let mut request = req;
         request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
+        // A configured per-upstream path overrides the chat-completions
+        // surface only (e.g. native Anthropic `/v1/messages`). Other
+        // surfaces (`/v1/completions`, `/v1/embeddings`) keep the
+        // caller-supplied path so they route to the matching upstream path.
+        if let Some(route_path) = &route.path {
+            let on_chat_surface = request
+                .path
+                .as_deref()
+                .map(|path| path == "/v1/chat/completions")
+                .unwrap_or(true);
+            if on_chat_surface {
+                request.path = Some(route_path.clone());
+            }
+        }
         Ok(PreparedUpstreamRequest {
             request,
             upstream_name: route.upstream.name().to_string(),
             url_origin: route.upstream.url_origin().map(str::to_string),
             model_id: route.upstream_model_id.clone(),
             route_id: Some(route.route_id.clone()),
+            is_tee: route.is_tee,
         })
     }
 
