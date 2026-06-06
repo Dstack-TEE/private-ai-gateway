@@ -53,6 +53,8 @@ export interface PreConsult {
   userId?: number;
   virtualKeyId?: number;
   spendMode?: SpendMode;
+  // Set on a 429 denial: drives the X-RateLimit-* / Retry-After headers.
+  rateLimit?: { limit: number; resetAt: number };
 }
 
 /** SHA-256 hex of the bearer key — only the hash crosses to the control plane. */

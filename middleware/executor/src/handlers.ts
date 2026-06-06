@@ -21,6 +21,30 @@ function jsonError(status: number, type: string, message: string): Response {
   });
 }
 
+/** A 429 response carrying the standard rate-limit headers. */
+function rateLimitResponse(
+  message: string,
+  limit: number,
+  resetAt: number
+): Response {
+  const retryAfter = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
+  return new Response(
+    JSON.stringify({
+      error: { message, type: 'rate_limit_error', code: 'rate_limit_exceeded' },
+    }),
+    {
+      status: 429,
+      headers: {
+        'content-type': 'application/json',
+        'X-RateLimit-Limit': String(limit),
+        'X-RateLimit-Remaining': '0',
+        'X-RateLimit-Reset': String(resetAt),
+        'Retry-After': String(retryAfter),
+      },
+    }
+  );
+}
+
 /**
  * Error type for a denial, using values valid on both surfaces this executor
  * serves (OpenAI and Anthropic share these four). Clients branch on the type
@@ -146,7 +170,11 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   );
   if (!consult.allow) {
     const status = consult.status ?? 403;
-    return jsonError(status, denialType(status), consult.message ?? 'forbidden');
+    const message = consult.message ?? 'forbidden';
+    if (status === 429 && consult.rateLimit) {
+      return rateLimitResponse(message, consult.rateLimit.limit, consult.rateLimit.resetAt);
+    }
+    return jsonError(status, denialType(status), message);
   }
   const pricing = consult.pricing ?? null;
 
