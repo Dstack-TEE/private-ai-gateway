@@ -98,6 +98,36 @@ export async function consultPre(
   }
 }
 
+/** Content-blind post-request usage report (drives billing + request logs). */
+export interface PostReport {
+  requestId: string;
+  endpoint: string;
+  status: number;
+  durationMs: number;
+  ttftMs?: number;
+  isStreaming?: boolean;
+  attemptIndex?: number;
+  // `<provider>:<model>` from the backend's selected-route header.
+  selectedRouteId: string | null;
+  requestModel: string;
+  // Raw upstream usage (before usage.cost was injected), or null if none.
+  usage: Record<string, unknown> | null;
+  pricing: PricingConfig | null;
+  spendMode?: SpendMode;
+  userId?: number;
+  virtualKeyId?: number;
+}
+
+/**
+ * Post-request consult: fire-and-forget usage report. Billing is best-effort —
+ * a control-plane hiccup must never fail the user's already-served response.
+ */
+export function consultPost(report: PostReport): void {
+  controlRequest('POST', '/consult/post', JSON.stringify(report)).catch(() => {
+    /* best-effort */
+  });
+}
+
 /** Fetch the model catalog (relayed by the executor's GET /v1/models). */
 export function fetchCatalog(): Promise<{ status: number; body: string }> {
   return controlRequest('GET', '/models');

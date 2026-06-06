@@ -2,13 +2,14 @@ import { Context } from 'hono';
 
 import { forwardToBackend } from './backendForward';
 import {
+  consultPost,
   consultPre,
   fetchCatalog,
   Format,
   hashApiKey,
   RouteCandidate,
 } from './controlConsult';
-import { injectCost } from './cost';
+import { meterResponse } from './cost';
 import ProviderConfigs from './providers';
 import { endpointStrings } from './providers/types';
 import transformToProviderRequest from './services/transformToProviderRequest';
@@ -148,6 +149,7 @@ function driveResponse(
 }
 
 async function handle(c: Context, fn: endpointStrings): Promise<Response> {
+  const start = Date.now();
   const requestId = c.req.header('x-private-ai-gateway-request-id');
   if (!requestId) {
     return jsonError(
@@ -206,7 +208,37 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     );
   }
   const response = await driveResponse(backendResp, params, fn, candidates);
-  return injectCost(response, pricing);
+
+  // Content-blind post-request consult (billing + request log). Fired once the
+  // raw upstream usage is known — immediately for buffered responses, at stream
+  // end for SSE — with the route the backend committed to.
+  const selectedRouteId = backendResp.headers.get(
+    'x-private-ai-gateway-selected-route'
+  );
+  const attemptIndex = Math.max(
+    0,
+    candidates.findIndex((c) => c.routeId === selectedRouteId)
+  );
+  const isStreaming =
+    backendResp.headers.get('content-type')?.includes('text/event-stream') ??
+    false;
+  return meterResponse(response, pricing, (usage) => {
+    consultPost({
+      requestId,
+      endpoint: new URL(c.req.url).pathname,
+      status: backendResp.status,
+      durationMs: Date.now() - start,
+      isStreaming,
+      attemptIndex,
+      selectedRouteId,
+      requestModel: params.model ?? '',
+      usage,
+      pricing,
+      spendMode: consult.spendMode,
+      userId: consult.userId,
+      virtualKeyId: consult.virtualKeyId,
+    });
+  });
 }
 
 export const chatCompletions = (c: Context) => handle(c, 'chatComplete');
