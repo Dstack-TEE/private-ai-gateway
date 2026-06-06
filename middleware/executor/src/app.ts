@@ -5,6 +5,7 @@ import {
   completions,
   embeddings,
   messages,
+  models,
 } from './handlers';
 
 /**
@@ -18,6 +19,7 @@ export const app = new Hono();
 // Liveness/identity probe.
 app.get('/', (c) => c.text('private-ai-gateway middleware executor\n'));
 
+app.get('/v1/models', models);
 app.post('/v1/chat/completions', chatCompletions);
 app.post('/v1/completions', completions);
 app.post('/v1/embeddings', embeddings);

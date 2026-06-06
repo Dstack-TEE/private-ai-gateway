@@ -1,6 +1,8 @@
 import { Context } from 'hono';
 
 import { forwardToBackend } from './backendForward';
+import { consultPre, fetchCatalog } from './controlConsult';
+import { injectCost } from './cost';
 import ProviderConfigs from './providers';
 import { endpointStrings } from './providers/types';
 import { resolveCandidates, RouteCandidate, Wire } from './routing';
@@ -122,6 +124,10 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     );
   }
 
+  // Content-blind pre-request consult for pricing (extended later with auth +
+  // ordered routing candidates).
+  const { pricing } = await consultPre(params.model);
+
   const { targets, body } = buildForwardPayload(params, fn, candidates);
   let backendResp: Response;
   try {
@@ -133,10 +139,20 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
       `failed to reach gateway backend: ${(err as Error).message}`
     );
   }
-  return driveResponse(backendResp, params, fn, candidates);
+  const response = await driveResponse(backendResp, params, fn, candidates);
+  return injectCost(response, pricing);
 }
 
 export const chatCompletions = (c: Context) => handle(c, 'chatComplete');
 export const completions = (c: Context) => handle(c, 'complete');
 export const embeddings = (c: Context) => handle(c, 'embed');
 export const messages = (c: Context) => handle(c, 'messages');
+
+/** GET /v1/models — relay the catalog from the control plane. */
+export const models = async (): Promise<Response> => {
+  const r = await fetchCatalog();
+  return new Response(r.body, {
+    status: r.status,
+    headers: { 'content-type': 'application/json' },
+  });
+};

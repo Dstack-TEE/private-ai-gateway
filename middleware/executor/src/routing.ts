@@ -11,10 +11,10 @@ export interface RouteCandidate {
 }
 
 /**
- * Phase 2 routing stub: a static `model -> ordered candidates` map loaded from
- * a JSON file (PRIVATE_AI_GATEWAY_EXECUTOR_ROUTES_PATH). Phase 3 replaces this
- * with control's profit-EV ranking, keeping the same output shape (an ordered
- * list of {routeId, wire}).
+ * Routing stub: a static `model -> ordered candidates` map loaded from a JSON
+ * file (PRIVATE_AI_GATEWAY_EXECUTOR_ROUTES_PATH). Intended to be replaced by a
+ * dynamic ranking source over the control IPC, keeping the same output shape
+ * (an ordered list of {routeId, wire}).
  */
 type RoutesConfig = Record<string, RouteCandidate[]>;
 
