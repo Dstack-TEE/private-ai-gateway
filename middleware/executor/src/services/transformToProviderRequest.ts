@@ -164,7 +164,7 @@ const transformToProviderRequestJSON = (
  * executor serves only JSON endpoints (chat/completions/embeddings/messages),
  * so this always runs the JSON param transform.
  *
- * @param provider - Provider/wire key, e.g. 'openai' or 'anthropic'.
+ * @param provider - API format key, e.g. 'openai' or 'anthropic'.
  * @param params - The request parameters.
  * @param fn - The endpoint being called, e.g. 'chatComplete' or 'embed'.
  * @param providerOptions - Provider options carried with the request.

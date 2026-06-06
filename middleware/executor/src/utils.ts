@@ -3,7 +3,7 @@ import { ANTHROPIC } from './globals';
 export type SplitPatternType = '\n\n' | '\r\n\r\n' | '\n' | '\r\n';
 
 /**
- * Pick the SSE split pattern for the upstream wire. OpenAI- and
+ * Pick the SSE split pattern for the upstream format. OpenAI- and
  * Anthropic-compatible event streams delimit events with `\n\n`; native
  * Anthropic's legacy `/complete` uses `\r\n\r\n`.
  */

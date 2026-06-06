@@ -43,12 +43,24 @@ function controlRequest(
 
 export type SpendMode = 'regular' | 'subscription' | 'subscription_overflow';
 
+export type Format = 'openai' | 'anthropic';
+
+/** One ordered failover candidate: a backend route id and the upstream format. */
+export interface RouteCandidate {
+  /** `<provider>:<public model id>`, aligned with the backend's upstreams.json. */
+  routeId: string;
+  /** Which API format shapes the request / parses the response. */
+  format: Format;
+}
+
 export interface PreConsult {
   allow: boolean;
   // Set when allow is false: the status + message to return to the client.
   status?: number;
   message?: string;
   pricing?: PricingConfig | null;
+  // Ordered backend route candidates for this model (the routing decision).
+  candidates?: RouteCandidate[];
   // Billing identity, carried to the post-request consult.
   userId?: number;
   virtualKeyId?: number;

@@ -3,7 +3,7 @@ import OpenAIConfig from './openai';
 import AnthropicConfig from './anthropic';
 
 /**
- * Provider transform registry keyed by upstream wire format. Every
+ * Provider transform registry keyed by upstream API format. Every
  * OpenAI-compatible upstream uses the `openai` config; native Anthropic
  * upstreams use `anthropic`. Routing selects the key per candidate.
  */

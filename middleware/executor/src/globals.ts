@@ -1,4 +1,4 @@
-// Provider identifiers used by the transform layer (registry keys / wire types).
+// Provider identifiers used by the transform layer (registry keys / API formats).
 export const OPEN_AI: string = 'openai';
 export const ANTHROPIC: string = 'anthropic';
 

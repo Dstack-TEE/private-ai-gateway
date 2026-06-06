@@ -1,11 +1,16 @@
 import { Context } from 'hono';
 
 import { forwardToBackend } from './backendForward';
-import { consultPre, fetchCatalog, hashApiKey } from './controlConsult';
+import {
+  consultPre,
+  fetchCatalog,
+  Format,
+  hashApiKey,
+  RouteCandidate,
+} from './controlConsult';
 import { injectCost } from './cost';
 import ProviderConfigs from './providers';
 import { endpointStrings } from './providers/types';
-import { resolveCandidates, RouteCandidate, Wire } from './routing';
 import transformToProviderRequest from './services/transformToProviderRequest';
 import { handleNonStreamingMode, handleStreamingMode } from './stream';
 import { Params } from './types/requestBody';
@@ -67,8 +72,8 @@ function denialType(status: number): string {
 
 /**
  * Build the `{ targets, body }` payload for the backend: shape the request for
- * every candidate (downstream format x candidate wire), then package it — one
- * shared body when all candidates share a wire, otherwise the envelope the
+ * every candidate (downstream format x candidate format), then package it — one
+ * shared body when all candidates share a format, otherwise the envelope the
  * backend understands (`{ candidates: [{ target, body }] }`).
  */
 function buildForwardPayload(
@@ -79,29 +84,29 @@ function buildForwardPayload(
   const targets = candidates.map((candidate) => candidate.routeId);
   const shaped = candidates.map((candidate) => ({
     target: candidate.routeId,
-    body: transformToProviderRequest(candidate.wire, params, fn, {
-      provider: candidate.wire,
+    body: transformToProviderRequest(candidate.format, params, fn, {
+      provider: candidate.format,
     }),
   }));
-  const sameWire = candidates.every((c) => c.wire === candidates[0].wire);
-  return sameWire
+  const sameFormat = candidates.every((c) => c.format === candidates[0].format);
+  return sameFormat
     ? { targets, body: JSON.stringify(shaped[0].body) }
     : { targets, body: JSON.stringify({ candidates: shaped }) };
 }
 
 function responseTransformerFor(
-  wire: Wire,
+  format: Format,
   fn: endpointStrings,
   streaming: boolean
 ): Function | undefined {
-  const transforms = ProviderConfigs[wire]?.responseTransforms;
+  const transforms = ProviderConfigs[format]?.responseTransforms;
   if (!transforms) return undefined;
   return streaming ? transforms[`stream-${fn}`] : transforms[fn];
 }
 
 /**
  * Convert the backend response back to the downstream format. The committed
- * candidate's wire (from the backend's selected-route attribution header)
+ * candidate's format (from the backend's selected-route attribution header)
  * picks the response transform; buffered vs streaming is decided by the
  * backend response content-type, not the request flag (so an error returned
  * for a stream request is handled as buffered).
@@ -126,8 +131,8 @@ function driveResponse(
   if (streaming) {
     return handleStreamingMode(
       backendResp,
-      selected.wire,
-      responseTransformerFor(selected.wire, fn, true),
+      selected.format,
+      responseTransformerFor(selected.format, fn, true),
       requestURL,
       STRICT_OPENAI_COMPLIANCE,
       params
@@ -135,7 +140,7 @@ function driveResponse(
   }
   return handleNonStreamingMode(
     backendResp,
-    responseTransformerFor(selected.wire, fn, false),
+    responseTransformerFor(selected.format, fn, false),
     STRICT_OPENAI_COMPLIANCE,
     requestURL,
     params
@@ -178,12 +183,14 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   }
   const pricing = consult.pricing ?? null;
 
-  const candidates = resolveCandidates(params.model);
+  // The control plane ranks the model's deployments into ordered failover
+  // candidates; an empty list means the model has no active deployment.
+  const candidates = consult.candidates ?? [];
   if (candidates.length === 0) {
     return jsonError(
       400,
       'model_not_found',
-      `no route configured for model ${params.model ?? '(none)'}`
+      `no route available for model ${params.model ?? '(none)'}`
     );
   }
 
