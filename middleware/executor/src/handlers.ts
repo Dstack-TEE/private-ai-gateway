@@ -1,7 +1,7 @@
 import { Context } from 'hono';
 
 import { forwardToBackend } from './backendForward';
-import { consultPre, fetchCatalog } from './controlConsult';
+import { consultPre, fetchCatalog, hashApiKey } from './controlConsult';
 import { injectCost } from './cost';
 import ProviderConfigs from './providers';
 import { endpointStrings } from './providers/types';
@@ -19,6 +19,26 @@ function jsonError(status: number, type: string, message: string): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+/**
+ * Error type for a denial, using values valid on both surfaces this executor
+ * serves (OpenAI and Anthropic share these four). Clients branch on the type
+ * to decide retry behavior, so it's worth being precise rather than generic.
+ */
+function denialType(status: number): string {
+  switch (status) {
+    case 401:
+      return 'authentication_error';
+    case 402:
+      return 'insufficient_quota';
+    case 403:
+      return 'permission_error';
+    case 429:
+      return 'rate_limit_error';
+    default:
+      return status >= 500 ? 'server_error' : 'invalid_request_error';
+  }
 }
 
 /**
@@ -115,6 +135,21 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     return jsonError(400, 'invalid_request_error', 'invalid json body');
   }
 
+  // Content-blind pre-request consult: authorization + pricing. Only the
+  // bearer key's hash crosses the seam, never the raw key. A denial (invalid
+  // key, exhausted quota, control unavailable) returns here before any
+  // forwarding, so no inference happens and no receipt is emitted.
+  const bearer = c.req.header('authorization')?.replace(/^Bearer\s+/i, '');
+  const consult = await consultPre(
+    params.model,
+    bearer ? hashApiKey(bearer) : undefined
+  );
+  if (!consult.allow) {
+    const status = consult.status ?? 403;
+    return jsonError(status, denialType(status), consult.message ?? 'forbidden');
+  }
+  const pricing = consult.pricing ?? null;
+
   const candidates = resolveCandidates(params.model);
   if (candidates.length === 0) {
     return jsonError(
@@ -123,10 +158,6 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
       `no route configured for model ${params.model ?? '(none)'}`
     );
   }
-
-  // Content-blind pre-request consult for pricing (extended later with auth +
-  // ordered routing candidates).
-  const { pricing } = await consultPre(params.model);
 
   const { targets, body } = buildForwardPayload(params, fn, candidates);
   let backendResp: Response;
