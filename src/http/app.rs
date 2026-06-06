@@ -86,7 +86,7 @@ use crate::aggregator::service::{
     E2eeResponseInfo, ForwardCandidate, GatewayRequestContext, MiddlewareForwardResult,
     MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
     StreamingForwardResult, UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
-    EMBEDDINGS_PATH,
+    EMBEDDINGS_PATH, MESSAGES_PATH,
 };
 use crate::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigError, UpstreamConfigManager,
@@ -261,6 +261,7 @@ fn build_router_inner(
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/messages", post(messages))
         .route("/v1/receipt/:chat_id", get(receipt_by_chat_id))
         .route("/v1/signature/:chat_id", get(receipt_by_chat_id))
         .route("/v1/receipt/:chat_id/body", get(get_receipt_body))
@@ -575,6 +576,13 @@ async fn embeddings(State(state): State<AppState>, headers: HeaderMap, body: Byt
     // is forced back to buffered so the receipt/E2EE pipeline runs the
     // single non-streaming response path.
     openai_completion_endpoint(state, headers, body, EMBEDDINGS_PATH, true).await
+}
+
+async fn messages(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // Native Anthropic-format downstream surface. The frontend treats the body
+    // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
+    // middleware; the executor handles Anthropic<->provider conversion.
+    openai_completion_endpoint(state, headers, body, MESSAGES_PATH, false).await
 }
 
 async fn openai_completion_endpoint(
