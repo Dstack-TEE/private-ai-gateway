@@ -1,7 +1,7 @@
 {
-  "name": "private-ai-gateway-control-reference",
+  "name": "private-ai-gateway-control",
   "version": "0.1.0",
-  "description": "Open reference control plane (config-driven, no DB) implementing the executor<->control contract. The proprietary control ships as a separate private image.",
+  "description": "Minimal config-driven control plane (no DB) implementing the executor<->control HTTP surface. The production control ships as a separate private image.",
   "private": true,
   "type": "module",
   "bin": "build/server.js",

@@ -1,16 +1,14 @@
-# Reference control plane (open)
+# Control plane
 
-This is a **minimal, config-driven** implementation of the gateway's control
-plane — the content-blind decision plane the executor consults. It exists so the
-open stack runs end-to-end and so the executor↔control contract has a working,
-testable example. See [`../../docs/control-contract.md`](../../docs/control-contract.md).
+A **minimal, config-driven** implementation of the gateway's control plane — the
+content-blind decision plane the executor consults over a Unix socket. It exists
+so the stack runs end-to-end and gives a working, testable example of the
+executor↔control HTTP surface (the three endpoints below).
 
-It is **not** the production control. The real control (auth against a database,
-profit-EV routing, rate limiting, billing/spend, metrics) is a separate,
-closed-source service published as its own image. Because integration is purely
-the HTTP-over-UDS contract + a digest-pinned image, that proprietary control is a
-**drop-in replacement**: swap the `control` image in `deploy/docker-compose.yml`
-and supply its database env.
+It is **not** the production control, which is a separate, closed-source service
+published as its own image. Because the executor talks to it only over these
+HTTP-over-UDS endpoints, the production control is a **drop-in replacement**:
+swap the `control` image in the deployment compose and supply its env.
 
 ## What it does
 
@@ -21,7 +19,7 @@ and supply its database env.
   = anonymous allowed).
 - `POST /consult/post` — accepts the usage report and drops it (no billing).
 
-No Postgres / Redis / ClickHouse.
+No database; configuration only.
 
 ## Config
 

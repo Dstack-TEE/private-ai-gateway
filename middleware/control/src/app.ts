@@ -3,9 +3,9 @@ import { Hono } from 'hono';
 import { loadConfig } from './config';
 
 /**
- * Open reference control plane — config-driven, no database. It implements the
- * same executor<->control contract (see docs/control-contract.md) as the
- * proprietary control, so a private control image is a drop-in replacement.
+ * Control plane — config-driven, no database. It implements the same
+ * executor<->control HTTP surface as the production control, so a private
+ * control image is a drop-in replacement.
  *
  * Content-blind, like any control plane: it only ever sees `{ apiKeyHash, model }`
  * and post-request usage counts — never plaintext, never provider credentials.
@@ -17,7 +17,7 @@ const requireKey = allowList.size > 0;
 export const app = new Hono();
 
 // Liveness/identity probe.
-app.get('/', (c) => c.text('private-ai-gateway reference control plane\n'));
+app.get('/', (c) => c.text('private-ai-gateway control plane\n'));
 
 // Model catalog. The executor's /v1/models proxies here.
 app.get('/models', (c) =>
@@ -46,8 +46,8 @@ app.post('/consult/pre', async (c) => {
   return c.json({ allow: true, pricing: entry.pricing ?? null, candidates: entry.candidates });
 });
 
-// Post-request consult (content-blind): the reference build does no billing —
-// it accepts the usage report and drops it. (The proprietary control records it.)
+// Post-request consult (content-blind): this build does no billing — it accepts
+// the usage report and drops it. (The production control records it.)
 app.post('/consult/post', async (c) => {
   await c.req.json().catch(() => undefined);
   return c.json({ ok: true });

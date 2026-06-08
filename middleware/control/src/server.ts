@@ -7,8 +7,7 @@ import { app } from './app';
 
 /**
  * Listen on the control Unix domain socket the executor dials, with a TCP
- * fallback for local development. No background workers / no database — this is
- * the open reference control.
+ * fallback for local development. No background workers / no database.
  */
 const socketPath = process.env.PRIVATE_AI_GATEWAY_CONTROL_UDS_PATH?.trim();
 const portArg = process.argv.slice(2).find((arg) => arg.startsWith('--port='));
@@ -21,11 +20,11 @@ if (socketPath) {
     unlinkSync(socketPath);
   }
   server.listen({ path: socketPath }, () => {
-    console.log(`reference control listening on unix socket ${socketPath}`);
+    console.log(`control listening on unix socket ${socketPath}`);
   });
 } else {
   server.listen(port, () => {
-    console.log(`reference control listening on http://localhost:${port}`);
+    console.log(`control listening on http://localhost:${port}`);
   });
 }
 
