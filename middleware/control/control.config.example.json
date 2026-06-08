@@ -1,0 +1,9 @@
+{
+  "keys": [],
+  "models": {
+    "minimax/minimax-m2.5": {
+      "pricing": { "inputCostPerToken": "0.0000003", "outputCostPerToken": "0.0000012" },
+      "candidates": [{ "routeId": "chutes:minimax/minimax-m2.5", "format": "openai" }]
+    }
+  }
+}
