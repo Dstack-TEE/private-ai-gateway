@@ -10,7 +10,7 @@ import { app } from './app';
  * the frontend dials), otherwise fall back to a TCP port for local
  * single-process development.
  */
-const socketPath = process.env.PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH?.trim();
+const socketPath = process.env.PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH?.trim();
 const portArg = process.argv.slice(2).find((arg) => arg.startsWith('--port='));
 const port = portArg ? Number.parseInt(portArg.split('=')[1], 10) : 8788;
 
