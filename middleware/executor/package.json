@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --packages=external --outfile=build/server.js",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "format": "prettier --write \"./src/**/*.ts\"",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "20.8.3",
+    "esbuild": "^0.24.0",
     "jest": "^29.7.0",
     "prettier": "3.2.5",
     "ts-jest": "^29.2.4",
