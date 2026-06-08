@@ -86,7 +86,7 @@ use crate::aggregator::service::{
     E2eeResponseInfo, ForwardCandidate, GatewayRequestContext, MiddlewareForwardResult,
     MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
     StreamingForwardResult, UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
-    EMBEDDINGS_PATH, MESSAGES_PATH,
+    EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
 use crate::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigError, UpstreamConfigManager,
@@ -262,6 +262,7 @@ fn build_router_inner(
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
+        .route("/v1/responses", post(responses))
         .route("/v1/receipt/:chat_id", get(receipt_by_chat_id))
         .route("/v1/signature/:chat_id", get(receipt_by_chat_id))
         .route("/v1/receipt/:chat_id/body", get(get_receipt_body))
@@ -583,6 +584,22 @@ async fn messages(State(state): State<AppState>, headers: HeaderMap, body: Bytes
     // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
     // middleware; the executor handles Anthropic<->provider conversion.
     openai_completion_endpoint(state, headers, body, MESSAGES_PATH, false).await
+}
+
+async fn responses(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // Native OpenAI Responses API passthrough (create only). The frontend treats
+    // the body as opaque plaintext (extracts `model`/`stream`); the path flows
+    // through to the upstream as `base_url + /v1/responses`. ACI E2EE is not
+    // supported on this endpoint yet — its body uses `input`, not `messages` —
+    // so reject E2EE requests cleanly instead of failing later in field decryption.
+    if has_e2ee_headers(&headers) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "ACI E2EE is not supported on /v1/responses",
+        );
+    }
+    openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
 }
 
 async fn openai_completion_endpoint(

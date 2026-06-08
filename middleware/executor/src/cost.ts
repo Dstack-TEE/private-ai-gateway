@@ -40,21 +40,38 @@ export function meterResponse(
           if (!line.startsWith('data: ')) return line;
           const dataText = line.slice(6).trim();
           if (dataText === '[DONE]') return line;
-          let parsed: { usage?: unknown } & Record<string, unknown>;
+          let parsed: {
+            usage?: unknown;
+            response?: { usage?: unknown } & Record<string, unknown>;
+          } & Record<string, unknown>;
           try {
             parsed = JSON.parse(dataText);
           } catch {
             // chunk-boundary-split JSON — emit unchanged.
             return line;
           }
-          if (!parsed?.usage) return line;
-          lastUsage = parsed.usage as Usage;
+          // chat/completions/embeddings carry usage at the top level; the
+          // Responses API nests it at `response.usage` (the response.completed event).
+          const topUsage = parsed?.usage;
+          const respUsage = parsed?.response?.usage;
+          const usageObj = topUsage ?? respUsage;
+          if (!usageObj) return line;
+          lastUsage = usageObj as Usage;
           if (!inject) return line;
-          const cost = computeCost(parsed.usage as never, pricing);
+          const cost = computeCost(usageObj as never, pricing);
           rewritten = true;
+          if (topUsage) {
+            return `data: ${JSON.stringify({
+              ...parsed,
+              usage: { ...(topUsage as object), cost },
+            })}`;
+          }
           return `data: ${JSON.stringify({
             ...parsed,
-            usage: { ...(parsed.usage as object), cost },
+            response: {
+              ...(parsed.response as object),
+              usage: { ...(respUsage as object), cost },
+            },
           })}`;
         });
         controller.enqueue(

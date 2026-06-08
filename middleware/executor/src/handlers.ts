@@ -245,6 +245,9 @@ export const chatCompletions = (c: Context) => handle(c, 'chatComplete');
 export const completions = (c: Context) => handle(c, 'complete');
 export const embeddings = (c: Context) => handle(c, 'embed');
 export const messages = (c: Context) => handle(c, 'messages');
+// POST /v1/responses — OpenAI Responses API, native passthrough. openai->openai
+// request shaping is identity; no response transform => verbatim relay.
+export const responses = (c: Context) => handle(c, 'createModelResponse');
 
 /** GET /v1/models — relay the catalog from the control plane. */
 export const models = async (): Promise<Response> => {

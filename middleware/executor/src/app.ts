@@ -6,6 +6,7 @@ import {
   embeddings,
   messages,
   models,
+  responses,
 } from './handlers';
 
 /**
@@ -24,3 +25,4 @@ app.post('/v1/chat/completions', chatCompletions);
 app.post('/v1/completions', completions);
 app.post('/v1/embeddings', embeddings);
 app.post('/v1/messages', messages);
+app.post('/v1/responses', responses);

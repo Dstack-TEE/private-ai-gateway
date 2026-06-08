@@ -9,6 +9,7 @@ import {
   OpenAIChatCompleteResponseTransform,
 } from './chatComplete';
 import { OpenAIEmbedConfig, OpenAIEmbedResponseTransform } from './embed';
+import { OpenAICreateModelResponseConfig } from './createModelResponse';
 import {
   OpenAIToAnthropicMessagesConfig,
   OpenAIToAnthropicMessagesResponseTransform,
@@ -21,6 +22,7 @@ const OpenAIConfig: ProviderConfigs = {
   chatComplete: OpenAIChatCompleteConfig,
   embed: OpenAIEmbedConfig,
   messages: OpenAIToAnthropicMessagesConfig,
+  createModelResponse: OpenAICreateModelResponseConfig,
   responseTransforms: {
     complete: OpenAICompleteResponseTransform,
     chatComplete: OpenAIChatCompleteResponseTransform,

@@ -53,6 +53,7 @@ pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
+pub const RESPONSES_PATH: &str = "/v1/responses";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 
 #[derive(Debug, thiserror::Error)]
