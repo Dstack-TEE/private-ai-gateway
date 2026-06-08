@@ -30,7 +30,7 @@ The gateway connects to this socket when forwarding public requests to
 middleware:
 
 ```bash
-PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock
+PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
 PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
 ```
 
@@ -43,7 +43,7 @@ In this mode the gateway has three HTTP surfaces:
 | Surface | Who Calls It | Purpose |
 | --- | --- | --- |
 | Public gateway bind, for example `127.0.0.1:8086` | Downstream users and SDKs | ACI/OpenAI-compatible frontend. |
-| Middleware UDS, for example `/run/private-ai-gateway/middleware.sock` | Gateway frontend | Plaintext routing and business logic. |
+| Middleware UDS, for example `/run/private-ai-gateway/executor.sock` | Gateway frontend | Plaintext routing and business logic. |
 | Internal backend UDS, for example `/run/private-ai-gateway/backend.sock` | Middleware only | Verified provider forwarding. |
 
 Run middleware in the same attested deployment as the gateway. The socket paths
@@ -120,14 +120,19 @@ Middleware must call:
 ```http
 POST http://private-ai-gateway/internal/forward
 x-private-ai-gateway-request-id: <request id from frontend>
-x-private-ai-gateway-target: <configured target route id>
+x-private-ai-gateway-targets: <ordered, comma-separated route ids>
 content-type: application/json
 
 <possibly rewritten OpenAI-compatible JSON body>
 ```
 
-`x-private-ai-gateway-target` is a backend route id. For routes loaded from the
-gateway upstream config, the route id is:
+`x-private-ai-gateway-targets` is an ordered, comma-separated list of backend
+route ids (highest priority first). The backend tries each in order until one
+commits, performing request-level failover internally (verification/binding
+failure, transport error, or a retryable provider HTTP error before the first
+response byte advances to the next candidate). A single route id is just a
+one-element list. For routes loaded from the gateway upstream config, each
+route id is:
 
 ```text
 <upstream name>:<public model id in upstream config>
@@ -151,8 +156,33 @@ For example, this upstream config creates target route
 ```
 
 The request body sent to `/internal/forward` may keep the user-facing model
-name. The backend selects by `x-private-ai-gateway-target` and rewrites
-`body.model` to the configured upstream model id before provider forwarding.
+name. The backend selects the committed candidate from
+`x-private-ai-gateway-targets` and rewrites `body.model` to the configured
+upstream model id before provider forwarding.
+
+Mixed-format candidates (e.g. an OpenAI-compatible route and a native Anthropic
+`/v1/messages` route in one failover list) use the envelope body form instead of
+a single shared body:
+
+```json
+{
+  "candidates": [
+    { "target": "anthropic:claude", "body": { "model": "claude", "messages": [] } },
+    { "target": "openrouter:claude", "body": { "model": "claude", "messages": [] } }
+  ]
+}
+```
+
+The backend forwards each candidate's own body verbatim to that upstream's
+configured `path`. When the envelope is used, its target order is
+authoritative; if `x-private-ai-gateway-targets` is also present it must match.
+
+The backend returns route attribution on the `/internal/forward` response for
+the middleware to record metrics and bill the actually-served deployment:
+`x-private-ai-gateway-selected-route`, `x-private-ai-gateway-attempts`, and
+`x-private-ai-gateway-session-id` (the attested session id, when the committed
+route established one). These are internal-hop headers; the frontend strips any
+leaked `x-private-ai-gateway-*` before the user sees the response.
 
 ### `POST /v1/completions`
 
@@ -234,7 +264,7 @@ async def forward(body: bytes, request_id: str) -> Response:
             headers={
                 "content-type": "application/json",
                 "x-private-ai-gateway-request-id": request_id,
-                "x-private-ai-gateway-target": TARGET_ROUTE,
+                "x-private-ai-gateway-targets": TARGET_ROUTE,
             },
             content=body,
         )
@@ -278,13 +308,13 @@ async def completions(
 Run it locally:
 
 ```bash
-uvicorn middleware:app --uds /run/private-ai-gateway/middleware.sock
+uvicorn middleware:app --uds /run/private-ai-gateway/executor.sock
 ```
 
 Start the gateway with middleware enabled:
 
 ```bash
-PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock \
+PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock \
 PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock \
 PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/path/to/upstreams.json \
 cargo run --bin private-ai-gateway
