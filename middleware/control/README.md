@@ -1,14 +1,9 @@
 # Control plane
 
 A **minimal, config-driven** implementation of the gateway's control plane — the
-content-blind decision plane the executor consults. It exists so the stack runs
-end-to-end and gives a working, testable example of the executor↔control HTTP
-surface (the three endpoints below).
-
-It is **not** the production control, which is a separate, closed-source service.
-Because the executor talks to it only over these HTTP endpoints, the production
-control is a **drop-in replacement**: point the executor at its URL and supply a
-token.
+decision plane the executor consults. It exists so the stack runs end-to-end and
+gives a working, testable example of the executor↔control HTTP surface (the three
+endpoints below).
 
 ## What it does
 
@@ -40,12 +35,10 @@ node build/server.js
 
 Then run the executor with `PRIVATE_AI_GATEWAY_CONTROL_URL=http://127.0.0.1:8789`.
 
-## Remote / production mode
+## Remote mode
 
-The control plane is meant to run as a **standalone service on its own server**,
-which is what keeps the attested gateway CVM fully open-source — only the executor
-reaches across the network to it, and only content-blind metadata
-(`{apiKeyHash, model}` + usage counts) ever crosses that hop.
+The control plane can run on a separate host that the executor reaches over the
+network. The consult payloads carry only `{apiKeyHash, model}` and usage counts.
 
 - **Authentication** — set `PRIVATE_AI_GATEWAY_CONTROL_TOKEN`. When set, the
   control enforces `Authorization: Bearer <token>` on `/consult/*` and `/models`;

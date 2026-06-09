@@ -37,7 +37,7 @@ describe('controlConsult — remote dial', () => {
     nextResponse = { status: 200, body: '{}' };
   });
 
-  it('sends the Bearer token + content-blind body to /consult/pre and parses the result', async () => {
+  it('sends the Bearer token + {apiKeyHash, model} body to /consult/pre and parses the result', async () => {
     nextResponse = { status: 200, body: JSON.stringify({ allow: true, candidates: [] }) };
     const res = await consultPre('gpt-4o', 'abc');
     expect(res.allow).toBe(true);

@@ -581,7 +581,7 @@ export const AnthropicChatCompleteResponseTransform: (
         // cached/created portions. Anthropic's raw input_tokens excludes the
         // cache buckets (it's only tokens after the last cache breakpoint), so
         // we add the buckets back to align with how downstream consumers and
-        // the materialized spend_logs.input_cost formula expect prompt_tokens.
+        // the cost computation expect prompt_tokens.
         prompt_tokens:
           input_tokens +
           (cache_creation_input_tokens ?? 0) +

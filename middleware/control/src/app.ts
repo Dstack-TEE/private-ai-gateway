@@ -4,12 +4,9 @@ import { bearerAuth } from 'hono/bearer-auth';
 import { loadConfig } from './config';
 
 /**
- * Control plane — config-driven, no database. It implements the same
- * executor<->control HTTP surface as the production control, so a private
- * control image is a drop-in replacement.
- *
- * Content-blind, like any control plane: it only ever sees `{ apiKeyHash, model }`
- * and post-request usage counts — never plaintext, never provider credentials.
+ * Control plane — config-driven, no database. Implements the executor<->control
+ * HTTP surface so the stack runs end-to-end. It only ever receives
+ * `{ apiKeyHash, model }` and post-request usage counts.
  */
 const config = loadConfig();
 const allowList = new Set(config.keys ?? []);
@@ -33,7 +30,7 @@ app.get('/models', (c) =>
   c.json({ data: Object.keys(config.models).map((id) => ({ id, object: 'model' })) })
 );
 
-// Pre-request consult (content-blind): authorize + resolve pricing + ordered
+// Pre-request consult: authorize + resolve pricing + ordered
 // candidates from config. A denial carries the status + message the executor
 // returns verbatim.
 app.post('/consult/pre', async (c) => {
@@ -55,8 +52,8 @@ app.post('/consult/pre', async (c) => {
   return c.json({ allow: true, pricing: entry.pricing ?? null, candidates: entry.candidates });
 });
 
-// Post-request consult (content-blind): this build does no billing — it accepts
-// the usage report and drops it. (The production control records it.)
+// Post-request consult: this build does no billing — it accepts the usage
+// report and drops it.
 app.post('/consult/post', async (c) => {
   await c.req.json().catch(() => undefined);
   return c.json({ ok: true });

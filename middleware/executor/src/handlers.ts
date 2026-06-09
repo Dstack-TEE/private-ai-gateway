@@ -166,7 +166,7 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     return jsonError(400, 'invalid_request_error', 'invalid json body');
   }
 
-  // Content-blind pre-request consult: authorization + pricing. Only the
+  // Pre-request consult: authorization + pricing. Only the
   // bearer key's hash crosses the seam, never the raw key. A denial (invalid
   // key, exhausted quota, control unavailable) returns here before any
   // forwarding, so no inference happens and no receipt is emitted.
@@ -209,7 +209,7 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   }
   const response = await driveResponse(backendResp, params, fn, candidates);
 
-  // Content-blind post-request consult (billing + request log). Fired once the
+  // Post-request consult (billing + request log). Fired once the
   // raw upstream usage is known — immediately for buffered responses, at stream
   // end for SSE — with the route the backend committed to.
   const selectedRouteId = backendResp.headers.get(

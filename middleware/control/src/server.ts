@@ -4,10 +4,10 @@ import { createAdaptorServer } from '@hono/node-server';
 import { app } from './app';
 
 /**
- * The control plane runs as a standalone service listening on a TCP port; the
- * executor reaches it over HTTP(S) at PRIVATE_AI_GATEWAY_CONTROL_URL. For
- * production, terminate TLS in front of this (a reverse proxy) and set a bearer
- * token via PRIVATE_AI_GATEWAY_CONTROL_TOKEN (enforced in app.ts).
+ * Listen on a TCP port; the executor reaches it over HTTP(S) at
+ * PRIVATE_AI_GATEWAY_CONTROL_URL. For production, terminate TLS in front of this
+ * (a reverse proxy) and set a bearer token via PRIVATE_AI_GATEWAY_CONTROL_TOKEN
+ * (enforced in app.ts).
  */
 const portArg = process.argv.slice(2).find((arg) => arg.startsWith('--port='));
 const portFromArg = portArg ? Number.parseInt(portArg.split('=')[1], 10) : undefined;

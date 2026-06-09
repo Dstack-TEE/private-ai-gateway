@@ -4,9 +4,9 @@ import https from 'node:https';
 
 import { PricingConfig } from './services/pricing';
 
-// The control plane runs as a separate service. The executor reaches it over
-// HTTP(S) at PRIVATE_AI_GATEWAY_CONTROL_URL, authenticated with a bearer token.
-// Only content-blind metadata crosses this hop; for production it must be TLS.
+// The executor reaches the control plane over HTTP(S) at
+// PRIVATE_AI_GATEWAY_CONTROL_URL, authenticated with a bearer token; use TLS in
+// production. The consult payloads carry only {apiKeyHash, model} and usage counts.
 const CONTROL_URL = process.env.PRIVATE_AI_GATEWAY_CONTROL_URL?.trim();
 const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
 
@@ -87,7 +87,7 @@ export function hashApiKey(apiKey: string): string {
 }
 
 /**
- * Pre-request consult: content-blind {apiKeyHash?, model} -> {allow, ...}.
+ * Pre-request consult: {apiKeyHash?, model} -> {allow, ...}.
  * Because this gates authorization, it fails CLOSED — an unreachable control
  * plane blocks the request (503) rather than letting it through unauthorized.
  */
@@ -110,7 +110,7 @@ export async function consultPre(
   }
 }
 
-/** Content-blind post-request usage report (drives billing + request logs). */
+/** Post-request usage report (drives billing + request logs). */
 export interface PostReport {
   requestId: string;
   endpoint: string;

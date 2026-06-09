@@ -55,7 +55,7 @@ export const resolveUsage = (usage: Usage): ResolvedUsage => ({
 
 // Bills each bucket at its per-token rate. Unset cache rates fall back to
 // inputCostPerToken — equivalent to "no cache discount" and identical to what
-// the materialized total_cost in spend_logs computes from the same inputs.
+// the downstream cost computation produces from the same inputs.
 export const computeCost = (usage: Usage, pricing: PricingConfig): number => {
   const {
     promptTokens,
