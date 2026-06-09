@@ -1016,7 +1016,21 @@ fn build_global_verifier_for_config(
         UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
             "preverified/out-of-band/v1",
         )))),
-        UpstreamVerifierMode::AciDcap => build_aci_dcap_verifier(cfg, options).map(Some),
+        UpstreamVerifierMode::AciDcap => {
+            let has_explicit_aci_policy = cfg
+                .accepted_workload_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
+                || cfg
+                    .accepted_image_digests
+                    .as_ref()
+                    .is_some_and(|digests| !digests.is_empty());
+            if has_explicit_aci_policy {
+                build_aci_dcap_verifier(cfg, options).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1275,6 +1289,36 @@ mod tests {
         invalidations: Arc<AtomicUsize>,
     }
 
+    fn test_upstream_config(
+        name: &str,
+        provider: UpstreamProvider,
+        public_model: &str,
+        upstream_model: &str,
+    ) -> UpstreamConfig {
+        UpstreamConfig {
+            name: name.to_string(),
+            provider,
+            base_url: format!("https://{name}.example"),
+            path: None,
+            models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
+            bearer_token: None,
+            accepted_workload_ids: None,
+            accepted_image_digests: None,
+            accepted_dstack_kms_root_public_keys: None,
+            pccs_url: None,
+            verifier_cache_seconds: None,
+            connect_timeout_seconds: None,
+            read_timeout_seconds: None,
+            verifier_request_timeout_seconds: None,
+            verification_refresh_seconds: None,
+            session_refresh_seconds: None,
+            chutes_e2ee_api_base: None,
+            chutes_chute_ids: None,
+            chutes_e2ee_discovery_rounds: None,
+            chutes_e2ee_discovery_interval_seconds: None,
+        }
+    }
+
     #[async_trait]
     impl UpstreamVerifier for CountingVerifier {
         async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -1321,6 +1365,40 @@ mod tests {
         .expect("same public model can have multiple route ids");
 
         assert_eq!(config.len(), 2);
+    }
+
+    #[test]
+    fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams() {
+        let config = vec![
+            test_upstream_config(
+                "near-ai",
+                UpstreamProvider::NearAi,
+                "openai/gpt-oss-120b",
+                "near-model",
+            ),
+            test_upstream_config(
+                "secretai-107",
+                UpstreamProvider::OpenAiCompatible,
+                "openai/gpt-oss-120b",
+                "secret-model",
+            ),
+        ];
+        let options = UpstreamRuntimeOptions {
+            verifier_mode: UpstreamVerifierMode::AciDcap,
+            accepted_workload_ids: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+        };
+
+        let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
+            .expect("plain OpenAI-compatible upstreams should not require ACI DCAP policy");
+
+        assert!(verifier.is_some());
     }
 
     #[tokio::test]
