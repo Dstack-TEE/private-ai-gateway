@@ -264,16 +264,21 @@ pub struct AttestedSessionRecord {
     pub direction: String,
     pub established_at: u64,
     pub expires_at: u64,
-    pub upstream: AttestedSessionUpstream,
+    pub target: AttestedSessionTarget,
     pub verification: AttestedSessionVerification,
     pub session_binding: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionUpstream {
-    pub provider: String,
+pub struct AttestedSessionTarget {
+    #[serde(rename = "type")]
+    pub target_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    pub endpoint_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1892,14 +1897,33 @@ impl AciService {
             "session_binding": channel_bindings,
         });
         let binding_material_digest = crate::aci::canonical::jcs_sha256_hex(&binding_material)?;
+        let verified_claims = verified_claims_for_session(event);
+        let evidence = session_evidence(event);
+        let evidence_material = evidence.as_ref().map(|value| {
+            value
+                .get("digest")
+                .and_then(Value::as_str)
+                .map(|digest| json!({ "digest": digest }))
+                .unwrap_or_else(|| value.clone())
+        });
+        let verification_material = json!({
+            "verifier_id": &event.verifier_id,
+            "verified_claims": &verified_claims,
+            "evidence": evidence_material,
+            "provider_claims": &event.provider_claims,
+        });
+        let verification_material_digest =
+            crate::aci::canonical::jcs_sha256_hex(&verification_material)?;
         let session_material = json!({
             "direction": "upstream",
-            "upstream": {
-                "provider": event.vendor,
-                "model_id": event.model_id,
-                "endpoint_origin": event.url_origin,
+            "target": {
+                "type": "upstream",
+                "provider": &event.vendor,
+                "model_id": &event.model_id,
+                "endpoint": &event.url_origin,
             },
-            "verifier_id": event.verifier_id,
+            "verifier_id": &event.verifier_id,
+            "verification_digest": verification_material_digest,
             "session_binding_digest": binding_material_digest,
         });
         let session_digest = crate::aci::canonical::jcs_sha256_hex(&session_material)?;
@@ -1915,15 +1939,16 @@ impl AciService {
             direction: "upstream".to_string(),
             established_at: now,
             expires_at,
-            upstream: AttestedSessionUpstream {
-                provider: event.vendor.clone(),
+            target: AttestedSessionTarget {
+                target_type: "upstream".to_string(),
+                provider: Some(event.vendor.clone()),
                 model_id: Some(event.model_id.clone()),
-                endpoint_origin: event.url_origin.clone(),
+                endpoint: event.url_origin.clone(),
             },
             verification: AttestedSessionVerification {
                 verifier_id: event.verifier_id.clone(),
-                verified_claims: verified_claims_for_session(event),
-                evidence: session_evidence(event),
+                verified_claims,
+                evidence,
                 provider_claims: event.provider_claims.clone(),
             },
             session_binding: channel_bindings,

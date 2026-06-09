@@ -76,26 +76,27 @@ def assert_upstream_attested_session(
     if session.get("direction") != "upstream":
         raise RuntimeError(f"{provider.name} attested session direction must be upstream")
 
-    upstream = require_object(session, "upstream", provider.name)
-    expect_equal(provider, "upstream.provider", upstream.get("provider"), event.get("vendor"))
-    expect_equal(provider, "upstream.provider", upstream.get("provider"), provider.name)
+    target = require_object(session, "target", provider.name)
+    expect_equal(provider, "target.type", target.get("type"), "upstream")
+    expect_equal(provider, "target.provider", target.get("provider"), event.get("vendor"))
+    expect_equal(provider, "target.provider", target.get("provider"), provider.name)
     expect_equal(
         provider,
-        "upstream.model_id",
-        upstream.get("model_id"),
+        "target.model_id",
+        target.get("model_id"),
         event.get("model_id"),
     )
-    expect_equal(provider, "upstream.model_id", upstream.get("model_id"), provider.upstream_model)
+    expect_equal(provider, "target.model_id", target.get("model_id"), provider.upstream_model)
     expect_equal(
         provider,
-        "upstream.endpoint_origin",
-        upstream.get("endpoint_origin"),
+        "target.endpoint",
+        target.get("endpoint"),
         event.get("url_origin"),
     )
     expect_equal(
         provider,
-        "upstream.endpoint_origin",
-        upstream.get("endpoint_origin"),
+        "target.endpoint",
+        target.get("endpoint"),
         provider.base_url,
     )
 
@@ -142,9 +143,9 @@ def assert_upstream_attested_session(
 
     return {
         "session_id": session_id,
-        "provider": upstream.get("provider"),
-        "model_id": upstream.get("model_id"),
-        "endpoint_origin": upstream.get("endpoint_origin"),
+        "provider": target.get("provider"),
+        "model_id": target.get("model_id"),
+        "endpoint": target.get("endpoint"),
         "verifier_id": verification.get("verifier_id"),
         "verified_claims": claims,
         "binding_count": len(session_bindings),
@@ -185,7 +186,7 @@ def parsed_summary(value: dict[str, Any]) -> dict[str, Any]:
             "direction": session.get("direction"),
             "established_at": session.get("established_at"),
             "expires_at": session.get("expires_at"),
-            "upstream": session.get("upstream"),
+            "target": session.get("target"),
             "verification": {
                 "verifier_id": verification.get("verifier_id"),
                 "verified_claims": verification.get("verified_claims"),

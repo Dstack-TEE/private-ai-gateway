@@ -401,6 +401,20 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         )
         return
     report_data = tinfoil_report_data(report.raw or {}, report.intel_quote)
+    raw_report = report.raw or {}
+    used_router = bool(raw_report.get("used_router"))
+    provider_claims = {
+        "trust_boundary": "router" if used_router else "model",
+        "evidence_scope": "router" if used_router else "model",
+        "canonical_model_id": getattr(report, "model_id", request["model_id"]),
+        "tls_spki_from_report_data": True,
+    }
+    if raw_report.get("repo") is not None:
+        provider_claims["repo"] = raw_report["repo"]
+    if raw_report.get("quote_type") is not None:
+        provider_claims["quote_type"] = raw_report["quote_type"]
+    if raw_report.get("used_router") is not None:
+        provider_claims["used_router"] = raw_report["used_router"]
     emit(
         {
             "result": "verified",
@@ -413,6 +427,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                     "spki_sha256": report_data[:32].hex(),
                 }
             ],
+            "provider_claims": provider_claims,
         }
     )
 
@@ -700,6 +715,21 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             ),
         )
         return
+    provider_claims = {
+        "trust_boundary": "model_instance",
+        "evidence_scope": "model_instance",
+        "chute_id": chute_id,
+        "canonical_model_id": request["model_id"],
+        "verified_instance_count": len(verified),
+        "verified_instance_ids": [item["instance_id"] for item in verified],
+        "verified_public_key_sha256": [item["public_key_sha256"] for item in verified],
+    }
+    if nonce_expires_in is not None:
+        provider_claims["nonce_expires_in"] = nonce_expires_in
+    if evidence_data.get("failed_instance_ids"):
+        provider_claims["failed_instance_ids"] = evidence_data["failed_instance_ids"]
+    if skipped_without_key:
+        provider_claims["attested_instances_without_e2ee_key"] = skipped_without_key
     emit(
         {
             "result": "verified",
@@ -709,6 +739,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
                 source_url=attestation_url,
             ),
             "channel_bindings": bindings,
+            "provider_claims": provider_claims,
             "chutes_session": {
                 "chute_id": chute_id,
                 "nonce_expires_in": nonce_expires_in,

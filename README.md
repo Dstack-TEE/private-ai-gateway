@@ -104,7 +104,7 @@ Use this checklist before treating a deployment as private inference.
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
-| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. |
+| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
 | Provider is admissible | Review the provider-specific report in `docs/reviews/providers/` against `docs/reviews/providers/audit-criteria.md`. |

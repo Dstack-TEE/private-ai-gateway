@@ -351,6 +351,8 @@ Every provider adapter should return the same class of result to Rust:
     }
   ],
   "provider_claims": {
+    "trust_boundary": "gateway",
+    "evidence_scope": "model",
     "gateway_verified": true,
     "model_evidence_present": true
   }
@@ -359,7 +361,9 @@ Every provider adapter should return the same class of result to Rust:
 
 The exact `provider_claims` fields are provider-owned. Rust should enforce the
 generic fields and the channel binding. Provider-specific meaning belongs in
-the adapter and review document.
+the adapter and review document. When useful, adapters should include compact
+readable scope facts such as `trust_boundary` and `evidence_scope`; the raw
+proof input still belongs in `evidence.data`.
 
 `evidence.digest` is computed over the decoded bytes from `evidence.data`.
 Provider adapters must not rebuild evidence into a normalized JSON shape unless

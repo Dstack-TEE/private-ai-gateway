@@ -245,10 +245,11 @@ async fn verified_upstream_binding_creates_attested_session() {
         .expect("session audit record should be queryable");
     assert_eq!(session.session_id, session_id);
     assert_eq!(session.direction, "upstream");
-    assert_eq!(session.upstream.provider, "stub-upstream");
-    assert_eq!(session.upstream.model_id.as_deref(), Some("x"));
+    assert_eq!(session.target.target_type, "upstream");
+    assert_eq!(session.target.provider.as_deref(), Some("stub-upstream"));
+    assert_eq!(session.target.model_id.as_deref(), Some("x"));
     assert_eq!(
-        session.upstream.endpoint_origin.as_deref(),
+        session.target.endpoint.as_deref(),
         Some("https://stub-upstream")
     );
     assert_eq!(session.verification.verifier_id, "stub-verifier-1");
@@ -263,6 +264,95 @@ async fn verified_upstream_binding_creates_attested_session() {
     assert_eq!(
         session.session_binding[0]["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
+    );
+}
+
+#[tokio::test]
+async fn attested_session_id_changes_when_verification_material_changes() {
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
+        vendor: "stub-upstream".to_string(),
+        model_id: "x".to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: Some(serde_json::json!({
+            "digest": format!("sha256:{}", digest_byte.repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
+        })),
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: Some(serde_json::json!({
+            "release": "fixture",
+        })),
+    };
+
+    let first = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            None,
+            Some(make_event("11")),
+        )
+        .await
+        .unwrap();
+    let second = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            None,
+            Some(make_event("22")),
+        )
+        .await
+        .unwrap();
+
+    let first_session_id = first
+        .receipt
+        .event_log
+        .iter()
+        .find(|e| e.event_type == "upstream.verified")
+        .and_then(|e| e.fields.get("session_id"))
+        .and_then(|v| v.as_str())
+        .expect("first verified binding should produce a session id");
+    let second_session_id = second
+        .receipt
+        .event_log
+        .iter()
+        .find(|e| e.event_type == "upstream.verified")
+        .and_then(|e| e.fields.get("session_id"))
+        .and_then(|v| v.as_str())
+        .expect("second verified binding should produce a session id");
+
+    assert_ne!(first_session_id, second_session_id);
+    let first_session = svc
+        .get_attested_session(first_session_id)
+        .expect("first session should remain queryable");
+    let second_session = svc
+        .get_attested_session(second_session_id)
+        .expect("second session should remain queryable");
+    let first_digest = format!("sha256:{}", "11".repeat(32));
+    let second_digest = format!("sha256:{}", "22".repeat(32));
+    assert_eq!(
+        first_session
+            .verification
+            .evidence
+            .as_ref()
+            .and_then(|v| v.get("digest"))
+            .and_then(|v| v.as_str()),
+        Some(first_digest.as_str())
+    );
+    assert_eq!(
+        second_session
+            .verification
+            .evidence
+            .as_ref()
+            .and_then(|v| v.get("digest"))
+            .and_then(|v| v.as_str()),
+        Some(second_digest.as_str())
     );
 }
 
