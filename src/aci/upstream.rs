@@ -289,6 +289,7 @@ impl ModelRoute {
 pub struct ModelRouterBackend {
     name: String,
     routes: HashMap<String, ModelRoute>,
+    default_routes: HashMap<String, String>,
     order: Vec<String>,
 }
 
@@ -297,29 +298,24 @@ impl ModelRouterBackend {
         Self {
             name: name.into(),
             routes: HashMap::new(),
+            default_routes: HashMap::new(),
             order: Vec::new(),
         }
     }
 
     pub fn add_route(&mut self, route: ModelRoute) -> Result<(), UpstreamError> {
-        if self.routes.contains_key(&route.public_model_id) {
-            return Err(UpstreamError::Routing(format!(
-                "duplicate public model id {:?}",
-                route.public_model_id
-            )));
-        }
-        if self
-            .routes
-            .values()
-            .any(|existing| existing.route_id == route.route_id)
-        {
+        if self.routes.contains_key(&route.route_id) {
             return Err(UpstreamError::Routing(format!(
                 "duplicate route id {:?}",
                 route.route_id
             )));
         }
-        self.order.push(route.public_model_id.clone());
-        self.routes.insert(route.public_model_id.clone(), route);
+        if !self.default_routes.contains_key(&route.public_model_id) {
+            self.order.push(route.public_model_id.clone());
+            self.default_routes
+                .insert(route.public_model_id.clone(), route.route_id.clone());
+        }
+        self.routes.insert(route.route_id.clone(), route);
         Ok(())
     }
 
@@ -328,15 +324,15 @@ impl ModelRouterBackend {
     }
 
     fn route_for(&self, public_model_id: &str) -> Result<&ModelRoute, UpstreamError> {
-        self.routes.get(public_model_id).ok_or_else(|| {
+        let route_id = self.default_routes.get(public_model_id).ok_or_else(|| {
             UpstreamError::Routing(format!("no upstream route for model {public_model_id:?}"))
-        })
+        })?;
+        self.route_for_id(route_id)
     }
 
     fn route_for_id(&self, route_id: &str) -> Result<&ModelRoute, UpstreamError> {
         self.routes
-            .values()
-            .find(|route| route.route_id == route_id)
+            .get(route_id)
             .ok_or_else(|| UpstreamError::Routing(format!("unknown target route {route_id:?}")))
     }
 
@@ -449,7 +445,8 @@ impl UpstreamBackend for ModelRouterBackend {
         let data = self
             .order
             .iter()
-            .filter_map(|public| self.routes.get(public))
+            .filter_map(|public| self.default_routes.get(public))
+            .filter_map(|route_id| self.routes.get(route_id))
             .map(|route| {
                 json!({
                     "id": route.public_model_id,
@@ -468,6 +465,85 @@ impl UpstreamBackend for ModelRouterBackend {
             body,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubBackend {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl UpstreamBackend for StubBackend {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn url_origin(&self) -> Option<&str> {
+            None
+        }
+
+        async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            Err(UpstreamError::Transport("not used".to_string()))
+        }
+    }
+
+    #[test]
+    fn model_router_routes_duplicate_public_models_by_route_id() {
+        let mut router = ModelRouterBackend::new("model-router");
+        router
+            .add_route(
+                ModelRoute::new(
+                    "openai/gpt-oss-120b",
+                    "near-model",
+                    Arc::new(StubBackend { name: "near-ai" }),
+                    "near-ai:openai/gpt-oss-120b",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        router
+            .add_route(
+                ModelRoute::new(
+                    "openai/gpt-oss-120b",
+                    "secret-model",
+                    Arc::new(StubBackend {
+                        name: "secretai-107",
+                    }),
+                    "secretai-107:openai/gpt-oss-120b",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let body = br#"{"model":"openai/gpt-oss-120b","messages":[]}"#.to_vec();
+        let default_prepared = router
+            .prepare(UpstreamRequest {
+                body: body.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(default_prepared.upstream_name, "near-ai");
+        assert_eq!(
+            request_model_id(&default_prepared.request.body).as_deref(),
+            Some("near-model")
+        );
+
+        let targeted_prepared = router
+            .prepare(UpstreamRequest {
+                body,
+                target_route_id: Some("secretai-107:openai/gpt-oss-120b".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(targeted_prepared.upstream_name, "secretai-107");
+        assert_eq!(
+            request_model_id(&targeted_prepared.request.body).as_deref(),
+            Some("secret-model")
+        );
     }
 }
 

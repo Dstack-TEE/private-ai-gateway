@@ -598,7 +598,7 @@ pub fn parse_config_text(text: &str) -> Result<Vec<UpstreamConfig>, UpstreamConf
 
 fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError> {
     let mut names = HashSet::new();
-    let mut public_models = HashMap::new();
+    let mut route_ids = HashSet::new();
     for upstream in config {
         if upstream.name.trim().is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(
@@ -712,10 +712,10 @@ fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError>
                     upstream.name, public_model
                 )));
             }
-            if let Some(previous) = public_models.insert(public_model, &upstream.name) {
+            let route_id = format!("{}:{public_model}", upstream.name);
+            if !route_ids.insert(route_id.clone()) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "public model id {public_model:?} is routed by both {previous:?} and {:?}",
-                    upstream.name
+                    "route id {route_id:?} is duplicated"
                 )));
             }
         }
@@ -1296,6 +1296,31 @@ mod tests {
         fn invalidate(&self, _request: &UpstreamVerificationRequest) {
             self.invalidations.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn parse_config_allows_same_public_model_on_distinct_route_ids() {
+        let config = parse_config_text(
+            r#"
+            [
+              {
+                "name": "near-ai",
+                "provider": "near-ai",
+                "base_url": "https://near.example",
+                "models": {"openai/gpt-oss-120b": "near-model"}
+              },
+              {
+                "name": "secretai-107",
+                "provider": "openai-compatible",
+                "base_url": "https://secret.example",
+                "models": {"openai/gpt-oss-120b": "secret-model"}
+              }
+            ]
+            "#,
+        )
+        .expect("same public model can have multiple route ids");
+
+        assert_eq!(config.len(), 2);
     }
 
     #[tokio::test]
