@@ -143,6 +143,22 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   `UpstreamProvider::SecretAi` and `SecretAiProviderVerifier` parallel to
   the existing Chutes/Tinfoil/NEAR adapters; the review's "Required Adapter
   Behavior" section captures wiring requirements.
+- Verifier code is now vendored. The provider-verifier bridge imports
+  `scripts/confidential_verifier` (vendored from `Phala-Network/private-ai-verifier`,
+  see its `VENDOR.md`) instead of a sibling checkout, so the gateway no longer breaks
+  when the upstream verifier drifts or carries uncommitted edits. A hermetic contract
+  test (`tests/contract_verifier_bridge.rs`) fails closed if the bridge and the
+  vendored package fall out of sync. Re-sync with upstream deliberately and update the
+  baseline commit in `VENDOR.md`.
+- Deferred: standalone / self-hosted Phala dstack-vLLM node verification through the
+  deep verifier and the live harness. The bridge today only dispatches
+  `tinfoil`/`near-ai`/`chutes`, and the vendored verifier's Phala/Redpill paths go
+  through the hosted `api.redpill.ai` / `cloud-api.phala.network` endpoints, not a raw
+  node's `/v1/attestation/report`. The gateway already verifies first-party Phala
+  workers natively in Rust (`AciDcapUpstreamVerifier`); the follow-up is a `phala`
+  bridge branch + a standalone-dstack verifier so the deep/user verifier and harness
+  can verify a raw node the same way as the other providers. Pairs with the direct
+  vLLM-proxy worker bullet above.
 
 ### P0: Live E2E and User Verification
 

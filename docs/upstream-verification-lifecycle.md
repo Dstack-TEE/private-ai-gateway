@@ -91,6 +91,22 @@ verified TLS binding on that connection.
 The session lease is subordinate to the verification lease. Session material
 cannot extend trust after verification expires.
 
+Attested session record:
+
+A separate, read-only audit artifact written when a verified upstream event is
+recorded (`record_attested_upstream_session`). It content-addresses the verified
+binding, verifier id, target, and evidence digest into a stable `session_id`, stores
+the matching `AttestedSessionRecord`, and attaches that id to the receipt. A relying
+party fetches it back from `/v1/audit/sessions/{session_id}` and confirms the record's
+target, verifier id, evidence digest, and channel bindings match the receipt event.
+
+Its `expires_at` is deliberately the receipt TTL, not the verification lease TTL. The
+record is a per-receipt historical attestation, so it must stay resolvable for as long
+as the receipt that cites it; expiring it with the ~300 s lease would strand
+`session_id`s in still-valid receipts. The record is not a claim that the binding is
+still live now — `established_at` records when it was verified, and the forwarding path
+only ever uses a binding from a fresh verification lease.
+
 ## Current No-Middleware Lifecycle
 
 The implementation today is equivalent to the framework's middleware-disabled

@@ -1887,6 +1887,13 @@ impl AciService {
         }
 
         let now = self.clock.now_secs();
+        // Retain the attested-session record for the same window as the receipt that
+        // cites it (receipt_ttl_seconds), so a relying party verifying that receipt can
+        // always resolve its `session_id`. This is a *retention* window, not a binding
+        // validity deadline: the forwarding path only ever uses a binding from a fresh
+        // verification lease (verifier_cache_seconds, ~300s), and `established_at` records
+        // when this binding was verified. Expiring this record with the lease instead
+        // would strand `session_id`s referenced by still-valid receipts.
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
         let channel_bindings = event
             .channel_bindings

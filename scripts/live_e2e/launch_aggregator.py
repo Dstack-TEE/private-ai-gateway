@@ -13,7 +13,6 @@ import requests
 from .common import (
     DEFAULT_DSTACK_ENDPOINT,
     DEFAULT_DSTACK_VERIFIER_URL,
-    DEFAULT_PRIVATE_AI_VERIFIER_DIR,
     ROOT,
     Provider,
     public_base_url,
@@ -93,14 +92,15 @@ class AggregatorProcess:
                 "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS",
                 "240",
             ),
-            "PRIVATE_AI_VERIFIER_DIR": self.env.get(
-                "PRIVATE_AI_VERIFIER_DIR",
-                str(DEFAULT_PRIVATE_AI_VERIFIER_DIR),
-            ),
             "RUST_LOG": self.env.get("RUST_LOG", "info"),
         }
         if "DSTACK_VERIFIER_URL" not in child_env:
             child_env["DSTACK_VERIFIER_URL"] = DEFAULT_DSTACK_VERIFIER_URL
+        # Only forward PRIVATE_AI_VERIFIER_DIR when explicitly set; otherwise the
+        # gateway uses its vendored confidential_verifier package.
+        verifier_override = self.env.get("PRIVATE_AI_VERIFIER_DIR")
+        if verifier_override:
+            child_env["PRIVATE_AI_VERIFIER_DIR"] = verifier_override
         for provider in self.providers:
             child_env.pop(provider.api_key_env, None)
         log = self.log_path.open("wb")

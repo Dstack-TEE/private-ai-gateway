@@ -438,6 +438,17 @@ async def verify_nearai(request: dict[str, Any]) -> None:
 
     provider = "near-ai"
     verifier_id = verifier_id_for(provider)
+    # Fail loudly on bridge/verifier contract drift instead of letting a missing
+    # method surface as a cryptic AttributeError mid-verification.
+    if not hasattr(NearAICloudVerifier, "verify_gateway_component"):
+        failed(
+            provider,
+            "verifier contract drift: NearAICloudVerifier is missing "
+            "verify_gateway_component; the confidential_verifier package is out of sync "
+            "with this bridge (see scripts/confidential_verifier/VENDOR.md)",
+            verifier_id=verifier_id,
+        )
+        return
     near_provider = NearaiProvider(include_tls_fingerprint=True)
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
     with contextlib.redirect_stdout(sys.stderr):
@@ -760,6 +771,13 @@ async def verify_chutes(request: dict[str, Any]) -> None:
 
 async def main() -> None:
     request = json.loads(sys.stdin.read())
+    # Default to the vendored `confidential_verifier` package next to this script
+    # (see scripts/confidential_verifier/VENDOR.md). An external private-ai-verifier
+    # checkout can override via PRIVATE_AI_VERIFIER_DIR, which is inserted ahead of
+    # the vendored copy on sys.path.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.append(script_dir)
     private_ai_dir = os.environ.get("PRIVATE_AI_VERIFIER_DIR")
     if private_ai_dir:
         sys.path.insert(0, private_ai_dir)

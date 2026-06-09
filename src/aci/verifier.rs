@@ -164,8 +164,6 @@ pub enum ProviderVerifierConfigError {
     EmptyCommand,
 }
 
-const PRIVATE_AI_VERIFIER_DIR_ENV: &str = "PRIVATE_AI_VERIFIER_DIR";
-
 #[derive(Debug, Clone)]
 struct ExternalProviderVerifier {
     provider: &'static str,
@@ -186,8 +184,8 @@ impl ExternalProviderVerifier {
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
-        let private_ai_dir = private_ai_verifier_dir();
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let script = manifest_dir
             .join("scripts")
             .join("private_ai_provider_verifier.py");
         let command = vec![
@@ -199,11 +197,14 @@ impl ExternalProviderVerifier {
         Self {
             provider,
             command,
-            current_dir: Some(private_ai_dir.clone()),
-            env: vec![(
-                PRIVATE_AI_VERIFIER_DIR_ENV.to_string(),
-                private_ai_dir.display().to_string(),
-            )],
+            // Run `uv run` in the gateway project so the bridge uses the gateway's
+            // own uv environment and the vendored `scripts/confidential_verifier`
+            // package — no sibling private-ai-verifier checkout required. An
+            // external verifier checkout can still be selected by setting
+            // PRIVATE_AI_VERIFIER_DIR in the gateway process environment, which the
+            // spawned bridge inherits.
+            current_dir: Some(manifest_dir),
+            env: Vec::new(),
             options: HashMap::new(),
             timeout_seconds,
             cache_ttl_seconds,
@@ -504,16 +505,6 @@ impl ExternalProviderVerifier {
             provider_claims: None,
         }
     }
-}
-
-fn private_ai_verifier_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os(PRIVATE_AI_VERIFIER_DIR_ENV) {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("aggregator crate must have a parent directory")
-        .join("private-ai-verifier")
 }
 
 #[derive(Serialize)]
