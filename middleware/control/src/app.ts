@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { bearerAuth } from 'hono/bearer-auth';
 
 import { loadConfig } from './config';
 
@@ -15,6 +16,14 @@ const allowList = new Set(config.keys ?? []);
 const requireKey = allowList.size > 0;
 
 export const app = new Hono();
+
+// When exposed over the network, authenticate consult/catalog with a bearer
+// token (set PRIVATE_AI_GATEWAY_CONTROL_TOKEN). Unset = local dev (no auth).
+const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
+if (CONTROL_TOKEN) {
+  app.use('/consult/*', bearerAuth({ token: CONTROL_TOKEN }));
+  app.use('/models', bearerAuth({ token: CONTROL_TOKEN }));
+}
 
 // Liveness/identity probe.
 app.get('/', (c) => c.text('private-ai-gateway control plane\n'));

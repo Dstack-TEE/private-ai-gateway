@@ -1,14 +1,14 @@
 # Control plane
 
 A **minimal, config-driven** implementation of the gateway's control plane — the
-content-blind decision plane the executor consults over a Unix socket. It exists
-so the stack runs end-to-end and gives a working, testable example of the
-executor↔control HTTP surface (the three endpoints below).
+content-blind decision plane the executor consults. It exists so the stack runs
+end-to-end and gives a working, testable example of the executor↔control HTTP
+surface (the three endpoints below).
 
-It is **not** the production control, which is a separate, closed-source service
-published as its own image. Because the executor talks to it only over these
-HTTP-over-UDS endpoints, the production control is a **drop-in replacement**:
-swap the `control` image in the deployment compose and supply its env.
+It is **not** the production control, which is a separate, closed-source service.
+Because the executor talks to it only over these HTTP endpoints, the production
+control is a **drop-in replacement**: point the executor at its URL and supply a
+token.
 
 ## What it does
 
@@ -24,14 +24,36 @@ No database; configuration only.
 ## Config
 
 Reads JSON from `CONTROL_CONFIG_PATH` (default `/etc/pag/control.config.json`).
-See [`control.config.example.json`](./control.config.example.json). The image
-bakes the example as the default; mount your own to override.
+See [`control.config.example.json`](./control.config.example.json).
 
 ## Run
+
+The control plane listens on a TCP port; the executor reaches it over HTTP(S) at
+`PRIVATE_AI_GATEWAY_CONTROL_URL`.
 
 ```bash
 npm install && npm run build
 CONTROL_CONFIG_PATH=./control.config.example.json \
-PRIVATE_AI_GATEWAY_CONTROL_UDS_PATH=/run/pag/control.sock \
+PRIVATE_AI_GATEWAY_CONTROL_PORT=8789 \
 node build/server.js
 ```
+
+Then run the executor with `PRIVATE_AI_GATEWAY_CONTROL_URL=http://127.0.0.1:8789`.
+
+## Remote / production mode
+
+The control plane is meant to run as a **standalone service on its own server**,
+which is what keeps the attested gateway CVM fully open-source — only the executor
+reaches across the network to it, and only content-blind metadata
+(`{apiKeyHash, model}` + usage counts) ever crosses that hop.
+
+- **Authentication** — set `PRIVATE_AI_GATEWAY_CONTROL_TOKEN`. When set, the
+  control enforces `Authorization: Bearer <token>` on `/consult/*` and `/models`;
+  the executor sends it via its own `PRIVATE_AI_GATEWAY_CONTROL_TOKEN`. Unset =
+  local dev, no auth.
+- **TLS** — terminate TLS at a reverse proxy in front of this process (the
+  executor dials `https://…`). The process itself speaks plain HTTP + token, so
+  the code change stays minimal; optional hardening is direct TLS / mTLS.
+- **Availability** — the executor fails **closed** (503) if the control is
+  unreachable, since the pre-request consult gates authorization. Deploy it near
+  the gateway, with HA; the executor holds a keep-alive connection.

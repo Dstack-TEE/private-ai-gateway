@@ -1,31 +1,43 @@
 import { createHash } from 'node:crypto';
 import http from 'node:http';
+import https from 'node:https';
 
 import { PricingConfig } from './services/pricing';
 
-const DEFAULT_CONTROL_SOCKET = '/run/private-ai-gateway/control.sock';
+// The control plane runs as a separate service. The executor reaches it over
+// HTTP(S) at PRIVATE_AI_GATEWAY_CONTROL_URL, authenticated with a bearer token.
+// Only content-blind metadata crosses this hop; for production it must be TLS.
+const CONTROL_URL = process.env.PRIVATE_AI_GATEWAY_CONTROL_URL?.trim();
+const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
 
-function controlSocketPath(): string {
-  return (
-    process.env.PRIVATE_AI_GATEWAY_CONTROL_UDS_PATH?.trim() ||
-    DEFAULT_CONTROL_SOCKET
-  );
-}
+// One keep-alive connection so TLS is negotiated once, not per request.
+const agent = CONTROL_URL
+  ? new URL(CONTROL_URL).protocol === 'https:'
+    ? new https.Agent({ keepAlive: true })
+    : new http.Agent({ keepAlive: true })
+  : undefined;
 
 function controlRequest(
   method: string,
   path: string,
   body?: string
 ): Promise<{ status: number; body: string }> {
+  if (!CONTROL_URL) {
+    return Promise.reject(new Error('PRIVATE_AI_GATEWAY_CONTROL_URL is not set'));
+  }
   const payload = body === undefined ? undefined : Buffer.from(body);
+  const url = new URL(CONTROL_URL);
+  url.pathname = url.pathname.replace(/\/$/, '') + path; // path begins with '/'
+  const lib = url.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const req = lib.request(
+      url,
       {
-        socketPath: controlSocketPath(),
-        path,
         method,
+        agent,
         headers: {
           'content-type': 'application/json',
+          ...(CONTROL_TOKEN ? { authorization: `Bearer ${CONTROL_TOKEN}` } : {}),
           ...(payload ? { 'content-length': payload.byteLength } : {}),
         },
       },

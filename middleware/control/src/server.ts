@@ -1,44 +1,28 @@
 #!/usr/bin/env node
-import { existsSync, unlinkSync } from 'node:fs';
-
 import { createAdaptorServer } from '@hono/node-server';
 
 import { app } from './app';
 
 /**
- * Listen on the control Unix domain socket the executor dials, with a TCP
- * fallback for local development. No background workers / no database.
+ * The control plane runs as a standalone service listening on a TCP port; the
+ * executor reaches it over HTTP(S) at PRIVATE_AI_GATEWAY_CONTROL_URL. For
+ * production, terminate TLS in front of this (a reverse proxy) and set a bearer
+ * token via PRIVATE_AI_GATEWAY_CONTROL_TOKEN (enforced in app.ts).
  */
-const socketPath = process.env.PRIVATE_AI_GATEWAY_CONTROL_UDS_PATH?.trim();
 const portArg = process.argv.slice(2).find((arg) => arg.startsWith('--port='));
-const port = portArg ? Number.parseInt(portArg.split('=')[1], 10) : 8789;
+const portFromArg = portArg ? Number.parseInt(portArg.split('=')[1], 10) : undefined;
+const portFromEnv = process.env.PRIVATE_AI_GATEWAY_CONTROL_PORT
+  ? Number.parseInt(process.env.PRIVATE_AI_GATEWAY_CONTROL_PORT, 10)
+  : undefined;
+const port = portFromArg ?? portFromEnv ?? 8789;
 
 const server = createAdaptorServer({ fetch: app.fetch });
-
-if (socketPath) {
-  if (existsSync(socketPath)) {
-    unlinkSync(socketPath);
-  }
-  server.listen({ path: socketPath }, () => {
-    console.log(`control listening on unix socket ${socketPath}`);
-  });
-} else {
-  server.listen(port, () => {
-    console.log(`control listening on http://localhost:${port}`);
-  });
-}
+server.listen(port, () => {
+  console.log(`control listening on http://0.0.0.0:${port}`);
+});
 
 function shutdown(): void {
-  server.close(() => {
-    if (socketPath && existsSync(socketPath)) {
-      try {
-        unlinkSync(socketPath);
-      } catch {
-        // best effort
-      }
-    }
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 }
 
 process.on('SIGTERM', shutdown);
