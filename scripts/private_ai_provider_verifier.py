@@ -380,54 +380,94 @@ async def chutes_verify_instance(
 
 
 async def verify_tinfoil(request: dict[str, Any]) -> None:
-    from confidential_verifier import TeeVerifier
+    # Verify with Tinfoil's official Python verifier. It performs the full reference
+    # chain that our previous hand-rolled SEV-SNP path skipped: the AMD report
+    # signature + VCEK->ASK->ARK certificate chain and policy/TCB (or DCAP for TDX),
+    # Sigstore-verified code-measurement provenance bound to the GitHub repo and
+    # workflow identity, and the TLS public-key binding. The verified TLS key
+    # fingerprint (report_data[0:32]) is returned as the enforceable channel binding.
+    from urllib.parse import urlparse
+
+    from tinfoil import SecureClient
 
     provider = "tinfoil"
-    verifier = TeeVerifier()
-    with contextlib.redirect_stdout(sys.stderr):
-        report = await verifier.fetch_report(provider, request["model_id"])
-        result = await verifier.verify(report)
-    report_obj = model_dump(report)
-    attestation_url = request.get("url_origin")
-    if attestation_url:
-        attestation_url = f"{attestation_url.rstrip('/')}/.well-known/tinfoil-attestation"
-    else:
-        attestation_url = "https://inference.tinfoil.sh/.well-known/tinfoil-attestation"
-    if not result.model_verified:
+    url_origin = request.get("url_origin") or "https://inference.tinfoil.sh"
+    parsed = urlparse(url_origin if "://" in url_origin else f"https://{url_origin}")
+    enclave_host = parsed.netloc or parsed.path
+    attestation_url = f"{url_origin.rstrip('/')}/.well-known/tinfoil-attestation"
+    options = request.get("provider_options") or {}
+    repo = options.get("tinfoil_repo") or "tinfoilsh/confidential-model-router"
+
+    def _verify():
+        client = SecureClient(enclave=enclave_host, repo=repo)
+        client.verify()
+        return client.get_verification_document()
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            doc = await asyncio.to_thread(_verify)
+    except Exception as exc:
+        failed(provider, f"Tinfoil verification failed: {exc}")
+        return
+
+    steps = {
+        name: {
+            "status": getattr(state, "status", None),
+            "error": getattr(state, "error", None),
+        }
+        for name, state in (doc.steps or {}).items()
+    }
+    evidence_doc = {
+        "config_repo": doc.config_repo,
+        "enclave_host": doc.enclave_host,
+        "release_digest": doc.release_digest,
+        "code_fingerprint": doc.code_fingerprint,
+        "enclave_fingerprint": doc.enclave_fingerprint,
+        "tls_public_key_fp": doc.tls_public_key,
+        "hpke_public_key": doc.hpke_public_key,
+        "security_verified": doc.security_verified,
+        "steps": steps,
+    }
+    evidence = json_evidence_bundle(evidence_doc, attestation_url)
+
+    if not doc.security_verified:
+        failed(provider, "Tinfoil attestation not verified", evidence=evidence)
+        return
+    spki = doc.tls_public_key
+    if not spki:
         failed(
             provider,
-            result.error or "Tinfoil verification failed",
-            evidence=json_evidence_bundle(report_obj, attestation_url),
+            "Tinfoil verification returned no TLS public key fingerprint",
+            evidence=evidence,
         )
         return
-    report_data = tinfoil_report_data(report.raw or {}, report.intel_quote)
-    raw_report = report.raw or {}
-    used_router = bool(raw_report.get("used_router"))
-    provider_claims = {
-        "trust_boundary": "router" if used_router else "model",
-        "evidence_scope": "router" if used_router else "model",
-        "canonical_model_id": getattr(report, "model_id", request["model_id"]),
-        "tls_spki_from_report_data": True,
-    }
-    if raw_report.get("repo") is not None:
-        provider_claims["repo"] = raw_report["repo"]
-    if raw_report.get("quote_type") is not None:
-        provider_claims["quote_type"] = raw_report["quote_type"]
-    if raw_report.get("used_router") is not None:
-        provider_claims["used_router"] = raw_report["used_router"]
+
+    used_router = bool(getattr(doc, "selected_router_endpoint", "")) or repo.endswith(
+        "confidential-model-router"
+    )
     emit(
         {
             "result": "verified",
-            "verifier_id": "private-ai-verifier/tinfoil/v1",
-            "evidence": json_evidence_bundle(report_obj, attestation_url),
+            "verifier_id": "tinfoil-verifier/v1",
+            "evidence": evidence,
             "channel_bindings": [
                 {
                     "type": "tls_spki_sha256",
                     "origin": request.get("url_origin"),
-                    "spki_sha256": report_data[:32].hex(),
+                    "spki_sha256": spki,
                 }
             ],
-            "provider_claims": provider_claims,
+            "provider_claims": {
+                "trust_boundary": "router" if used_router else "model",
+                "evidence_scope": "router" if used_router else "model",
+                "canonical_model_id": request["model_id"],
+                "used_router": used_router,
+                "config_repo": doc.config_repo,
+                "release_digest": doc.release_digest,
+                "code_fingerprint": doc.code_fingerprint,
+                "tls_spki_from_report_data": True,
+                "verification_steps": {k: v["status"] for k, v in steps.items()},
+            },
         }
     )
 

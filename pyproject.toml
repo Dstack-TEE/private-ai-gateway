@@ -16,6 +16,11 @@ dependencies = [
   "pyyaml>=6.0.3",
   "python-dotenv>=1.0.1",
   "PyJWT>=2.10.1",
+  # Tinfoil's official Python verifier. SEV-SNP/TDX attestation is verified with the
+  # reference implementation (AMD VCEK->ASK->ARK signature chain + policy, Sigstore
+  # code-measurement provenance, and TLS-key binding) instead of our own crypto. Used
+  # by the bridge's verify_tinfoil. See docs/upstream-verification-lifecycle.md.
+  "tinfoil>=0.2",
 ]
 
 [tool.uv]

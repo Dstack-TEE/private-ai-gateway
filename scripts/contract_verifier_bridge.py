@@ -82,15 +82,27 @@ def check() -> list[str]:
     except Exception as exc:  # noqa: BLE001
         failures.append(f"chutes: cannot import dcap_qvl ({exc})")
 
-    # --- tinfoil: bridge uses confidential_verifier.TeeVerifier ---
+    # --- tinfoil: bridge uses the official tinfoil SDK (SecureClient + document) ---
     try:
-        cv = importlib.import_module("confidential_verifier")
-        tee = _get_attr(cv, "TeeVerifier", failures, "tinfoil/confidential_verifier")
-        if tee is not None:
-            _require_callable(tee, "fetch_report", failures, "tinfoil/TeeVerifier", coroutine=True)
-            _require_callable(tee, "verify", failures, "tinfoil/TeeVerifier", coroutine=True)
+        tinfoil_mod = importlib.import_module("tinfoil")
+        sc = _get_attr(tinfoil_mod, "SecureClient", failures, "tinfoil/SecureClient")
+        if sc is not None:
+            _require_callable(sc, "verify", failures, "tinfoil/SecureClient")
+            _require_callable(sc, "get_verification_document", failures, "tinfoil/SecureClient")
+        vd = _get_attr(tinfoil_mod, "VerificationDocument", failures, "tinfoil/VerificationDocument")
+        if vd is not None:
+            import dataclasses
+
+            field_names = (
+                {f.name for f in dataclasses.fields(vd)}
+                if dataclasses.is_dataclass(vd)
+                else set(dir(vd))
+            )
+            for needed in ("security_verified", "tls_public_key", "steps"):
+                if needed not in field_names:
+                    failures.append(f"tinfoil/VerificationDocument: missing `{needed}`")
     except Exception as exc:  # noqa: BLE001
-        failures.append(f"tinfoil: cannot import confidential_verifier ({exc})")
+        failures.append(f"tinfoil: cannot import tinfoil SDK ({exc})")
 
     # --- near-ai: bridge uses NearaiProvider + NearAICloudVerifier.verify_gateway_component ---
     try:
