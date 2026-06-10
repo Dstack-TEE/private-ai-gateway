@@ -219,7 +219,8 @@ The current compromises:
 ## Provider verification soundness
 
 A soundness pass (2026-06) tamper-tested each provider's attestation verification
-against the live upstream APIs. Findings and the resulting state:
+against the live upstream APIs. Per-provider "how it is verified and bound" references
+live in [`providers/`](providers/README.md). Findings and the resulting state:
 
 - **NEAR AI (TDX):** the quote is verified by the dstack verifier, but the
   `report_data` binding was being skipped (the check was gated on a field the dstack
@@ -276,7 +277,7 @@ request falls back into slow evidence refresh.
   middleware-disabled path must remain behavior-compatible with the current
   request path.
 - P0: finish strict-release pins from the provider reports under
-  [reviews/providers](reviews/providers/README.md): NEAR AI gateway
+  [providers/](providers/README.md): NEAR AI gateway
   provenance/runtime policy, Tinfoil router compose/image identity, and Chutes
   exact model-to-chute resolution. The first-pass soundness reviews are saved,
   but these provider-specific TODOs still gate general production inclusion.

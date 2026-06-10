@@ -1,7 +1,7 @@
 # Router-Mode Provider Review
 
 Status: first-pass review complete. Provider-specific reports and the shared
-admission checklist are under `docs/reviews/providers/`.
+admission checklist are under `docs/providers/`.
 
 Router-mode verification is acceptable only when the router is itself a
 trusted workload and the router-to-model path preserves the same privacy and
@@ -76,10 +76,10 @@ testing is practical.
 
 Write separate review notes under `docs/reviews/`:
 
-- `router-mode-soundness.md`
-- `router-mode-load-balancing-cache.md`
-- `providers/tinfoil-router-mode.md`
-- `providers/near-ai-router-mode.md`
+- `reviews/router-mode-soundness.md`
+- `reviews/router-mode-load-balancing-cache.md`
+- `providers/tinfoil/review.md`
+- `providers/near-ai/review.md`
 
 Each note must include:
 

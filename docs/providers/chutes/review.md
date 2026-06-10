@@ -10,6 +10,11 @@ Source reports:
 - [upstream-verification-lifecycle.md](../../upstream-verification-lifecycle.md)
 - Chutes catalog and E2EE throughput probes captured during the provider audit.
 
+> **How the gateway verifies this provider:** see [verification.md](verification.md).
+> Status (2026-06 soundness pass): Chutes verification confirmed sound — DCAP quote
+> signature verification plus `report_data ↔ SHA256(nonce ‖ e2e_pubkey)`; no change
+> required.
+
 ## Verdict
 
 Chutes is accepted for limited traffic on the E2EE path.
@@ -139,6 +144,20 @@ The Chutes adapter must:
 - fail closed when no verified nonce is available
 - keep credential material in the upstream config, not process environment
 - record E2EE binding and compact provider claims in receipts
+
+## Source & platform provenance, and TCB status
+
+Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
+
+- **Software provenance** (model/server code → reviewed source): partial — the TDX
+  measurement is matched against a reviewed public profile (`chutes_measurement_name`),
+  but the served-model identity is **not** bound (the chute display name aliases the
+  actual weights via unsigned `readme` text). **TODO:** maintain/pin the reviewed
+  measurement profile and bind the served model.
+- **Platform/OS provenance** (guest OS, kernel + cmdline, firmware/TEE module →
+  reviewed reproducible build): **TODO** — `MR_TD`/RTMRs are not pinned to a reviewed
+  reproducible OS/firmware build.
+- **TCB status / freshness**: done — the bridge requires `UpToDate`.
 
 ## Open Questions
 

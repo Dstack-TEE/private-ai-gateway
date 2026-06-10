@@ -135,7 +135,7 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
 - Chutes: use explicit per-model `chute_id` pins in production configs and
   complete long-window nonce-throughput testing.
 - SecretAI: review complete (SEV-SNP + NVIDIA Hopper, single-VM trust
-  boundary; see [reviews/providers/secret-ai.md](reviews/providers/secret-ai.md)).
+  boundary; see [providers/secret-ai/review.md](providers/secret-ai/review.md)).
   Adapter implementation deferred until SCRT addresses partner feedback sent
   2026-05-23 — SPKI binding, per-release build provenance, downstream image
   digest pins, journald policy, and open-sourcing `secret-vm-attest-rest-server`
@@ -159,6 +159,20 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   bridge branch + a standalone-dstack verifier so the deep/user verifier and harness
   can verify a raw node the same way as the other providers. Pairs with the direct
   vLLM-proxy worker bullet above.
+- Attestation soundness pass complete for all verifying providers. Each provider's
+  session binding is now cryptographically tied to a verified quote (see the soundness
+  section in `docs/upstream-verification-lifecycle.md`): Chutes (DCAP +
+  `report_data`↔`nonce‖e2e_pubkey`), NEAR AI (`report_data` binding now enforced),
+  Tinfoil (official `tinfoil` SDK: AMD signature chain + Sigstore provenance + TLS
+  binding), and AciDcap (TLS keys covered by the keyset digest bound into `report_data`
+  and the keyset endorsement). Live tamper tests confirm rejection.
+- Follow-up (defense-in-depth, not a forgeable hole): verify the NVIDIA NRAS GPU JWT
+  signature against NRAS' JWKS. Today the GPU tokens are fetched online from NRAS over
+  TLS and the request nonce is checked (Chutes via `eat_nonce`, NEAR AI via the
+  component nonce), but the JWT signature itself is decoded with
+  `verify_signature: False`. Closing it means fetching and caching NVIDIA's JWKS and
+  handling key rotation; it hardens the relayed/offline case and adds a second layer
+  if TLS to NRAS is ever compromised.
 
 ### P0: Live E2E and User Verification
 
@@ -254,13 +268,15 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
 ## Provider Soundness
 
 Supported providers must pass the criteria in
-[reviews/providers/audit-criteria.md](reviews/providers/audit-criteria.md).
-The current provider reports are:
+[providers/audit-criteria.md](providers/audit-criteria.md). Each provider directory
+under [providers/](providers/README.md) holds its `review.md` (admissions audit) and,
+once implemented, its `verification.md` (how the gateway verifies it). The current
+provider reports are:
 
-- [reviews/providers/tinfoil-router-mode.md](reviews/providers/tinfoil-router-mode.md)
-- [reviews/providers/near-ai-router-mode.md](reviews/providers/near-ai-router-mode.md)
-- [reviews/providers/chutes-e2ee.md](reviews/providers/chutes-e2ee.md)
-- [reviews/providers/secret-ai.md](reviews/providers/secret-ai.md)
+- [providers/tinfoil/review.md](providers/tinfoil/review.md)
+- [providers/near-ai/review.md](providers/near-ai/review.md)
+- [providers/chutes/review.md](providers/chutes/review.md)
+- [providers/secret-ai/review.md](providers/secret-ai/review.md)
 
 The implementation should stay minimal: each provider adapter owns its
 transport and verification rules. The config selects a provider and model map;

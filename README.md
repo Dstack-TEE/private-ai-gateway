@@ -107,7 +107,7 @@ Use this checklist before treating a deployment as private inference.
 | Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
-| Provider is admissible | Review the provider-specific report in `docs/reviews/providers/` against `docs/reviews/providers/audit-criteria.md`. |
+| Provider is admissible | Review the provider's `docs/providers/<provider>/review.md` against `docs/providers/audit-criteria.md`. |
 
 Provider verification and transport binding are backend responsibilities.
 Middleware and user-controlled headers can select routes, but they do not create
@@ -536,5 +536,6 @@ tests/                         unit and integration coverage
 - [Middleware integration guide](docs/middleware-integration.md)
 - [Frontend/middleware/backend architecture](docs/frontend-middleware-backend.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)
-- [Provider audit criteria](docs/reviews/providers/audit-criteria.md)
+- [Providers (verification + audit)](docs/providers/README.md)
+- [Provider audit criteria](docs/providers/audit-criteria.md)
 - [Roadmap](docs/roadmap.md)

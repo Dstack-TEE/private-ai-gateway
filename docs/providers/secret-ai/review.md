@@ -6,6 +6,10 @@ Ollama-via-Caddy inference on `:21434`).
 Trust boundary: single verified SecretVM running AMD SEV-SNP with NVIDIA H100
 ("HOPPER") GPU, fronted by `secret-ai-caddy`.
 
+> **Gateway verification:** not yet implemented — the SecretAI adapter is deferred
+> (see the roadmap). This review stands as the admissions audit; there is no
+> `verification.md` for SecretAI until the adapter lands.
+
 Source repos reviewed:
 
 - `scrtlabs/secretvm` at `ed4115cfe266365ffa0e34a0c4effadb6066040f`
@@ -478,6 +482,17 @@ The provider test suite must include:
   allowlist and confirm rejection.
 - Force a verifier failure on a refresh and confirm the previous lease is
   not replaced and that traffic stops when it expires.
+
+## Source & platform provenance, and TCB status
+
+Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md). The SecretAI
+adapter is not implemented, so these are review observations to confirm at adapter time:
+
+- **Software provenance** (model/server code → reviewed source): reviewed here
+  (compose-into-cmdline launch measurement). **TODO** at adapter implementation.
+- **Platform/OS provenance** (SecretVM guest OS / firmware → reviewed reproducible
+  build): **TODO** at adapter implementation (pin the reviewed SecretVM image).
+- **TCB status / freshness**: **TODO** at adapter implementation (criterion 14).
 
 ## Open Questions
 

@@ -14,8 +14,14 @@ Supporting repos:
 
 Source reports:
 
-- [router-mode-soundness.md](../router-mode-soundness.md)
-- [router-mode-load-balancing-cache.md](../router-mode-load-balancing-cache.md)
+- [router-mode-soundness.md](../../reviews/router-mode-soundness.md)
+- [router-mode-load-balancing-cache.md](../../reviews/router-mode-load-balancing-cache.md)
+
+> **How the gateway verifies this provider:** see [verification.md](verification.md).
+> Status (2026-06 soundness pass): the gateway now parses `report_data` from the
+> verified quote and enforces the nonce + signing-address + TLS-SPKI binding (commit
+> `ca7ddbd`), addressing the P0 "verify gateway identity/provenance/TLS binding" item
+> below. The strict gateway compose/image digest pin remains a follow-up.
 
 ## Verdict
 
@@ -370,6 +376,20 @@ P2:
   exposes backend or cache metadata.
 - Track whether live NEAR enables strict image-hash and TCB freshness policy,
   then fold those expectations into the verifier bridge.
+
+## Source & platform provenance, and TCB status
+
+Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
+
+- **Software provenance** (gateway/model code → reviewed source): partial —
+  `SHA256(app_compose) == reported compose_hash` is self-consistent only, not pinned to
+  a reviewed release. **TODO** (matches the P1 "pin the gateway compose/image digest"
+  item above).
+- **Platform/OS provenance** (guest OS, kernel + cmdline, firmware/TEE module →
+  reviewed reproducible build): **TODO** — the dstack guest OS image / RTMRs are not
+  pinned to a reviewed reproducible build.
+- **TCB status / freshness**: **TODO** — the dstack-verifier currently accepts
+  `OutOfDate`; set and enforce a policy per criterion 14.
 
 ## Open Questions
 
