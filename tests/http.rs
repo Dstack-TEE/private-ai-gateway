@@ -448,9 +448,10 @@ async fn attested_session_lookup_returns_audit_record() {
         body["session"]["verification"]["verifier_id"],
         "stub-verifier-1"
     );
-    assert_eq!(body["session"]["upstream"]["provider"], "stub-upstream");
+    assert_eq!(body["session"]["target"]["type"], "upstream");
+    assert_eq!(body["session"]["target"]["provider"], "stub-upstream");
     assert_eq!(
-        body["session"]["upstream"]["endpoint_origin"],
+        body["session"]["target"]["endpoint"],
         "https://stub-upstream"
     );
     assert_eq!(

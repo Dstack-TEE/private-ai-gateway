@@ -14,7 +14,6 @@ from live_e2e.common import (  # noqa: E402
     DEFAULT_DSTACK_ENDPOINT,
     DEFAULT_DSTACK_VERIFIER_URL,
     DEFAULT_ENV_FILE,
-    DEFAULT_PRIVATE_AI_VERIFIER_DIR,
     ROOT,
     Provider,
     assert_port_free,
@@ -47,9 +46,17 @@ def preflight(
         if shutil.which(binary) is None:
             raise RuntimeError(f"required binary not found on PATH: {binary}")
 
-    verifier_dir = Path(os.getenv("PRIVATE_AI_VERIFIER_DIR", str(DEFAULT_PRIVATE_AI_VERIFIER_DIR)))
-    if not verifier_dir.exists():
-        raise RuntimeError(f"private-ai-verifier checkout not found: {verifier_dir}")
+    # The gateway ships a vendored confidential_verifier; an external checkout is
+    # only needed when PRIVATE_AI_VERIFIER_DIR explicitly overrides it.
+    override_dir = os.getenv("PRIVATE_AI_VERIFIER_DIR")
+    if override_dir:
+        verifier_dir = Path(override_dir)
+        if not verifier_dir.exists():
+            raise RuntimeError(f"PRIVATE_AI_VERIFIER_DIR override not found: {verifier_dir}")
+    else:
+        verifier_dir = ROOT / "scripts" / "confidential_verifier"
+        if not (verifier_dir / "__init__.py").exists():
+            raise RuntimeError(f"vendored confidential_verifier not found: {verifier_dir}")
 
     dstack_endpoint = os.getenv("PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT", DEFAULT_DSTACK_ENDPOINT)
     if dstack_endpoint.startswith("unix:"):

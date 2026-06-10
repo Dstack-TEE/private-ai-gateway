@@ -380,39 +380,94 @@ async def chutes_verify_instance(
 
 
 async def verify_tinfoil(request: dict[str, Any]) -> None:
-    from confidential_verifier import TeeVerifier
+    # Verify with Tinfoil's official Python verifier. It performs the full reference
+    # chain that our previous hand-rolled SEV-SNP path skipped: the AMD report
+    # signature + VCEK->ASK->ARK certificate chain and policy/TCB (or DCAP for TDX),
+    # Sigstore-verified code-measurement provenance bound to the GitHub repo and
+    # workflow identity, and the TLS public-key binding. The verified TLS key
+    # fingerprint (report_data[0:32]) is returned as the enforceable channel binding.
+    from urllib.parse import urlparse
+
+    from tinfoil import SecureClient
 
     provider = "tinfoil"
-    verifier = TeeVerifier()
-    with contextlib.redirect_stdout(sys.stderr):
-        report = await verifier.fetch_report(provider, request["model_id"])
-        result = await verifier.verify(report)
-    report_obj = model_dump(report)
-    attestation_url = request.get("url_origin")
-    if attestation_url:
-        attestation_url = f"{attestation_url.rstrip('/')}/.well-known/tinfoil-attestation"
-    else:
-        attestation_url = "https://inference.tinfoil.sh/.well-known/tinfoil-attestation"
-    if not result.model_verified:
+    url_origin = request.get("url_origin") or "https://inference.tinfoil.sh"
+    parsed = urlparse(url_origin if "://" in url_origin else f"https://{url_origin}")
+    enclave_host = parsed.netloc or parsed.path
+    attestation_url = f"{url_origin.rstrip('/')}/.well-known/tinfoil-attestation"
+    options = request.get("provider_options") or {}
+    repo = options.get("tinfoil_repo") or "tinfoilsh/confidential-model-router"
+
+    def _verify():
+        client = SecureClient(enclave=enclave_host, repo=repo)
+        client.verify()
+        return client.get_verification_document()
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            doc = await asyncio.to_thread(_verify)
+    except Exception as exc:
+        failed(provider, f"Tinfoil verification failed: {exc}")
+        return
+
+    steps = {
+        name: {
+            "status": getattr(state, "status", None),
+            "error": getattr(state, "error", None),
+        }
+        for name, state in (doc.steps or {}).items()
+    }
+    evidence_doc = {
+        "config_repo": doc.config_repo,
+        "enclave_host": doc.enclave_host,
+        "release_digest": doc.release_digest,
+        "code_fingerprint": doc.code_fingerprint,
+        "enclave_fingerprint": doc.enclave_fingerprint,
+        "tls_public_key_fp": doc.tls_public_key,
+        "hpke_public_key": doc.hpke_public_key,
+        "security_verified": doc.security_verified,
+        "steps": steps,
+    }
+    evidence = json_evidence_bundle(evidence_doc, attestation_url)
+
+    if not doc.security_verified:
+        failed(provider, "Tinfoil attestation not verified", evidence=evidence)
+        return
+    spki = doc.tls_public_key
+    if not spki:
         failed(
             provider,
-            result.error or "Tinfoil verification failed",
-            evidence=json_evidence_bundle(report_obj, attestation_url),
+            "Tinfoil verification returned no TLS public key fingerprint",
+            evidence=evidence,
         )
         return
-    report_data = tinfoil_report_data(report.raw or {}, report.intel_quote)
+
+    used_router = bool(getattr(doc, "selected_router_endpoint", "")) or repo.endswith(
+        "confidential-model-router"
+    )
     emit(
         {
             "result": "verified",
-            "verifier_id": "private-ai-verifier/tinfoil/v1",
-            "evidence": json_evidence_bundle(report_obj, attestation_url),
+            "verifier_id": "tinfoil-verifier/v1",
+            "evidence": evidence,
             "channel_bindings": [
                 {
                     "type": "tls_spki_sha256",
                     "origin": request.get("url_origin"),
-                    "spki_sha256": report_data[:32].hex(),
+                    "spki_sha256": spki,
                 }
             ],
+            "provider_claims": {
+                "trust_boundary": "router" if used_router else "model",
+                "evidence_scope": "router" if used_router else "model",
+                "canonical_model_id": request["model_id"],
+                "used_router": used_router,
+                "config_repo": doc.config_repo,
+                "release_digest": doc.release_digest,
+                "code_fingerprint": doc.code_fingerprint,
+                "tls_spki_from_report_data": True,
+                "verification_steps": {k: v["status"] for k, v in steps.items()},
+            },
         }
     )
 
@@ -423,6 +478,17 @@ async def verify_nearai(request: dict[str, Any]) -> None:
 
     provider = "near-ai"
     verifier_id = verifier_id_for(provider)
+    # Fail loudly on bridge/verifier contract drift instead of letting a missing
+    # method surface as a cryptic AttributeError mid-verification.
+    if not hasattr(NearAICloudVerifier, "verify_gateway_component"):
+        failed(
+            provider,
+            "verifier contract drift: NearAICloudVerifier is missing "
+            "verify_gateway_component; the confidential_verifier package is out of sync "
+            "with this bridge (see scripts/confidential_verifier/VENDOR.md)",
+            verifier_id=verifier_id,
+        )
+        return
     near_provider = NearaiProvider(include_tls_fingerprint=True)
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
     with contextlib.redirect_stdout(sys.stderr):
@@ -700,6 +766,21 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             ),
         )
         return
+    provider_claims = {
+        "trust_boundary": "model_instance",
+        "evidence_scope": "model_instance",
+        "chute_id": chute_id,
+        "canonical_model_id": request["model_id"],
+        "verified_instance_count": len(verified),
+        "verified_instance_ids": [item["instance_id"] for item in verified],
+        "verified_public_key_sha256": [item["public_key_sha256"] for item in verified],
+    }
+    if nonce_expires_in is not None:
+        provider_claims["nonce_expires_in"] = nonce_expires_in
+    if evidence_data.get("failed_instance_ids"):
+        provider_claims["failed_instance_ids"] = evidence_data["failed_instance_ids"]
+    if skipped_without_key:
+        provider_claims["attested_instances_without_e2ee_key"] = skipped_without_key
     emit(
         {
             "result": "verified",
@@ -709,6 +790,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
                 source_url=attestation_url,
             ),
             "channel_bindings": bindings,
+            "provider_claims": provider_claims,
             "chutes_session": {
                 "chute_id": chute_id,
                 "nonce_expires_in": nonce_expires_in,
@@ -729,6 +811,13 @@ async def verify_chutes(request: dict[str, Any]) -> None:
 
 async def main() -> None:
     request = json.loads(sys.stdin.read())
+    # Default to the vendored `confidential_verifier` package next to this script
+    # (see scripts/confidential_verifier/VENDOR.md). An external private-ai-verifier
+    # checkout can override via PRIVATE_AI_VERIFIER_DIR, which is inserted ahead of
+    # the vendored copy on sys.path.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.append(script_dir)
     private_ai_dir = os.environ.get("PRIVATE_AI_VERIFIER_DIR")
     if private_ai_dir:
         sys.path.insert(0, private_ai_dir)

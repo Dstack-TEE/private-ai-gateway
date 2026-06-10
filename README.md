@@ -104,10 +104,10 @@ Use this checklist before treating a deployment as private inference.
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
-| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. |
+| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
-| Provider is admissible | Review the provider-specific report in `docs/reviews/providers/` against `docs/reviews/providers/audit-criteria.md`. |
+| Provider is admissible | Review the provider's `docs/providers/<provider>/review.md` against `docs/providers/audit-criteria.md`. |
 
 Provider verification and transport binding are backend responsibilities.
 Middleware and user-controlled headers can select routes, but they do not create
@@ -492,6 +492,18 @@ receipt hashing, dynamic upstream config, or metrics:
 scripts/local_multi_upstream_smoke.sh
 ```
 
+Run live upstream smoke after changing provider adapters, attested sessions, or
+receipt audit fields:
+
+```bash
+uv run python scripts/live_e2e/run.py --profile quick --port 0
+```
+
+The live smoke verifies every configured upstream in
+`scripts/live_e2e/providers.json`, sends one request per supported surface, then
+checks each receipt's `upstream.verified.session_id` against
+`GET /v1/audit/sessions/{session_id}`.
+
 Run the slower Phala deployment smoke when you need to validate the deployment
 surface:
 
@@ -524,5 +536,6 @@ tests/                         unit and integration coverage
 - [Middleware integration guide](docs/middleware-integration.md)
 - [Frontend/middleware/backend architecture](docs/frontend-middleware-backend.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)
-- [Provider audit criteria](docs/reviews/providers/audit-criteria.md)
+- [Providers (verification + audit)](docs/providers/README.md)
+- [Provider audit criteria](docs/providers/audit-criteria.md)
 - [Roadmap](docs/roadmap.md)

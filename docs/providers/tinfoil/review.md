@@ -9,8 +9,15 @@ Observed router image: `ghcr.io/tinfoilsh/confidential-model-router@sha256:893f9
 
 Source reports:
 
-- [router-mode-soundness.md](../router-mode-soundness.md)
-- [router-mode-load-balancing-cache.md](../router-mode-load-balancing-cache.md)
+- [router-mode-soundness.md](../../reviews/router-mode-soundness.md)
+- [router-mode-load-balancing-cache.md](../../reviews/router-mode-load-balancing-cache.md)
+
+> **How the gateway verifies this provider:** see [verification.md](verification.md).
+> Status (2026-06 soundness pass): the gateway now verifies Tinfoil with the official
+> `tinfoil` SDK — the full AMD signature chain + Sigstore code-provenance + TLS-key
+> binding — surfacing `release_digest`/`config_repo` (commit `747b117`). This review
+> covers the Tinfoil router's own soundness; the strict digest pin/allowlist (P0 below)
+> remains a follow-up.
 
 ## Verdict
 
@@ -183,6 +190,20 @@ P2:
 - Add a live test that verifies `Tinfoil-Enclave` belongs to the model's
   advertised enclave set and that the enclave attestation matches the model
   source measurement.
+
+## Source & platform provenance, and TCB status
+
+Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
+
+- **Software provenance** (router/model code → reviewed source): mechanism done — the
+  `tinfoil` SDK binds the code measurement to the repo via Sigstore (Rekor + GitHub
+  workflow identity). **TODO:** pin to a *reviewed* release commit/digest allowlist, not
+  any release of the configured repo (matches the P0 digest-pin item above).
+- **Platform/OS provenance** (guest OS, kernel + cmdline, firmware/TEE module →
+  reviewed reproducible build): partial — SEV policy (`MinimumTCB`, debug off) and
+  Tinfoil's hardware measurements apply. **TODO:** pin the guest OS/firmware to a
+  reviewed reproducible build.
+- **TCB status / freshness**: done — the SDK enforces `MinimumTCB`.
 
 ## Open Questions
 

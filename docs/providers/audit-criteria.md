@@ -276,6 +276,42 @@ practical:
   replaced
 - exercise streaming error paths without losing receipt hashes
 
+### 13. Source And Platform Provenance
+
+A verified measurement only proves "some specific code/firmware is running."
+Provenance proves *which* code, traced to reviewed, ideally reproducible source.
+Two distinct layers must each be covered:
+
+- **Software provenance** — the application/model/gateway code measured into the
+  quote (compose hash, image digest, workload id, container measurement) maps to
+  reviewed open source at a known commit/release, ideally via a reproducible build
+  or a signed provenance attestation (e.g. Sigstore/in-toto with a transparency-log
+  entry and a trusted builder identity), not merely "matches the provider's
+  currently published value."
+- **Platform/OS provenance** — the platform layer measured into the quote (guest
+  OS image, kernel + command line, initramfs, bootloader, and the TEE firmware /
+  module: TDX module `MR_SEAM`, SEV firmware/ucode level) maps to a reviewed,
+  reproducible build or a documented known-good set. The OS and firmware are part
+  of the TCB; an unreviewed OS image is as much a gap as unreviewed application
+  code.
+
+Both layers should be pinned through the release/upgrade process in criterion 7.
+Where a layer is verified only for self-consistency (the measurement matches its
+own reported hash) but not pinned to reviewed source, record it as a **TODO**; it
+blocks strict inclusion.
+
+### 14. Platform TCB Freshness
+
+The verifier must read the platform TCB status (Intel TDX/SGX `TcbStatus`, AMD
+SEV-SNP reported TCB against a minimum policy) and apply a documented, consistent
+policy across providers — not silently accept any signed quote. A genuine TEE on
+out-of-date microcode (`OutOfDate`) is still exposed to issues fixed in later TCB.
+
+- Require `UpToDate`, or an explicit allowlist (e.g. `SWHardeningNeeded` /
+  `ConfigurationNeeded`) that records the advisory IDs and the reason.
+- Apply the same bar to every provider; document any deviation.
+- Reject `OutOfDate` / `Revoked` unless the relying party has explicitly opted in.
+
 ## Hard Reject Conditions
 
 Any one of these blocks strict inclusion:
@@ -295,7 +331,8 @@ Any one of these blocks strict inclusion:
 
 ## Review Process
 
-Each provider review should produce a document under `docs/reviews/providers`.
+Each provider review should produce a `review.md` under `docs/providers/<provider>/`,
+alongside the `verification.md` reference for that provider.
 
 The reviewer should:
 
@@ -351,6 +388,8 @@ Every provider adapter should return the same class of result to Rust:
     }
   ],
   "provider_claims": {
+    "trust_boundary": "gateway",
+    "evidence_scope": "model",
     "gateway_verified": true,
     "model_evidence_present": true
   }
@@ -359,7 +398,9 @@ Every provider adapter should return the same class of result to Rust:
 
 The exact `provider_claims` fields are provider-owned. Rust should enforce the
 generic fields and the channel binding. Provider-specific meaning belongs in
-the adapter and review document.
+the adapter and review document. When useful, adapters should include compact
+readable scope facts such as `trust_boundary` and `evidence_scope`; the raw
+proof input still belongs in `evidence.data`.
 
 `evidence.digest` is computed over the decoded bytes from `evidence.data`.
 Provider adapters must not rebuild evidence into a normalized JSON shape unless

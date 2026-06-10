@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common import Provider, json_bytes, request_json, run_cmd_json, write_bytes, write_json
+from .attested_sessions import assert_upstream_attested_sessions
 
 
 REQUESTER_TOKEN = "live-e2e-requester"
@@ -100,6 +101,12 @@ def run_embeddings_case(
     write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     receipt = receipt_json.get("receipt") or {}
     assert_embeddings_receipt_log(provider, receipt)
+    attested_sessions = assert_upstream_attested_sessions(
+        base_url=base_url,
+        provider=provider,
+        receipt=receipt,
+        artifact_dir=provider_dir,
+    )
     return {
         "provider": provider.name,
         "receipt_id": receipt_id,
@@ -107,6 +114,7 @@ def run_embeddings_case(
         "embedding_dim": embedding_dim(parsed),
         "verified": verifier_summary.get("verified") is True,
         "upstream_events": verifier_summary.get("upstream_events"),
+        "attested_sessions": attested_sessions,
         "transparency_events": verifier_summary.get("transparency_events"),
     }
 

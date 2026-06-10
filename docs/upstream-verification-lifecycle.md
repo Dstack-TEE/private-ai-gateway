@@ -91,6 +91,22 @@ verified TLS binding on that connection.
 The session lease is subordinate to the verification lease. Session material
 cannot extend trust after verification expires.
 
+Attested session record:
+
+A separate, read-only audit artifact written when a verified upstream event is
+recorded (`record_attested_upstream_session`). It content-addresses the verified
+binding, verifier id, target, and evidence digest into a stable `session_id`, stores
+the matching `AttestedSessionRecord`, and attaches that id to the receipt. A relying
+party fetches it back from `/v1/audit/sessions/{session_id}` and confirms the record's
+target, verifier id, evidence digest, and channel bindings match the receipt event.
+
+Its `expires_at` is deliberately the receipt TTL, not the verification lease TTL. The
+record is a per-receipt historical attestation, so it must stay resolvable for as long
+as the receipt that cites it; expiring it with the ~300 s lease would strand
+`session_id`s in still-valid receipts. The record is not a claim that the binding is
+still live now — `established_at` records when it was verified, and the forwarding path
+only ever uses a binding from a fresh verification lease.
+
 ## Current No-Middleware Lifecycle
 
 The implementation today is equivalent to the framework's middleware-disabled
@@ -200,6 +216,37 @@ The current compromises:
   are short-lived.
 - We have short-window throughput lower bounds, not a long-window ceiling.
 
+## Provider verification soundness
+
+A soundness pass (2026-06) tamper-tested each provider's attestation verification
+against the live upstream APIs. Per-provider "how it is verified and bound" references
+live in [`providers/`](providers/README.md). Findings and the resulting state:
+
+- **NEAR AI (TDX):** the quote is verified by the dstack verifier, but the
+  `report_data` binding was being skipped (the check was gated on a field the dstack
+  verifier never returns), so a wrong nonce or a swapped TLS fingerprint still
+  verified. Fixed: `report_data` is now parsed from the verified quote and the nonce
+  + signing-address + TLS-SPKI binding is enforced (fail-closed).
+- **Chutes (TDX):** sound. The quote signature is verified with `dcap_qvl` (real DCAP
+  collateral; `UpToDate` required) and `report_data` binds `SHA256(nonce‖e2e_pubkey)`.
+- **Tinfoil (SEV-SNP, router mode):** the previous hand-rolled `_verify_snp` did **no**
+  AMD signature verification — it only compared the measurement to a public Sigstore
+  value, so a forged report with any `report_data` (TLS-SPKI) passed. Replaced with
+  Tinfoil's official Python verifier (`tinfoil` SDK), which performs the full
+  reference chain: AMD report signature + VCEK→ASK→ARK certificate chain and policy,
+  Sigstore-verified code-measurement provenance bound to the GitHub repo/workflow
+  identity, and the TLS public-key binding. The enforced binding value
+  (`report_data[0:32]`) is unchanged; it is now cryptographically proven. Tamper tests
+  confirm a modified `report_data`, measurement, or signature are all rejected.
+- **NVIDIA GPU (NRAS), all providers:** tokens are fetched online from NRAS over TLS
+  and the request nonce is checked (Chutes via `eat_nonce`, NEAR AI via the component
+  nonce). The JWT signature is not additionally verified against NRAS' JWKS — a
+  defense-in-depth follow-up, not a forgeable hole.
+
+The principle: lean on the hardware/vendor reference verifier (Intel DCAP via
+`dcap_qvl`, AMD via the `tinfoil`/`go-sev-guest` chain, NVIDIA via NRAS) rather than
+re-implementing attestation crypto, and always bind the result to the transport.
+
 ## Next Measurements
 
 To understand Chutes throughput better, run a long warmed test across several
@@ -230,7 +277,7 @@ request falls back into slow evidence refresh.
   middleware-disabled path must remain behavior-compatible with the current
   request path.
 - P0: finish strict-release pins from the provider reports under
-  [reviews/providers](reviews/providers/README.md): NEAR AI gateway
+  [providers/](providers/README.md): NEAR AI gateway
   provenance/runtime policy, Tinfoil router compose/image identity, and Chutes
   exact model-to-chute resolution. The first-pass soundness reviews are saved,
   but these provider-specific TODOs still gate general production inclusion.

@@ -97,7 +97,8 @@ cargo run --example verify_aci_artifacts -- \
 
 Profiles:
 
-- `quick`: one non-streaming request per provider plus receipt verification.
+- `quick`: one non-streaming request per provider plus receipt verification and
+  attested-session audit lookup for every verified upstream event.
 - `full`: all capability-enabled fidelity cases.
 - `strict-release`: full profile plus vendored reference pins, gateway code
   provenance, launcher/image provenance, and fail-closed negative checks.
@@ -464,6 +465,10 @@ Procedure:
 6. Verify request/response hashes when bodies are supplied.
 7. Inspect `upstream.verified` and show provider, model id, verifier id,
    evidence digest, evidence data URI content type, result, and binding type.
+8. For every `upstream.verified.session_id`, fetch
+   `GET /v1/audit/sessions/{session_id}` and confirm the audit record matches
+   the receipt event's provider, model id, endpoint origin, verifier id,
+   evidence digest, session binding material, and verified claim tags.
 
 The final output should be a human-readable summary plus a machine-readable
 JSON result:
@@ -503,7 +508,8 @@ providers. Our suite should explicitly cover the same classes of behavior:
 
 1. `user_verify.py` for already captured responses.
 2. `provider_verify.py` plus `provider_refs`.
-3. `run.py --profile quick` for Tinfoil, NEAR AI, Chutes.
+3. `run.py --profile quick` for Tinfoil, NEAR AI, Chutes, including
+   attested-session audit lookup.
 4. Framework no-middleware compatibility case.
 5. Framework fixture-middleware case with route selection and rewrite receipts.
 6. Streaming and receipt hash verification.

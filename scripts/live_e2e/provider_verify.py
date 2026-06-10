@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
-    DEFAULT_PRIVATE_AI_VERIFIER_DIR,
     ROOT,
     Provider,
     run_cmd_json,
@@ -26,12 +25,9 @@ def verify_provider(
     timeout: int = 300,
     artifact_dir: Path | None = None,
 ) -> dict[str, Any]:
-    verifier_dir = Path(
-        (env or os.environ).get(
-            "PRIVATE_AI_VERIFIER_DIR",
-            str(DEFAULT_PRIVATE_AI_VERIFIER_DIR),
-        )
-    )
+    # The bridge runs from the gateway project (cwd=ROOT) so it uses the gateway's
+    # own uv env and the vendored confidential_verifier package. An external verifier
+    # checkout is selected only when PRIVATE_AI_VERIFIER_DIR is set in the environment.
     request = {
         "api_version": "aci.provider-verifier.request.v1",
         "provider": provider.provider,
@@ -52,11 +48,10 @@ def verify_provider(
             "python",
             str(ROOT / "scripts" / "private_ai_provider_verifier.py"),
         ],
-        cwd=verifier_dir,
+        cwd=ROOT,
         env={
             **os.environ,
             **(env or {}),
-            "PRIVATE_AI_VERIFIER_DIR": str(verifier_dir),
         },
         input_value=request,
         timeout=timeout,
