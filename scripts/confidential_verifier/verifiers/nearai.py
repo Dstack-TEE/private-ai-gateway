@@ -12,6 +12,23 @@ from .intel import IntelTdxVerifier
 logger = logging.getLogger(__name__)
 
 
+def _tdx_report_data_hex(quote: Any) -> Optional[str]:
+    """Extract the 64-byte report_data from a raw Intel TDX v4 quote.
+
+    The header is 48 bytes; report_data is the final field of the TD report body
+    (body[520:584]) — the same offset used by the Chutes/Tinfoil/Intel verifiers.
+    Returns None if the quote is missing or malformed so callers can fail closed.
+    """
+    if not quote:
+        return None
+    try:
+        quote_bytes = bytes.fromhex(quote) if isinstance(quote, str) else bytes(quote)
+    except (ValueError, TypeError):
+        return None
+    rd = quote_bytes[48 + 520 : 48 + 584]
+    return rd.hex() if len(rd) == 64 else None
+
+
 class NearAICloudVerifier(Verifier):
     def __init__(self, dstack_verifier_url: str = "http://localhost:8080"):
         self.dstack_verifier = DstackVerifier(service_url=dstack_verifier_url)
@@ -93,20 +110,26 @@ class NearAICloudVerifier(Verifier):
 
             results["details"]["compose_verified"] = compose_verified
 
-            # 3. Report Data Verification (Nonce & Address)
+            # 3. Report Data Verification (nonce, signing address, TLS SPKI binding)
             signing_address = attestation_data.get("signing_address")
             tls_cert_fingerprint = attestation_data.get("tls_cert_fingerprint")
 
-            # Try to get report data from dstack result if available
-            report_data_hex = dstack_result.get("report_data")
+            # report_data lives inside the quote the dstack verifier just proved
+            # authentic, so parse it from those same verified quote bytes. Do NOT rely
+            # on the dstack verifier to surface report_data -- it does not, and without
+            # this check the request nonce, signing address, and TLS SPKI binding are
+            # never validated (a replayed quote or a swapped TLS fingerprint would pass).
+            report_data_hex = dstack_result.get("report_data") or _tdx_report_data_hex(quote)
 
-            # If not available from dstack (e.g. failure or not returned), try to parse manually using IntelTdxVerifier logic?
-            # For robustness, let's assume if dstack failed, report_data might be untrusted.
-            # But here we want to see if it binds correctly even if collateral is missing.
-            # We can use IntelTdxVerifier()._parse_quote() logic if it was public.
-            # Assuming we rely on dstack_result for now.
-
-            if report_data_hex and request_nonce and signing_address:
+            if not request_nonce or not signing_address:
+                results["errors"].append(
+                    "Missing request_nonce or signing_address; cannot verify report_data binding"
+                )
+            elif not report_data_hex:
+                results["errors"].append(
+                    "Could not obtain report_data from quote; cannot verify nonce/address/TLS binding"
+                )
+            else:
                 rd_result = verify_report_data(
                     report_data_hex,
                     signing_address,
