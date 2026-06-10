@@ -96,6 +96,11 @@ class DstackVerifier(Verifier):
                 "quote": quote,
                 "event_log": event_log,
                 "vm_config": vm_config,
+                # dstack-verifier >= 0.5.6 serializes the request with
+                # serde_human_bytes and no field default, so the optional
+                # `attestation` field must be present (even as null). Older
+                # verifiers ignore the extra key, so this stays backward compatible.
+                "attestation": None,
             }
             response = requests.post(f"{self.service_url}/verify", json=payload)
             response.raise_for_status()
