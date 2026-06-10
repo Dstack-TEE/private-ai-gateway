@@ -840,6 +840,74 @@ impl UpstreamVerifier for NearAiProviderVerifier {
     }
 }
 
+/// Verifier for `PhalaDirect` upstreams: a Phala dstack-vllm-proxy attestation
+/// endpoint reached directly (per model). The external bridge fetches the
+/// `version=2` attestation report, verifies the dstack TDX quote, GPU evidence,
+/// and the report_data binding (signing address + nonce + custom-domain TLS
+/// SPKI), and returns a `tls_spki_sha256` channel binding the
+/// [`OpenAICompatibleBackend`] pins on the forward connection.
+///
+/// (Named "direct" because it is expected to be superseded by an ACI-compatible
+/// server; see [`AciDcapUpstreamVerifier`].)
+#[derive(Debug, Clone)]
+pub struct PhalaDirectProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl PhalaDirectProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "phala-direct",
+                timeout_seconds,
+                cache_ttl_seconds,
+            ),
+        }
+    }
+
+    /// Bearer token sent on the attestation report request (the proxy's
+    /// `/v1/attestation/report` endpoint requires authorization).
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.verifier = self
+            .verifier
+            .with_option("phala_direct_bearer_token", token);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "phala-direct",
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for PhalaDirectProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
 pub struct RoutingUpstreamVerifier {
     by_origin: HashMap<String, Arc<dyn UpstreamVerifier>>,
     by_name: HashMap<String, Arc<dyn UpstreamVerifier>>,
@@ -2010,6 +2078,33 @@ esac"#
             &verifier,
             "near-ai",
             "near-ai/external-test/v1",
+            ChannelBinding::TlsSpkiSha256 {
+                origin: "https://provider.example".to_string(),
+                spki_sha256: "aa".repeat(32),
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn phala_direct_provider_verifier_runs_provider_owned_external_verifier() {
+        let verifier = PhalaDirectProviderVerifier::with_command(
+            provider_script(
+                "phala-direct",
+                "phala-direct/external-test/v1",
+                json!({
+                    "type": "tls_spki_sha256",
+                    "origin": "https://provider.example",
+                    "spki_sha256": "AA".repeat(32),
+                }),
+            ),
+            5,
+        )
+        .unwrap();
+        assert_provider_script_verifier(
+            &verifier,
+            "phala-direct",
+            "phala-direct/external-test/v1",
             ChannelBinding::TlsSpkiSha256 {
                 origin: "https://provider.example".to_string(),
                 spki_sha256: "aa".repeat(32),

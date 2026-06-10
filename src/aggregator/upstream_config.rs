@@ -22,7 +22,8 @@ use crate::aci::upstream::{
 };
 use crate::aci::verifier::{
     AciDcapUpstreamVerifier, AciDcapVerifierPolicy, ChutesProviderVerifier, NearAiProviderVerifier,
-    PreverifiedUpstreamVerifier, RoutingUpstreamVerifier, TinfoilProviderVerifier,
+    PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier, RoutingUpstreamVerifier,
+    TinfoilProviderVerifier,
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -139,6 +140,7 @@ pub enum UpstreamProvider {
     Chutes,
     Tinfoil,
     NearAi,
+    PhalaDirect,
 }
 
 #[derive(Debug, Clone)]
@@ -835,7 +837,8 @@ fn build_provider_backend(
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::AciDcap
         | UpstreamProvider::Tinfoil
-        | UpstreamProvider::NearAi => {
+        | UpstreamProvider::NearAi
+        | UpstreamProvider::PhalaDirect => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(
                 cfg.base_url.clone(),
                 connect_timeout_seconds,
@@ -970,6 +973,16 @@ fn build_provider_verifier(
                 request_timeout_seconds,
                 cache_seconds,
             ))),
+            UpstreamProvider::PhalaDirect => {
+                let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
+                    request_timeout_seconds,
+                    cache_seconds,
+                );
+                if let Some(token) = &cfg.bearer_token {
+                    verifier = verifier.with_bearer_token(token.clone());
+                }
+                Some(Arc::new(verifier))
+            }
         };
         if let Some(verifier) = verifier {
             router = router

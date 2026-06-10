@@ -27,5 +27,23 @@
     "bearer_token": "<chutes-api-key>",
     "session_refresh_seconds": 45,
     "chutes_e2ee_discovery_rounds": 3
+  },
+  {
+    "name": "phala-direct-glm51",
+    "provider": "phala-direct",
+    "base_url": "https://glm51.model-a.phala.network",
+    "models": {
+      "glm51-phala": "zai-org/GLM-5.1"
+    },
+    "bearer_token": "<phala-direct-api-key>"
+  },
+  {
+    "name": "phala-direct-qwen3",
+    "provider": "phala-direct",
+    "base_url": "https://qwen3.model-b.phala.network",
+    "models": {
+      "qwen3-phala": "Qwen/Qwen3-235B"
+    },
+    "bearer_token": "<phala-direct-api-key>"
   }
 ]
