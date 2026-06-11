@@ -6,8 +6,8 @@
   upstream entry). No hosted `api.redpill.ai` / `cloud-api.phala.network` hop.
 - **Session binding:** `tls_spki_sha256` (custom-domain leaf SPKI).
 - **Verifier:** bridge (`verify_phala_direct`) → vendored `confidential_verifier`
-  (`DstackVerifier`, `verify_report_data`) + an external dstack-verifier service
-  (`DSTACK_VERIFIER_URL`). No NRAS call (GPU is verified by implication, see step 6).
+  (`DstackVerifier`, `verify_report_data`, `NvidiaGpuVerifier`) + an external
+  dstack-verifier service (`DSTACK_VERIFIER_URL`).
 - **Requires:** the proxy serving attestation **version 2** (see
   [Producer requirement](#producer-requirement)).
 - **Status:** sound for the TLS-SPKI binding; known-good software/OS provenance is a
@@ -50,15 +50,13 @@ with a fresh nonce (and the configured `bearer_token`), then:
    `report_data[0:32] == SHA256(signing_address ‖ tls_cert_fingerprint)` and
    `report_data[32:64] == nonce`. **Fail closed** if `report_data`, the nonce, or the
    signing address is unavailable.
-6. **GPU — verified by implication, not by NRAS.** We do **not** call NRAS (it is only an
-   existence oracle — it proves a CC-capable GPU exists for a nonce, not that it is bound to
-   this CPU TEE or serving this request, and it adds a pointless round-trip). GPU trust comes
-   from the CPU-TEE quote + measured serving software (steps 2–4): the attested inference
-   software attests the GPU and sets up the encrypted CPU↔GPU CC channel, refusing to serve
-   otherwise. So once the CPU-TEE gate passes, a GPU the attested software presents is
-   verified — `gpu_verified` is derived from `gpu_evidence_present` (true for a GPU-backed
-   workload, false for CPU-only). The granular evidence (`gpu_evidence_nonce_matched`,
-   `gpu_arch`) is recorded for observability; GPU is never a gate.
+6. **Record the GPU evidence — supplemental, not a gate.** Check the GPU evidence nonce
+   against the request nonce and run `NvidiaGpuVerifier` (NRAS), but **do not fail** on a
+   GPU error. A standalone gateway-side NRAS check only proves a CC-capable GPU *exists*
+   for a nonce; it does not prove that GPU is bound to this CPU TEE or serving this request.
+   That binding is the measured serving software's job, attested *inside* the CPU-TEE quote
+   — so GPU trust is subsumed by the CPU-TEE quote + serving-software provenance (steps
+   2–4), and the NRAS result is recorded as `gpu_verified` / `gpu_evidence_*` metadata.
 
 ## What binds the session
 
@@ -77,11 +75,10 @@ Pinned hermetically by `tests/phala_direct_bridge.rs` (→ `scripts/soundness_ph
 - Wrong nonce → `report_data binding failed`.
 - dstack quote invalid → rejected (the CPU-TEE gate).
 
-GPU is **supplemental**, so a stale GPU evidence nonce does **not** reject — the upstream
-still verifies, `gpu_verified` stays true (trust is the attested software, not the evidence
-blob's freshness), and the staleness is recorded as `gpu_evidence_nonce_matched: false`. A
-CPU-only workload (no GPU evidence) verifies with `gpu_verified: false`. The shared
-report_data binding logic is also pinned by `tests/soundness_report_data.rs`.
+GPU is **supplemental**, so a GPU evidence nonce mismatch or a failed NRAS result does
+**not** reject — the upstream still verifies, and the outcome is recorded as
+`gpu_verified: false` / `gpu_evidence_nonce_matched: false`. The shared report_data binding
+logic is also pinned by `tests/soundness_report_data.rs`.
 
 ## Transport enforcement
 
@@ -132,13 +129,13 @@ unseeded hash is resolved once and cached on disk. Re-verify or add an image wit
   Known-good pinning of the vllm-proxy image/compose digest is still **not** enforced
   (compose-hash *integrity* is proven, but the compose is not checked against an allowlist).
   See [review.md](review.md).
-- GPU is **verified by implication, not by NRAS** — we do not call NRAS at all. A
-  gateway-side NRAS check is only an existence oracle (a CC-capable GPU exists for a nonce);
-  it does not prove the GPU is bound to this CPU TEE. The sound model is that the CPU TEE's
-  *measured serving software* (inside the quote) attests the GPU and sets up the encrypted
-  CPU↔GPU CC channel, refusing to serve otherwise — so once the CPU-TEE gate passes, a GPU
-  the attested software presents is verified. `gpu_verified` is derived from that
-  (`gpu_evidence_present`); it is recorded, never a gate.
+- GPU attestation is **supplemental metadata, not a security boundary** on this path. A
+  gateway-side NRAS check is an online existence oracle (a CC-capable GPU exists for a
+  nonce); it does not prove the GPU is bound to this CPU TEE. The sound model is that the
+  CPU TEE's *measured serving software* (inside the quote) attests the GPU and sets up the
+  encrypted CPU↔GPU CC channel, refusing to serve otherwise — so GPU trust is subsumed by
+  the CPU-TEE quote + serving-software provenance. Verifying the NRAS JWT against NRAS' JWKS
+  would not change this, so it is not treated as a gating requirement.
 
 ## Configuration
 

@@ -29,6 +29,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import types
 from contextlib import redirect_stdout
 from urllib.parse import parse_qs, urlparse
 
@@ -37,6 +38,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import dstack_os_image as osimg_mod  # noqa: E402
 import private_ai_provider_verifier as bridge  # noqa: E402
 from confidential_verifier.verifiers import dstack as dstack_mod  # noqa: E402
+from confidential_verifier.verifiers import nvidia as nvidia_mod  # noqa: E402
 
 ADDR = "11" * 20  # 20-byte ECDSA signing address (no 0x)
 FP = "ab" * 32  # genuine custom-domain SPKI fingerprint
@@ -55,28 +57,24 @@ def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
     return (b"\x00" * 48 + bytes(body) + rd + b"\x99" * 16).hex()
 
 
-def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, gpu: bool = True, debug: bool = False) -> dict:
+def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False) -> dict:
     """Build a version-2 report for a given nonce.
 
     bind_fp  : fingerprint mixed into report_data[0:32] (genuine = FP).
     report_fp: fingerprint advertised in the report body (None ⇒ omit the field).
-    gpu      : include NVIDIA GPU CC evidence (False ⇒ a CPU-only workload).
     debug    : set the TD_ATTRIBUTES TUD byte so the quote reads as debug mode.
     """
     first = hashlib.sha256(bytes.fromhex(ADDR) + bytes.fromhex(bind_fp)).digest()
     report_data_hex = (first + bytes.fromhex(nonce_hex)).hex()
     app_compose = "services: []"
-    nvidia_payload = (
-        json.dumps({"nonce": gpu_nonce or nonce_hex, "evidence_list": [{"arch": "HOPPER"}], "arch": "HOPPER"})
-        if gpu
-        else None
-    )
     attestation = {
         "signing_address": "0x" + ADDR,
         "signing_algo": "ecdsa",
         "request_nonce": nonce_hex,
         "intel_quote": _synthetic_quote(report_data_hex, debug=debug),
-        "nvidia_payload": nvidia_payload,
+        "nvidia_payload": json.dumps(
+            {"nonce": gpu_nonce or nonce_hex, "evidence_list": [{"arch": "HOPPER"}], "arch": "HOPPER"}
+        ),
         "info": {
             "compose_hash": hashlib.sha256(app_compose.encode()).hexdigest(),
             "tcb_info": {"app_compose": app_compose},
@@ -131,10 +129,21 @@ class _StubDstack:
         return {"is_valid": True, "details": details}
 
 
+def _stub_gpu(ok=True):
+    class _G:
+        async def verify(self, payload):
+            return types.SimpleNamespace(
+                model_verified=ok, error=None if ok else "stub gpu failure"
+            )
+
+    return lambda: _G()
+
+
 def _run(
     *,
     report_builder,
     dstack_valid=True,
+    gpu_ok=True,
     os_image_hash=SEED_DEV_HASH,
     resolve_override=None,
 ) -> dict:
@@ -143,17 +152,18 @@ def _run(
     OS-image resolution stays offline: seeded hashes resolve from
     KNOWN_OS_IMAGES, and DSTACK_OS_IMAGE_OFFLINE blocks any network for unseeded
     ones (so an unknown hash yields production_os_image=None). resolve_override
-    lets a case force a specific decision (e.g. a production image). The bridge
-    does NOT call NRAS, so there is no GPU verifier to stub.
+    lets a case force a specific decision (e.g. a production image).
     """
     orig_urlopen = bridge.urllib.request.urlopen
     orig_dstack = dstack_mod.DstackVerifier
+    orig_gpu = nvidia_mod.NvidiaGpuVerifier
     orig_resolve = osimg_mod.resolve_os_image
     orig_offline = os.environ.get("DSTACK_OS_IMAGE_OFFLINE")
     bridge.urllib.request.urlopen = _make_urlopen(report_builder)
     dstack_mod.DstackVerifier = lambda url=None: _StubDstack(
         url, is_valid=dstack_valid, os_image_hash=os_image_hash
     )
+    nvidia_mod.NvidiaGpuVerifier = _stub_gpu(gpu_ok)
     if resolve_override is not None:
         osimg_mod.resolve_os_image = resolve_override
     os.environ["DSTACK_OS_IMAGE_OFFLINE"] = "1"
@@ -172,6 +182,7 @@ def _run(
     finally:
         bridge.urllib.request.urlopen = orig_urlopen
         dstack_mod.DstackVerifier = orig_dstack
+        nvidia_mod.NvidiaGpuVerifier = orig_gpu
         osimg_mod.resolve_os_image = orig_resolve
         if orig_offline is None:
             os.environ.pop("DSTACK_OS_IMAGE_OFFLINE", None)
@@ -198,14 +209,8 @@ def check() -> list[str]:
             f.append("genuine: tcb_status claim not surfaced from dstack details")
         if claims.get("signing_address") != "0x" + ADDR:
             f.append("genuine: signing_address claim missing")
-        # GPU verified by implication from the attested inference software (no NRAS):
-        # the report presents GPU CC evidence and the CPU-TEE gate passed.
         if claims.get("gpu_verified") is not True:
-            f.append("genuine: gpu_verified should be true (implied by attested software)")
-        if claims.get("gpu_evidence_present") is not True:
-            f.append("genuine: expected gpu_evidence_present=true")
-        if claims.get("gpu_evidence_nonce_matched") is not True:
-            f.append("genuine: fresh GPU nonce should match")
+            f.append("genuine: expected gpu_verified true for a fresh GPU pass")
         # OS-image provenance: the attested os_image_hash resolves (offline, from the
         # seed map) to a known dev image, so production_os_image must be False — not
         # None, and never a fake True.
@@ -265,9 +270,7 @@ def check() -> list[str]:
         f.append(f"dstack-fail: expected dstack failure, got {out!r}")
 
     # --- GPU is supplemental, never a gate ---
-    # A stale GPU evidence nonce still VERIFIES, and gpu_verified stays true: trust
-    # comes from the attested software presenting the GPU, not the evidence blob's
-    # freshness — only gpu_evidence_nonce_matched records the staleness.
+    # A GPU evidence nonce mismatch still VERIFIES; the outcome is recorded.
     out = _run(report_builder=lambda n: _report(n, gpu_nonce="99" * 32))
     if out.get("result") != "verified":
         f.append(f"gpu-nonce: GPU is supplemental, expected verified, got {out!r}")
@@ -275,19 +278,19 @@ def check() -> list[str]:
         claims = out.get("provider_claims") or {}
         if claims.get("gpu_evidence_nonce_matched") is not False:
             f.append("gpu-nonce: expected gpu_evidence_nonce_matched=false")
-        if claims.get("gpu_verified") is not True:
-            f.append("gpu-nonce: gpu_verified should stay true (implied by software)")
+        if claims.get("gpu_verified") is not False:
+            f.append("gpu-nonce: stale GPU nonce must not count as gpu_verified")
 
-    # --- a CPU-only workload (no GPU evidence) is not GPU-verified ---
-    out = _run(report_builder=lambda n: _report(n, gpu=False))
+    # A failed NRAS result still VERIFIES; gpu_verified is recorded false.
+    out = _run(report_builder=lambda n: _report(n), gpu_ok=False)
     if out.get("result") != "verified":
-        f.append(f"no-gpu: expected verified, got {out!r}")
+        f.append(f"gpu-fail: GPU is supplemental, expected verified, got {out!r}")
     else:
         claims = out.get("provider_claims") or {}
-        if claims.get("gpu_evidence_present") is not False:
-            f.append("no-gpu: expected gpu_evidence_present=false")
         if claims.get("gpu_verified") is not False:
-            f.append("no-gpu: no GPU evidence must yield gpu_verified=false")
+            f.append("gpu-fail: expected gpu_verified=false")
+        if claims.get("gpu_evidence_present") is not True:
+            f.append("gpu-fail: expected gpu_evidence_present=true")
 
     return f
 
