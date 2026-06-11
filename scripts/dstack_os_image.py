@@ -39,13 +39,21 @@ DEFAULT_DOWNLOAD_URL_TEMPLATE = "https://download.dstack.org/os-images/mr_{}.tar
 # os_image_hash == SHA256(sha256sum.txt) and metadata.json binding). Re-verify with:
 #   uv run python scripts/dstack_os_image.py <os_image_hash>
 KNOWN_OS_IMAGES: dict[str, dict[str, Any]] = {
-    # dstack-nvidia dev image 0.5.9 — glm4-7-flash.use2, gemma4-31b-it.use2, …
+    # dstack PROD image 0.5.9 — entire reachable Phala fleet as of 2026-06-11
+    # (glm4-7-flash.use2, gemma*/gpt-oss/qwen*/bge-reranker/embedding, …).
+    "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9": {
+        "is_dev": False,
+        "version": "0.5.9",
+        "git_revision": "e3655d1390feee3736476f4bda35c4354b4a12fc",
+    },
+    # dstack DEV image 0.5.9 — the fleet's pre-flip image (now superseded by the
+    # prod build above). Kept as a known-dev vector and for any un-flipped box.
     "0e09f2bcb510c682b461d16b97192c710886db582852991e05146291063f890b": {
         "is_dev": True,
         "version": "0.5.9",
         "git_revision": "e3655d1390feee3736476f4bda35c4354b4a12fc",
     },
-    # dstack dev image 0.5.5 — bge-reranker.use2, qwen3-embedding-8b.use2, …
+    # dstack DEV image 0.5.5 — earlier embedding/reranker image (now superseded).
     "021bf66a7c9fd4a05031b8fa688834948874631c2ad5b9a2d566b4421b817271": {
         "is_dev": True,
         "version": "0.5.5",
