@@ -27,12 +27,15 @@ import io
 import json
 import os
 import sys
+import tarfile
+import tempfile
 import types
 from contextlib import redirect_stdout
 from urllib.parse import parse_qs, urlparse
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import dstack_os_image as osimg_mod  # noqa: E402
 import private_ai_provider_verifier as bridge  # noqa: E402
 from confidential_verifier.verifiers import dstack as dstack_mod  # noqa: E402
 from confidential_verifier.verifiers import nvidia as nvidia_mod  # noqa: E402
@@ -40,6 +43,9 @@ from confidential_verifier.verifiers import nvidia as nvidia_mod  # noqa: E402
 ADDR = "11" * 20  # 20-byte ECDSA signing address (no 0x)
 FP = "ab" * 32  # genuine custom-domain SPKI fingerprint
 URL_ORIGIN = "https://model-a.phala.example"
+# A real seeded dstack OS image hash (dev image 0.5.9) so the genuine path resolves
+# production_os_image offline from dstack_os_image.KNOWN_OS_IMAGES.
+SEED_DEV_HASH = "0e09f2bcb510c682b461d16b97192c710886db582852991e05146291063f890b"
 
 
 def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
@@ -107,15 +113,20 @@ def _make_urlopen(report_builder):
 
 
 class _StubDstack:
-    def __init__(self, url=None, *, is_valid=True):
+    def __init__(self, url=None, *, is_valid=True, os_image_hash=SEED_DEV_HASH):
         self._is_valid = is_valid
+        self._os_image_hash = os_image_hash
 
     def verify(self, quote, event_log, vm_config):
         if not self._is_valid:
             return {"is_valid": False, "reason": "stub dstack failure"}
         # Intentionally omit report_data so the bridge falls back to parsing it
-        # from the quote via the real _tdx_report_data_hex.
-        return {"is_valid": True, "details": {"tcb_status": "UpToDate"}}
+        # from the quote via the real _tdx_report_data_hex. Surface os_image_hash
+        # under app_info, matching the live dstack-verifier >= 0.5.6 response shape.
+        details = {"tcb_status": "UpToDate"}
+        if self._os_image_hash is not None:
+            details["app_info"] = {"os_image_hash": self._os_image_hash}
+        return {"is_valid": True, "details": details}
 
 
 def _stub_gpu(ok=True):
@@ -128,14 +139,34 @@ def _stub_gpu(ok=True):
     return lambda: _G()
 
 
-def _run(*, report_builder, dstack_valid=True, gpu_ok=True) -> dict:
-    """Run verify_phala_direct with stubs and return the emitted JSON result."""
+def _run(
+    *,
+    report_builder,
+    dstack_valid=True,
+    gpu_ok=True,
+    os_image_hash=SEED_DEV_HASH,
+    resolve_override=None,
+) -> dict:
+    """Run verify_phala_direct with stubs and return the emitted JSON result.
+
+    OS-image resolution stays offline: seeded hashes resolve from
+    KNOWN_OS_IMAGES, and DSTACK_OS_IMAGE_OFFLINE blocks any network for unseeded
+    ones (so an unknown hash yields production_os_image=None). resolve_override
+    lets a case force a specific decision (e.g. a production image).
+    """
     orig_urlopen = bridge.urllib.request.urlopen
     orig_dstack = dstack_mod.DstackVerifier
     orig_gpu = nvidia_mod.NvidiaGpuVerifier
+    orig_resolve = osimg_mod.resolve_os_image
+    orig_offline = os.environ.get("DSTACK_OS_IMAGE_OFFLINE")
     bridge.urllib.request.urlopen = _make_urlopen(report_builder)
-    dstack_mod.DstackVerifier = lambda url=None: _StubDstack(url, is_valid=dstack_valid)
+    dstack_mod.DstackVerifier = lambda url=None: _StubDstack(
+        url, is_valid=dstack_valid, os_image_hash=os_image_hash
+    )
     nvidia_mod.NvidiaGpuVerifier = _stub_gpu(gpu_ok)
+    if resolve_override is not None:
+        osimg_mod.resolve_os_image = resolve_override
+    os.environ["DSTACK_OS_IMAGE_OFFLINE"] = "1"
     request = {
         "provider": "phala-direct",
         "upstream_name": "phala-a",
@@ -152,6 +183,11 @@ def _run(*, report_builder, dstack_valid=True, gpu_ok=True) -> dict:
         bridge.urllib.request.urlopen = orig_urlopen
         dstack_mod.DstackVerifier = orig_dstack
         nvidia_mod.NvidiaGpuVerifier = orig_gpu
+        osimg_mod.resolve_os_image = orig_resolve
+        if orig_offline is None:
+            os.environ.pop("DSTACK_OS_IMAGE_OFFLINE", None)
+        else:
+            os.environ["DSTACK_OS_IMAGE_OFFLINE"] = orig_offline
     return json.loads(buf.getvalue())
 
 
@@ -175,8 +211,43 @@ def check() -> list[str]:
             f.append("genuine: signing_address claim missing")
         if claims.get("gpu_verified") is not True:
             f.append("genuine: expected gpu_verified true for a fresh GPU pass")
+        # OS-image provenance: the attested os_image_hash resolves (offline, from the
+        # seed map) to a known dev image, so production_os_image must be False — not
+        # None, and never a fake True.
+        if claims.get("os_image_hash") != SEED_DEV_HASH:
+            f.append(f"genuine: os_image_hash not surfaced ({claims.get('os_image_hash')!r})")
+        if claims.get("os_image_is_dev") is not True:
+            f.append("genuine: seeded dev image must surface os_image_is_dev=true")
+        if claims.get("production_os_image") is not False:
+            f.append("genuine: a dev image must yield production_os_image=false")
+        if claims.get("os_image_version") != "0.5.9":
+            f.append("genuine: os_image_version not surfaced from resolved metadata")
         if out.get("verifier_id") != "private-ai-verifier/phala-direct/v1":
             f.append(f"genuine: unexpected verifier_id {out.get('verifier_id')!r}")
+
+    # --- a production OS image resolves to production_os_image=true ---
+    out = _run(
+        report_builder=lambda n: _report(n),
+        resolve_override=lambda h, **kw: {
+            "is_dev": False,
+            "version": "0.5.9",
+            "verified": True,
+            "source": "seed",
+        },
+    )
+    claims = out.get("provider_claims") or {}
+    if out.get("result") != "verified":
+        f.append(f"prod-image: expected verified, got {out!r}")
+    elif claims.get("production_os_image") is not True or claims.get("os_image_is_dev") is not False:
+        f.append(f"prod-image: expected production_os_image=true, got {claims!r}")
+
+    # --- an unresolvable os_image_hash (unknown + offline) stays undecided (None) ---
+    out = _run(report_builder=lambda n: _report(n), os_image_hash="ff" * 32)
+    claims = out.get("provider_claims") or {}
+    if out.get("result") != "verified":
+        f.append(f"unknown-image: GPU/OS are not gates, expected verified, got {out!r}")
+    elif claims.get("production_os_image") is not None or claims.get("os_image_is_dev") is not None:
+        f.append(f"unknown-image: unresolved hash must be undecided None, got {claims!r}")
 
     # --- missing tls_cert_fingerprint (old proxy that ignored version=2) ---
     out = _run(report_builder=lambda n: _report(n, report_fp=None))
@@ -224,8 +295,101 @@ def check() -> list[str]:
     return f
 
 
+def _build_image_archive(metadata: dict, *, pinned_metadata: dict | None = None) -> tuple[str, bytes]:
+    """Build a synthetic dstack OS-image archive and return (os_image_hash, bytes).
+
+    os_image_hash = SHA256(sha256sum.txt); sha256sum.txt pins SHA256(each file).
+    If pinned_metadata is given, sha256sum.txt pins ITS digest while the archive
+    ships `metadata` — i.e. a download server that swapped metadata.json after the
+    manifest was fixed (the binding must reject this).
+    """
+    meta_bytes = json.dumps(metadata).encode("utf-8")
+    manifest_meta = json.dumps(pinned_metadata).encode("utf-8") if pinned_metadata else meta_bytes
+    files = {
+        "ovmf.fd": b"firmware",
+        "bzImage": b"kernel",
+        "initramfs.cpio.gz": b"initrd",
+        "metadata.json": meta_bytes,
+    }
+    digests = {name: hashlib.sha256(c).hexdigest() for name, c in files.items()}
+    digests["metadata.json"] = hashlib.sha256(manifest_meta).hexdigest()
+    sha_txt = ("".join(f"{digests[n]}  {n}\n" for n in files)).encode("utf-8")
+    os_image_hash = hashlib.sha256(sha_txt).hexdigest()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, content in list(files.items()) + [("sha256sum.txt", sha_txt)]:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+    return os_image_hash, buf.getvalue()
+
+
+def check_os_image() -> list[str]:
+    """Pin the os_image_hash -> is_dev binding the production_os_image claim rests on."""
+    f: list[str] = []
+
+    # Genuine archive: is_dev is bound to the hash and reads back.
+    h, archive = _build_image_archive({"version": "9.9.9", "is_dev": True})
+    try:
+        meta = osimg_mod.verify_and_read_metadata(h, archive)
+        if meta.get("is_dev") is not True:
+            f.append("os-image: genuine archive did not read back is_dev=true")
+    except ValueError as exc:
+        f.append(f"os-image: genuine archive rejected: {exc}")
+
+    # Tamper: ship is_dev=false but keep the manifest that pinned is_dev=true.
+    # The os_image_hash still matches the manifest, but metadata.json no longer does.
+    h2, archive2 = _build_image_archive(
+        {"version": "9.9.9", "is_dev": False},
+        pinned_metadata={"version": "9.9.9", "is_dev": True},
+    )
+    try:
+        osimg_mod.verify_and_read_metadata(h2, archive2)
+        f.append("os-image: a swapped metadata.json (flipped is_dev) was NOT rejected")
+    except ValueError:
+        pass
+
+    # Tamper: a different os_image_hash than the archive hashes to.
+    try:
+        osimg_mod.verify_and_read_metadata("ab" * 32, archive)
+        f.append("os-image: a wrong os_image_hash was NOT rejected")
+    except ValueError:
+        pass
+
+    # End-to-end resolve over a file:// URL, with verification + on-disk cache.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, f"mr_{h}.tar.gz")
+        with open(path, "wb") as fh:
+            fh.write(archive)
+        env_keys = ("DSTACK_OS_IMAGE_DOWNLOAD_URL", "DSTACK_OS_IMAGE_CACHE_DIR", "DSTACK_OS_IMAGE_OFFLINE")
+        saved = {k: os.environ.get(k) for k in env_keys}
+        try:
+            os.environ["DSTACK_OS_IMAGE_DOWNLOAD_URL"] = "file://" + os.path.join(tmp, "mr_{}.tar.gz")
+            os.environ["DSTACK_OS_IMAGE_CACHE_DIR"] = os.path.join(tmp, "cache")
+            os.environ.pop("DSTACK_OS_IMAGE_OFFLINE", None)
+            res = osimg_mod.resolve_os_image(h)
+            if not res or res.get("is_dev") is not True or res.get("source") != "download":
+                f.append(f"os-image: file:// resolve did not verify+return is_dev ({res!r})")
+            # Offline now must still resolve from the on-disk cache written above.
+            os.environ["DSTACK_OS_IMAGE_OFFLINE"] = "1"
+            cached = osimg_mod.resolve_os_image(h)
+            if not cached or cached.get("source") != "cache":
+                f.append(f"os-image: resolved image was not cached for offline reuse ({cached!r})")
+            # An unknown hash while offline is undecided, never fabricated.
+            if osimg_mod.resolve_os_image("cc" * 32) is not None:
+                f.append("os-image: an unknown hash offline must resolve to None")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    return f
+
+
 def main() -> int:
-    failures = check()
+    failures = check() + check_os_image()
     if failures:
         print("PHALA-DIRECT BRIDGE SOUNDNESS FAILURES:")
         for item in failures:

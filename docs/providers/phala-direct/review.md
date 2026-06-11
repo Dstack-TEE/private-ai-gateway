@@ -26,7 +26,7 @@ can *prove* it on this path or only record an operator assertion.
 | `tee_attested` | **Proven** | dstack-verifier `is_valid` + report_data binding |
 | `gpu_attested` | **Derived from CPU + code (TODO), not NRAS** | The sound source is the **CPU-TEE quote + measured serving software**: the serving software, attested inside the CPU-TEE quote, locally attests the GPU and establishes the encrypted CPU↔GPU CC channel, refusing to serve otherwise. So `gpu_attested` should be derived from `tee_attested` ∧ `serving_software_known_good` — and is therefore **Unknown** today until serving-software provenance is pinned (see that row). The gateway-side `NvidiaGpuVerifier` / NRAS result is recorded as **auxiliary metadata only** (`gpu_verified` + `gpu_*`); it is an existence oracle, never the source of truth, and a GPU failure never rejects. |
 | `tcb_up_to_date` | **Surfaced** | dstack `details.tcb_status` (emitted as `tcb_status`); a strict freshness policy is still **TODO** — dstack-verifier may accept `OutOfDate` |
-| `os_known_good` | **Against dstack reference set** | dstack `os_image_hash` / MRTD / RTMRs; not independently pinned to a reviewed reproducible build (**TODO**) |
+| `os_known_good` | **Classified (dev-vs-prod), bound to attestation; not gated** | dstack `os_image_hash` / MRTD / RTMRs reproduce a *real* dstack release. The image's `is_dev` flag is cryptographically bound to the attested `os_image_hash` (`os_image_hash = SHA256(sha256sum.txt)`, which pins `SHA256(metadata.json)`), so `resolve_os_image` decides `production_os_image` soundly (`os_image_is_dev` / `os_image_version` also surfaced). It is **recorded, not a gate**; a reviewed reproducible-build allowlist for the *vllm-proxy compose/image* is still a separate **TODO** |
 | `serving_software_known_good` | **Integrity only** | `SHA256(app_compose) == compose_hash` proves compose integrity, but the compose/image digest is **not** checked against an allowlist on this path (**TODO** — operator-asserted today) |
 | `model_weights_provenance` | **Not derived** | nothing in the attestation proves the loaded weights (operator-asserted only) |
 
@@ -35,7 +35,10 @@ can *prove* it on this path or only record an operator assertion.
 - Pin the accepted vllm-proxy image/compose digest (allowlist) on the PhalaDirect path —
   today the config's `accepted_image_digests` / `accepted_workload_ids` fields are wired to
   the native `aci-dcap` path, not this external bridge.
-- Pin the guest OS image / MRTD to a reviewed reproducible build.
+- `production_os_image` is now decided from dstack's published image metadata (bound to the
+  attested `os_image_hash`), so dev images are flagged today (the deployed fleet is all
+  `is_dev: true`). Remaining: decide whether to **gate** on it (reject non-prod) for a
+  strict release tier, vs. the current record-only behavior.
 - Set and enforce a TCB freshness policy (reject `OutOfDate` per criterion 14).
 - Confirm the production TLS endpoint is terminated by the attested CVM (dstack-ingress
   sidecar), with no off-TEE terminator — otherwise the SPKI binding is vacuous.

@@ -654,6 +654,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     from confidential_verifier.verifiers.dstack import DstackVerifier, verify_report_data
     from confidential_verifier.verifiers.nearai import _tdx_report_data_hex
     from confidential_verifier.verifiers.nvidia import NvidiaGpuVerifier
+    from dstack_os_image import resolve_os_image
 
     provider = "phala-direct"
     verifier_id = verifier_id_for(provider)
@@ -826,6 +827,35 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     dstack_details = dstack_result.get("details") if isinstance(dstack_result, dict) else None
     tcb_status = dstack_details.get("tcb_status") if isinstance(dstack_details, dict) else None
 
+    # OS-image provenance (production-vs-dev decision).
+    #
+    # The attested os_image_hash (proved by the dstack verifier — is_valid implies
+    # os_image_hash_verified) is SHA256(sha256sum.txt) of dstack's published OS
+    # image, and that manifest pins SHA256(metadata.json) — so the image's `is_dev`
+    # flag is cryptographically bound to the attested hash. resolve_os_image()
+    # re-downloads the published image, re-verifies that binding, and reads is_dev
+    # (known fleet images are seeded, so the common case is offline). A dev image
+    # (dstack-nvidia-dev-*, SSH/serial-console enabled) is NOT a production OS.
+    #
+    # This is recorded metadata, not a gate (mirrors how GPU evidence is handled):
+    # the deployed fleet currently runs dev images, and gating here would reject
+    # them. The session layer decides policy. None means "could not resolve"
+    # (unknown hash + offline/unreachable) — never silently treated as production.
+    app_info = dstack_details.get("app_info") if isinstance(dstack_details, dict) else None
+    os_image_hash = app_info.get("os_image_hash") if isinstance(app_info, dict) else None
+    if not os_image_hash and isinstance(dstack_details, dict):
+        os_image_hash = dstack_details.get("os_image_hash")
+
+    os_image = resolve_os_image(os_image_hash) if os_image_hash else None
+    if os_image is not None:
+        os_image_is_dev = bool(os_image.get("is_dev"))
+        os_image_version = os_image.get("version")
+        production_os_image = not os_image_is_dev
+    else:
+        os_image_is_dev = None
+        os_image_version = None
+        production_os_image = None
+
     emit(
         {
             "result": "verified",
@@ -848,6 +878,13 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "report_data_nonce_matched": True,
                 "compose_hash_verified": True,
                 "tdx_debug_mode": False,
+                # OS-image provenance, resolved from dstack's published image and
+                # bound to the attested os_image_hash. production_os_image is the
+                # prod-vs-dev decision (None only if the hash could not be resolved).
+                "os_image_hash": os_image_hash,
+                "os_image_version": os_image_version,
+                "os_image_is_dev": os_image_is_dev,
+                "production_os_image": production_os_image,
                 # GPU is supplemental metadata, not part of the trust gate.
                 "gpu_verified": gpu_attested,
                 "gpu_evidence_present": gpu_evidence_present,

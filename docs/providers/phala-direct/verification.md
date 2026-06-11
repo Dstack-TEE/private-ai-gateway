@@ -90,17 +90,45 @@ forwarding any request.
 
 `trust_boundary` (`phala-dstack-cvm`), `evidence_scope` (`model_instance`),
 `canonical_model_id`, `attestation_version` (2), `tls_spki_from_report_data`,
-`signing_address`, `report_data_nonce_matched`, `compose_hash_verified`, `tcb_status` (the
-granular dstack TCB status, e.g. `UpToDate`), and the supplemental GPU metadata
-`gpu_verified`, `gpu_evidence_present`, `gpu_evidence_nonce_matched`, `gpu_arch`.
+`signing_address`, `report_data_nonce_matched`, `compose_hash_verified`, `tdx_debug_mode`
+(always `false` — debug TDs are rejected), `tcb_status` (the granular dstack TCB status,
+e.g. `UpToDate`), the OS-image provenance trio `os_image_hash` / `os_image_version` /
+`os_image_is_dev` and the resolved `production_os_image` decision, and the supplemental GPU
+metadata `gpu_verified`, `gpu_evidence_present`, `gpu_evidence_nonce_matched`, `gpu_arch`.
+
+> **`production_os_image` is decided, not a TODO.** It is `false` for a dev image, `true`
+> for a production image, and `null` only when the hash cannot be resolved (unknown image
+> while offline). It is recorded metadata, **not a gate** — the deployed fleet currently
+> runs dev images (`dstack-nvidia-dev-*`, `is_dev: true`), so gating here would reject them;
+> the session layer decides policy. See [How the OS image is classified](#how-the-os-image-is-classified).
+
+## How the OS image is classified
+
+The decision is bound to the attestation, so the image download server cannot lie about it:
+
+1. The dstack verifier returns `app_info.os_image_hash` and only reports `is_valid` when
+   `os_image_hash_verified` (it reproduced MRTD/RTMRs from that exact image).
+2. dstack derives `os_image_hash = SHA256(sha256sum.txt)`, and that manifest pins
+   `SHA256(metadata.json)`. So `metadata.json`'s `is_dev` flag is **cryptographically bound**
+   to the attested hash — flipping it changes `metadata.json` → `sha256sum.txt` →
+   `os_image_hash`, which would no longer match the quote.
+3. `resolve_os_image` (`scripts/dstack_os_image.py`) re-downloads
+   `https://download.dstack.org/os-images/mr_{os_image_hash}.tar.gz`, **re-verifies both
+   equalities**, then reads `is_dev`. `production_os_image = not is_dev`.
+
+Known fleet images are seeded in `KNOWN_OS_IMAGES`, so the common path is offline; an
+unseeded hash is resolved once and cached on disk. Re-verify or add an image with
+`uv run python scripts/dstack_os_image.py <os_image_hash>`.
 
 ## Notes
 
 - Requires a reachable dstack-verifier at `DSTACK_VERIFIER_URL` (default
   `http://localhost:8080`).
-- Known-good pinning of the vllm-proxy image/compose digest and the guest OS / MRTD is
-  **not** enforced on this path yet (compose-hash *integrity* is proven, but the compose
-  is not checked against an allowlist). See [review.md](review.md).
+- The guest OS image is now **classified** (dev-vs-prod, bound to the attested
+  `os_image_hash`) and surfaced as `production_os_image` — but it is recorded, **not gated**.
+  Known-good pinning of the vllm-proxy image/compose digest is still **not** enforced
+  (compose-hash *integrity* is proven, but the compose is not checked against an allowlist).
+  See [review.md](review.md).
 - GPU attestation is **supplemental metadata, not a security boundary** on this path. A
   gateway-side NRAS check is an online existence oracle (a CC-capable GPU exists for a
   nonce); it does not prove the GPU is bound to this CPU TEE. The sound model is that the
