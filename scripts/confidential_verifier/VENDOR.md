@@ -23,6 +23,10 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
 
 - `verifiers/nearai.py`: added `NearAICloudVerifier.verify_gateway_component(...)` — the gateway-only
   verification entry point the bridge depends on. (Upstream had this only as an uncommitted edit.)
+- `verifiers/dstack.py`: `DstackVerifier.verify` sends `"attestation": None` in the `/verify` body.
+  dstack-verifier >= 0.5.6 serializes the request with `serde_human_bytes` and no field default, so the
+  optional `attestation` field must be present even when unused. Older verifiers ignore the extra key,
+  so this is backward compatible. Required to verify dstack >= 0.5.6 CVMs (e.g. OS image 0.5.6/0.5.8).
 
 ## Re-syncing with upstream
 

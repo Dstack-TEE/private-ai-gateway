@@ -14,6 +14,7 @@ One directory per upstream provider. Each holds up to two documents:
 | NEAR AI | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](near-ai/verification.md) | [review](near-ai/review.md) |
 | Tinfoil | AMD SEV-SNP (or TDX) + NVIDIA CC | `tls_spki_sha256` | [verification](tinfoil/verification.md) | [review](tinfoil/review.md) |
 | AciDcap (first-party Phala) | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](aci-dcap/verification.md) | — (first-party) |
+| PhalaDirect | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](phala-direct/verification.md) | [review](phala-direct/review.md) |
 | SecretAI | AMD SEV-SNP + NVIDIA CC | — (adapter deferred) | — | [review](secret-ai/review.md) |
 
 The two columns are different document *types* — `verification.md` tracks the running

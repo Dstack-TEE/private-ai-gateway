@@ -179,7 +179,7 @@ container.
 | Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
-| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, ACI/DCAP, and generic OpenAI-compatible upstreams |
+| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, PhalaDirect, ACI/DCAP, and generic OpenAI-compatible upstreams |
 | Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
 | Middleware framework | Implemented over HTTP on Unix domain sockets |
 | Receipt/body store | In-memory; receipt TTL is configurable, body retention defaults to disabled |
@@ -316,6 +316,7 @@ Supported `provider` values:
 | `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
 | `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
 | `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
+| `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
 
 ACI/DCAP verification policy can be set globally with
 `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS`,
@@ -325,7 +326,7 @@ ACI/DCAP verification policy can be set globally with
 `accepted_workload_ids`, `accepted_image_digests`,
 `accepted_dstack_kms_root_public_keys`, and `pccs_url`.
 
-Tinfoil, NEAR AI, and Chutes use the provider verifier bridge in
+Tinfoil, NEAR AI, Chutes, and PhalaDirect use the provider verifier bridge in
 `scripts/private_ai_provider_verifier.py`. Install `uv` and set
 `PRIVATE_AI_VERIFIER_DIR` to a `private-ai-verifier` checkout, or keep that
 checkout as a sibling directory of this repo.
