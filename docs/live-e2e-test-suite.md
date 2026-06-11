@@ -262,7 +262,7 @@ For each provider and enabled request mode:
 
 - Send request through the gateway.
 - Assert response status and OpenAI-compatible shape.
-- Fetch `/v1/receipt/{chat_id}` with the original bearer token.
+- Fetch `/v1/aci/receipts/{chat_id}` with the original bearer token.
 - Verify receipt signature using the receipt key from the attested keyset.
 - Verify receipt workload id and keyset digest match the attestation report.
 - Verify `request.received` hash equals the exact client body.
@@ -286,7 +286,7 @@ Capability-gated on `embeddings`. For each provider that lists it, the runner:
 - Sends `POST /v1/embeddings` through the gateway with a fixed `input` string.
 - Asserts the OpenAI-compatible response shape (`object: "list"`, non-empty
   `data[]` with a numeric `embedding[]` whose components are not all zero).
-- Fetches `/v1/receipt/{receipt_id}` using the `x-receipt-id` header value as
+- Fetches `/v1/aci/receipts/{receipt_id}` using the `x-receipt-id` header value as
   the lookup id, since OpenAI embeddings responses carry no `id` field. The
   gateway's receipt endpoint accepts either `chat_id` or `receipt_id` as the
   path parameter.
@@ -459,14 +459,14 @@ Procedure:
 1. Fetch `GET /v1/attestation/report?nonce=<random>`.
 2. Verify the report binding, quote, keyset endorsement, source provenance,
    and optional TLS SPKI.
-3. Fetch `GET /v1/receipt/{chat_id}`.
+3. Fetch `GET /v1/aci/receipts/{chat_id}`.
 4. Verify receipt signature under the attested receipt key.
 5. Verify receipt workload id and keyset digest match the verified report.
 6. Verify request/response hashes when bodies are supplied.
 7. Inspect `upstream.verified` and show provider, model id, verifier id,
    evidence digest, evidence data URI content type, result, and binding type.
 8. For every `upstream.verified.session_id`, fetch
-   `GET /v1/audit/sessions/{session_id}` and confirm the audit record matches
+   `GET /v1/aci/sessions/{session_id}` and confirm the audit record matches
    the receipt event's provider, model id, endpoint origin, verifier id,
    evidence digest, session binding material, and verified claim tags.
 

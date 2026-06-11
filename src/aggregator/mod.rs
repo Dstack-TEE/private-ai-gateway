@@ -7,4 +7,6 @@
 
 pub mod metrics;
 pub mod service;
+pub mod session;
+pub mod session_store;
 pub mod upstream_config;

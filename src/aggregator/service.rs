@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +47,10 @@ use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream, UpstreamError, UpstreamRequest,
 };
 use crate::aggregator::metrics::{MetricsSnapshot, RequestMode, ServiceMetrics, StreamErrorKind};
+use crate::aggregator::session::{
+    AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, WorkloadIdentityRef,
+};
+use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
@@ -259,41 +262,9 @@ impl ReceiptOwner {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionRecord {
-    pub api_version: String,
-    pub session_id: String,
-    pub direction: String,
-    pub established_at: u64,
-    pub expires_at: u64,
-    pub target: AttestedSessionTarget,
-    pub verification: AttestedSessionVerification,
-    pub session_binding: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionTarget {
-    #[serde(rename = "type")]
-    pub target_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionVerification {
-    pub verifier_id: String,
-    pub verified_claims: Vec<String>,
-    pub evidence: Option<Value>,
-    pub provider_claims: Option<Value>,
-}
-
-/// Stored receipts plus optional retained request bodies. The default
-/// in-memory implementation is enough for the first increment; a
-/// regional persistent store comes in a follow-up.
+/// Stored signed receipts. The default in-memory implementation is enough for
+/// the prototype; a durable store comes in a follow-up. The gateway never
+/// stores request bodies — only the receipt (which holds hashes, not content).
 pub trait ReceiptStore: Send + Sync {
     /// Store a signed receipt. `owner` is the requester's hashed bearer
     /// credential, or `None` for anonymous calls. The store MUST keep
@@ -303,16 +274,6 @@ pub trait ReceiptStore: Send + Sync {
     fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<Receipt>;
     /// Return the owner recorded at `put` time, if any.
     fn owner_of(&self, receipt_id: &str, now: u64) -> Option<ReceiptOwner>;
-    /// Persist the post-rewrite request body for `receipt_id` until
-    /// `expires_at` (unix seconds). Stores covered by retention windows
-    /// MUST drop expired bodies on read.
-    fn put_body(&self, receipt_id: &str, body: Vec<u8>, expires_at: u64);
-    /// Fetch the retained body if it exists and `now < expires_at`.
-    fn get_body(&self, receipt_id: &str, now: u64) -> Option<Vec<u8>>;
-    /// Store a verified attested-session audit record.
-    fn put_attested_session(&self, session: AttestedSessionRecord);
-    /// Fetch an attested-session audit record if it exists and is not expired.
-    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord>;
 }
 
 #[derive(Default)]
@@ -324,18 +285,11 @@ pub struct InMemoryReceiptStore {
 struct InMemoryReceiptStoreInner {
     by_receipt: std::collections::HashMap<String, StoredReceipt>,
     by_chat: std::collections::HashMap<String, String>,
-    bodies: std::collections::HashMap<String, RetainedBody>,
-    sessions: std::collections::HashMap<String, AttestedSessionRecord>,
 }
 
 struct StoredReceipt {
     receipt: Receipt,
     owner: Option<ReceiptOwner>,
-    expires_at: u64,
-}
-
-struct RetainedBody {
-    bytes: Vec<u8>,
     expires_at: u64,
 }
 
@@ -394,44 +348,6 @@ impl ReceiptStore for InMemoryReceiptStore {
             .get(receipt_id)
             .and_then(|entry| entry.owner.clone())
     }
-
-    fn put_body(&self, receipt_id: &str, body: Vec<u8>, expires_at: u64) {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        guard.bodies.insert(
-            receipt_id.to_string(),
-            RetainedBody {
-                bytes: body,
-                expires_at,
-            },
-        );
-    }
-
-    fn get_body(&self, receipt_id: &str, now: u64) -> Option<Vec<u8>> {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        if let Some(entry) = guard.bodies.get(receipt_id) {
-            if now >= entry.expires_at {
-                guard.bodies.remove(receipt_id);
-                return None;
-            }
-            return Some(entry.bytes.clone());
-        }
-        None
-    }
-
-    fn put_attested_session(&self, session: AttestedSessionRecord) {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        guard.sessions.insert(session.session_id.clone(), session);
-    }
-
-    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord> {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        let expires_at = guard.sessions.get(session_id)?.expires_at;
-        if now >= expires_at {
-            guard.sessions.remove(session_id);
-            return None;
-        }
-        guard.sessions.get(session_id).cloned()
-    }
 }
 
 fn remove_receipt_locked(inner: &mut InMemoryReceiptStoreInner, receipt_id: &str) {
@@ -440,7 +356,6 @@ fn remove_receipt_locked(inner: &mut InMemoryReceiptStoreInner, receipt_id: &str
             inner.by_chat.remove(&chat_id);
         }
     }
-    inner.bodies.remove(receipt_id);
 }
 
 /// Returned by [`AciService::forward_chat_completion`].
@@ -488,7 +403,6 @@ pub struct MiddlewareReceiptDraft {
     receipt_id: String,
     builder: ReceiptBuilder,
     provider_response_hash: String,
-    forwarded_body: Vec<u8>,
     endpoint_path: String,
     request_mode: RequestMode,
     response_model: Option<String>,
@@ -661,6 +575,7 @@ pub struct AciService {
     upstream: Arc<dyn UpstreamBackend>,
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
+    session_store: Arc<dyn SessionStore>,
     keyset: WorkloadKeyset,
     workload_id: String,
     workload_keyset_digest: String,
@@ -811,6 +726,7 @@ impl AciService {
             upstream,
             upstream_verifier,
             receipt_store,
+            session_store: Arc::new(InMemorySessionStore::default()),
             keyset,
             workload_id,
             workload_keyset_digest,
@@ -822,6 +738,13 @@ impl AciService {
             ),
             e2ee_replay: RwLock::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Swap in a durable session store (e.g. [`crate::aggregator::session_store::JsonlSessionStore`]).
+    /// Defaults to an in-memory store, which keeps the prior no-persistence behavior.
+    pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
+        self.session_store = session_store;
+        self
     }
 
     pub fn workload_id(&self) -> &str {
@@ -1230,9 +1153,6 @@ impl AciService {
         };
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body);
-        recorded_event.model_id = response_model
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -1277,16 +1197,18 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-        builder
-            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
+        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
+        // The session is keyed on the requested (routed) model; record the exact
+        // upstream-served model in the receipt's upstream.verified event.
+        builder.set_upstream_verified_model_id(response_model.clone());
         if upstream_response.body != wire_response_body {
             builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
         }
         builder.add_response_returned(&upstream_response.body, &wire_response_body)?;
 
         let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), req.requester.clone(), &forwarded_body);
+        self.store_receipt(receipt.clone(), req.requester.clone());
         self.metrics.record_receipt_issued(
             endpoint_path,
             RequestMode::Buffered,
@@ -1326,7 +1248,7 @@ impl AciService {
         selected_route_id: &str,
         forwarded_body: &[u8],
         recorded_event: UpstreamVerifiedEvent,
-        upstream_session_id: Option<&str>,
+        recorded: Option<(String, Value)>,
     ) -> Result<ReceiptBuilder, ServiceError> {
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
@@ -1344,7 +1266,7 @@ impl AciService {
         if received_body != forwarded_body {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        builder.add_upstream_verified_with_session(recorded_event, upstream_session_id)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
         Ok(builder)
     }
 
@@ -1523,7 +1445,8 @@ impl AciService {
                 let upstream_headers = upstream_response.headers;
                 let receipt_id = generate_receipt_id();
                 let served_at = self.clock.now_secs();
-                let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+                let recorded = self.record_attested_upstream_session(&recorded_event)?;
+                let session_id = recorded.as_ref().map(|(id, _)| id.clone());
                 let builder = self.build_middleware_receipt_prefix(
                     &receipt_id,
                     None,
@@ -1534,7 +1457,7 @@ impl AciService {
                     &route_id,
                     &forwarded_body,
                     recorded_event,
-                    upstream_session_id.as_deref(),
+                    recorded,
                 )?;
                 receipt_journal.reserve_receipt_id(receipt_id.clone());
 
@@ -1544,7 +1467,6 @@ impl AciService {
                     journal: receipt_journal,
                     provider_response_hasher: Sha256::new(),
                     receipt_id: receipt_id.clone(),
-                    forwarded_body,
                     endpoint_path: endpoint_path.to_string(),
                     sse_parser: SseChatIdParser::default(),
                     metrics: self.metrics.clone(),
@@ -1561,7 +1483,7 @@ impl AciService {
                         body: Box::pin(body),
                         selected_route: route_id.clone(),
                         attempts: index + 1,
-                        session_id: upstream_session_id,
+                        session_id,
                     },
                 )));
             }
@@ -1627,9 +1549,6 @@ impl AciService {
 
             // Commit this candidate.
             let response_model = accepted_response_model(status, &upstream_response.body);
-            recorded_event.model_id = response_model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
             self.metrics.record_upstream_response(
                 endpoint_path,
                 RequestMode::Buffered,
@@ -1640,7 +1559,8 @@ impl AciService {
             let receipt_id = generate_receipt_id();
             let served_at = self.clock.now_secs();
             let chat_id = extract_chat_id(&upstream_response.body);
-            let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+            let recorded = self.record_attested_upstream_session(&recorded_event)?;
+            let session_id = recorded.as_ref().map(|(id, _)| id.clone());
             let mut builder = self.build_middleware_receipt_prefix(
                 &receipt_id,
                 chat_id,
@@ -1651,8 +1571,11 @@ impl AciService {
                 &route_id,
                 &forwarded_body,
                 recorded_event,
-                upstream_session_id.as_deref(),
+                recorded,
             )?;
+            // The session is keyed on the requested (routed) model; record the
+            // exact upstream-served model in the receipt's upstream.verified.
+            builder.set_upstream_verified_model_id(response_model.clone());
             let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
 
             return Ok(MiddlewareForwardResult::Forwarded(Box::new(
@@ -1662,7 +1585,6 @@ impl AciService {
                         receipt_id: receipt_id.clone(),
                         builder,
                         provider_response_hash,
-                        forwarded_body,
                         endpoint_path: endpoint_path.to_string(),
                         request_mode: RequestMode::Buffered,
                         response_model,
@@ -1672,7 +1594,7 @@ impl AciService {
                     upstream_headers: upstream_response.headers,
                     selected_route: route_id.clone(),
                     attempts: index + 1,
-                    session_id: upstream_session_id,
+                    session_id,
                 },
             )));
         }
@@ -1795,9 +1717,8 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-        builder
-            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
+        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
 
         let e2ee_response = req.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -1818,9 +1739,6 @@ impl AciService {
             receipt_store: self.receipt_store.clone(),
             key_id: self.default_receipt_key_id.clone(),
             requester: req.requester,
-            forwarded_body,
-            receipt_id: receipt_id.clone(),
-            body_retention_seconds: self.config.service_capabilities.body_retention_seconds,
             receipt_ttl_seconds: self.config.receipt_ttl_seconds,
             clock: self.clock.clone(),
             metrics: self.metrics.clone(),
@@ -1887,7 +1805,7 @@ impl AciService {
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), requester, &draft.forwarded_body);
+        self.store_receipt(receipt.clone(), requester);
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
@@ -1952,7 +1870,6 @@ impl AciService {
             receipt_store: self.receipt_store.clone(),
             key_id: self.default_receipt_key_id.clone(),
             requester,
-            body_retention_seconds: self.config.service_capabilities.body_retention_seconds,
             receipt_ttl_seconds: self.config.receipt_ttl_seconds,
             clock: self.clock.clone(),
             metrics: self.metrics.clone(),
@@ -2070,111 +1987,86 @@ impl AciService {
         }
     }
 
+    /// Seal + persist the attested session for a verified event, and return its
+    /// `(session_id, claim-verdicts)`. The verdicts are surfaced inline in the
+    /// receipt's `upstream.verified` (shallow audit), while the persisted session
+    /// also carries the evidence + reasons (deep audit).
     fn record_attested_upstream_session(
         &self,
         event: &UpstreamVerifiedEvent,
-    ) -> Result<Option<String>, ServiceError> {
+    ) -> Result<Option<(String, Value)>, ServiceError> {
         if event.result != VerificationResult::Verified || event.channel_bindings.is_empty() {
             return Ok(None);
         }
 
         let now = self.clock.now_secs();
-        // Retain the attested-session record for the same window as the receipt that
-        // cites it (receipt_ttl_seconds), so a relying party verifying that receipt can
-        // always resolve its `session_id`. This is a *retention* window, not a binding
-        // validity deadline: the forwarding path only ever uses a binding from a fresh
-        // verification lease (verifier_cache_seconds, ~300s), and `established_at` records
-        // when this binding was verified. Expiring this record with the lease instead
-        // would strand `session_id`s referenced by still-valid receipts.
+        // Retention window: keep at least as long as the receipts that cite this
+        // session (`receipt_ttl_seconds`), so a relying party verifying that receipt can
+        // always resolve its `session_id`. `established_at` records when the binding was
+        // verified; the forwarding path only ever uses a binding from a fresh
+        // verification lease, so this is a retention deadline, not a validity one.
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        let channel_bindings = event
-            .channel_bindings
-            .iter()
-            .map(|binding| binding.to_value())
-            .collect::<Vec<_>>();
-        let binding_material = json!({
-            "session_binding": channel_bindings,
-        });
-        let binding_material_digest = crate::aci::canonical::jcs_sha256_hex(&binding_material)?;
-        let verified_claims = verified_claims_for_session(event);
-        let evidence = session_evidence(event);
-        let evidence_material = evidence.as_ref().map(|value| {
-            value
-                .get("digest")
-                .and_then(Value::as_str)
-                .map(|digest| json!({ "digest": digest }))
-                .unwrap_or_else(|| value.clone())
-        });
-        let verification_material = json!({
-            "verifier_id": &event.verifier_id,
-            "verified_claims": &verified_claims,
-            "evidence": evidence_material,
-            "provider_claims": &event.provider_claims,
-        });
-        let verification_material_digest =
-            crate::aci::canonical::jcs_sha256_hex(&verification_material)?;
-        let session_material = json!({
-            "direction": "upstream",
-            "target": {
-                "type": "upstream",
-                "provider": &event.vendor,
-                "model_id": &event.model_id,
-                "endpoint": &event.url_origin,
-            },
-            "verifier_id": &event.verifier_id,
-            "verification_digest": verification_material_digest,
-            "session_binding_digest": binding_material_digest,
-        });
-        let session_digest = crate::aci::canonical::jcs_sha256_hex(&session_material)?;
-        let session_id = format!(
-            "as_{}",
-            session_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(session_digest.as_str())
-        );
-        let record = AttestedSessionRecord {
-            api_version: "aci/1".to_string(),
-            session_id: session_id.clone(),
-            direction: "upstream".to_string(),
-            established_at: now,
+
+        let channel_binding = AttestedSession::bindings_to_values(&event.channel_bindings);
+        let claims = session_claims_for_event(event);
+        let claims_value = serde_json::to_value(&claims).unwrap_or(Value::Null);
+
+        // Lift the response-signing address into the verified identity when present.
+        let mut identity = WorkloadIdentityRef::default();
+        if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
+            if let Some(addr) = map.get("signing_address").and_then(Value::as_str) {
+                identity.signing_address = Some(addr.to_string());
+            }
+        }
+        let identity = (!identity.is_empty()).then_some(identity);
+
+        let evidence = event
+            .evidence
+            .as_ref()
+            .map(EvidenceRef::from_value)
+            .unwrap_or_default();
+
+        let session = AttestedSession::seal(
+            event.vendor.clone(),
+            event.model_id.clone(),
+            None,
+            event.url_origin.clone(),
+            event.verifier_id.clone(),
+            identity,
+            channel_binding,
+            claims,
+            evidence,
+            now,
             expires_at,
-            target: AttestedSessionTarget {
-                target_type: "upstream".to_string(),
-                provider: Some(event.vendor.clone()),
-                model_id: Some(event.model_id.clone()),
-                endpoint: event.url_origin.clone(),
-            },
-            verification: AttestedSessionVerification {
-                verifier_id: event.verifier_id.clone(),
-                verified_claims,
-                evidence,
-                provider_claims: event.provider_claims.clone(),
-            },
-            session_binding: channel_bindings,
-        };
-        self.receipt_store.put_attested_session(record);
-        Ok(Some(session_id))
+        )?;
+
+        let session_id = session.session_id.clone();
+        if let Err(err) = self.session_store.put_session(session, now) {
+            // Persisting the audit record must not break inference; a missing
+            // session simply resolves to "not found" for relying parties.
+            tracing::warn!(error = %err, session_id = %session_id, "failed to persist attested session");
+        }
+        Ok(Some((session_id, claims_value)))
     }
 
-    fn store_receipt(
-        &self,
-        receipt: Receipt,
-        requester: Option<ReceiptOwner>,
-        forwarded_body: &[u8],
-    ) {
+    /// Append the `upstream.verified` receipt event, attaching the session id and
+    /// the typed claim verdicts when a verified session was recorded.
+    fn append_upstream_verified(
+        builder: &mut ReceiptBuilder,
+        event: UpstreamVerifiedEvent,
+        recorded: Option<(String, Value)>,
+    ) -> Result<(), ReceiptError> {
+        let (session_id, claims) = match recorded {
+            Some((id, claims)) => (Some(id), Some(claims)),
+            None => (None, None),
+        };
+        builder.add_upstream_verified_with_session(event, session_id.as_deref(), claims)
+    }
+
+    fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {
         let now = self.clock.now_secs();
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        self.receipt_store
-            .put(receipt.clone(), requester, expires_at);
-        let retention = self.config.service_capabilities.body_retention_seconds;
-        if retention > 0 {
-            let body_expires_at = now.saturating_add(retention);
-            self.receipt_store.put_body(
-                &receipt.receipt_id,
-                forwarded_body.to_vec(),
-                body_expires_at,
-            );
-        }
+        self.receipt_store.put(receipt, requester, expires_at);
     }
 
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<Receipt> {
@@ -2215,21 +2107,19 @@ impl AciService {
             .owner_of(receipt_id, self.clock.now_secs())
     }
 
-    /// Read the retained post-rewrite request body if retention is
-    /// active and the entry has not expired.
-    pub fn get_retained_body(&self, receipt_id: &str) -> Option<Vec<u8>> {
-        self.receipt_store
-            .get_body(receipt_id, self.clock.now_secs())
+    pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSession> {
+        self.session_store
+            .get_session(session_id, self.clock.now_secs())
     }
 
-    pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSessionRecord> {
-        self.receipt_store
-            .get_attested_session(session_id, self.clock.now_secs())
-    }
-
-    /// Body retention window in seconds, or 0 if bodies are not retained.
-    pub fn body_retention_seconds(&self) -> u64 {
-        self.config.service_capabilities.body_retention_seconds
+    /// List attested sessions, optionally filtered by provider and/or public model id.
+    pub fn list_attested_sessions(
+        &self,
+        provider: Option<&str>,
+        public_model_id: Option<&str>,
+    ) -> Vec<AttestedSession> {
+        self.session_store
+            .list_sessions(provider, public_model_id, self.clock.now_secs())
     }
 
     /// E2EE protocol versions this workload has actually wired.
@@ -2238,28 +2128,29 @@ impl AciService {
     }
 }
 
-fn verified_claims_for_session(event: &UpstreamVerifiedEvent) -> Vec<String> {
-    let mut claims = std::collections::BTreeSet::new();
-    claims.insert("encrypted-session-verified".to_string());
-
-    if let Some(provider_claims) = event.provider_claims.as_ref() {
-        if let Some(items) = provider_claims
-            .get("verified_claims")
-            .and_then(serde_json::Value::as_array)
-        {
-            for item in items {
-                if let Some(tag) = item.as_str().map(str::trim).filter(|tag| !tag.is_empty()) {
-                    claims.insert(tag.to_string());
-                }
-            }
+/// Derive the typed claim verdicts for a verified upstream event. A verified
+/// result means the provider's verifier proved a genuine TEE workload identity
+/// and bound the request channel to it, so `tee_attested` is asserted
+/// (`VerifierDerived`). The remaining typed claims stay `Unknown` until a
+/// per-provider mapper fills them; the verifier's raw `provider_claims` are
+/// preserved verbatim as scope facts under `claims.extra`.
+fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
+    let mut claims = SessionClaims::default();
+    if event.result == VerificationResult::Verified {
+        claims.tee_attested = Claim::asserted(
+            ClaimSource::VerifierDerived,
+            format!(
+                "{} verified the workload identity and bound the channel",
+                event.verifier_id
+            ),
+        );
+    }
+    if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
+        for (key, value) in map {
+            claims.extra.insert(key.clone(), value.clone());
         }
     }
-
-    claims.into_iter().collect()
-}
-
-fn session_evidence(event: &UpstreamVerifiedEvent) -> Option<Value> {
-    event.evidence.clone()
+    claims
 }
 
 struct MiddlewareProviderResponseDraftingStream {
@@ -2268,7 +2159,6 @@ struct MiddlewareProviderResponseDraftingStream {
     journal: MiddlewareReceiptJournal,
     provider_response_hasher: Sha256,
     receipt_id: String,
-    forwarded_body: Vec<u8>,
     endpoint_path: String,
     sse_parser: SseChatIdParser,
     metrics: Arc<ServiceMetrics>,
@@ -2339,7 +2229,6 @@ impl MiddlewareProviderResponseDraftingStream {
             receipt_id: self.receipt_id.clone(),
             builder,
             provider_response_hash,
-            forwarded_body: self.forwarded_body.clone(),
             endpoint_path: self.endpoint_path.clone(),
             request_mode: RequestMode::Streaming,
             response_model: response_model.clone(),
@@ -2363,7 +2252,6 @@ struct MiddlewareResponseFinalizingStream {
     receipt_store: Arc<dyn ReceiptStore>,
     key_id: String,
     requester: Option<ReceiptOwner>,
-    body_retention_seconds: u64,
     receipt_ttl_seconds: u64,
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
@@ -2490,12 +2378,6 @@ impl MiddlewareResponseFinalizingStream {
         self.receipt_store
             .put(receipt, self.requester.clone(), expires_at);
 
-        if self.body_retention_seconds > 0 {
-            let body_expires_at = now.saturating_add(self.body_retention_seconds);
-            self.receipt_store
-                .put_body(&draft.receipt_id, draft.forwarded_body, body_expires_at);
-        }
-
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
@@ -2514,9 +2396,6 @@ struct ReceiptFinalizingStream {
     receipt_store: Arc<dyn ReceiptStore>,
     key_id: String,
     requester: Option<ReceiptOwner>,
-    forwarded_body: Vec<u8>,
-    receipt_id: String,
-    body_retention_seconds: u64,
     receipt_ttl_seconds: u64,
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
@@ -2634,15 +2513,6 @@ impl ReceiptFinalizingStream {
         let expires_at = now.saturating_add(self.receipt_ttl_seconds);
         self.receipt_store
             .put(receipt, self.requester.clone(), expires_at);
-
-        if self.body_retention_seconds > 0 {
-            let body_expires_at = now.saturating_add(self.body_retention_seconds);
-            self.receipt_store.put_body(
-                &self.receipt_id,
-                self.forwarded_body.clone(),
-                body_expires_at,
-            );
-        }
 
         self.metrics.record_upstream_response(
             &self.endpoint_path,

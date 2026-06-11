@@ -1443,7 +1443,7 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 
-    let receipt_response = h.requester.get("/v1/receipt/chat-mock-1").await;
+    let receipt_response = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(receipt_response.status, StatusCode::OK);
     let receipt_json = json_body(&receipt_response);
     assert_eq!(receipt_json["receipt"]["receipt_id"], receipt_id);
@@ -1615,32 +1615,21 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
 }
 
 #[tokio::test]
-async fn receipt_path_and_body_retention_errors_follow_aci_shape() {
+async fn receipt_path_errors_follow_aci_shape() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
     let chat = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(chat.status, StatusCode::OK);
     let receipt_id = header_str(&chat.headers, "x-receipt-id").to_string();
 
-    let by_chat = h.requester.get("/v1/receipt/chat-mock-1").await;
+    let by_chat = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(by_chat.status, StatusCode::OK);
     assert_eq!(json_body(&by_chat)["receipt"]["chat_id"], "chat-mock-1");
     assert_eq!(json_body(&by_chat)["receipt"]["receipt_id"], receipt_id);
 
-    let unknown = h.requester.get("/v1/receipt/missing").await;
+    let unknown = h.requester.get("/v1/signature/missing").await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     assert_eq!(json_body(&unknown)["error"]["type"], "not_found");
-
-    let body = h.requester.get("/v1/receipt/chat-mock-1/body").await;
-    assert_eq!(body.status, StatusCode::NOT_FOUND);
-    assert_eq!(
-        json_body(&body)["error"]["type"],
-        "receipt_body_not_retained"
-    );
-
-    let unknown_body = h.requester.get("/v1/receipt/missing/body").await;
-    assert_eq!(unknown_body.status, StatusCode::NOT_FOUND);
-    assert_eq!(json_body(&unknown_body)["error"]["type"], "not_found");
 }
 
 #[tokio::test]

@@ -275,17 +275,27 @@ impl ReceiptBuilder {
         self.append(EVENT_UPSTREAM_VERIFIED, event.to_fields())
     }
 
+    /// Append `upstream.verified`, attaching the attested-session id and the
+    /// typed claim verdicts (shallow audit) when a verified session exists. The
+    /// session id is content-addressed, so it commits the receipt to the exact
+    /// session (with its evidence + reasons) a deep audit would re-fetch.
     pub fn add_upstream_verified_with_session(
         &mut self,
         event: UpstreamVerifiedEvent,
         session_id: Option<&str>,
+        claims: Option<Value>,
     ) -> Result<(), ReceiptError> {
         let mut fields = event.to_fields();
-        if let (Some(session_id), Value::Object(obj)) = (session_id, &mut fields) {
-            obj.insert(
-                "session_id".to_string(),
-                Value::String(session_id.to_string()),
-            );
+        if let Value::Object(obj) = &mut fields {
+            if let Some(session_id) = session_id {
+                obj.insert(
+                    "session_id".to_string(),
+                    Value::String(session_id.to_string()),
+                );
+            }
+            if let Some(claims) = claims {
+                obj.insert("claims".to_string(), claims);
+            }
         }
         self.append(EVENT_UPSTREAM_VERIFIED, fields)
     }

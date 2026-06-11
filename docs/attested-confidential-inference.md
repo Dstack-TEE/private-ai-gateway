@@ -80,7 +80,7 @@ curl "$API_BASE_URL/v1/attestation/report?nonce=$NONCE" \
 Fetch the receipt for the response.
 
 ```bash
-curl "$API_BASE_URL/v1/receipt/$RECEIPT_ID" \
+curl "$API_BASE_URL/v1/aci/receipts/$RECEIPT_ID" \
   -H "Authorization: Bearer $API_KEY" \
   -o receipt.json
 ```
@@ -107,7 +107,7 @@ Then verify these facts locally:
 12. `upstream.verified.result` is `verified` for the selected upstream model,
     and its channel binding is enforceable by the gateway.
 13. If `upstream.verified.session_id` is present, fetch
-    `/v1/audit/sessions/{session_id}` and verify the session record matches the
+    `/v1/aci/sessions/{session_id}` and verify the session record matches the
     receipt event.
 
 The verifier should fail closed if a required artifact is missing, malformed,
@@ -117,57 +117,25 @@ expired, unsigned, or rejected by policy.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v1/attestation/report?nonce=<nonce>` | Fresh gateway attestation report. |
-| `GET /v1/receipt/{id}` | Signed ACI receipt. `{id}` can be a receipt ID or response chat ID. |
-| `GET /v1/signature/{id}` | Legacy compatibility response. New verifiers should read the embedded `receipt`. |
-| `GET /v1/receipt/{id}/body` | Optional retained post-rewrite request body. Available only when retention is enabled. |
-| `GET /v1/audit/sessions/{session_id}` | Optional attested-session audit record referenced by receipt events. |
+| `GET /v1/aci/attestation/report?nonce=<nonce>` | Fresh gateway attestation report. |
+| `GET /v1/aci/receipts/{id}` | Signed ACI receipt (bare). `{id}` can be a receipt ID or response chat ID. |
+| `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by receipt events. |
+| `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |
+| `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. New verifiers should use the `/v1/aci/*` endpoints above. |
 
-## Verification Bundle API
+## Tracing a receipt to its session
 
-Pre-launch deployments may add a batch endpoint that returns all verification
-artifacts in one round trip. This endpoint is an artifact transport, not a trust
-oracle. The verifier still checks every signature, hash, attestation binding,
-session record, and production policy locally.
+The artifacts are linked, not bundled. A receipt's `upstream.verified` event
+carries the typed claim verdicts inline (shallow audit — trust the gateway's
+signed claim) plus the content-addressed `session_id`. For a deep audit, follow
+that reference to `GET /v1/aci/sessions/{session_id}`: an immutable record with
+the full evidence and per-claim reasons, which the verifier re-checks itself.
+Because `session_id` is a content hash, the session you fetch is exactly the one
+the receipt committed to — race-free, and permanently cacheable.
 
-```text
-POST /v1/verification/bundles
-```
-
-Request:
-
-```json
-{
-  "nonce": "<fresh verifier nonce>",
-  "items": [{"id": "<chat id or receipt id>"}],
-  "include": {
-    "legacy_signature": false,
-    "sessions": true,
-    "retained_body": false
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "api_version": "aci.verification_bundle.v1",
-  "attestation_report": {},
-  "items": [
-    {
-      "id": "<requested id>",
-      "receipt": {},
-      "legacy_signature": null,
-      "sessions": [],
-      "retained_body": null
-    }
-  ]
-}
-```
-
-`retained_body` must stay opt-in because it can expose the post-rewrite request
-body and only exists when body retention is enabled.
+The gateway never stores request bodies, so there is no body to fetch: the
+rewrite (if any) is committed by `request.forwarded.body_hash` plus the
+`transparency.request_modified` event, not by warehousing plaintext.
 
 ## E2EE Mode
 
@@ -206,8 +174,7 @@ E2EE already provides integrity for encrypted fields. Receipts are still attache
 like normal TLS requests. For E2EE requests, `request.received.body_hash` is the
 hash of the gateway-observed decrypted JSON body, not the original encrypted
 HTTP body sent by the client. Verifiers should compare request hashes only
-against the decrypted body bytes or the retained post-rewrite body when that
-artifact is available.
+against the decrypted body bytes they hold.
 
 ## Legacy Compatibility
 

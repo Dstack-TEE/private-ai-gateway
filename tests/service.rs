@@ -244,27 +244,78 @@ async fn verified_upstream_binding_creates_attested_session() {
         .get_attested_session(session_id)
         .expect("session audit record should be queryable");
     assert_eq!(session.session_id, session_id);
-    assert_eq!(session.direction, "upstream");
-    assert_eq!(session.target.target_type, "upstream");
-    assert_eq!(session.target.provider.as_deref(), Some("stub-upstream"));
-    assert_eq!(session.target.model_id.as_deref(), Some("x"));
+    assert_eq!(session.api_version, "aci.session.v1");
+    assert_eq!(session.provider, "stub-upstream");
+    assert_eq!(session.public_model_id, "x");
+    assert_eq!(session.endpoint.as_deref(), Some("https://stub-upstream"));
+    assert_eq!(session.verifier_id, "stub-verifier-1");
+    // provider_claims are folded verbatim into claims.extra; typed claims beyond
+    // tee_attested stay Unknown until a per-provider mapping populates them.
     assert_eq!(
-        session.target.endpoint.as_deref(),
-        Some("https://stub-upstream")
+        session.claims.extra.get("release").and_then(|v| v.as_str()),
+        Some("fixture")
     );
-    assert_eq!(session.verification.verifier_id, "stub-verifier-1");
+    assert_eq!(session.channel_binding.len(), 1);
     assert_eq!(
-        session.verification.verified_claims,
-        vec![
-            "encrypted-session-verified".to_string(),
-            "source-verified".to_string()
-        ]
-    );
-    assert_eq!(session.session_binding.len(), 1);
-    assert_eq!(
-        session.session_binding[0]["spki_sha256"],
+        session.channel_binding[0]["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
     );
+
+    // Shallow audit: the receipt's upstream.verified carries the typed claim
+    // verdicts inline. A verified result asserts tee_attested (verifier-derived).
+    let receipt_claims = uv
+        .fields
+        .get("claims")
+        .expect("upstream.verified must carry typed claim verdicts");
+    assert_eq!(receipt_claims["tee_attested"]["status"], "asserted");
+    assert_eq!(receipt_claims["tee_attested"]["source"], "verifier_derived");
+    assert_eq!(receipt_claims["tcb_up_to_date"]["status"], "unknown");
+
+    // Deep audit: the persisted session carries the same verdicts plus evidence.
+    let session_claims = serde_json::to_value(&session.claims).unwrap();
+    assert_eq!(session_claims["tee_attested"]["status"], "asserted");
+    assert_eq!(
+        session.evidence.digest.as_deref(),
+        Some(format!("sha256:{}", "11".repeat(32)).as_str())
+    );
+}
+
+#[tokio::test]
+async fn session_keys_on_requested_model_not_response_model() {
+    // The upstream echoes a different `model` than the one we routed to.
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"served-by-upstream"}"#, true);
+    let event = UpstreamVerifiedEvent {
+        vendor: "stub-upstream".to_string(),
+        model_id: "requested-model".to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: None,
+    };
+    let result = svc
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .await
+        .unwrap();
+    let uv = result
+        .receipt
+        .event_log
+        .iter()
+        .find(|e| e.event_type == "upstream.verified")
+        .expect("must emit upstream.verified");
+    // The receipt records the exact upstream-served model...
+    assert_eq!(uv.fields.get("model_id").unwrap(), "served-by-upstream");
+    // ...but the session is keyed on the requested (routed) model, so its
+    // identity never depends on the response body.
+    let session_id = uv.fields.get("session_id").and_then(|v| v.as_str()).unwrap();
+    let session = svc.get_attested_session(session_id).unwrap();
+    assert_eq!(session.public_model_id, "requested-model");
 }
 
 #[tokio::test]
@@ -337,21 +388,11 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let first_digest = format!("sha256:{}", "11".repeat(32));
     let second_digest = format!("sha256:{}", "22".repeat(32));
     assert_eq!(
-        first_session
-            .verification
-            .evidence
-            .as_ref()
-            .and_then(|v| v.get("digest"))
-            .and_then(|v| v.as_str()),
+        first_session.evidence.digest.as_deref(),
         Some(first_digest.as_str())
     );
     assert_eq!(
-        second_session
-            .verification
-            .evidence
-            .as_ref()
-            .and_then(|v| v.get("digest"))
-            .and_then(|v| v.as_str()),
+        second_session.evidence.digest.as_deref(),
         Some(second_digest.as_str())
     );
 }

@@ -1,4 +1,4 @@
-//! Coverage for the new authn/authz layer on receipts, body retention,
+//! Coverage for the new authn/authz layer on receipts
 //! and the ACI headers stamped on every response.
 
 use std::collections::HashMap;
@@ -76,11 +76,11 @@ impl private_ai_gateway::aggregator::service::Clock for TestClock {
     }
 }
 
-fn harness(body_retention_seconds: u64) -> Harness {
-    harness_with_ttl(body_retention_seconds, 3600)
+fn harness() -> Harness {
+    harness_with_ttl(3600)
 }
 
-fn harness_with_ttl(body_retention_seconds: u64, receipt_ttl_seconds: u64) -> Harness {
+fn harness_with_ttl(receipt_ttl_seconds: u64) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream = Arc::new(StubUpstream);
@@ -88,7 +88,7 @@ fn harness_with_ttl(body_retention_seconds: u64, receipt_ttl_seconds: u64) -> Ha
     let mut cfg = AciServiceConfig::for_test("auth-and-retention");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds,
+        body_retention_seconds: 0,
     };
     cfg.receipt_ttl_seconds = receipt_ttl_seconds;
     let clock = Arc::new(TestClock::new(1_700_000_000));
@@ -130,7 +130,7 @@ fn json(bytes: &[u8]) -> Value {
 
 #[tokio::test]
 async fn anonymous_receipt_is_publicly_retrievable() {
-    let h = harness(0);
+    let h = harness();
     let (status, headers, _) = call(
         &h.router,
         Request::builder()
@@ -149,7 +149,7 @@ async fn anonymous_receipt_is_publicly_retrievable() {
     let (status, _, body) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -162,7 +162,7 @@ async fn anonymous_receipt_is_publicly_retrievable() {
 
 #[tokio::test]
 async fn owned_receipt_lookup_unauthenticated_returns_401() {
-    let h = harness(0);
+    let h = harness();
     let (status, headers, _) = call(
         &h.router,
         Request::builder()
@@ -180,7 +180,7 @@ async fn owned_receipt_lookup_unauthenticated_returns_401() {
     let (status, _, body) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -191,7 +191,7 @@ async fn owned_receipt_lookup_unauthenticated_returns_401() {
 
 #[tokio::test]
 async fn owned_receipt_lookup_wrong_bearer_returns_403() {
-    let h = harness(0);
+    let h = harness();
     let (_, headers, _) = call(
         &h.router,
         Request::builder()
@@ -208,7 +208,7 @@ async fn owned_receipt_lookup_wrong_bearer_returns_403() {
     let (status, _, body) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .header("authorization", "Bearer requester-b")
             .body(Body::empty())
             .unwrap(),
@@ -220,7 +220,7 @@ async fn owned_receipt_lookup_wrong_bearer_returns_403() {
 
 #[tokio::test]
 async fn owned_receipt_lookup_with_matching_bearer_returns_receipt() {
-    let h = harness(0);
+    let h = harness();
     let (_, headers, _) = call(
         &h.router,
         Request::builder()
@@ -237,7 +237,7 @@ async fn owned_receipt_lookup_with_matching_bearer_returns_receipt() {
     let (status, _, body) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .header("authorization", "Bearer requester-a")
             .body(Body::empty())
             .unwrap(),
@@ -247,125 +247,11 @@ async fn owned_receipt_lookup_with_matching_bearer_returns_receipt() {
     assert_eq!(json(&body)["receipt"]["receipt_id"], rid);
 }
 
-// ---------- Body retention ----------
-
-#[tokio::test]
-async fn retention_disabled_body_endpoint_returns_receipt_body_not_retained() {
-    let h = harness(0);
-    let (_, headers, _) = call(
-        &h.router,
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .body(Body::from(CHAT_REQUEST.to_vec()))
-            .unwrap(),
-    )
-    .await;
-    let _rid = headers.get("x-receipt-id").unwrap().to_str().unwrap();
-
-    let (status, _, body) = call(
-        &h.router,
-        Request::builder()
-            .uri("/v1/receipt/chat-auth-1/body")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json(&body)["error"]["type"], "receipt_body_not_retained");
-}
-
-#[tokio::test]
-async fn retention_enabled_body_endpoint_returns_retained_bytes_to_owner() {
-    let h = harness(60);
-    let (_, headers, _) = call(
-        &h.router,
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer requester-a")
-            .body(Body::from(CHAT_REQUEST.to_vec()))
-            .unwrap(),
-    )
-    .await;
-    let _rid = headers.get("x-receipt-id").unwrap().to_str().unwrap();
-
-    let (status, _, body) = call(
-        &h.router,
-        Request::builder()
-            .uri("/v1/receipt/chat-auth-1/body")
-            .header("authorization", "Bearer requester-a")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, CHAT_REQUEST);
-}
-
-#[tokio::test]
-async fn retained_body_rejects_wrong_bearer() {
-    let h = harness(60);
-    let (_, headers, _) = call(
-        &h.router,
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer requester-a")
-            .body(Body::from(CHAT_REQUEST.to_vec()))
-            .unwrap(),
-    )
-    .await;
-    let _rid = headers.get("x-receipt-id").unwrap().to_str().unwrap();
-
-    let (status, _, body) = call(
-        &h.router,
-        Request::builder()
-            .uri("/v1/receipt/chat-auth-1/body")
-            .header("authorization", "Bearer requester-b")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(json(&body)["error"]["type"], "redaction_required");
-}
-
-#[tokio::test]
-async fn retained_body_expires_after_window() {
-    let h = harness(60);
-    let (_, headers, _) = call(
-        &h.router,
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .body(Body::from(CHAT_REQUEST.to_vec()))
-            .unwrap(),
-    )
-    .await;
-    let _rid = headers.get("x-receipt-id").unwrap().to_str().unwrap();
-
-    h.clock.advance(120);
-
-    let (status, _, body) = call(
-        &h.router,
-        Request::builder()
-            .uri("/v1/receipt/chat-auth-1/body")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json(&body)["error"]["type"], "receipt_body_not_retained");
-}
+// ---------- Receipt TTL ----------
 
 #[tokio::test]
 async fn receipt_expires_after_store_ttl() {
-    let h = harness_with_ttl(60, 30);
+    let h = harness_with_ttl(30);
     let (_, headers, _) = call(
         &h.router,
         Request::builder()
@@ -381,7 +267,7 @@ async fn receipt_expires_after_store_ttl() {
     let (status, _, _) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -393,7 +279,7 @@ async fn receipt_expires_after_store_ttl() {
     let (status, _, body) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/chat-auth-1")
+            .uri("/v1/signature/chat-auth-1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -403,18 +289,11 @@ async fn receipt_expires_after_store_ttl() {
     assert!(h.service.get_receipt_by_receipt_id(rid).is_none());
 }
 
-#[tokio::test]
-async fn retention_propagates_into_service_capabilities() {
-    let h = harness(86400);
-    let report = h.service.attestation_report(None).await.unwrap();
-    assert_eq!(report.service_capabilities.body_retention_seconds, 86400);
-}
-
 // ---------- X-ACI headers everywhere ----------
 
 #[tokio::test]
 async fn aci_headers_present_on_success_responses() {
-    let h = harness(0);
+    let h = harness();
     let (status, headers, _) = call(
         &h.router,
         Request::builder()
@@ -437,11 +316,11 @@ async fn aci_headers_present_on_success_responses() {
 
 #[tokio::test]
 async fn aci_headers_present_on_not_found_error() {
-    let h = harness(0);
+    let h = harness();
     let (status, headers, _) = call(
         &h.router,
         Request::builder()
-            .uri("/v1/receipt/nope")
+            .uri("/v1/signature/nope")
             .body(Body::empty())
             .unwrap(),
     )
@@ -459,7 +338,7 @@ async fn aci_headers_present_on_not_found_error() {
 
 #[tokio::test]
 async fn aci_headers_present_on_bad_request_error() {
-    let h = harness(0);
+    let h = harness();
     let (status, headers, _) = call(
         &h.router,
         Request::builder()

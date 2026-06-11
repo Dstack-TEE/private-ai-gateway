@@ -17,7 +17,6 @@
 //! | Admin API bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | `DSTACK_LLM_ROUTER_ADMIN_TOKEN` |
 //! | Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` | `DSTACK_LLM_ROUTER_REPO_URL` |
 //! | Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | `DSTACK_LLM_ROUTER_REPO_COMMIT` |
-//! | Body retention seconds | `PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS` | `DSTACK_LLM_ROUTER_BODY_RETENTION_SECONDS` |
 //! | Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS` |
 //! | TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | `DSTACK_LLM_ROUTER_TLS_CERT_PATHS` |
 //! | TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | `DSTACK_LLM_ROUTER_TLS_SPKI_SHA256` |
@@ -49,6 +48,7 @@ use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
 };
+use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
@@ -79,10 +79,6 @@ fn parse_positive_seconds(setting: &str, value: &str) -> Result<u64, String> {
         return Err(format!("{setting} seconds must be greater than zero"));
     }
     Ok(seconds)
-}
-
-fn parse_body_retention_seconds(value: &str) -> Result<u64, String> {
-    parse_seconds("body retention", value)
 }
 
 fn parse_comma_list(value: Option<&str>) -> Vec<String> {
@@ -351,14 +347,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PRIVATE_AI_GATEWAY_REPO_COMMIT",
         "DSTACK_LLM_ROUTER_REPO_COMMIT",
     );
-    let body_retention_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS",
-        "DSTACK_LLM_ROUTER_BODY_RETENTION_SECONDS",
-    )
-    .as_deref()
-    .map(parse_body_retention_seconds)
-    .transpose()?
-    .unwrap_or(0);
     let receipt_ttl_seconds = env_pref(
         "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS",
         "DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS",
@@ -510,7 +498,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity_subject: None,
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],
-            body_retention_seconds,
+            // Body retention is removed: the gateway never stores request
+            // bodies, so the attested window is a hard zero.
+            body_retention_seconds: 0,
         },
         freshness_seconds: 3600,
         receipt_ttl_seconds,
@@ -519,7 +509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tls_public_keys,
     };
 
-    let service = Arc::new(AciService::new_with_upstream_verifier(
+    let mut service_inner = AciService::new_with_upstream_verifier(
         keys,
         quoter,
         upstream,
@@ -527,7 +517,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         receipt_store,
         config,
         Arc::new(SystemClock),
-    )?);
+    )?;
+    // Opt into a durable append-only session log when a path is configured;
+    // otherwise sessions stay in memory (prior behavior).
+    if let Ok(path) = std::env::var("PRIVATE_AI_GATEWAY_SESSION_LOG_PATH") {
+        let path = path.trim();
+        if !path.is_empty() {
+            match JsonlSessionStore::open(path) {
+                Ok(store) => {
+                    tracing::info!(session_log = %path, "persisting attested sessions to JSONL log");
+                    service_inner = service_inner.with_session_store(Arc::new(store));
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, session_log = %path, "failed to open session log; using in-memory session store");
+                }
+            }
+        }
+    }
+    let service = Arc::new(service_inner);
 
     let app = if let Some(executor_uds_path) = executor_uds_path {
         let request_store = GatewayRequestStore::default();
@@ -643,7 +650,7 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        parse_body_retention_seconds, parse_domain_spki_map, parse_positive_seconds,
+        parse_domain_spki_map, parse_positive_seconds,
         parse_tls_cert_paths, parse_tls_spki_list, resolve_tls_public_keys,
         seed_upstream_config_if_empty,
     };
@@ -691,14 +698,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 .unwrap()
                 .as_nanos()
         ))
-    }
-
-    #[test]
-    fn parses_body_retention_seconds() {
-        assert_eq!(parse_body_retention_seconds("0").unwrap(), 0);
-        assert_eq!(parse_body_retention_seconds("86400").unwrap(), 86400);
-        assert!(parse_body_retention_seconds("-1").is_err());
-        assert!(parse_body_retention_seconds("1.5").is_err());
     }
 
     #[test]
