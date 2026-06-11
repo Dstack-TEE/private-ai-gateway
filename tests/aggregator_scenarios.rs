@@ -312,7 +312,7 @@ async fn fixture_middleware_handler(
         .unwrap()
         .post("http://private-ai-gateway/internal/forward")
         .header("x-private-ai-gateway-request-id", request_id)
-        .header("x-private-ai-gateway-target", state.target_route_id)
+        .header("x-private-ai-gateway-targets", state.target_route_id)
         .body(body.to_vec())
         .send()
         .await
@@ -410,11 +410,21 @@ async fn fixture_middleware_streaming_handler(
 fn test_socket_path(name: &str) -> PathBuf {
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-{name}-{}-{}.sock",
+    let file = format!(
+        "pag-{name}-{}-{}.sock",
         std::process::id(),
         hex::encode(bytes)
-    ))
+    );
+    // Prefer the standard temp dir (honours $TMPDIR), but a Unix socket path
+    // must fit in `sockaddr_un.sun_path` (~104 bytes on macOS, ~108 on Linux).
+    // macOS `$TMPDIR` (/var/folders/...) can overflow it, so fall back to the
+    // short `/tmp` only when the temp-dir path would be too long.
+    let candidate = std::env::temp_dir().join(&file);
+    if candidate.as_os_str().len() < 100 {
+        candidate
+    } else {
+        PathBuf::from("/tmp").join(file)
+    }
 }
 
 async fn serve_router_uds(name: &str, app: Router) -> PathBuf {
@@ -769,7 +779,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
                 .header("x-private-ai-gateway-request-id", "req-attacker")
-                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .header("x-private-ai-gateway-targets", "upstream-b:public-b")
                 .body(Body::from(received.to_vec()))
                 .unwrap(),
         )
@@ -807,7 +817,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
                 .method("POST")
                 .uri("/internal/forward")
                 .header("x-private-ai-gateway-request-id", "req-test-target-route")
-                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .header("x-private-ai-gateway-targets", "upstream-b:public-b")
                 .body(Body::from(selected.to_vec()))
                 .unwrap(),
         )
@@ -873,7 +883,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
                 .method("POST")
                 .uri("/internal/forward")
                 .header("x-private-ai-gateway-request-id", "req-test-bad-route")
-                .header("x-private-ai-gateway-target", "missing:route")
+                .header("x-private-ai-gateway-targets", "missing:route")
                 .body(Body::from(selected.to_vec()))
                 .unwrap(),
         )
@@ -904,7 +914,7 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
                 .method("POST")
                 .uri("/internal/forward")
                 .header("x-private-ai-gateway-request-id", "req-test-expired")
-                .header("x-private-ai-gateway-target", "upstream-b:public-b")
+                .header("x-private-ai-gateway-targets", "upstream-b:public-b")
                 .body(Body::from(selected.to_vec()))
                 .unwrap(),
         )
@@ -1694,4 +1704,459 @@ fn future_aci_surfaces_not_covered_by_this_runnable_suite() {
     ];
     assert_eq!(missing.len(), 4);
     assert!(missing.iter().all(|s| !s.is_empty()));
+}
+
+// ---------------------------------------------------------------------------
+// Request-level failover: candidate loop, route attribution, receipt events.
+// ---------------------------------------------------------------------------
+
+fn router_service(router: ModelRouterBackend, verifier: ScriptedVerifier) -> Arc<AciService> {
+    AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        Arc::new(router),
+        Arc::new(verifier),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test("private-ai-gateway"),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .map(Arc::new)
+    .unwrap()
+}
+
+async fn run_internal_forward(
+    service: &Arc<AciService>,
+    targets: &str,
+    received: &[u8],
+    upstream_required: bool,
+) -> (HttpResult, MiddlewareReceiptJournal) {
+    let request_store = GatewayRequestStore::default();
+    let backend = MockRequester::new(build_internal_backend_router(
+        service.clone(),
+        request_store.clone(),
+    ));
+    let journal = MiddlewareReceiptJournal::default();
+    request_store.insert(
+        "req-failover".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: received.to_vec(),
+            upstream_required,
+            requester: None,
+            e2ee: None,
+            user_model: Some("public".to_string()),
+            receipt_journal: journal.clone(),
+        },
+    );
+    let response = backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-failover")
+                .header("x-private-ai-gateway-targets", targets)
+                .body(Body::from(received.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    (response, journal)
+}
+
+type UpstreamCalls = Arc<Mutex<Vec<UpstreamCall>>>;
+
+fn two_route_router(
+    status_a: u16,
+    body_a: &[u8],
+    status_b: u16,
+    body_b: &[u8],
+) -> (ModelRouterBackend, UpstreamCalls, UpstreamCalls) {
+    let (upstream_a, calls_a) =
+        MockUpstream::named("upstream-a", "https://upstream-a.example", status_a, body_a);
+    let (upstream_b, calls_b) =
+        MockUpstream::named("upstream-b", "https://upstream-b.example", status_b, body_b);
+    let upstream_a: Arc<dyn UpstreamBackend> = Arc::new(upstream_a);
+    let upstream_b: Arc<dyn UpstreamBackend> = Arc::new(upstream_b);
+    let mut router = ModelRouterBackend::new("model-router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "public-a",
+                "upstream-a-model",
+                upstream_a,
+                "upstream-a:public-a",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    router
+        .add_route(
+            ModelRoute::new(
+                "public-b",
+                "upstream-b-model",
+                upstream_b,
+                "upstream-b:public-b",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    (router, calls_a, calls_b)
+}
+
+#[tokio::test]
+async fn failover_advances_to_next_candidate_on_provider_error() {
+    let body_b = br#"{"id":"chat-b","object":"chat.completion","model":"upstream-b-model","choices":[{"index":0,"message":{"role":"assistant","content":"b"},"finish_reason":"stop"}]}"#;
+    let (router, calls_a, calls_b) =
+        two_route_router(503, br#"{"error":"unavailable"}"#, 200, body_b);
+    let (verifier, _verifier_calls) = ScriptedVerifier::verified();
+    let service = router_service(router, verifier);
+
+    let received = br#"{"model":"public-a","messages":[]}"#;
+    let (response, journal) = run_internal_forward(
+        &service,
+        "upstream-a:public-a,upstream-b:public-b",
+        received,
+        true,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(calls_a.lock().unwrap().len(), 1, "r1 attempted once");
+    assert_eq!(calls_b.lock().unwrap().len(), 1, "r2 served the request");
+    assert_eq!(
+        header_str(&response.headers, "x-private-ai-gateway-selected-route"),
+        "upstream-b:public-b"
+    );
+    assert_eq!(
+        header_str(&response.headers, "x-private-ai-gateway-attempts"),
+        "2"
+    );
+
+    let draft = journal.take().expect("receipt draft");
+    let finalized = service
+        .finalize_middleware_receipt(
+            draft,
+            &response.body,
+            Some(header_str(&response.headers, "content-type")),
+            None,
+            None,
+        )
+        .unwrap();
+    // Failover is not in the receipt; the receipt attests only the served
+    // (selected) route. The attempt count is surfaced via the header above.
+    let receipt = finalized.receipt;
+    assert_eq!(
+        event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
+}
+
+#[tokio::test]
+async fn failover_all_unknown_routes_returns_routing_error() {
+    let (router, calls_a, _calls_b) =
+        two_route_router(200, br#"{"id":"a"}"#, 200, br#"{"id":"b"}"#);
+    let (verifier, _verifier_calls) = ScriptedVerifier::verified();
+    let service = router_service(router, verifier);
+
+    let received = br#"{"model":"public-a","messages":[]}"#;
+    let (response, _journal) =
+        run_internal_forward(&service, "missing-a:x,missing-b:y", received, true).await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"]["type"], "model_routing_error");
+    assert!(calls_a.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn non_tee_route_forwards_unattested_without_verifier() {
+    // A non-TEE route forwards even with no verifier and no attestation
+    // (never fail-closed). The receipt records this honestly on
+    // `upstream.verified`: verifier_id "none", evidence null.
+    let (upstream, calls) = MockUpstream::named(
+        "openai",
+        "https://api.openai.example",
+        200,
+        br#"{"id":"c","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
+    );
+    let upstream: Arc<dyn UpstreamBackend> = Arc::new(upstream);
+    let mut router = ModelRouterBackend::new("model-router");
+    router
+        .add_route(
+            ModelRoute::new("public", "gpt-x", upstream, "openai:public")
+                .unwrap()
+                .with_is_tee(Some(false)),
+        )
+        .unwrap();
+    // Service WITHOUT a verifier: mirrors a real non-TEE upstream.
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(router),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test("private-ai-gateway"),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+
+    let received = br#"{"model":"public","messages":[]}"#;
+    // `upstream_required: true` from the frontend must NOT fail-close a
+    // route the backend classified as non-TEE.
+    let (response, journal) = run_internal_forward(&service, "openai:public", received, true).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let draft = journal.take().expect("receipt draft");
+    let finalized = service
+        .finalize_middleware_receipt(
+            draft,
+            &response.body,
+            Some(header_str(&response.headers, "content-type")),
+            None,
+            None,
+        )
+        .unwrap();
+    let receipt = finalized.receipt;
+    // Non-TEE is signalled by the existing upstream.verified fields:
+    // no verifier ran and there is no attestation evidence.
+    let verified = event(&receipt, EVENT_UPSTREAM_VERIFIED);
+    assert_eq!(verified["verifier_id"], "none");
+    assert!(verified
+        .get("evidence")
+        .map(|v| v.is_null())
+        .unwrap_or(true));
+    // The route is still bound and recorded as selected.
+    assert_eq!(
+        event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "openai:public"
+    );
+}
+
+/// Verifier that fails verification for one named upstream and verifies
+/// all others. Exercises per-candidate TEE fail-closed + failover.
+struct KeyedVerifier {
+    fail_for: String,
+}
+
+#[async_trait]
+impl UpstreamVerifier for KeyedVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let verified = request.upstream_name != self.fail_for;
+        UpstreamVerifiedEvent {
+            vendor: request.upstream_name.clone(),
+            model_id: request.model_id,
+            url_origin: request.url_origin,
+            verifier_id: "keyed-verifier/v1".to_string(),
+            result: if verified {
+                VerificationResult::Verified
+            } else {
+                VerificationResult::Failed
+            },
+            required: request.required,
+            reason: (!verified).then(|| "verification failed".to_string()),
+            evidence: None,
+            channel_bindings: Vec::new(),
+            provider_claims: None,
+        }
+    }
+}
+
+fn keyed_verifier_service(router: ModelRouterBackend, fail_for: &str) -> Arc<AciService> {
+    AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        Arc::new(router),
+        Arc::new(KeyedVerifier {
+            fail_for: fail_for.to_string(),
+        }),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test("private-ai-gateway"),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .map(Arc::new)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn failover_advances_when_first_tee_candidate_fails_verification() {
+    let body_b = br#"{"id":"chat-b","object":"chat.completion","model":"upstream-b-model","choices":[{"index":0,"message":{"role":"assistant","content":"b"},"finish_reason":"stop"}]}"#;
+    let (router, calls_a, calls_b) = two_route_router(200, br#"{"id":"a"}"#, 200, body_b);
+    // upstream-a fails verification (fail-closed); upstream-b verifies.
+    let service = keyed_verifier_service(router, "upstream-a");
+
+    let received = br#"{"model":"public-a","messages":[]}"#;
+    let (response, journal) = run_internal_forward(
+        &service,
+        "upstream-a:public-a,upstream-b:public-b",
+        received,
+        true,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(
+        calls_a.lock().unwrap().is_empty(),
+        "r1 must never be forwarded after fail-closed verification"
+    );
+    assert_eq!(calls_b.lock().unwrap().len(), 1);
+    assert_eq!(
+        header_str(&response.headers, "x-private-ai-gateway-selected-route"),
+        "upstream-b:public-b"
+    );
+
+    let draft = journal.take().expect("receipt draft");
+    let receipt = service
+        .finalize_middleware_receipt(
+            draft,
+            &response.body,
+            Some(header_str(&response.headers, "content-type")),
+            None,
+            None,
+        )
+        .unwrap()
+        .receipt;
+    // The receipt attests only the served route; the failed first attempt
+    // is not recorded in it (it surfaces via the attempts header → request_logs).
+    assert_eq!(
+        event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
+}
+
+#[tokio::test]
+async fn failover_all_tee_routes_fail_verification_returns_503() {
+    // Fail verification for every upstream (fail-closed for all).
+    let (router, calls_a, calls_b) = two_route_router(200, br#"{"id":"a"}"#, 200, br#"{"id":"b"}"#);
+    let (verifier, _calls) = ScriptedVerifier::failed("attestation rejected");
+    let service = router_service(router, verifier);
+
+    let received = br#"{"model":"public-a","messages":[]}"#;
+    let (response, _journal) = run_internal_forward(
+        &service,
+        "upstream-a:public-a,upstream-b:public-b",
+        received,
+        true,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"]["type"], "upstream_verification_failed");
+    assert!(calls_a.lock().unwrap().is_empty());
+    assert!(calls_b.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failover_envelope_form_splits_candidates_and_advances() {
+    // Mixed-format envelope: each candidate carries its own body.
+    let body_b = br#"{"id":"chat-b","object":"chat.completion","model":"upstream-b-model","choices":[{"index":0,"message":{"role":"assistant","content":"b"},"finish_reason":"stop"}]}"#;
+    let (router, calls_a, calls_b) =
+        two_route_router(503, br#"{"error":"unavailable"}"#, 200, body_b);
+    let (verifier, _verifier_calls) = ScriptedVerifier::verified();
+    let service = router_service(router, verifier);
+
+    let envelope = br#"{"candidates":[
+        {"target":"upstream-a:public-a","body":{"model":"public-a","messages":[]}},
+        {"target":"upstream-b:public-b","body":{"model":"public-b","messages":[]}}
+    ]}"#;
+
+    let request_store = GatewayRequestStore::default();
+    let backend = MockRequester::new(build_internal_backend_router(
+        service.clone(),
+        request_store.clone(),
+    ));
+    let journal = MiddlewareReceiptJournal::default();
+    request_store.insert(
+        "req-envelope".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: br#"{"model":"public","messages":[]}"#.to_vec(),
+            upstream_required: true,
+            requester: None,
+            e2ee: None,
+            user_model: Some("public".to_string()),
+            receipt_journal: journal.clone(),
+        },
+    );
+    // No -targets header: the envelope is authoritative.
+    let response = backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-envelope")
+                .body(Body::from(envelope.to_vec()))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(calls_a.lock().unwrap().len(), 1);
+    assert_eq!(calls_b.lock().unwrap().len(), 1);
+    // Candidate B's own body was forwarded (model rewritten to upstream-b-model).
+    let forwarded_b: Value = serde_json::from_slice(&calls_b.lock().unwrap()[0].body).unwrap();
+    assert_eq!(forwarded_b["model"], "upstream-b-model");
+    assert_eq!(
+        header_str(&response.headers, "x-private-ai-gateway-selected-route"),
+        "upstream-b:public-b"
+    );
+
+    let receipt = service
+        .finalize_middleware_receipt(
+            journal.take().unwrap(),
+            &response.body,
+            Some(header_str(&response.headers, "content-type")),
+            None,
+            None,
+        )
+        .unwrap()
+        .receipt;
+    assert_eq!(
+        event(&receipt, EVENT_ROUTE_SELECTED)["target_route_id"],
+        "upstream-b:public-b"
+    );
+}
+
+#[tokio::test]
+async fn failover_envelope_rejects_mismatched_stream_flags() {
+    let (router, _calls_a, _calls_b) =
+        two_route_router(200, br#"{"id":"a"}"#, 200, br#"{"id":"b"}"#);
+    let (verifier, _verifier_calls) = ScriptedVerifier::verified();
+    let service = router_service(router, verifier);
+
+    let envelope = br#"{"candidates":[
+        {"target":"upstream-a:public-a","body":{"model":"public-a","messages":[],"stream":false}},
+        {"target":"upstream-b:public-b","body":{"model":"public-b","messages":[],"stream":true}}
+    ]}"#;
+
+    let request_store = GatewayRequestStore::default();
+    let backend = MockRequester::new(build_internal_backend_router(
+        service.clone(),
+        request_store.clone(),
+    ));
+    request_store.insert(
+        "req-bad-stream".to_string(),
+        StoredGatewayRequest {
+            endpoint_path: "/v1/chat/completions",
+            received_body: br#"{"model":"public","messages":[]}"#.to_vec(),
+            upstream_required: true,
+            requester: None,
+            e2ee: None,
+            user_model: Some("public".to_string()),
+            receipt_journal: MiddlewareReceiptJournal::default(),
+        },
+    );
+    let response = backend
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/forward")
+                .header("x-private-ai-gateway-request-id", "req-bad-stream")
+                .body(Body::from(envelope.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
 }

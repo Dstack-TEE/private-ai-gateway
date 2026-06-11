@@ -135,7 +135,7 @@ Middleware mode is enabled by one Unix socket path. The gateway also starts an
 internal backend Unix socket for the middleware to call:
 
 ```text
-PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock
+PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
 PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
 ```
 

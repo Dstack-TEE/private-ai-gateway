@@ -13,7 +13,7 @@ The checked-in compose runs in no-middleware mode: the public ACI frontend and
 verified-provider backend are the same process, and traffic is forwarded
 directly from frontend to backend. The binary can also run with a plaintext
 HTTP-over-UDS middleware slot by setting
-`PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` and
+`PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH` and
 `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH`; this compose does not yet include a
 middleware container or shared socket volume. See
 [`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md)

@@ -381,7 +381,7 @@ Middleware mode is enabled by a middleware Unix socket path. The gateway also
 starts an internal backend socket for middleware to call:
 
 ```bash
-PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH=/run/private-ai-gateway/middleware.sock
+PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
 PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
 ```
 
@@ -450,7 +450,7 @@ both are set.
 | Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `600` |
 | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `60` |
 | dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | dstack SDK default socket |
-| Middleware UDS path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` | unset; middleware disabled |
+| Executor UDS path | `PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH` | unset; executor disabled |
 | Internal backend UDS path | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | `/run/private-ai-gateway/backend.sock` |
 
 Prefer certificate-path variables for client-facing TLS binding. The gateway

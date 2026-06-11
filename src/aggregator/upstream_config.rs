@@ -34,6 +34,12 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub provider: UpstreamProvider,
     pub base_url: String,
+    /// Per-upstream POST path the generic forwarder targets (e.g.
+    /// `/v1/messages` for native Anthropic upstreams), appended to
+    /// `base_url`. When omitted the downstream surface path is used
+    /// verbatim, matching today's OpenAI-compatible behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
@@ -72,6 +78,8 @@ pub struct PublicUpstreamConfig {
     pub name: String,
     pub provider: UpstreamProvider,
     pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,6 +118,7 @@ impl UpstreamConfig {
             name: self.name.clone(),
             provider: self.provider,
             base_url: self.base_url.clone(),
+            path: self.path.clone(),
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
             accepted_workload_ids: self.accepted_workload_ids.clone(),
@@ -591,7 +600,7 @@ pub fn parse_config_text(text: &str) -> Result<Vec<UpstreamConfig>, UpstreamConf
 
 fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError> {
     let mut names = HashSet::new();
-    let mut public_models = HashMap::new();
+    let mut route_ids = HashSet::new();
     for upstream in config {
         if upstream.name.trim().is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(
@@ -705,10 +714,10 @@ fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError>
                     upstream.name, public_model
                 )));
             }
-            if let Some(previous) = public_models.insert(public_model, &upstream.name) {
+            let route_id = format!("{}:{public_model}", upstream.name);
+            if !route_ids.insert(route_id.clone()) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "public model id {public_model:?} is routed by both {previous:?} and {:?}",
-                    upstream.name
+                    "route id {route_id:?} is duplicated"
                 )));
             }
         }
@@ -801,12 +810,28 @@ fn build_model_router(
                         backend.clone(),
                         format!("{}:{public_model}", cfg.name),
                     )
-                    .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+                    .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+                    .with_path(cfg.path.clone())
+                    .with_is_tee(Some(provider_is_tee(cfg.provider))),
                 )
                 .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;
         }
     }
     Ok(router)
+}
+
+/// Whether a provider performs hardware attestation (TEE). Non-TEE
+/// providers (plain OpenAI-compatible cloud APIs) are forwarded with
+/// TLS endpoint binding only and never fail closed for lack of evidence.
+fn provider_is_tee(provider: UpstreamProvider) -> bool {
+    match provider {
+        UpstreamProvider::OpenAiCompatible => false,
+        UpstreamProvider::AciDcap
+        | UpstreamProvider::Chutes
+        | UpstreamProvider::Tinfoil
+        | UpstreamProvider::NearAi
+        | UpstreamProvider::PhalaDirect => true,
+    }
 }
 
 fn build_provider_backend(
@@ -1005,7 +1030,21 @@ fn build_global_verifier_for_config(
         UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
             "preverified/out-of-band/v1",
         )))),
-        UpstreamVerifierMode::AciDcap => build_aci_dcap_verifier(cfg, options).map(Some),
+        UpstreamVerifierMode::AciDcap => {
+            let has_explicit_aci_policy = cfg
+                .accepted_workload_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
+                || cfg
+                    .accepted_image_digests
+                    .as_ref()
+                    .is_some_and(|digests| !digests.is_empty());
+            if has_explicit_aci_policy {
+                build_aci_dcap_verifier(cfg, options).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1264,6 +1303,36 @@ mod tests {
         invalidations: Arc<AtomicUsize>,
     }
 
+    fn test_upstream_config(
+        name: &str,
+        provider: UpstreamProvider,
+        public_model: &str,
+        upstream_model: &str,
+    ) -> UpstreamConfig {
+        UpstreamConfig {
+            name: name.to_string(),
+            provider,
+            base_url: format!("https://{name}.example"),
+            path: None,
+            models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
+            bearer_token: None,
+            accepted_workload_ids: None,
+            accepted_image_digests: None,
+            accepted_dstack_kms_root_public_keys: None,
+            pccs_url: None,
+            verifier_cache_seconds: None,
+            connect_timeout_seconds: None,
+            read_timeout_seconds: None,
+            verifier_request_timeout_seconds: None,
+            verification_refresh_seconds: None,
+            session_refresh_seconds: None,
+            chutes_e2ee_api_base: None,
+            chutes_chute_ids: None,
+            chutes_e2ee_discovery_rounds: None,
+            chutes_e2ee_discovery_interval_seconds: None,
+        }
+    }
+
     #[async_trait]
     impl UpstreamVerifier for CountingVerifier {
         async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -1285,6 +1354,65 @@ mod tests {
         fn invalidate(&self, _request: &UpstreamVerificationRequest) {
             self.invalidations.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn parse_config_allows_same_public_model_on_distinct_route_ids() {
+        let config = parse_config_text(
+            r#"
+            [
+              {
+                "name": "near-ai",
+                "provider": "near-ai",
+                "base_url": "https://near.example",
+                "models": {"openai/gpt-oss-120b": "near-model"}
+              },
+              {
+                "name": "secretai-107",
+                "provider": "openai-compatible",
+                "base_url": "https://secret.example",
+                "models": {"openai/gpt-oss-120b": "secret-model"}
+              }
+            ]
+            "#,
+        )
+        .expect("same public model can have multiple route ids");
+
+        assert_eq!(config.len(), 2);
+    }
+
+    #[test]
+    fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams() {
+        let config = vec![
+            test_upstream_config(
+                "near-ai",
+                UpstreamProvider::NearAi,
+                "openai/gpt-oss-120b",
+                "near-model",
+            ),
+            test_upstream_config(
+                "secretai-107",
+                UpstreamProvider::OpenAiCompatible,
+                "openai/gpt-oss-120b",
+                "secret-model",
+            ),
+        ];
+        let options = UpstreamRuntimeOptions {
+            verifier_mode: UpstreamVerifierMode::AciDcap,
+            accepted_workload_ids: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+        };
+
+        let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
+            .expect("plain OpenAI-compatible upstreams should not require ACI DCAP policy");
+
+        assert!(verifier.is_some());
     }
 
     #[tokio::test]
@@ -1323,6 +1451,7 @@ mod tests {
             name: "provider-a".to_string(),
             provider: UpstreamProvider::Tinfoil,
             base_url: "https://provider-a.example/".to_string(),
+            path: None,
             models: BTreeMap::from([
                 ("public-a".to_string(), "upstream-a".to_string()),
                 ("public-b".to_string(), "upstream-a".to_string()),
