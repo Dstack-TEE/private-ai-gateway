@@ -37,17 +37,20 @@ with a fresh nonce (and the configured `bearer_token`), then:
 
 1. **Require a TLS fingerprint.** `tls_cert_fingerprint` must be present — an older proxy
    that ignored `version=2` cannot be TLS-pinned, so it is rejected.
-2. **Verify the TDX quote.** The dstack-verifier service verifies the quote, event log,
+2. **Reject debug-mode TDs.** The TDX quote's `TD_ATTRIBUTES` TUD byte (offset 168) must
+   be zero — a debug-mode TD exposes its CPU state and private memory to the host, so the
+   TEE guarantee does not hold. (Shared `tdx_debug_enabled`, applied to every TDX provider.)
+3. **Verify the TDX quote.** The dstack-verifier service verifies the quote, event log,
    and VM config (RTMR replay). `is_valid` must be true.
-3. **Verify the compose hash.** `SHA256(app_compose)` must equal the reported
+4. **Verify the compose hash.** `SHA256(app_compose)` must equal the reported
    `compose_hash`.
-4. **Verify the report_data binding.** Parse `report_data` from the *verified* quote
+5. **Verify the report_data binding.** Parse `report_data` from the *verified* quote
    bytes (`_tdx_report_data_hex`, TDX v4 offset `quote[48+520 : 48+584]`) and run
    `verify_report_data(report_data, signing_address, nonce, tls_cert_fingerprint)`:
    `report_data[0:32] == SHA256(signing_address ‖ tls_cert_fingerprint)` and
    `report_data[32:64] == nonce`. **Fail closed** if `report_data`, the nonce, or the
    signing address is unavailable.
-5. **Record the GPU evidence — supplemental, not a gate.** Check the GPU evidence nonce
+6. **Record the GPU evidence — supplemental, not a gate.** Check the GPU evidence nonce
    against the request nonce and run `NvidiaGpuVerifier` (NRAS), but **do not fail** on a
    GPU error. A standalone gateway-side NRAS check only proves a CC-capable GPU *exists*
    for a nonce; it does not prove that GPU is bound to this CPU TEE or serving this request.

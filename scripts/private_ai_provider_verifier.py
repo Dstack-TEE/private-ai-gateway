@@ -238,11 +238,23 @@ def chutes_report_data(quote_bytes: bytes) -> bytes:
     return report_data
 
 
-def chutes_debug_enabled(quote_bytes: bytes) -> bool:
+def tdx_debug_enabled(quote_bytes: bytes) -> bool:
+    """True if a TDX v4 quote's TD runs in debug/untrusted mode.
+
+    TD_ATTRIBUTES is 8 bytes at quote offset 168 (header 48 + body offset 120).
+    Byte 0 is the little-endian TUD (TD Under Debug) group; DEBUG is bit 0. Per
+    dcap-qvl `validate_td10`, any TUD bit set means the TD is untrusted (CPU state
+    and private memory are accessible to the host), so we reject a non-zero TUD
+    byte. (The previous big-endian `int(hex) & 1` read byte 7 and missed it.)
+    """
     td_attributes = quote_bytes[48 + 120 : 48 + 128]
     if len(td_attributes) != 8:
-        raise ValueError(f"invalid Chutes td_attributes length: {len(td_attributes)}")
-    return bool(int(td_attributes.hex(), 16) & 1)
+        raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
+    return td_attributes[0] != 0
+
+
+def chutes_debug_enabled(quote_bytes: bytes) -> bool:
+    return tdx_debug_enabled(quote_bytes)
 
 
 def chutes_discovery_rounds(options: dict[str, str]) -> int:
@@ -558,6 +570,26 @@ async def verify_nearai(request: dict[str, Any]) -> None:
                 verifier_id=verifier_id,
             )
             return
+        # The gateway does not re-verify these nested model quotes through the
+        # dstack verifier, so check the TD debug bit here: a debug-mode model TD
+        # would otherwise be accepted on the gateway's word alone.
+        try:
+            if tdx_debug_enabled(bytes.fromhex(item["intel_quote"])):
+                failed(
+                    provider,
+                    f"NEAR AI model_attestations[{index}] TDX quote is in debug mode",
+                    evidence=json_evidence_bundle(report_obj, attestation_url),
+                    verifier_id=verifier_id,
+                )
+                return
+        except ValueError as exc:
+            failed(
+                provider,
+                f"NEAR AI model_attestations[{index}] intel_quote is not valid TDX bytes: {exc}",
+                evidence=json_evidence_bundle(report_obj, attestation_url),
+                verifier_id=verifier_id,
+            )
+            return
 
     model_attestations_sha256 = sha256_json_prefixed(model_attestations)
     provider_claims = {
@@ -696,6 +728,16 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(provider, "PhalaDirect report nonce did not match request nonce", evidence=evidence, verifier_id=verifier_id)
         return
 
+    # Reject a TD running in debug/untrusted mode: its CPU state and private
+    # memory are accessible to the host, so the TEE guarantee does not hold.
+    try:
+        if tdx_debug_enabled(bytes.fromhex(intel_quote)):
+            failed(provider, "PhalaDirect TDX quote is in debug mode (TD_ATTRIBUTES TUD set)", evidence=evidence, verifier_id=verifier_id)
+            return
+    except ValueError as exc:
+        failed(provider, f"PhalaDirect intel_quote is not valid TDX quote bytes: {exc}", evidence=evidence, verifier_id=verifier_id)
+        return
+
     if isinstance(vm_config, (dict, list)):
         vm_config = json.dumps(vm_config)
 
@@ -805,6 +847,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "signing_address": signing_address,
                 "report_data_nonce_matched": True,
                 "compose_hash_verified": True,
+                "tdx_debug_mode": False,
                 # GPU is supplemental metadata, not part of the trust gate.
                 "gpu_verified": gpu_attested,
                 "gpu_evidence_present": gpu_evidence_present,

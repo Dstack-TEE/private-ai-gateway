@@ -42,18 +42,21 @@ FP = "ab" * 32  # genuine custom-domain SPKI fingerprint
 URL_ORIGIN = "https://model-a.phala.example"
 
 
-def _synthetic_quote(report_data_hex: str) -> str:
+def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
     """A synthetic TDX v4 quote with report_data at the canonical offset, so the
     real _tdx_report_data_hex extracts it (matches scripts/soundness_report_data.py)."""
     rd = bytes.fromhex(report_data_hex)
-    return (b"\x00" * 48 + b"\x11" * 520 + rd + b"\x99" * 16).hex()
+    body = bytearray(b"\x11" * 520)
+    body[120] = 0x01 if debug else 0x00  # TD_ATTRIBUTES TUD byte (bit0 = DEBUG)
+    return (b"\x00" * 48 + bytes(body) + rd + b"\x99" * 16).hex()
 
 
-def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None) -> dict:
+def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False) -> dict:
     """Build a version-2 report for a given nonce.
 
     bind_fp  : fingerprint mixed into report_data[0:32] (genuine = FP).
     report_fp: fingerprint advertised in the report body (None ⇒ omit the field).
+    debug    : set the TD_ATTRIBUTES TUD byte so the quote reads as debug mode.
     """
     first = hashlib.sha256(bytes.fromhex(ADDR) + bytes.fromhex(bind_fp)).digest()
     report_data_hex = (first + bytes.fromhex(nonce_hex)).hex()
@@ -62,7 +65,7 @@ def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gp
         "signing_address": "0x" + ADDR,
         "signing_algo": "ecdsa",
         "request_nonce": nonce_hex,
-        "intel_quote": _synthetic_quote(report_data_hex),
+        "intel_quote": _synthetic_quote(report_data_hex, debug=debug),
         "nvidia_payload": json.dumps(
             {"nonce": gpu_nonce or nonce_hex, "evidence_list": [{"arch": "HOPPER"}], "arch": "HOPPER"}
         ),
@@ -184,6 +187,11 @@ def check() -> list[str]:
     out = _run(report_builder=lambda n: _report(n, bind_fp="cd" * 32, report_fp=FP))
     if out.get("result") != "failed" or "binding" not in (out.get("reason") or ""):
         f.append(f"swapped-fp: expected report_data binding failure, got {out!r}")
+
+    # --- TD in debug mode (TD_ATTRIBUTES TUD byte set) → hard rejection ---
+    out = _run(report_builder=lambda n: _report(n, debug=True))
+    if out.get("result") != "failed" or "debug" not in (out.get("reason") or ""):
+        f.append(f"debug-mode: expected debug-mode rejection, got {out!r}")
 
     # --- dstack verification fails (the CPU TEE gate) → hard rejection ---
     out = _run(report_builder=lambda n: _report(n), dstack_valid=False)
