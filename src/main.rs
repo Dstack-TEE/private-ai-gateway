@@ -32,7 +32,7 @@
 //! | Upstream read timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_READ_TIMEOUT_SECONDS` |
 //! | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
 //! | dstack endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | `DSTACK_LLM_ROUTER_DSTACK_ENDPOINT` |
-//! | Optional middleware Unix socket path | `PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH` | none |
+//! | Optional executor Unix socket path | `PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH` | none |
 //! | Internal backend Unix socket path for middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | none |
 
 use std::io::Cursor;
@@ -454,7 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "DSTACK_LLM_ROUTER_DSTACK_QUOTER_URL",
         )
     });
-    let middleware_uds_path = std::env::var("PRIVATE_AI_GATEWAY_MIDDLEWARE_UDS_PATH")
+    let executor_uds_path = std::env::var("PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -529,13 +529,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(SystemClock),
     )?);
 
-    let app = if let Some(middleware_uds_path) = middleware_uds_path {
+    let app = if let Some(executor_uds_path) = executor_uds_path {
         let request_store = GatewayRequestStore::default();
         let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
         let backend_listener = bind_unix_listener(&backend_uds_path)?;
         tracing::info!(
             backend_uds_path = %backend_uds_path,
-            middleware_uds_path = %middleware_uds_path,
+            executor_uds_path = %executor_uds_path,
             "private-ai-gateway internal backend listening on Unix socket"
         );
         tokio::spawn(async move {
@@ -548,7 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             upstream_config,
             admin_token,
             request_store,
-            middleware_uds_path,
+            executor_uds_path,
         )
     } else {
         build_router_with_admin(service, upstream_config, admin_token)

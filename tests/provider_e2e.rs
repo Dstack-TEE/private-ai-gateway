@@ -636,6 +636,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
+            path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
             accepted_workload_ids: None,
@@ -716,6 +717,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
+            path: None,
             models: BTreeMap::from([
                 ("public-model".to_string(), "provider-model".to_string()),
                 (
@@ -802,6 +804,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
+            path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
             accepted_workload_ids: None,
