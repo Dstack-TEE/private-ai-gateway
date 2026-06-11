@@ -679,9 +679,14 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     http_request = urllib.request.Request(f"{attestation_url}?{query}")
     if bearer:
         http_request.add_header("Authorization", f"Bearer {bearer}")
-    try:
+
+    def _fetch_report() -> bytes:
         with urllib.request.urlopen(http_request, timeout=timeout) as response:
-            body = response.read()
+            return response.read()
+
+    try:
+        # urlopen is blocking; run it off the event loop (as with the dstack call).
+        body = await asyncio.to_thread(_fetch_report)
         report = json.loads(body.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
         failed(
@@ -693,13 +698,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     evidence = json_evidence_bundle(report, attestation_url)
 
-    # Per-model endpoints return a single attestation; prefer all_attestations[0].
+    # A per-model PhalaDirect endpoint returns a single attestation at the top level
+    # of the report — use it directly. (all_attestations is a multi-instance gateway
+    # shape and is not expected here.)
     attestation = report
-    all_attestations = report.get("all_attestations")
-    if isinstance(all_attestations, list) and all_attestations and isinstance(
-        all_attestations[0], dict
-    ):
-        attestation = all_attestations[0]
 
     intel_quote = attestation.get("intel_quote") or attestation.get("quote")
     signing_address = attestation.get("signing_address")
