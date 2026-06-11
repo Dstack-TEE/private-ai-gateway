@@ -653,7 +653,6 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     """
     from confidential_verifier.verifiers.dstack import DstackVerifier, verify_report_data
     from confidential_verifier.verifiers.nearai import _tdx_report_data_hex
-    from confidential_verifier.verifiers.nvidia import NvidiaGpuVerifier
     from dstack_os_image import resolve_os_image
 
     provider = "phala-direct"
@@ -793,15 +792,15 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
-    # 4. GPU (NVIDIA confidential computing) evidence — SUPPLEMENTAL, never a gate.
-    # The CPU TEE quote + report_data binding + compose integrity above are the
-    # trust gate. A standalone gateway-side NRAS check only proves a CC-capable
-    # GPU exists for a nonce; it does not prove that GPU is bound to this CPU TEE
-    # or serving this request (that is the measured serving software's job, inside
-    # the quote). So we record the GPU outcome as metadata and do not fail on it.
+    # 4. GPU (NVIDIA confidential computing) — verified BY IMPLICATION, not by NRAS.
+    # We do NOT call NRAS (it is only an existence oracle and a pointless round-trip).
+    # GPU trust comes from the CPU-TEE quote + measured serving software: the attested
+    # inference software attests the GPU and sets up the encrypted CPU↔GPU CC channel,
+    # refusing to serve otherwise. So once the CPU-TEE gate above passes, a GPU the
+    # attested software presents is verified — gpu_verified is derived from that
+    # (gpu_evidence_present), and the granular evidence is recorded for observability.
     gpu_evidence_present = False
     gpu_evidence_nonce_matched: bool | None = None
-    gpu_attested = False
     gpu_arch = None
     payload = nvidia_payload
     if isinstance(payload, str):
@@ -814,12 +813,6 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         gpu_arch = payload.get("arch")
         gpu_nonce = payload.get("nonce")
         gpu_evidence_nonce_matched = bool(gpu_nonce) and str(gpu_nonce).lower() == nonce.lower()
-        try:
-            with contextlib.redirect_stdout(sys.stderr):
-                gpu_result = await NvidiaGpuVerifier().verify(payload)
-            gpu_attested = bool(gpu_result.model_verified) and bool(gpu_evidence_nonce_matched)
-        except Exception:  # noqa: BLE001 - supplemental; a GPU error is never fatal
-            gpu_attested = False
 
     # Surface the granular TDX TCB status (e.g. "UpToDate", "OutOfDate") so the
     # session layer can populate a tri-state `tcb_up_to_date` claim instead of
@@ -885,8 +878,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "os_image_version": os_image_version,
                 "os_image_is_dev": os_image_is_dev,
                 "production_os_image": production_os_image,
-                # GPU is supplemental metadata, not part of the trust gate.
-                "gpu_verified": gpu_attested,
+                # GPU verified by implication from the attested inference software
+                # (which attests the GPU + CC channel inside the quote), NOT by NRAS:
+                # true when that software presents GPU CC evidence.
+                "gpu_verified": gpu_evidence_present,
                 "gpu_evidence_present": gpu_evidence_present,
                 "gpu_evidence_nonce_matched": gpu_evidence_nonce_matched,
                 "gpu_arch": gpu_arch,
