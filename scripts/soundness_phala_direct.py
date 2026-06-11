@@ -31,10 +31,10 @@ import tarfile
 import tempfile
 import types
 from contextlib import redirect_stdout
-from urllib.parse import parse_qs, urlparse
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import requests as requests_mod  # noqa: E402
 import dstack_os_image as osimg_mod  # noqa: E402
 import private_ai_provider_verifier as bridge  # noqa: E402
 from confidential_verifier.verifiers import dstack as dstack_mod  # noqa: E402
@@ -90,26 +90,24 @@ def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gp
 
 
 class _Resp:
-    def __init__(self, body: bytes):
-        self._body = body
+    """Minimal stand-in for a requests.Response (the bridge calls .raise_for_status / .json)."""
 
-    def __enter__(self):
-        return self
+    def __init__(self, payload: dict):
+        self._payload = payload
 
-    def __exit__(self, *exc):
-        return False
+    def raise_for_status(self) -> None:
+        return None
 
-    def read(self) -> bytes:
-        return self._body
+    def json(self) -> dict:
+        return self._payload
 
 
-def _make_urlopen(report_builder):
-    def _urlopen(request, timeout=None):
-        url = request.full_url if hasattr(request, "full_url") else request
-        nonce = parse_qs(urlparse(url).query)["nonce"][0]
-        return _Resp(json.dumps(report_builder(nonce)).encode("utf-8"))
+def _make_requests_get(report_builder):
+    def _get(url, params=None, headers=None, timeout=None):
+        nonce = (params or {}).get("nonce")
+        return _Resp(report_builder(nonce))
 
-    return _urlopen
+    return _get
 
 
 class _StubDstack:
@@ -154,12 +152,12 @@ def _run(
     ones (so an unknown hash yields production_os_image=None). resolve_override
     lets a case force a specific decision (e.g. a production image).
     """
-    orig_urlopen = bridge.urllib.request.urlopen
+    orig_get = requests_mod.get
     orig_dstack = dstack_mod.DstackVerifier
     orig_gpu = nvidia_mod.NvidiaGpuVerifier
     orig_resolve = osimg_mod.resolve_os_image
     orig_offline = os.environ.get("DSTACK_OS_IMAGE_OFFLINE")
-    bridge.urllib.request.urlopen = _make_urlopen(report_builder)
+    requests_mod.get = _make_requests_get(report_builder)
     dstack_mod.DstackVerifier = lambda url=None: _StubDstack(
         url, is_valid=dstack_valid, os_image_hash=os_image_hash
     )
@@ -180,7 +178,7 @@ def _run(
         with redirect_stdout(buf):
             asyncio.run(bridge.verify_phala_direct(request))
     finally:
-        bridge.urllib.request.urlopen = orig_urlopen
+        requests_mod.get = orig_get
         dstack_mod.DstackVerifier = orig_dstack
         nvidia_mod.NvidiaGpuVerifier = orig_gpu
         osimg_mod.resolve_os_image = orig_resolve

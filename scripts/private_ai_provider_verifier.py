@@ -651,6 +651,8 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     evidence; then return the attested TLS SPKI as the enforceable channel
     binding so the forwarding backend pins the connection.
     """
+    import requests
+
     from confidential_verifier.verifiers.dstack import DstackVerifier, verify_report_data
     from confidential_verifier.verifiers.nearai import _tdx_report_data_hex
     from confidential_verifier.verifiers.nvidia import NvidiaGpuVerifier
@@ -673,21 +675,20 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     nonce = secrets.token_hex(32)
     attestation_url = f"{url_origin}/v1/attestation/report"
-    query = urllib.parse.urlencode(
-        {"signing_algo": "ecdsa", "nonce": nonce, "version": "2"}
-    )
-    http_request = urllib.request.Request(f"{attestation_url}?{query}")
-    if bearer:
-        http_request.add_header("Authorization", f"Bearer {bearer}")
+    params = {"signing_algo": "ecdsa", "nonce": nonce, "version": "2"}
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
-    def _fetch_report() -> bytes:
-        with urllib.request.urlopen(http_request, timeout=timeout) as response:
-            return response.read()
+    def _fetch_report() -> dict[str, Any]:
+        response = requests.get(
+            attestation_url, params=params, headers=headers, timeout=timeout
+        )
+        response.raise_for_status()
+        return response.json()
 
     try:
-        # urlopen is blocking; run it off the event loop (as with the dstack call).
-        body = await asyncio.to_thread(_fetch_report)
-        report = json.loads(body.decode("utf-8"))
+        # requests is blocking; run it off the event loop (as with the dstack call,
+        # and consistent with the rest of the bridge's HTTP).
+        report = await asyncio.to_thread(_fetch_report)
     except Exception as exc:  # noqa: BLE001
         failed(
             provider,
