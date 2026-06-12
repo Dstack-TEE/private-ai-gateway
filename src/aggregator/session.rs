@@ -199,7 +199,13 @@ pub struct AttestedSession {
     /// `"as_" + hex(sha256(JCS(verified material)))`.
     pub session_id: String,
     pub provider: String,
-    pub public_model_id: String,
+    /// The model id this session attests, as routed to the upstream (the model
+    /// string the gateway verified against). NOT necessarily a client-facing
+    /// alias — when the frontend pre-resolves a public name to a provider model,
+    /// this holds the resolved id. `/v1/aci/sessions?model=` filters on it.
+    pub model_id: String,
+    /// The upstream's own model id, set only when it differs from `model_id`
+    /// (reserved for per-model config that carries a distinct public alias).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,7 +236,7 @@ impl AttestedSession {
     #[allow(clippy::too_many_arguments)]
     pub fn seal(
         provider: impl Into<String>,
-        public_model_id: impl Into<String>,
+        model_id: impl Into<String>,
         upstream_model_id: Option<String>,
         endpoint: Option<String>,
         verifier_id: impl Into<String>,
@@ -245,7 +251,7 @@ impl AttestedSession {
             api_version: SESSION_API_VERSION.to_string(),
             session_id: String::new(),
             provider: provider.into(),
-            public_model_id: public_model_id.into(),
+            model_id: model_id.into(),
             upstream_model_id,
             endpoint,
             verifier_id: verifier_id.into(),
@@ -269,7 +275,7 @@ impl AttestedSession {
     pub fn content_id(&self) -> Result<String, CanonicalError> {
         let material = json!({
             "provider": self.provider,
-            "public_model_id": self.public_model_id,
+            "model_id": self.model_id,
             "upstream_model_id": self.upstream_model_id,
             "endpoint": self.endpoint,
             "verifier_id": self.verifier_id,

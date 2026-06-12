@@ -2114,14 +2114,15 @@ impl AciService {
             .get_session(session_id, self.clock.now_secs())
     }
 
-    /// List attested sessions, optionally filtered by provider and/or public model id.
+    /// List attested sessions, optionally filtered by provider and/or the
+    /// routed `model_id`.
     pub fn list_attested_sessions(
         &self,
         provider: Option<&str>,
-        public_model_id: Option<&str>,
+        model_id: Option<&str>,
     ) -> Vec<AttestedSession> {
         self.session_store
-            .list_sessions(provider, public_model_id, self.clock.now_secs())
+            .list_sessions(provider, model_id, self.clock.now_secs())
     }
 
     /// E2EE protocol versions this workload has actually wired.
@@ -2169,9 +2170,22 @@ fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
                         event.verifier_id
                     ),
                 );
-                claims.tcb_up_to_date = tcb_up_to_date_claim(event);
                 if provider == "tinfoil" {
+                    // Tinfoil's official verifier requires an up-to-date TCB for a
+                    // verified result (per its attestation policy) but exposes no
+                    // separable `TcbStatus`. So freshness is verifier-derived — NOT
+                    // a hardware-proven status, and not a refutable tri-state. We
+                    // never label this `HardwareProven`: no raw collateral backs it.
+                    claims.tcb_up_to_date = Claim::asserted(
+                        ClaimSource::VerifierDerived,
+                        "Tinfoil's verifier requires an up-to-date TCB for a verified \
+                         result; no separable TcbStatus is surfaced",
+                    );
                     claims.serving_software_known_good = tinfoil_software_claim(event);
+                } else {
+                    // dstack-based providers surface a real `TcbStatus` from
+                    // verified DCAP collateral: a true HardwareProven tri-state.
+                    claims.tcb_up_to_date = tcb_up_to_date_claim(event);
                 }
                 // os_known_good: no verifier here traces the guest OS/firmware to
                 // reviewed source. gpu_attested: never asserted from a GPU/NRAS
@@ -3578,24 +3592,30 @@ mod claim_mapping_tests {
     }
 
     #[test]
-    fn tinfoil_asserts_tee_tcb_and_serving_software_with_source() {
+    fn tinfoil_asserts_tee_and_serving_software_with_verifier_derived_tcb() {
         let claims = session_claims_for_event(&event(
             Some("tinfoil"),
             VerificationResult::Verified,
             Some(json!({
                 "config_repo": "tinfoilsh/confidential-model",
                 "release_digest": "sha256:abc123",
-                "tcb_status": "UpToDate",
             })),
         ));
-        // TEE + TCB are hardware-proven (TCB from the reported tcb_status).
+        // TEE is hardware-proven.
         assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
         assert_eq!(
             claims.tee_attested.source,
             Some(ClaimSource::HardwareProven)
         );
+        // TCB is asserted but VerifierDerived — Tinfoil's verifier gates on TCB
+        // yet exposes no raw TcbStatus, so it must NOT be labeled HardwareProven
+        // (regression guard for the fabricated-"UpToDate" bug).
         assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
         assert_eq!(
+            claims.tcb_up_to_date.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_ne!(
             claims.tcb_up_to_date.source,
             Some(ClaimSource::HardwareProven)
         );
@@ -3650,8 +3670,11 @@ mod claim_mapping_tests {
     }
 
     #[test]
-    fn tcb_up_to_date_is_an_honest_tri_state_for_every_provider() {
-        for provider in ["tinfoil", "near-ai", "chutes", "phala-direct"] {
+    fn tcb_up_to_date_is_a_hardware_proven_tri_state_for_dstack_providers() {
+        // The dstack-based providers surface a real TcbStatus from DCAP
+        // collateral. (Tinfoil is excluded: its verifier exposes no raw status,
+        // so its TCB claim is VerifierDerived, asserted earlier in this module.)
+        for provider in ["near-ai", "chutes", "phala-direct"] {
             // UpToDate asserts.
             let up = session_claims_for_event(&event(
                 Some(provider),

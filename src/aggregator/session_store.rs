@@ -66,7 +66,7 @@ pub trait SessionStore: Send + Sync {
     fn list_sessions(
         &self,
         provider: Option<&str>,
-        public_model_id: Option<&str>,
+        model_id: Option<&str>,
         now: u64,
     ) -> Vec<AttestedSession>;
 }
@@ -133,7 +133,7 @@ impl SessionStore for JsonlSessionStore {
     fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
         let payload = serde_json::to_value(&session)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut guard = self.inner.lock().expect("session store poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let seq = guard.next_seq;
         let record = SessionLogRecord {
             seq,
@@ -148,11 +148,15 @@ impl SessionStore for JsonlSessionStore {
         guard.writer.flush()?;
         guard.next_seq = seq + 1;
         guard.by_id.insert(session.session_id.clone(), session);
+        // Bound the in-memory index: drop entries past their retention deadline.
+        // (The append-only log itself still grows; compaction is an ops concern —
+        // rotate/replay the log file. Relying parties always fetch a live id.)
+        guard.by_id.retain(|_, s| ts < s.expires_at);
         Ok(seq)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        let mut guard = self.inner.lock().expect("session store poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match guard.by_id.get(session_id) {
             Some(session) if now >= session.expires_at => {
                 guard.by_id.remove(session_id);
@@ -166,16 +170,16 @@ impl SessionStore for JsonlSessionStore {
     fn list_sessions(
         &self,
         provider: Option<&str>,
-        public_model_id: Option<&str>,
+        model_id: Option<&str>,
         now: u64,
     ) -> Vec<AttestedSession> {
-        let guard = self.inner.lock().expect("session store poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<AttestedSession> = guard
             .by_id
             .values()
             .filter(|s| now < s.expires_at)
             .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .filter(|s| public_model_id.is_none_or(|m| s.public_model_id == m))
+            .filter(|s| model_id.is_none_or(|m| s.model_id == m))
             .cloned()
             .collect();
         // Stable order for callers/tests: newest first, then by id.
@@ -202,14 +206,17 @@ struct InMemoryInner {
 }
 
 impl SessionStore for InMemorySessionStore {
-    fn put_session(&self, session: AttestedSession, _ts: u64) -> io::Result<u64> {
-        let mut guard = self.inner.lock().expect("session store poisoned");
+    fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         guard.by_id.insert(session.session_id.clone(), session);
+        // Bound the store: drop entries past their retention deadline so a
+        // long-running gateway does not accumulate a session per key rotation.
+        guard.by_id.retain(|_, s| ts < s.expires_at);
         Ok(0)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        let mut guard = self.inner.lock().expect("session store poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match guard.by_id.get(session_id) {
             Some(session) if now >= session.expires_at => {
                 guard.by_id.remove(session_id);
@@ -223,16 +230,16 @@ impl SessionStore for InMemorySessionStore {
     fn list_sessions(
         &self,
         provider: Option<&str>,
-        public_model_id: Option<&str>,
+        model_id: Option<&str>,
         now: u64,
     ) -> Vec<AttestedSession> {
-        let guard = self.inner.lock().expect("session store poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<AttestedSession> = guard
             .by_id
             .values()
             .filter(|s| now < s.expires_at)
             .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .filter(|s| public_model_id.is_none_or(|m| s.public_model_id == m))
+            .filter(|s| model_id.is_none_or(|m| s.model_id == m))
             .cloned()
             .collect();
         out.sort_by(|a, b| {
@@ -278,6 +285,24 @@ mod tests {
             expires_at,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn put_evicts_expired_sessions_so_the_store_stays_bounded() {
+        let store = InMemorySessionStore::default();
+        // A is live when written...
+        let a = session("https://a", "aa", 2_000);
+        store.put_session(a.clone(), 1_000).unwrap();
+        // ...but a later write past A's retention deadline evicts it, so the
+        // store does not accumulate a session per key rotation.
+        let b = session("https://b", "bb", 10_000);
+        store.put_session(b.clone(), 5_000).unwrap();
+
+        assert!(store.get_session(&a.session_id, 5_000).is_none());
+        assert!(store.get_session(&b.session_id, 5_000).is_some());
+        let listed = store.list_sessions(None, None, 5_000);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, b.session_id);
     }
 
     #[test]

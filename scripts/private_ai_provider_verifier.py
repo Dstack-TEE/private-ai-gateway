@@ -509,14 +509,12 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 "code_fingerprint": doc.code_fingerprint,
                 "tls_spki_from_report_data": True,
                 "verification_steps": {k: v["status"] for k, v in steps.items()},
-                # Tinfoil's official verifier (SecureClient.verify) owns the TCB
-                # gate and is fail-closed — it checks the AMD report signature /
-                # cert chain and policy/TCB (or DCAP for TDX) as part of
-                # security_verified, which is True here. So a verified result
-                # implies an up-to-date TCB; there is no separable TcbStatus to
-                # surface a stale value, hence this is "UpToDate" rather than a
-                # tri-state from raw collateral.
-                "tcb_status": "UpToDate",
+                # NOTE: we deliberately do NOT emit a `tcb_status` here. Tinfoil's
+                # official verifier (SecureClient.verify) owns the TCB gate as part
+                # of security_verified, but exposes no separable TcbStatus, so there
+                # is no raw collateral value to surface. The session layer records a
+                # verifier-derived tcb_up_to_date claim for Tinfoil instead of
+                # fabricating a hardware-proven "UpToDate" status.
             },
         }
     )

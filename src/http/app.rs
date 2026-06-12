@@ -1561,21 +1561,31 @@ async fn aci_receipt(
 }
 
 /// List attested sessions, optionally filtered by `?provider=` and/or `?model=`
-/// (the public model id). Surfaces the sessions a provider has imported.
+/// (the routed model id). Surfaces the sessions a provider has attested.
 ///
 /// Intentionally unauthenticated (like [`attested_session`]): a session record
 /// is a transparency artifact carrying only verification material — provider,
 /// model, endpoint, the verified identity (e.g. signing address), channel
-/// bindings, claims, and an evidence digest/data-URI. It holds no request or
-/// response content. Anyone wiring a verifier MUST ensure the `evidence`
-/// data-URI never carries client-sensitive bytes.
+/// bindings, claims, and an evidence digest. It holds no request or response
+/// content. The list response carries only the evidence **digest**, not the
+/// full evidence `data` bundle: fetch a single session by id (`/v1/aci/sessions/
+/// {id}`) for the bytes. This keeps any larger/raw evidence payload off the
+/// broad, unfiltered listing.
 async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let sessions = state
+    let sessions: Vec<_> = state
         .service
-        .list_attested_sessions(q.provider.as_deref(), q.model.as_deref());
+        .list_attested_sessions(q.provider.as_deref(), q.model.as_deref())
+        .into_iter()
+        .map(|mut s| {
+            // Keep the digest as the integrity anchor; drop the data-URI bytes
+            // from the broad listing.
+            s.evidence.data_uri = None;
+            s
+        })
+        .collect();
     Json(json!({
         "api_version": "aci.session_list.v1",
         "sessions": sessions,

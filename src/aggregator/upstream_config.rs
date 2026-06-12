@@ -277,10 +277,7 @@ impl UpstreamConfigManager {
     /// into. Set once after the service is built, before the lifecycle is
     /// spawned.
     pub fn set_session_sink(&self, sink: Arc<dyn UpstreamSessionSink>) {
-        *self
-            .session_sink
-            .write()
-            .expect("upstream config manager session sink poisoned") = Some(sink);
+        *self.session_sink.write().unwrap_or_else(|p| p.into_inner()) = Some(sink);
     }
 
     pub fn backend(&self) -> Arc<dyn UpstreamBackend> {
@@ -373,7 +370,7 @@ impl UpstreamConfigManager {
             let sink = self
                 .session_sink
                 .read()
-                .expect("upstream config manager session sink poisoned")
+                .unwrap_or_else(|p| p.into_inner())
                 .clone();
             (verifier, targets, sink)
         };

@@ -81,8 +81,8 @@ struct AttestedSession {
     api_version: String,
     session_id: String,            // "as_" + sha256 over the verified material below
     provider: String,              // e.g. "phala-direct"
-    public_model_id: String,       // the gateway-exposed model alias
-    upstream_model_id: Option<String>,
+    model_id: String,              // the model attested, as routed to the upstream
+    upstream_model_id: Option<String>, // the upstream's own id, only when it differs
     endpoint: Option<String>,      // the verified upstream origin
     verifier_id: String,
     established_at: u64,            // when this material was verified
@@ -261,7 +261,7 @@ request → receipt (x-receipt-id)
 A tamper-evident log behind a session store trait (sibling to `ReceiptStore`).
 Each line is a typed, gateway-signed record (`{ seq, ts, type, payload, sig }`).
 On startup the log is replayed into an in-memory materialized index (by
-`session_id`, and by `(provider, public_model_id)`). Properties:
+`session_id`, and by `(provider, model_id)`). Properties:
 
 - Append-only + per-record signature ⇒ integrity independent of at-rest
   sealing, and a natural feed for a future public transparency log.

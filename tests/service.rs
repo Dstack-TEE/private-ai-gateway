@@ -250,7 +250,7 @@ async fn verified_upstream_binding_creates_attested_session() {
     assert_eq!(session.session_id, session_id);
     assert_eq!(session.api_version, "aci.session.v1");
     assert_eq!(session.provider, "stub-upstream");
-    assert_eq!(session.public_model_id, "x");
+    assert_eq!(session.model_id, "x");
     assert_eq!(session.endpoint.as_deref(), Some("https://stub-upstream"));
     assert_eq!(session.verifier_id, "stub-verifier-1");
     // provider_claims are folded verbatim into claims.extra; typed claims beyond
@@ -324,7 +324,7 @@ async fn session_keys_on_requested_model_not_response_model() {
         .and_then(|v| v.as_str())
         .unwrap();
     let session = svc.get_attested_session(session_id).unwrap();
-    assert_eq!(session.public_model_id, "requested-model");
+    assert_eq!(session.model_id, "requested-model");
 }
 
 #[tokio::test]
@@ -559,7 +559,7 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
     let listed = service.list_attested_sessions(None, Some("preflight-model"));
     assert_eq!(listed.len(), 1);
     let session = &listed[0];
-    assert_eq!(session.public_model_id, "preflight-model");
+    assert_eq!(session.model_id, "preflight-model");
     assert_eq!(session.provider, "preflight-upstream");
     // Typed claims are populated from the provider mapping (tinfoil + UpToDate).
     assert_eq!(session.claims.tee_attested.status, ClaimStatus::Asserted);
