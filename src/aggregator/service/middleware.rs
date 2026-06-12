@@ -2,8 +2,6 @@
 //! external middleware and finalizing the receipt/response it returns.
 //!
 
-use sha2::{Digest, Sha256};
-
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
@@ -263,19 +261,15 @@ impl AciService {
                 )?;
                 receipt_journal.reserve_receipt_id(receipt_id.clone());
 
-                let body = MiddlewareProviderResponseDraftingStream {
-                    inner: upstream_response.body,
-                    builder: Some(builder),
-                    journal: receipt_journal,
-                    provider_response_hasher: Sha256::new(),
-                    receipt_id: receipt_id.clone(),
-                    endpoint_path: endpoint_path.to_string(),
-                    sse_parser: SseChatIdParser::default(),
-                    metrics: self.metrics.clone(),
-                    upstream_status: status,
-                    upstream_ended: false,
-                    finished: false,
-                };
+                let body = MiddlewareProviderResponseDraftingStream::new(
+                    upstream_response.body,
+                    builder,
+                    receipt_journal,
+                    receipt_id.clone(),
+                    endpoint_path.to_string(),
+                    self.metrics.clone(),
+                    status,
+                );
 
                 return Ok(MiddlewareForwardResult::Stream(Box::new(
                     MiddlewareStreamingForwarded {
@@ -516,25 +510,15 @@ impl AciService {
         let e2ee_transformer = e2ee
             .clone()
             .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-        let body = MiddlewareResponseFinalizingStream {
-            inner: cleartext_stream,
+        let body = MiddlewareResponseFinalizingStream::new(
+            self,
+            cleartext_stream,
             journal,
-            cleartext_hasher: Sha256::new(),
-            wire_hasher: Sha256::new(),
-            keys: self.keys.clone(),
-            receipt_store: self.receipt_store.clone(),
-            key_id: self.default_receipt_key_id.clone(),
             requester,
-            receipt_ttl_seconds: self.config.receipt_ttl_seconds,
-            clock: self.clock.clone(),
-            metrics: self.metrics.clone(),
-            endpoint_path: endpoint_path.to_string(),
-            sse_parser: SseChatIdParser::default(),
+            endpoint_path.to_string(),
             e2ee_transformer,
-            response_modified_by_wire: e2ee_response.is_some(),
-            upstream_ended: false,
-            finished: false,
-        };
+            e2ee_response.is_some(),
+        );
         Ok(MiddlewareStreamFinalization {
             body: Box::pin(body),
             e2ee: e2ee_response,

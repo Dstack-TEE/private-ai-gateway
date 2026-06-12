@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 
 use super::e2ee_crypto::encrypt_e2ee_stream_payload;
 use super::{
-    Clock, E2eeError, E2eeRequestContext, MiddlewareReceiptDraft, MiddlewareReceiptJournal,
-    ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
+    AciService, Clock, E2eeError, E2eeRequestContext, MiddlewareReceiptDraft,
+    MiddlewareReceiptJournal, ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
 };
 use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError, TransparencyEventKind};
@@ -17,17 +17,17 @@ use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 
 pub(super) struct MiddlewareProviderResponseDraftingStream {
-    pub(super) inner: UpstreamBodyStream,
-    pub(super) builder: Option<ReceiptBuilder>,
-    pub(super) journal: MiddlewareReceiptJournal,
-    pub(super) provider_response_hasher: Sha256,
-    pub(super) receipt_id: String,
-    pub(super) endpoint_path: String,
-    pub(super) sse_parser: SseChatIdParser,
-    pub(super) metrics: Arc<ServiceMetrics>,
-    pub(super) upstream_status: u16,
-    pub(super) upstream_ended: bool,
-    pub(super) finished: bool,
+    inner: UpstreamBodyStream,
+    builder: Option<ReceiptBuilder>,
+    journal: MiddlewareReceiptJournal,
+    provider_response_hasher: Sha256,
+    receipt_id: String,
+    endpoint_path: String,
+    sse_parser: SseChatIdParser,
+    metrics: Arc<ServiceMetrics>,
+    upstream_status: u16,
+    upstream_ended: bool,
+    finished: bool,
 }
 
 impl Unpin for MiddlewareProviderResponseDraftingStream {}
@@ -78,6 +78,30 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
 }
 
 impl MiddlewareProviderResponseDraftingStream {
+    pub(super) fn new(
+        inner: UpstreamBodyStream,
+        builder: ReceiptBuilder,
+        journal: MiddlewareReceiptJournal,
+        receipt_id: String,
+        endpoint_path: String,
+        metrics: Arc<ServiceMetrics>,
+        upstream_status: u16,
+    ) -> Self {
+        Self {
+            inner,
+            builder: Some(builder),
+            journal,
+            provider_response_hasher: Sha256::new(),
+            receipt_id,
+            endpoint_path,
+            sse_parser: SseChatIdParser::default(),
+            metrics,
+            upstream_status,
+            upstream_ended: false,
+            finished: false,
+        }
+    }
+
     fn publish_draft(&mut self) -> Result<(), ServiceError> {
         let provider_response_hash = format!(
             "sha256:{}",
@@ -107,23 +131,23 @@ impl MiddlewareProviderResponseDraftingStream {
 }
 
 pub(super) struct MiddlewareResponseFinalizingStream {
-    pub(super) inner: ServiceResponseStream,
-    pub(super) journal: MiddlewareReceiptJournal,
-    pub(super) cleartext_hasher: Sha256,
-    pub(super) wire_hasher: Sha256,
-    pub(super) keys: Arc<dyn KeyProvider>,
-    pub(super) receipt_store: Arc<dyn ReceiptStore>,
-    pub(super) key_id: String,
-    pub(super) requester: Option<ReceiptOwner>,
-    pub(super) receipt_ttl_seconds: u64,
-    pub(super) clock: Arc<dyn Clock>,
-    pub(super) metrics: Arc<ServiceMetrics>,
-    pub(super) endpoint_path: String,
-    pub(super) sse_parser: SseChatIdParser,
-    pub(super) e2ee_transformer: Option<E2eeSseTransformer>,
-    pub(super) response_modified_by_wire: bool,
-    pub(super) upstream_ended: bool,
-    pub(super) finished: bool,
+    inner: ServiceResponseStream,
+    journal: MiddlewareReceiptJournal,
+    cleartext_hasher: Sha256,
+    wire_hasher: Sha256,
+    keys: Arc<dyn KeyProvider>,
+    receipt_store: Arc<dyn ReceiptStore>,
+    key_id: String,
+    requester: Option<ReceiptOwner>,
+    receipt_ttl_seconds: u64,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<ServiceMetrics>,
+    endpoint_path: String,
+    sse_parser: SseChatIdParser,
+    e2ee_transformer: Option<E2eeSseTransformer>,
+    response_modified_by_wire: bool,
+    upstream_ended: bool,
+    finished: bool,
 }
 
 impl Unpin for MiddlewareResponseFinalizingStream {}
@@ -210,6 +234,36 @@ impl Stream for MiddlewareResponseFinalizingStream {
 }
 
 impl MiddlewareResponseFinalizingStream {
+    pub(super) fn new(
+        service: &AciService,
+        inner: ServiceResponseStream,
+        journal: MiddlewareReceiptJournal,
+        requester: Option<ReceiptOwner>,
+        endpoint_path: String,
+        e2ee_transformer: Option<E2eeSseTransformer>,
+        response_modified_by_wire: bool,
+    ) -> Self {
+        Self {
+            inner,
+            journal,
+            cleartext_hasher: Sha256::new(),
+            wire_hasher: Sha256::new(),
+            keys: service.keys.clone(),
+            receipt_store: service.receipt_store.clone(),
+            key_id: service.default_receipt_key_id.clone(),
+            requester,
+            receipt_ttl_seconds: service.config.receipt_ttl_seconds,
+            clock: service.clock.clone(),
+            metrics: service.metrics.clone(),
+            endpoint_path,
+            sse_parser: SseChatIdParser::default(),
+            e2ee_transformer,
+            response_modified_by_wire,
+            upstream_ended: false,
+            finished: false,
+        }
+    }
+
     fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
         let Some(mut draft) = self.journal.take() else {
             return Ok(());
@@ -251,23 +305,23 @@ impl MiddlewareResponseFinalizingStream {
 }
 
 pub(super) struct ReceiptFinalizingStream {
-    pub(super) inner: UpstreamBodyStream,
-    pub(super) builder: Option<ReceiptBuilder>,
-    pub(super) cleartext_hasher: Sha256,
-    pub(super) wire_hasher: Sha256,
-    pub(super) keys: Arc<dyn KeyProvider>,
-    pub(super) receipt_store: Arc<dyn ReceiptStore>,
-    pub(super) key_id: String,
-    pub(super) requester: Option<ReceiptOwner>,
-    pub(super) receipt_ttl_seconds: u64,
-    pub(super) clock: Arc<dyn Clock>,
-    pub(super) metrics: Arc<ServiceMetrics>,
-    pub(super) endpoint_path: String,
-    pub(super) sse_parser: SseChatIdParser,
-    pub(super) e2ee_transformer: Option<E2eeSseTransformer>,
-    pub(super) response_modified: bool,
-    pub(super) upstream_ended: bool,
-    pub(super) finished: bool,
+    inner: UpstreamBodyStream,
+    builder: Option<ReceiptBuilder>,
+    cleartext_hasher: Sha256,
+    wire_hasher: Sha256,
+    keys: Arc<dyn KeyProvider>,
+    receipt_store: Arc<dyn ReceiptStore>,
+    key_id: String,
+    requester: Option<ReceiptOwner>,
+    receipt_ttl_seconds: u64,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<ServiceMetrics>,
+    endpoint_path: String,
+    sse_parser: SseChatIdParser,
+    e2ee_transformer: Option<E2eeSseTransformer>,
+    response_modified: bool,
+    upstream_ended: bool,
+    finished: bool,
 }
 
 impl Unpin for ReceiptFinalizingStream {}
@@ -354,6 +408,36 @@ impl Stream for ReceiptFinalizingStream {
 }
 
 impl ReceiptFinalizingStream {
+    pub(super) fn new(
+        service: &AciService,
+        inner: UpstreamBodyStream,
+        builder: ReceiptBuilder,
+        requester: Option<ReceiptOwner>,
+        endpoint_path: String,
+        e2ee_transformer: Option<E2eeSseTransformer>,
+        response_modified: bool,
+    ) -> Self {
+        Self {
+            inner,
+            builder: Some(builder),
+            cleartext_hasher: Sha256::new(),
+            wire_hasher: Sha256::new(),
+            keys: service.keys.clone(),
+            receipt_store: service.receipt_store.clone(),
+            key_id: service.default_receipt_key_id.clone(),
+            requester,
+            receipt_ttl_seconds: service.config.receipt_ttl_seconds,
+            clock: service.clock.clone(),
+            metrics: service.metrics.clone(),
+            endpoint_path,
+            sse_parser: SseChatIdParser::default(),
+            e2ee_transformer,
+            response_modified,
+            upstream_ended: false,
+            finished: false,
+        }
+    }
+
     fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
         let cleartext_hash = format!(
             "sha256:{}",

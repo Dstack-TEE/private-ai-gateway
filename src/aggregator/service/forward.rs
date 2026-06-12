@@ -1,5 +1,4 @@
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::aci::receipt::{
     ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent, VerificationResult,
@@ -16,7 +15,7 @@ use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
-use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream, SseChatIdParser};
+use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
 use super::{
     AciService, ChatCompletionRequest, E2eeResponseInfo, ForwardResult, GatewayRequestContext,
     ReceiptOwner, ServiceError, StreamingForwardResult, StreamingForwardStream,
@@ -309,25 +308,15 @@ impl AciService {
             .clone()
             .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
 
-        let body = ReceiptFinalizingStream {
-            inner: upstream_response.body,
-            builder: Some(builder),
-            cleartext_hasher: Sha256::new(),
-            wire_hasher: Sha256::new(),
-            keys: self.keys.clone(),
-            receipt_store: self.receipt_store.clone(),
-            key_id: self.default_receipt_key_id.clone(),
-            requester: req.requester,
-            receipt_ttl_seconds: self.config.receipt_ttl_seconds,
-            clock: self.clock.clone(),
-            metrics: self.metrics.clone(),
-            endpoint_path: endpoint_path.to_string(),
-            sse_parser: SseChatIdParser::default(),
+        let body = ReceiptFinalizingStream::new(
+            self,
+            upstream_response.body,
+            builder,
+            req.requester,
+            endpoint_path.to_string(),
             e2ee_transformer,
             response_modified,
-            upstream_ended: false,
-            finished: false,
-        };
+        );
 
         Ok(StreamingForwardResult::Stream(StreamingForwardStream {
             receipt_id,
