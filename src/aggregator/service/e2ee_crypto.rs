@@ -1,9 +1,9 @@
-use super::streaming::*;
 use super::wire::{E2eeAadMode, E2eeDecryptor};
-use super::*;
 
 use serde_json::Value;
 
+use super::streaming::E2eeSseTransformer;
+use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 use crate::aci::e2ee::{
     encrypt_for_public_key, encrypt_legacy_for_public_key, normalize_secp256k1_public_key_hex,
     E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,

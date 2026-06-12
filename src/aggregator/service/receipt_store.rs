@@ -1,6 +1,6 @@
-use super::*;
 use std::sync::RwLock;
 
+use super::ReceiptOwner;
 use crate::aci::types::Receipt;
 
 /// stores request bodies — only the receipt (which holds hashes, not content).

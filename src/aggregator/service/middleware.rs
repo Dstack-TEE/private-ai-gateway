@@ -2,18 +2,41 @@
 //! external middleware and finalizing the receipt/response it returns.
 //!
 
-use super::*;
-
 use sha2::{Digest, Sha256};
 
-use super::e2ee_crypto::*;
-use super::forward::{is_retryable_provider_status, upgrade_err};
-use super::helpers::*;
-use super::streaming::*;
+use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
+use super::helpers::{
+    accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
+};
+use super::streaming::{
+    E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
+    MiddlewareResponseFinalizingStream, SseChatIdParser,
+};
+use super::{
+    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
+    ForwardCandidate, MiddlewareForwardResult, MiddlewareForwarded,
+    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
+    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
+    ReceiptOwner, ServiceError, ServiceResponseStream, StreamingUpstreamError,
+    CHANNEL_BINDING_REVERIFY_ATTEMPTS,
+};
 use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
+
+fn is_retryable_provider_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Track the highest-priority failover error so that, when every candidate
+/// fails, the returned error reflects the most informative failure.
+/// Priority order: verification (3), then transport (2), then routing (1).
+fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: ServiceError) {
+    if slot.as_ref().map(|(p, _)| priority >= *p).unwrap_or(true) {
+        *slot = Some((priority, err));
+    }
+}
 
 impl AciService {
     pub(super) fn build_middleware_receipt_prefix(

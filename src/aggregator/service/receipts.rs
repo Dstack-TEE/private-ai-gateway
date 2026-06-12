@@ -1,6 +1,5 @@
-use super::*;
-
-use super::helpers::*;
+use super::helpers::legacy_signature_text;
+use super::{AciService, LegacySignatureResult, ReceiptOwner, ServiceError};
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
 use crate::aci::receipt::{ReceiptError, EVENT_RESPONSE_RETURNED};
 use crate::aci::types::Receipt;

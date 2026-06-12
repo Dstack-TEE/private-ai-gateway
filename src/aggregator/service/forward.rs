@@ -1,12 +1,6 @@
-use super::*;
-
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::claims::*;
-use super::e2ee_crypto::*;
-use super::helpers::*;
-use super::streaming::*;
 use crate::aci::receipt::{
     ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent, VerificationResult,
 };
@@ -17,18 +11,18 @@ use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, WorkloadIdentityRef,
 };
 
-pub(super) fn is_retryable_provider_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
-}
-
-/// Track the highest-priority failover error so that, when every candidate
-/// fails, the returned error reflects the most informative failure.
-/// Priority order: verification (3), then transport (2), then routing (1).
-pub(super) fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: ServiceError) {
-    if slot.as_ref().map(|(p, _)| priority >= *p).unwrap_or(true) {
-        *slot = Some((priority, err));
-    }
-}
+use super::claims::session_claims_for_event;
+use super::e2ee_crypto::encrypt_e2ee_response_body;
+use super::helpers::{
+    accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
+};
+use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream, SseChatIdParser};
+use super::{
+    AciService, ChatCompletionRequest, E2eeResponseInfo, ForwardResult, GatewayRequestContext,
+    ReceiptOwner, ServiceError, StreamingForwardResult, StreamingForwardStream,
+    StreamingUpstreamError, UpstreamVerificationError, UpstreamVerificationRequest,
+    CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
+};
 
 impl AciService {
     pub async fn forward_chat_completion(

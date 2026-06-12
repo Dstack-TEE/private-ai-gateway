@@ -1,5 +1,4 @@
-use super::*;
-
+use super::ServiceError;
 use crate::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki};
 
 /// Validate ACI §5.2 source-provenance arms.

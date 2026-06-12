@@ -1,8 +1,7 @@
-use super::*;
-
 use futures_util::StreamExt;
 use rand::RngCore;
 
+use super::ServiceError;
 use crate::aci::receipt::{EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED};
 use crate::aci::types::Receipt;
 use crate::aci::upstream::UpstreamBodyStream;

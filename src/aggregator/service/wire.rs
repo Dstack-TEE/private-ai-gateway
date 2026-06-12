@@ -1,4 +1,3 @@
-use super::*;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -6,6 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::Stream;
 
+use super::{ReceiptOwner, ServiceError};
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::types::Receipt;
 use crate::aggregator::metrics::RequestMode;
