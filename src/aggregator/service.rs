@@ -2056,11 +2056,14 @@ impl AciService {
         event: UpstreamVerifiedEvent,
         recorded: Option<(String, SessionClaims)>,
     ) -> Result<(), ReceiptError> {
-        let (session_id, claims) = match recorded {
-            Some((id, claims)) => (Some(id), Some(claims)),
-            None => (None, None),
-        };
-        builder.add_upstream_verified_with_session(event, session_id.as_deref(), claims.as_ref())
+        // A sealed session and its claims are inseparable: either both (verified)
+        // or neither (failed / no binding).
+        match recorded {
+            Some((session_id, claims)) => {
+                builder.add_upstream_verified_with_session(event, &session_id, &claims)
+            }
+            None => builder.add_upstream_verified(event),
+        }
     }
 
     fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {

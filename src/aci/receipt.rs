@@ -277,6 +277,11 @@ impl ReceiptBuilder {
         )
     }
 
+    /// Append `upstream.verified` with **no** attested session — used when
+    /// verification failed (or produced no enforceable channel binding), so there
+    /// is no session to reference. The event is still recorded so a downstream
+    /// verifier sees the (failed) outcome. The verified case uses
+    /// [`Self::add_upstream_verified_with_session`].
     pub fn add_upstream_verified(
         &mut self,
         event: UpstreamVerifiedEvent,
@@ -284,20 +289,17 @@ impl ReceiptBuilder {
         self.append(EVENT_UPSTREAM_VERIFIED, event.to_fields())
     }
 
-    /// Append `upstream.verified`, attaching the attested-session id and the
-    /// typed claim verdicts (shallow audit) when a verified session exists. The
+    /// Append `upstream.verified` for a verified upstream, attaching the
+    /// attested-session id and the typed claim verdicts (shallow audit). The two
+    /// are **inseparable** — a sealed session always carries its claims — so they
+    /// are taken together and required, not as two independent options. The
     /// session id is content-addressed, so it commits the receipt to the exact
     /// session (with its evidence + reasons) a deep audit would re-fetch.
-    ///
-    /// `session_id`/`claims` are `None` when no session was sealed — i.e. the
-    /// upstream verification failed (or produced no enforceable channel binding).
-    /// The event is still recorded so a downstream verifier sees the failed
-    /// outcome; there is simply no session to reference.
     pub fn add_upstream_verified_with_session<C: serde::Serialize>(
         &mut self,
         event: UpstreamVerifiedEvent,
-        session_id: Option<&str>,
-        claims: Option<&C>,
+        session_id: &str,
+        claims: &C,
     ) -> Result<(), ReceiptError> {
         // `claims` is typed at the call site (the aggregator's `SessionClaims`);
         // it is serialized here only because the event-log fields are a generic
@@ -305,18 +307,14 @@ impl ReceiptBuilder {
         // types via the `Serialize` bound rather than a `Value` parameter.
         let mut fields = event.to_fields();
         if let Value::Object(obj) = &mut fields {
-            if let Some(session_id) = session_id {
-                obj.insert(
-                    "session_id".to_string(),
-                    Value::String(session_id.to_string()),
-                );
-            }
-            if let Some(claims) = claims {
-                obj.insert(
-                    "claims".to_string(),
-                    serde_json::to_value(claims).unwrap_or(Value::Null),
-                );
-            }
+            obj.insert(
+                "session_id".to_string(),
+                Value::String(session_id.to_string()),
+            );
+            obj.insert(
+                "claims".to_string(),
+                serde_json::to_value(claims).unwrap_or(Value::Null),
+            );
         }
         self.append(EVENT_UPSTREAM_VERIFIED, fields)
     }
