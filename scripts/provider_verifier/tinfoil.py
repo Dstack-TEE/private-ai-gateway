@@ -6,17 +6,10 @@ import asyncio
 import base64
 import contextlib
 import gzip
-import hashlib
-import json
-import os
-import secrets
 import sys
-import time
-import urllib.parse
-import urllib.request
 from typing import Any
 
-from .common import *  # noqa: F401,F403
+from .common import emit, failed, json_evidence_bundle
 
 
 def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
