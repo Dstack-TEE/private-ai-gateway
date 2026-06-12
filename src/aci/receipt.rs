@@ -45,6 +45,11 @@ pub enum ReceiptError {
 #[derive(Debug, Clone)]
 pub struct UpstreamVerifiedEvent {
     pub vendor: String,
+    /// Stable provider *type* (e.g. "tinfoil", "near-ai", "chutes",
+    /// "phala-direct") used to map provider evidence onto typed session
+    /// claims. `None` for generic/static verifiers with no provider identity.
+    /// Distinct from `vendor`, which is the operator's per-endpoint config name.
+    pub provider: Option<String>,
     pub model_id: String,
     pub url_origin: Option<String>,
     pub verifier_id: String,
@@ -158,6 +163,7 @@ impl UpstreamVerifiedEvent {
     fn to_fields(&self) -> Value {
         serde_json::json!({
             "vendor": self.vendor,
+            "provider": self.provider,
             "model_id": self.model_id,
             "url_origin": self.url_origin,
             "verifier_id": self.verifier_id,

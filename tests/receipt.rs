@@ -82,6 +82,7 @@ fn event_seqs_strictly_increasing_and_first_is_request_received() {
     b.add_request_forwarded(b"a").unwrap();
     b.add_upstream_verified(UpstreamVerifiedEvent {
         vendor: "openai-compatible".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("http://upstream".to_string()),
         verifier_id: "verifier-stub-1".to_string(),
@@ -113,6 +114,7 @@ fn upstream_verified_event_records_channel_bindings() {
     b.add_request_forwarded(b"a").unwrap();
     b.add_upstream_verified(UpstreamVerifiedEvent {
         vendor: "openai-compatible".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://upstream.example".to_string()),
         verifier_id: "external/verifier/v1".to_string(),

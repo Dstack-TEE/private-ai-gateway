@@ -1242,6 +1242,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
             Some(verifier) => verifier.verify(request).await,
             None => UpstreamVerifiedEvent {
                 vendor: request.upstream_name,
+                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: "none".to_string(),
@@ -1266,6 +1267,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
             Some(verifier) => verifier.refresh(request).await,
             None => UpstreamVerifiedEvent {
                 vendor: request.upstream_name,
+                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: "none".to_string(),
@@ -1339,6 +1341,7 @@ mod tests {
             self.verifications.fetch_add(1, Ordering::SeqCst);
             UpstreamVerifiedEvent {
                 vendor: request.upstream_name,
+                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: "counting-verifier/v1".to_string(),

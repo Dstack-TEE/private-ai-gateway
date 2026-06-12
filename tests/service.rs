@@ -170,6 +170,7 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("http://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -205,6 +206,7 @@ async fn verified_upstream_binding_creates_attested_session() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let event = UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -286,6 +288,7 @@ async fn session_keys_on_requested_model_not_response_model() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"served-by-upstream"}"#, true);
     let event = UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "requested-model".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -323,6 +326,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -402,6 +406,7 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: None,
         verifier_id: "stub-verifier-1".to_string(),

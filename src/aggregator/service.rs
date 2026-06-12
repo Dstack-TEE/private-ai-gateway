@@ -1913,6 +1913,7 @@ impl AciService {
         let missing_verifier_result = upstream_verification_event.is_none();
         let event = upstream_verification_event.unwrap_or_else(|| UpstreamVerifiedEvent {
             vendor: prepared.upstream_name.clone(),
+            provider: None,
             model_id: prepared.model_id.clone(),
             url_origin: prepared.url_origin.clone(),
             verifier_id: "none".to_string(),
@@ -2134,16 +2135,49 @@ impl AciService {
 /// (`VerifierDerived`). The remaining typed claims stay `Unknown` until a
 /// per-provider mapper fills them; the verifier's raw `provider_claims` are
 /// preserved verbatim as scope facts under `claims.extra`.
+/// Map a verified upstream event onto the typed claim vocabulary, honestly: a
+/// claim is asserted only when *this* verifier's evidence backs it. Everything
+/// else stays `Unknown` rather than inflating the audit record. The raw
+/// `provider_claims` are always preserved verbatim in `claims.extra` so a deep
+/// auditor sees the full provider scope, typed or not.
 fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
     let mut claims = SessionClaims::default();
     if event.result == VerificationResult::Verified {
-        claims.tee_attested = Claim::asserted(
-            ClaimSource::VerifierDerived,
-            format!(
-                "{} verified the workload identity and bound the channel",
-                event.verifier_id
-            ),
-        );
+        match event.provider.as_deref() {
+            // Providers that verify a genuine hardware TEE quote and bind the
+            // request channel to it.
+            Some(provider @ ("tinfoil" | "near-ai" | "chutes" | "phala-direct")) => {
+                claims.tee_attested = Claim::asserted(
+                    ClaimSource::HardwareProven,
+                    format!(
+                        "{} verified the TEE quote and bound the request channel",
+                        event.verifier_id
+                    ),
+                );
+                claims.tcb_up_to_date = tcb_up_to_date_claim(event);
+                if provider == "tinfoil" {
+                    claims.serving_software_known_good = tinfoil_software_claim(event);
+                }
+                // os_known_good: no verifier here traces the guest OS/firmware to
+                // reviewed source. gpu_attested: never asserted from a GPU/NRAS
+                // token alone — it proves only that a CC-capable GPU exists, not
+                // that this request was served on it; the sound path is CPU
+                // attestation plus a measured-software GPU check, which we do not
+                // have. model_weights_provenance: no verifier checks the served
+                // weights. All three stay Unknown.
+            }
+            // Generic verifier (static/preverified/DCAP test path): we only know
+            // it returned Verified with an enforceable channel binding.
+            _ => {
+                claims.tee_attested = Claim::asserted(
+                    ClaimSource::VerifierDerived,
+                    format!(
+                        "{} verified the workload identity and bound the channel",
+                        event.verifier_id
+                    ),
+                );
+            }
+        }
     }
     if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
         for (key, value) in map {
@@ -2151,6 +2185,51 @@ fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
         }
     }
     claims
+}
+
+/// Platform TCB freshness as an honest tri-state from the verifier's reported
+/// `tcb_status` (TDX/SEV `TcbStatus`): `UpToDate` asserts, any other reported
+/// status refutes — the quote proves a stale TCB even though the gateway does
+/// not hard-reject it — and an absent status is Unknown. Freshness is never
+/// asserted by policy: a verifier that does not surface a status leaves the
+/// claim Unknown, because we cannot prove it is current, not because it is.
+fn tcb_up_to_date_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let status = event
+        .provider_claims
+        .as_ref()
+        .and_then(|c| c.get("tcb_status"))
+        .and_then(Value::as_str);
+    match status {
+        Some(status) if status.eq_ignore_ascii_case("uptodate") => {
+            Claim::asserted(ClaimSource::HardwareProven, format!("platform TCB status {status}"))
+        }
+        Some(status) => {
+            Claim::refuted(ClaimSource::HardwareProven, format!("platform TCB status {status}"))
+        }
+        None => Claim::unknown(),
+    }
+}
+
+/// Tinfoil traces its serving software to reviewed source: the SEV-SNP launch
+/// measurement is compared against the Sigstore golden values published for the
+/// build's repo. Cite the source repo and release digest when the verifier
+/// reported them.
+fn tinfoil_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let field = |key: &str| {
+        event
+            .provider_claims
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(Value::as_str)
+    };
+    let reason = match (field("config_repo"), field("release_digest")) {
+        (Some(repo), Some(digest)) => {
+            format!("Sigstore-verified code measurement matches {repo} (release {digest})")
+        }
+        (Some(repo), None) => format!("Sigstore-verified code measurement matches {repo}"),
+        _ => "Sigstore-verified code measurement matches the published golden values".to_string(),
+    };
+    Claim::asserted(ClaimSource::VerifierDerived, reason)
 }
 
 struct MiddlewareProviderResponseDraftingStream {
@@ -3449,4 +3528,168 @@ fn legacy_signature_text(receipt: &Receipt) -> Option<String> {
 
 fn strip_sha256_prefix(value: &str) -> Option<&str> {
     value.strip_prefix("sha256:")
+}
+
+#[cfg(test)]
+mod claim_mapping_tests {
+    use super::session_claims_for_event;
+    use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+    use crate::aggregator::session::{ClaimSource, ClaimStatus};
+    use serde_json::{json, Value};
+
+    fn event(
+        provider: Option<&str>,
+        result: VerificationResult,
+        provider_claims: Option<Value>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            vendor: "operator-config-name".to_string(),
+            provider: provider.map(str::to_string),
+            model_id: "m".to_string(),
+            url_origin: Some("https://up".to_string()),
+            verifier_id: "vid/v1".to_string(),
+            result,
+            required: true,
+            reason: None,
+            evidence: None,
+            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: "https://up".to_string(),
+                spki_sha256: "aa".repeat(32),
+            }],
+            provider_claims,
+        }
+    }
+
+    #[test]
+    fn tinfoil_asserts_tee_tcb_and_serving_software_with_source() {
+        let claims = session_claims_for_event(&event(
+            Some("tinfoil"),
+            VerificationResult::Verified,
+            Some(json!({
+                "config_repo": "tinfoilsh/confidential-model",
+                "release_digest": "sha256:abc123",
+                "tcb_status": "UpToDate",
+            })),
+        ));
+        // TEE + TCB are hardware-proven (TCB from the reported tcb_status).
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tee_attested.source, Some(ClaimSource::HardwareProven));
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tcb_up_to_date.source, Some(ClaimSource::HardwareProven));
+        // Serving software is verifier-derived (Sigstore), and cites the source.
+        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.serving_software_known_good.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        let reason = claims.serving_software_known_good.reason.unwrap();
+        assert!(reason.contains("tinfoilsh/confidential-model"), "{reason}");
+        assert!(reason.contains("sha256:abc123"), "{reason}");
+        // Honest Unknowns: no OS/GPU/weights provenance proven here.
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
+        // Raw provider_claims preserved verbatim for deep audit.
+        assert_eq!(
+            claims.extra.get("config_repo").and_then(Value::as_str),
+            Some("tinfoilsh/confidential-model")
+        );
+    }
+
+    #[test]
+    fn near_and_chutes_assert_tee_but_not_serving_software() {
+        for provider in ["near-ai", "chutes"] {
+            let claims = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "UpToDate" })),
+            ));
+            assert_eq!(
+                claims.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+            // Neither traces serving software to reviewed source.
+            assert_eq!(
+                claims.serving_software_known_good.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
+            assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown, "{provider}");
+        }
+    }
+
+    #[test]
+    fn tcb_up_to_date_is_an_honest_tri_state_for_every_provider() {
+        for provider in ["tinfoil", "near-ai", "chutes", "phala-direct"] {
+            // UpToDate asserts.
+            let up = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "UpToDate" })),
+            ));
+            assert_eq!(up.tcb_up_to_date.status, ClaimStatus::Asserted, "{provider}");
+
+            // A stale TCB is refuted from the quote — but the session is still
+            // created (we do not hard-reject), and TEE attestation still holds.
+            let stale = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "OutOfDate" })),
+            ));
+            assert_eq!(
+                stale.tcb_up_to_date.status,
+                ClaimStatus::Refuted,
+                "{provider}"
+            );
+            assert_eq!(
+                stale.tcb_up_to_date.source,
+                Some(ClaimSource::HardwareProven),
+                "{provider}"
+            );
+            assert_eq!(
+                stale.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+
+            // No surfaced status ⇒ Unknown; freshness is never asserted by policy.
+            let missing =
+                session_claims_for_event(&event(Some(provider), VerificationResult::Verified, None));
+            assert_eq!(
+                missing.tcb_up_to_date.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
+            assert_eq!(
+                missing.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_provider_asserts_only_tee_verifier_derived() {
+        let claims = session_claims_for_event(&event(None, VerificationResult::Verified, None));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tee_attested.source, Some(ClaimSource::VerifierDerived));
+        // No TCB/software guarantees from an unidentified verifier.
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
+        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn failed_result_asserts_nothing_but_preserves_evidence() {
+        let claims = session_claims_for_event(&event(
+            Some("tinfoil"),
+            VerificationResult::Failed,
+            Some(json!({ "config_repo": "x" })),
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
+        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Unknown);
+        // Raw claims are still recorded for the audit trail.
+        assert!(claims.extra.contains_key("config_repo"));
+    }
 }

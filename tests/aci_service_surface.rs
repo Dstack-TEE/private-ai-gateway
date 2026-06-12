@@ -202,6 +202,7 @@ impl UpstreamVerifier for AlwaysVerified {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             vendor: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "surface-verifier/v1".to_string(),
@@ -658,6 +659,7 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             upstream_required: Some(true),
             upstream_verification_event: Some(UpstreamVerifiedEvent {
                 vendor: "surface-upstream".to_string(),
+                provider: None,
                 model_id: "private-upstream".to_string(),
                 url_origin: Some("https://surface-upstream.example".to_string()),
                 verifier_id: "surface-verifier/v1".to_string(),

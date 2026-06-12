@@ -186,6 +186,7 @@ impl UpstreamVerifier for ScriptedVerifier {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
             vendor: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "mock-verifier/v1".to_string(),
@@ -1555,6 +1556,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
     let forwarded = br#"{"model":"private-upstream-name","messages":[]}"#;
     let verifier_event = UpstreamVerifiedEvent {
         vendor: "mock-upstream".to_string(),
+        provider: None,
         model_id: "private-upstream-name".to_string(),
         url_origin: Some("https://mock-upstream.example".to_string()),
         verifier_id: "mock-verifier/v1".to_string(),
@@ -1935,6 +1937,7 @@ impl UpstreamVerifier for KeyedVerifier {
         let verified = request.upstream_name != self.fail_for;
         UpstreamVerifiedEvent {
             vendor: request.upstream_name.clone(),
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "keyed-verifier/v1".to_string(),

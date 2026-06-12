@@ -834,6 +834,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         .unwrap();
     let event = UpstreamVerifiedEvent {
         vendor: "openai-compatible-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url.clone()),
         verifier_id: "fixture-spki-verifier/v1".to_string(),
@@ -870,6 +871,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
         .with_name("openai-compatible-provider");
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "openai-compatible-provider".to_string(),
+        provider: None,
         model_id: "public-model".to_string(),
         url_origin: Some(base_url.clone()),
         verifier_id: "fixture-spki-verifier/v1".to_string(),
@@ -921,6 +923,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -987,6 +990,7 @@ async fn chutes_provider_requires_exact_catalog_match() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1042,6 +1046,7 @@ async fn chutes_provider_uses_configured_chute_id_pin() {
         )]));
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1090,6 +1095,7 @@ async fn chutes_provider_pools_verified_single_use_nonces() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1176,6 +1182,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
         .with_session_store(store);
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1231,6 +1238,7 @@ async fn chutes_provider_refreshes_verified_nonce_pool_without_forwarding() {
         .with_session_store(store);
     let event = UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1300,6 +1308,7 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1375,6 +1384,7 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
@@ -1422,6 +1432,7 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         vendor: "chutes-provider".to_string(),
+        provider: None,
         model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),

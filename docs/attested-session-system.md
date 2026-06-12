@@ -171,6 +171,52 @@ The gateway records and surfaces these verbatim. Adding stronger provenance
 methods later is a change inside a verifier, not a change to the session model
 or config.
 
+## Per-provider claim mapping
+
+`session_claims_for_event` maps a verified upstream event onto the typed claims
+**honestly**: a claim is asserted only when *this* verifier's evidence backs it,
+and the raw `provider_claims` are always preserved verbatim in `extra` so a deep
+auditor sees the full provider scope. The event carries a stable `provider` type
+(distinct from the operator's per-endpoint config `vendor`) that selects the
+mapping. A `failed` result asserts nothing.
+
+| Claim | tinfoil | near-ai | chutes | phala-direct | generic |
+| --- | --- | --- | --- | --- | --- |
+| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
+| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | unknown |
+| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | unknown |
+| `os_known_good` | unknown | unknown | unknown | unknown | unknown |
+| `gpu_attested` | unknown³ | unknown³ | unknown³ | unknown³ | unknown |
+| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown |
+
+- For the four real provider verifiers `tee_attested` is `HardwareProven`: a
+  genuine TEE quote was verified and the request channel bound to it.
+- ¹ `tcb_up_to_date` is an honest tri-state from the verifier's reported
+  `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
+  **refutes** (the quote proves a stale TCB — the gateway records the bad claim
+  but does **not** hard-reject the session), and an absent status is `unknown`.
+  Freshness is never asserted by policy. All four provider verifiers surface
+  `tcb_status`: NEAR AI and Phala-direct read it from the dstack verifier, which
+  reports TCB freshness separately from its overall `is_valid`, so a stale TCB
+  shows up without failing the gateway; Chutes no longer hard-rejects a stale
+  TCB — it records the per-instance and fleet-aggregated status, so an OutOfDate
+  instance serves with a refuted claim (quote signature, report-data binding,
+  debug bit and measurement match stay hard gates); Tinfoil's official verifier
+  owns a fail-closed TCB gate with no separable status, so a verified result
+  reports `UpToDate`.
+- ² Tinfoil compares its SEV-SNP launch measurement against the Sigstore golden
+  values published for the build's repo; the reason cites `config_repo` /
+  `release_digest`. Source is `VerifierDerived`.
+- ³ `gpu_attested` is never asserted from a GPU/NRAS token alone (see the GPU
+  note above); the raw `gpu_verified` / `gpu_arch` facts remain in `extra`. The
+  GPU check still runs — when it succeeds it authenticates the GPU model/info the
+  CPU TEE quote does not itself vouch for — but it never gates a session: a real
+  TEE GPU is already established by the measured serving software inside the
+  quote, so a failed or absent GPU result is recorded as supplemental metadata,
+  not a rejection (Chutes and Phala-direct both treat it this way).
+- "generic" is the static / preverified / DCAP path with no provider identity:
+  it asserts only `tee_attested` (`VerifierDerived`), nothing else.
+
 ## Configuration
 
 Config is thin: it says *what to connect to*, not *what is trusted*. One

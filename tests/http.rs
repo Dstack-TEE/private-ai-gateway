@@ -397,6 +397,7 @@ async fn attested_session_lookup_returns_audit_record() {
     let h = make_harness();
     let event = UpstreamVerifiedEvent {
         vendor: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
