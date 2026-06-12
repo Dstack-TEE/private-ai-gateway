@@ -56,7 +56,7 @@ A provider can never be "verified but unpinned."
 When an upstream is verified, `record_attested_upstream_session`
 (`src/aggregator/service.rs`) content-addresses the verified binding, verifier id,
 target, and evidence digest into a stable `session_id` (`as_<sha256>`), stores an
-`AttestedSessionRecord` served by `GET /v1/audit/sessions/{session_id}`, and attaches
+`AttestedSession` served by `GET /v1/aci/sessions/{session_id}`, and attaches
 that `session_id` to the receipt's `upstream.verified` event. Retention is the receipt
 TTL — a retention window, not a binding-validity deadline (see
 [../upstream-verification-lifecycle.md](../upstream-verification-lifecycle.md)).
@@ -64,8 +64,8 @@ TTL — a retention window, not a binding-validity deadline (see
 ### How a relying party verifies it end-to-end
 
 1. `GET /v1/attestation/report?nonce=<random>` — verify the gateway's own ACI report.
-2. `GET /v1/receipt/{chat_id}` — verify the receipt signature under the attested keyset.
-3. Read `upstream.verified.session_id`; `GET /v1/audit/sessions/{id}`.
+2. `GET /v1/aci/receipts/{chat_id}` — verify the receipt signature under the attested keyset.
+3. Read `upstream.verified.session_id`; `GET /v1/aci/sessions/{id}`.
 4. Confirm the record's `target`, `verifier_id`, `evidence.digest`, and `session_binding`
    match the receipt event (nothing the middleware can forge).
 5. The gateway has already enforced that binding on the wire before forwarding.

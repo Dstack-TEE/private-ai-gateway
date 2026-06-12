@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +47,11 @@ use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream, UpstreamError, UpstreamRequest,
 };
 use crate::aggregator::metrics::{MetricsSnapshot, RequestMode, ServiceMetrics, StreamErrorKind};
+use crate::aggregator::session::{
+    AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, WorkloadIdentityRef,
+};
+use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
+use crate::aggregator::upstream_config::UpstreamSessionSink;
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
@@ -259,41 +263,9 @@ impl ReceiptOwner {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionRecord {
-    pub api_version: String,
-    pub session_id: String,
-    pub direction: String,
-    pub established_at: u64,
-    pub expires_at: u64,
-    pub target: AttestedSessionTarget,
-    pub verification: AttestedSessionVerification,
-    pub session_binding: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionTarget {
-    #[serde(rename = "type")]
-    pub target_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AttestedSessionVerification {
-    pub verifier_id: String,
-    pub verified_claims: Vec<String>,
-    pub evidence: Option<Value>,
-    pub provider_claims: Option<Value>,
-}
-
-/// Stored receipts plus optional retained request bodies. The default
-/// in-memory implementation is enough for the first increment; a
-/// regional persistent store comes in a follow-up.
+/// Stored signed receipts. The default in-memory implementation is enough for
+/// the prototype; a durable store comes in a follow-up. The gateway never
+/// stores request bodies — only the receipt (which holds hashes, not content).
 pub trait ReceiptStore: Send + Sync {
     /// Store a signed receipt. `owner` is the requester's hashed bearer
     /// credential, or `None` for anonymous calls. The store MUST keep
@@ -303,16 +275,6 @@ pub trait ReceiptStore: Send + Sync {
     fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<Receipt>;
     /// Return the owner recorded at `put` time, if any.
     fn owner_of(&self, receipt_id: &str, now: u64) -> Option<ReceiptOwner>;
-    /// Persist the post-rewrite request body for `receipt_id` until
-    /// `expires_at` (unix seconds). Stores covered by retention windows
-    /// MUST drop expired bodies on read.
-    fn put_body(&self, receipt_id: &str, body: Vec<u8>, expires_at: u64);
-    /// Fetch the retained body if it exists and `now < expires_at`.
-    fn get_body(&self, receipt_id: &str, now: u64) -> Option<Vec<u8>>;
-    /// Store a verified attested-session audit record.
-    fn put_attested_session(&self, session: AttestedSessionRecord);
-    /// Fetch an attested-session audit record if it exists and is not expired.
-    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord>;
 }
 
 #[derive(Default)]
@@ -324,18 +286,11 @@ pub struct InMemoryReceiptStore {
 struct InMemoryReceiptStoreInner {
     by_receipt: std::collections::HashMap<String, StoredReceipt>,
     by_chat: std::collections::HashMap<String, String>,
-    bodies: std::collections::HashMap<String, RetainedBody>,
-    sessions: std::collections::HashMap<String, AttestedSessionRecord>,
 }
 
 struct StoredReceipt {
     receipt: Receipt,
     owner: Option<ReceiptOwner>,
-    expires_at: u64,
-}
-
-struct RetainedBody {
-    bytes: Vec<u8>,
     expires_at: u64,
 }
 
@@ -394,44 +349,6 @@ impl ReceiptStore for InMemoryReceiptStore {
             .get(receipt_id)
             .and_then(|entry| entry.owner.clone())
     }
-
-    fn put_body(&self, receipt_id: &str, body: Vec<u8>, expires_at: u64) {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        guard.bodies.insert(
-            receipt_id.to_string(),
-            RetainedBody {
-                bytes: body,
-                expires_at,
-            },
-        );
-    }
-
-    fn get_body(&self, receipt_id: &str, now: u64) -> Option<Vec<u8>> {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        if let Some(entry) = guard.bodies.get(receipt_id) {
-            if now >= entry.expires_at {
-                guard.bodies.remove(receipt_id);
-                return None;
-            }
-            return Some(entry.bytes.clone());
-        }
-        None
-    }
-
-    fn put_attested_session(&self, session: AttestedSessionRecord) {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        guard.sessions.insert(session.session_id.clone(), session);
-    }
-
-    fn get_attested_session(&self, session_id: &str, now: u64) -> Option<AttestedSessionRecord> {
-        let mut guard = self.inner.write().expect("receipt store poisoned");
-        let expires_at = guard.sessions.get(session_id)?.expires_at;
-        if now >= expires_at {
-            guard.sessions.remove(session_id);
-            return None;
-        }
-        guard.sessions.get(session_id).cloned()
-    }
 }
 
 fn remove_receipt_locked(inner: &mut InMemoryReceiptStoreInner, receipt_id: &str) {
@@ -440,7 +357,6 @@ fn remove_receipt_locked(inner: &mut InMemoryReceiptStoreInner, receipt_id: &str
             inner.by_chat.remove(&chat_id);
         }
     }
-    inner.bodies.remove(receipt_id);
 }
 
 /// Returned by [`AciService::forward_chat_completion`].
@@ -488,7 +404,6 @@ pub struct MiddlewareReceiptDraft {
     receipt_id: String,
     builder: ReceiptBuilder,
     provider_response_hash: String,
-    forwarded_body: Vec<u8>,
     endpoint_path: String,
     request_mode: RequestMode,
     response_model: Option<String>,
@@ -661,6 +576,7 @@ pub struct AciService {
     upstream: Arc<dyn UpstreamBackend>,
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
+    session_store: Arc<dyn SessionStore>,
     keyset: WorkloadKeyset,
     workload_id: String,
     workload_keyset_digest: String,
@@ -811,6 +727,7 @@ impl AciService {
             upstream,
             upstream_verifier,
             receipt_store,
+            session_store: Arc::new(InMemorySessionStore::default()),
             keyset,
             workload_id,
             workload_keyset_digest,
@@ -822,6 +739,13 @@ impl AciService {
             ),
             e2ee_replay: RwLock::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Swap in a durable session store (e.g. [`crate::aggregator::session_store::JsonlSessionStore`]).
+    /// Defaults to an in-memory store, which keeps the prior no-persistence behavior.
+    pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
+        self.session_store = session_store;
+        self
     }
 
     pub fn workload_id(&self) -> &str {
@@ -1230,9 +1154,6 @@ impl AciService {
         };
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body);
-        recorded_event.model_id = response_model
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -1277,16 +1198,18 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-        builder
-            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
+        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
+        // The session is keyed on the requested (routed) model; record the exact
+        // upstream-served model in the receipt's upstream.verified event.
+        builder.set_upstream_verified_model_id(response_model.clone());
         if upstream_response.body != wire_response_body {
             builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
         }
         builder.add_response_returned(&upstream_response.body, &wire_response_body)?;
 
         let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), req.requester.clone(), &forwarded_body);
+        self.store_receipt(receipt.clone(), req.requester.clone());
         self.metrics.record_receipt_issued(
             endpoint_path,
             RequestMode::Buffered,
@@ -1326,7 +1249,7 @@ impl AciService {
         selected_route_id: &str,
         forwarded_body: &[u8],
         recorded_event: UpstreamVerifiedEvent,
-        upstream_session_id: Option<&str>,
+        recorded: Option<(String, SessionClaims)>,
     ) -> Result<ReceiptBuilder, ServiceError> {
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
@@ -1344,7 +1267,7 @@ impl AciService {
         if received_body != forwarded_body {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        builder.add_upstream_verified_with_session(recorded_event, upstream_session_id)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
         Ok(builder)
     }
 
@@ -1523,7 +1446,8 @@ impl AciService {
                 let upstream_headers = upstream_response.headers;
                 let receipt_id = generate_receipt_id();
                 let served_at = self.clock.now_secs();
-                let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+                let recorded = self.record_attested_upstream_session(&recorded_event)?;
+                let session_id = recorded.as_ref().map(|(id, _)| id.clone());
                 let builder = self.build_middleware_receipt_prefix(
                     &receipt_id,
                     None,
@@ -1534,7 +1458,7 @@ impl AciService {
                     &route_id,
                     &forwarded_body,
                     recorded_event,
-                    upstream_session_id.as_deref(),
+                    recorded,
                 )?;
                 receipt_journal.reserve_receipt_id(receipt_id.clone());
 
@@ -1544,7 +1468,6 @@ impl AciService {
                     journal: receipt_journal,
                     provider_response_hasher: Sha256::new(),
                     receipt_id: receipt_id.clone(),
-                    forwarded_body,
                     endpoint_path: endpoint_path.to_string(),
                     sse_parser: SseChatIdParser::default(),
                     metrics: self.metrics.clone(),
@@ -1561,7 +1484,7 @@ impl AciService {
                         body: Box::pin(body),
                         selected_route: route_id.clone(),
                         attempts: index + 1,
-                        session_id: upstream_session_id,
+                        session_id,
                     },
                 )));
             }
@@ -1627,9 +1550,6 @@ impl AciService {
 
             // Commit this candidate.
             let response_model = accepted_response_model(status, &upstream_response.body);
-            recorded_event.model_id = response_model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
             self.metrics.record_upstream_response(
                 endpoint_path,
                 RequestMode::Buffered,
@@ -1640,7 +1560,8 @@ impl AciService {
             let receipt_id = generate_receipt_id();
             let served_at = self.clock.now_secs();
             let chat_id = extract_chat_id(&upstream_response.body);
-            let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
+            let recorded = self.record_attested_upstream_session(&recorded_event)?;
+            let session_id = recorded.as_ref().map(|(id, _)| id.clone());
             let mut builder = self.build_middleware_receipt_prefix(
                 &receipt_id,
                 chat_id,
@@ -1651,8 +1572,11 @@ impl AciService {
                 &route_id,
                 &forwarded_body,
                 recorded_event,
-                upstream_session_id.as_deref(),
+                recorded,
             )?;
+            // The session is keyed on the requested (routed) model; record the
+            // exact upstream-served model in the receipt's upstream.verified.
+            builder.set_upstream_verified_model_id(response_model.clone());
             let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
 
             return Ok(MiddlewareForwardResult::Forwarded(Box::new(
@@ -1662,7 +1586,6 @@ impl AciService {
                         receipt_id: receipt_id.clone(),
                         builder,
                         provider_response_hash,
-                        forwarded_body,
                         endpoint_path: endpoint_path.to_string(),
                         request_mode: RequestMode::Buffered,
                         response_model,
@@ -1672,7 +1595,7 @@ impl AciService {
                     upstream_headers: upstream_response.headers,
                     selected_route: route_id.clone(),
                     attempts: index + 1,
-                    session_id: upstream_session_id,
+                    session_id,
                 },
             )));
         }
@@ -1795,9 +1718,8 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let upstream_session_id = self.record_attested_upstream_session(&recorded_event)?;
-        builder
-            .add_upstream_verified_with_session(recorded_event, upstream_session_id.as_deref())?;
+        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
 
         let e2ee_response = req.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -1818,9 +1740,6 @@ impl AciService {
             receipt_store: self.receipt_store.clone(),
             key_id: self.default_receipt_key_id.clone(),
             requester: req.requester,
-            forwarded_body,
-            receipt_id: receipt_id.clone(),
-            body_retention_seconds: self.config.service_capabilities.body_retention_seconds,
             receipt_ttl_seconds: self.config.receipt_ttl_seconds,
             clock: self.clock.clone(),
             metrics: self.metrics.clone(),
@@ -1887,7 +1806,7 @@ impl AciService {
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), requester, &draft.forwarded_body);
+        self.store_receipt(receipt.clone(), requester);
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
@@ -1952,7 +1871,6 @@ impl AciService {
             receipt_store: self.receipt_store.clone(),
             key_id: self.default_receipt_key_id.clone(),
             requester,
-            body_retention_seconds: self.config.service_capabilities.body_retention_seconds,
             receipt_ttl_seconds: self.config.receipt_ttl_seconds,
             clock: self.clock.clone(),
             metrics: self.metrics.clone(),
@@ -1995,7 +1913,8 @@ impl AciService {
 
         let missing_verifier_result = upstream_verification_event.is_none();
         let event = upstream_verification_event.unwrap_or_else(|| UpstreamVerifiedEvent {
-            vendor: prepared.upstream_name.clone(),
+            upstream_name: prepared.upstream_name.clone(),
+            provider: None,
             model_id: prepared.model_id.clone(),
             url_origin: prepared.url_origin.clone(),
             verifier_id: "none".to_string(),
@@ -2070,111 +1989,87 @@ impl AciService {
         }
     }
 
+    /// Seal + persist the attested session for a verified event, and return its
+    /// `(session_id, claim-verdicts)`. The verdicts are surfaced inline in the
+    /// receipt's `upstream.verified` (shallow audit), while the persisted session
+    /// also carries the evidence + reasons (deep audit).
     fn record_attested_upstream_session(
         &self,
         event: &UpstreamVerifiedEvent,
-    ) -> Result<Option<String>, ServiceError> {
+    ) -> Result<Option<(String, SessionClaims)>, ServiceError> {
         if event.result != VerificationResult::Verified || event.channel_bindings.is_empty() {
             return Ok(None);
         }
 
         let now = self.clock.now_secs();
-        // Retain the attested-session record for the same window as the receipt that
-        // cites it (receipt_ttl_seconds), so a relying party verifying that receipt can
-        // always resolve its `session_id`. This is a *retention* window, not a binding
-        // validity deadline: the forwarding path only ever uses a binding from a fresh
-        // verification lease (verifier_cache_seconds, ~300s), and `established_at` records
-        // when this binding was verified. Expiring this record with the lease instead
-        // would strand `session_id`s referenced by still-valid receipts.
+        // Retention window (`receipt_ttl_seconds`), so a relying party verifying a
+        // citing receipt can resolve its `session_id`. The session is sealed
+        // slightly before its receipt, so it expires up to one request-processing
+        // interval (sub-second) sooner than that receipt — both use the same TTL
+        // off a per-call `now`. This is a retention deadline, not a binding
+        // validity one (the forwarding path only ever uses a fresh lease).
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        let channel_bindings = event
-            .channel_bindings
-            .iter()
-            .map(|binding| binding.to_value())
-            .collect::<Vec<_>>();
-        let binding_material = json!({
-            "session_binding": channel_bindings,
-        });
-        let binding_material_digest = crate::aci::canonical::jcs_sha256_hex(&binding_material)?;
-        let verified_claims = verified_claims_for_session(event);
-        let evidence = session_evidence(event);
-        let evidence_material = evidence.as_ref().map(|value| {
-            value
-                .get("digest")
-                .and_then(Value::as_str)
-                .map(|digest| json!({ "digest": digest }))
-                .unwrap_or_else(|| value.clone())
-        });
-        let verification_material = json!({
-            "verifier_id": &event.verifier_id,
-            "verified_claims": &verified_claims,
-            "evidence": evidence_material,
-            "provider_claims": &event.provider_claims,
-        });
-        let verification_material_digest =
-            crate::aci::canonical::jcs_sha256_hex(&verification_material)?;
-        let session_material = json!({
-            "direction": "upstream",
-            "target": {
-                "type": "upstream",
-                "provider": &event.vendor,
-                "model_id": &event.model_id,
-                "endpoint": &event.url_origin,
-            },
-            "verifier_id": &event.verifier_id,
-            "verification_digest": verification_material_digest,
-            "session_binding_digest": binding_material_digest,
-        });
-        let session_digest = crate::aci::canonical::jcs_sha256_hex(&session_material)?;
-        let session_id = format!(
-            "as_{}",
-            session_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(session_digest.as_str())
-        );
-        let record = AttestedSessionRecord {
-            api_version: "aci/1".to_string(),
-            session_id: session_id.clone(),
-            direction: "upstream".to_string(),
-            established_at: now,
+
+        let channel_binding = AttestedSession::bindings_to_values(&event.channel_bindings);
+        let claims = session_claims_for_event(event);
+
+        // Lift the response-signing address into the verified identity when present.
+        let mut identity = WorkloadIdentityRef::default();
+        if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
+            if let Some(addr) = map.get("signing_address").and_then(Value::as_str) {
+                identity.signing_address = Some(addr.to_string());
+            }
+        }
+        let identity = (!identity.is_empty()).then_some(identity);
+
+        let evidence = event
+            .evidence
+            .as_ref()
+            .map(EvidenceRef::from_value)
+            .unwrap_or_default();
+
+        let session = AttestedSession::seal(
+            event.upstream_name.clone(),
+            event.url_origin.clone(),
+            event.verifier_id.clone(),
+            identity,
+            channel_binding,
+            claims.clone(),
+            evidence,
+            now,
             expires_at,
-            target: AttestedSessionTarget {
-                target_type: "upstream".to_string(),
-                provider: Some(event.vendor.clone()),
-                model_id: Some(event.model_id.clone()),
-                endpoint: event.url_origin.clone(),
-            },
-            verification: AttestedSessionVerification {
-                verifier_id: event.verifier_id.clone(),
-                verified_claims,
-                evidence,
-                provider_claims: event.provider_claims.clone(),
-            },
-            session_binding: channel_bindings,
-        };
-        self.receipt_store.put_attested_session(record);
-        Ok(Some(session_id))
+        )?;
+
+        let session_id = session.session_id.clone();
+        if let Err(err) = self.session_store.put_session(session, now) {
+            // Persisting the audit record must not break inference; a missing
+            // session simply resolves to "not found" for relying parties.
+            tracing::warn!(error = %err, session_id = %session_id, "failed to persist attested session");
+        }
+        Ok(Some((session_id, claims)))
     }
 
-    fn store_receipt(
-        &self,
-        receipt: Receipt,
-        requester: Option<ReceiptOwner>,
-        forwarded_body: &[u8],
-    ) {
+    /// Append the `upstream.verified` receipt event, attaching the session id and
+    /// the typed claim verdicts when a verified session was recorded.
+    fn append_upstream_verified(
+        builder: &mut ReceiptBuilder,
+        event: UpstreamVerifiedEvent,
+        recorded: Option<(String, SessionClaims)>,
+    ) -> Result<(), ReceiptError> {
+        // A sealed session and its claims are inseparable: either both (verified)
+        // or neither (failed / no binding).
+        match recorded {
+            Some((session_id, claims)) => {
+                builder.add_upstream_verified_with_session(event, &session_id, &claims)
+            }
+            None => builder.add_upstream_verified(event),
+        }
+    }
+
+    fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {
         let now = self.clock.now_secs();
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        self.receipt_store
-            .put(receipt.clone(), requester, expires_at);
-        let retention = self.config.service_capabilities.body_retention_seconds;
-        if retention > 0 {
-            let body_expires_at = now.saturating_add(retention);
-            self.receipt_store.put_body(
-                &receipt.receipt_id,
-                forwarded_body.to_vec(),
-                body_expires_at,
-            );
-        }
+        self.receipt_store.put(receipt, requester, expires_at);
     }
 
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<Receipt> {
@@ -2215,21 +2110,17 @@ impl AciService {
             .owner_of(receipt_id, self.clock.now_secs())
     }
 
-    /// Read the retained post-rewrite request body if retention is
-    /// active and the entry has not expired.
-    pub fn get_retained_body(&self, receipt_id: &str) -> Option<Vec<u8>> {
-        self.receipt_store
-            .get_body(receipt_id, self.clock.now_secs())
+    pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSession> {
+        self.session_store
+            .get_session(session_id, self.clock.now_secs())
     }
 
-    pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSessionRecord> {
-        self.receipt_store
-            .get_attested_session(session_id, self.clock.now_secs())
-    }
-
-    /// Body retention window in seconds, or 0 if bodies are not retained.
-    pub fn body_retention_seconds(&self) -> u64 {
-        self.config.service_capabilities.body_retention_seconds
+    /// List attested sessions (TEE channels), optionally filtered by provider
+    /// (the upstream config name). A model→channel lookup belongs to the caller,
+    /// since a session is per-channel, not per-model.
+    pub fn list_attested_sessions(&self, provider: Option<&str>) -> Vec<AttestedSession> {
+        self.session_store
+            .list_sessions(provider, self.clock.now_secs())
     }
 
     /// E2EE protocol versions this workload has actually wired.
@@ -2238,28 +2129,235 @@ impl AciService {
     }
 }
 
-fn verified_claims_for_session(event: &UpstreamVerifiedEvent) -> Vec<String> {
-    let mut claims = std::collections::BTreeSet::new();
-    claims.insert("encrypted-session-verified".to_string());
-
-    if let Some(provider_claims) = event.provider_claims.as_ref() {
-        if let Some(items) = provider_claims
-            .get("verified_claims")
-            .and_then(serde_json::Value::as_array)
-        {
-            for item in items {
-                if let Some(tag) = item.as_str().map(str::trim).filter(|tag| !tag.is_empty()) {
-                    claims.insert(tag.to_string());
-                }
-            }
+/// The background upstream verification writes attested sessions into the store
+/// through this sink, keeping it fresh from the same verification that keeps the
+/// gateway's attestation fresh — independent of traffic. The live completion
+/// path also writes (the session it served). Both are safe because sealing is
+/// content-addressed and idempotent: an unchanged endpoint resolves to the same
+/// record, so the two writers converge on one logical session per verified state
+/// rather than duplicating it.
+impl UpstreamSessionSink for AciService {
+    fn record_session(&self, event: &UpstreamVerifiedEvent) {
+        if let Err(err) = self.record_attested_upstream_session(event) {
+            tracing::warn!(error = %err, "failed to record attested session from verification");
         }
     }
-
-    claims.into_iter().collect()
 }
 
-fn session_evidence(event: &UpstreamVerifiedEvent) -> Option<Value> {
-    event.evidence.clone()
+/// Maps a verified `UpstreamVerifiedEvent` onto the typed claim vocabulary for
+/// one provider. Each provider implements it, so the honesty rules for a
+/// provider live with that provider instead of in one central match. `claims`
+/// is only invoked for a `Verified` result; the caller folds the raw
+/// `provider_claims` into `claims.extra` afterward. A mapper asserts only what
+/// its verifier's evidence proves; everything else stays `Unknown`.
+trait ProviderClaimMapper {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims;
+}
+
+/// Route a provider *type* to its claim mapper; an absent/unknown provider gets
+/// the generic mapper. This is the only place that branches on the provider
+/// string — the per-provider logic lives in the `ProviderClaimMapper` impls.
+fn claim_mapper(provider: Option<&str>) -> &'static dyn ProviderClaimMapper {
+    match provider {
+        Some("tinfoil") => &TinfoilClaims,
+        Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
+        _ => &GenericClaims,
+    }
+}
+
+/// Build the typed claim set for a verified event. Raw `provider_claims` are
+/// always preserved verbatim in `claims.extra` so a deep auditor sees the full
+/// provider scope, typed or not.
+fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
+    let mut claims = if event.result == VerificationResult::Verified {
+        claim_mapper(event.provider.as_deref()).claims(event)
+    } else {
+        SessionClaims::default()
+    };
+    if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
+        for (key, value) in map {
+            claims.extra.insert(key.clone(), value.clone());
+        }
+    }
+    claims
+}
+
+/// `tee_attested` rooted in a verified hardware quote with the request channel
+/// bound to it. Shared by the providers that verify a real TEE quote.
+fn hardware_tee_attested(event: &UpstreamVerifiedEvent) -> Claim {
+    Claim::asserted(
+        ClaimSource::HardwareProven,
+        format!(
+            "{} verified the TEE quote and bound the request channel",
+            event.verifier_id
+        ),
+    )
+}
+
+/// Intel TDX providers (NEAR AI, Chutes, Phala-direct): a real TDX quote, a
+/// granular `TcbStatus` from the verified collateral (a HardwareProven
+/// tri-state), OS provenance from the attested image hash, and — when the
+/// provider supplies it — a verified NVIDIA confidential-computing GPU
+/// attestation. (Chutes uses TDX too; it just isn't dstack-based, hence the
+/// name is by TEE type, not by stack.)
+struct IntelTdxClaims;
+impl ProviderClaimMapper for IntelTdxClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        // model_weights_provenance stays Unknown: no verifier here checks the
+        // served weights.
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
+            os_known_good: os_known_good_claim(event),
+            gpu_attested: gpu_attested_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Tinfoil: a verified hardware quote, but its official verifier gates on TCB
+/// internally (no separable `TcbStatus`, so freshness is VerifierDerived, never
+/// HardwareProven), and it traces serving software to a reviewed Sigstore release.
+struct TinfoilClaims;
+impl ProviderClaimMapper for TinfoilClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: Claim::asserted(
+                ClaimSource::VerifierDerived,
+                "Tinfoil's verifier requires an up-to-date TCB for a verified \
+                 result; no separable TcbStatus is surfaced",
+            ),
+            serving_software_known_good: tinfoil_software_claim(event),
+            os_known_good: os_known_good_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Generic verifier (static / preverified / DCAP test path): we only know it
+/// returned Verified with an enforceable channel binding.
+struct GenericClaims;
+impl ProviderClaimMapper for GenericClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: Claim::asserted(
+                ClaimSource::VerifierDerived,
+                format!(
+                    "{} verified the workload identity and bound the channel",
+                    event.verifier_id
+                ),
+            ),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Platform TCB freshness as an honest tri-state from the verifier's reported
+/// `tcb_status` (TDX/SEV `TcbStatus`): `UpToDate` asserts, any other reported
+/// status refutes — the quote proves a stale TCB even though the gateway does
+/// not hard-reject it — and an absent status is Unknown. Freshness is never
+/// asserted by policy: a verifier that does not surface a status leaves the
+/// claim Unknown, because we cannot prove it is current, not because it is.
+fn tcb_up_to_date_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let status = event
+        .provider_claims
+        .as_ref()
+        .and_then(|c| c.get("tcb_status"))
+        .and_then(Value::as_str);
+    match status {
+        Some(status) if status.eq_ignore_ascii_case("uptodate") => Claim::asserted(
+            ClaimSource::HardwareProven,
+            format!("platform TCB status {status}"),
+        ),
+        Some(status) => Claim::refuted(
+            ClaimSource::HardwareProven,
+            format!("platform TCB status {status}"),
+        ),
+        None => Claim::unknown(),
+    }
+}
+
+/// OS-image provenance from the attested `os_image_hash`. Phala-direct resolves
+/// that hash to dstack's published image and reads its prod-vs-dev flag, so
+/// `production_os_image` is a verifier-derived verdict: a known production image
+/// asserts; a dev image (SSH / serial console enabled — an operator shell that
+/// defeats the confidentiality guarantee) **refutes**, recorded rather than
+/// hard-rejected; an unresolved hash stays Unknown. Providers that surface no
+/// such fact are Unknown.
+fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let production = event
+        .provider_claims
+        .as_ref()
+        .and_then(|c| c.get("production_os_image"))
+        .and_then(Value::as_bool);
+    match production {
+        Some(true) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            "attested OS image resolves to a known production image",
+        ),
+        Some(false) => Claim::refuted(
+            ClaimSource::VerifierDerived,
+            "attested OS image is a dev image (SSH / serial console enabled), not production",
+        ),
+        None => Claim::unknown(),
+    }
+}
+
+/// GPU attestation from the provider's NVIDIA confidential-computing evidence.
+/// When `gpu_verified` is set, the GPU's own attestation report was
+/// cryptographically verified and nonce-bound to this verification round, so we
+/// **assert** it — but as `VerifierDerived`, not `HardwareProven`: it attests a
+/// genuine CC GPU, not (on its own) that this GPU is bound to the CPU TEE that
+/// served the request. Absent GPU evidence (or a provider that doesn't supply
+/// it) leaves the claim Unknown — we never assert it by policy.
+fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let claims = event.provider_claims.as_ref();
+    let verified = claims
+        .and_then(|c| c.get("gpu_verified"))
+        .and_then(Value::as_bool);
+    match verified {
+        Some(true) => {
+            let arch = claims
+                .and_then(|c| c.get("gpu_arch"))
+                .and_then(Value::as_str);
+            let reason = match arch {
+                Some(arch) => format!(
+                    "NVIDIA confidential-computing GPU attestation verified and nonce-bound \
+                     (arch {arch}); attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                ),
+                None => "NVIDIA confidential-computing GPU attestation verified and nonce-bound; \
+                         attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                    .to_string(),
+            };
+            Claim::asserted(ClaimSource::VerifierDerived, reason)
+        }
+        // `false` is ambiguous (no evidence vs. a swallowed verify error), so we
+        // do not refute — only assert on a genuine, nonce-bound verification.
+        _ => Claim::unknown(),
+    }
+}
+
+/// Tinfoil traces its serving software to reviewed source: the SEV-SNP launch
+/// measurement is compared against the Sigstore golden values published for the
+/// build's repo. Cite the source repo and release digest when the verifier
+/// reported them.
+fn tinfoil_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let field = |key: &str| {
+        event
+            .provider_claims
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(Value::as_str)
+    };
+    let reason = match (field("config_repo"), field("release_digest")) {
+        (Some(repo), Some(digest)) => {
+            format!("Sigstore-verified code measurement matches {repo} (release {digest})")
+        }
+        (Some(repo), None) => format!("Sigstore-verified code measurement matches {repo}"),
+        _ => "Sigstore-verified code measurement matches the published golden values".to_string(),
+    };
+    Claim::asserted(ClaimSource::VerifierDerived, reason)
 }
 
 struct MiddlewareProviderResponseDraftingStream {
@@ -2268,7 +2366,6 @@ struct MiddlewareProviderResponseDraftingStream {
     journal: MiddlewareReceiptJournal,
     provider_response_hasher: Sha256,
     receipt_id: String,
-    forwarded_body: Vec<u8>,
     endpoint_path: String,
     sse_parser: SseChatIdParser,
     metrics: Arc<ServiceMetrics>,
@@ -2339,7 +2436,6 @@ impl MiddlewareProviderResponseDraftingStream {
             receipt_id: self.receipt_id.clone(),
             builder,
             provider_response_hash,
-            forwarded_body: self.forwarded_body.clone(),
             endpoint_path: self.endpoint_path.clone(),
             request_mode: RequestMode::Streaming,
             response_model: response_model.clone(),
@@ -2363,7 +2459,6 @@ struct MiddlewareResponseFinalizingStream {
     receipt_store: Arc<dyn ReceiptStore>,
     key_id: String,
     requester: Option<ReceiptOwner>,
-    body_retention_seconds: u64,
     receipt_ttl_seconds: u64,
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
@@ -2490,12 +2585,6 @@ impl MiddlewareResponseFinalizingStream {
         self.receipt_store
             .put(receipt, self.requester.clone(), expires_at);
 
-        if self.body_retention_seconds > 0 {
-            let body_expires_at = now.saturating_add(self.body_retention_seconds);
-            self.receipt_store
-                .put_body(&draft.receipt_id, draft.forwarded_body, body_expires_at);
-        }
-
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
@@ -2514,9 +2603,6 @@ struct ReceiptFinalizingStream {
     receipt_store: Arc<dyn ReceiptStore>,
     key_id: String,
     requester: Option<ReceiptOwner>,
-    forwarded_body: Vec<u8>,
-    receipt_id: String,
-    body_retention_seconds: u64,
     receipt_ttl_seconds: u64,
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
@@ -2634,15 +2720,6 @@ impl ReceiptFinalizingStream {
         let expires_at = now.saturating_add(self.receipt_ttl_seconds);
         self.receipt_store
             .put(receipt, self.requester.clone(), expires_at);
-
-        if self.body_retention_seconds > 0 {
-            let body_expires_at = now.saturating_add(self.body_retention_seconds);
-            self.receipt_store.put_body(
-                &self.receipt_id,
-                self.forwarded_body.clone(),
-                body_expires_at,
-            );
-        }
 
         self.metrics.record_upstream_response(
             &self.endpoint_path,
@@ -3579,4 +3656,269 @@ fn legacy_signature_text(receipt: &Receipt) -> Option<String> {
 
 fn strip_sha256_prefix(value: &str) -> Option<&str> {
     value.strip_prefix("sha256:")
+}
+
+#[cfg(test)]
+mod claim_mapping_tests {
+    use super::session_claims_for_event;
+    use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+    use crate::aggregator::session::{ClaimSource, ClaimStatus};
+    use serde_json::{json, Value};
+
+    fn event(
+        provider: Option<&str>,
+        result: VerificationResult,
+        provider_claims: Option<Value>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: "operator-config-name".to_string(),
+            provider: provider.map(str::to_string),
+            model_id: "m".to_string(),
+            url_origin: Some("https://up".to_string()),
+            verifier_id: "vid/v1".to_string(),
+            result,
+            required: true,
+            reason: None,
+            evidence: None,
+            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: "https://up".to_string(),
+                spki_sha256: "aa".repeat(32),
+            }],
+            provider_claims,
+        }
+    }
+
+    #[test]
+    fn tinfoil_asserts_tee_and_serving_software_with_verifier_derived_tcb() {
+        let claims = session_claims_for_event(&event(
+            Some("tinfoil"),
+            VerificationResult::Verified,
+            Some(json!({
+                "config_repo": "tinfoilsh/confidential-model",
+                "release_digest": "sha256:abc123",
+            })),
+        ));
+        // TEE is hardware-proven.
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+        // TCB is asserted but VerifierDerived — Tinfoil's verifier gates on TCB
+        // yet exposes no raw TcbStatus, so it must NOT be labeled HardwareProven
+        // (regression guard for the fabricated-"UpToDate" bug).
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tcb_up_to_date.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_ne!(
+            claims.tcb_up_to_date.source,
+            Some(ClaimSource::HardwareProven)
+        );
+        // Serving software is verifier-derived (Sigstore), and cites the source.
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Asserted
+        );
+        assert_eq!(
+            claims.serving_software_known_good.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        let reason = claims.serving_software_known_good.reason.unwrap();
+        assert!(reason.contains("tinfoilsh/confidential-model"), "{reason}");
+        assert!(reason.contains("sha256:abc123"), "{reason}");
+        // Honest Unknowns: no OS/GPU/weights provenance proven here.
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
+        // Raw provider_claims preserved verbatim for deep audit.
+        assert_eq!(
+            claims.extra.get("config_repo").and_then(Value::as_str),
+            Some("tinfoilsh/confidential-model")
+        );
+    }
+
+    #[test]
+    fn near_and_chutes_assert_tee_but_not_serving_software() {
+        for provider in ["near-ai", "chutes"] {
+            let claims = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "UpToDate" })),
+            ));
+            assert_eq!(
+                claims.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+            // Neither traces serving software to reviewed source.
+            assert_eq!(
+                claims.serving_software_known_good.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
+            assert_eq!(
+                claims.gpu_attested.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn os_known_good_refutes_a_dev_image_and_asserts_production() {
+        // Phala surfaces production_os_image, resolved from the attested
+        // os_image_hash. A dev image (operator console) is refuted, not silently
+        // Unknown — a real platform-security signal the client can see.
+        let dev = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "production_os_image": false })),
+        ));
+        assert_eq!(dev.os_known_good.status, ClaimStatus::Refuted);
+        assert_eq!(dev.os_known_good.source, Some(ClaimSource::VerifierDerived));
+
+        let prod = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "production_os_image": true })),
+        ));
+        assert_eq!(prod.os_known_good.status, ClaimStatus::Asserted);
+
+        // Not surfaced / unresolved ⇒ Unknown (e.g. Tinfoil, or an unresolved hash).
+        let unknown =
+            session_claims_for_event(&event(Some("tinfoil"), VerificationResult::Verified, None));
+        assert_eq!(unknown.os_known_good.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn gpu_attested_asserts_only_on_a_verified_nonce_bound_gpu() {
+        // A verified, nonce-bound GPU attestation asserts — but VerifierDerived,
+        // never HardwareProven (it attests a genuine CC GPU, not its binding to
+        // the serving CPU TEE).
+        let verified = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "gpu_verified": true, "gpu_arch": "hopper" })),
+        ));
+        assert_eq!(verified.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            verified.gpu_attested.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_ne!(
+            verified.gpu_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+
+        // No GPU evidence ⇒ Unknown; never asserted by policy.
+        let absent = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "tcb_status": "UpToDate" })),
+        ));
+        assert_eq!(absent.gpu_attested.status, ClaimStatus::Unknown);
+
+        // Present-but-unverified is ambiguous, so we do not refute ⇒ Unknown.
+        let unverified = session_claims_for_event(&event(
+            Some("chutes"),
+            VerificationResult::Verified,
+            Some(json!({ "gpu_verified": false })),
+        ));
+        assert_eq!(unverified.gpu_attested.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn tcb_up_to_date_is_a_hardware_proven_tri_state_for_dstack_providers() {
+        // The dstack-based providers surface a real TcbStatus from DCAP
+        // collateral. (Tinfoil is excluded: its verifier exposes no raw status,
+        // so its TCB claim is VerifierDerived, asserted earlier in this module.)
+        for provider in ["near-ai", "chutes", "phala-direct"] {
+            // UpToDate asserts.
+            let up = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "UpToDate" })),
+            ));
+            assert_eq!(
+                up.tcb_up_to_date.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+
+            // A stale TCB is refuted from the quote — but the session is still
+            // created (we do not hard-reject), and TEE attestation still holds.
+            let stale = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                Some(json!({ "tcb_status": "OutOfDate" })),
+            ));
+            assert_eq!(
+                stale.tcb_up_to_date.status,
+                ClaimStatus::Refuted,
+                "{provider}"
+            );
+            assert_eq!(
+                stale.tcb_up_to_date.source,
+                Some(ClaimSource::HardwareProven),
+                "{provider}"
+            );
+            assert_eq!(
+                stale.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+
+            // No surfaced status ⇒ Unknown; freshness is never asserted by policy.
+            let missing = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                None,
+            ));
+            assert_eq!(
+                missing.tcb_up_to_date.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
+            assert_eq!(
+                missing.tee_attested.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_provider_asserts_only_tee_verifier_derived() {
+        let claims = session_claims_for_event(&event(None, VerificationResult::Verified, None));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        // No TCB/software guarantees from an unidentified verifier.
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn failed_result_asserts_nothing_but_preserves_evidence() {
+        let claims = session_claims_for_event(&event(
+            Some("tinfoil"),
+            VerificationResult::Failed,
+            Some(json!({ "config_repo": "x" })),
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        // Raw claims are still recorded for the audit trail.
+        assert!(claims.extra.contains_key("config_repo"));
+    }
 }

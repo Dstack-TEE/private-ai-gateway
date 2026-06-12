@@ -185,7 +185,8 @@ impl UpstreamVerifier for ScriptedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "mock-verifier/v1".to_string(),
@@ -460,7 +461,6 @@ fn make_harness_with_upstream(
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds: 0,
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -690,7 +690,6 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![E2EE_VERSION_V2.to_string()],
-        body_retention_seconds: 0,
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1443,7 +1442,7 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 
-    let receipt_response = h.requester.get("/v1/receipt/chat-mock-1").await;
+    let receipt_response = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(receipt_response.status, StatusCode::OK);
     let receipt_json = json_body(&receipt_response);
     assert_eq!(receipt_json["receipt"]["receipt_id"], receipt_id);
@@ -1554,7 +1553,8 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
     let received = br#"{"model":"public-name","messages":[]}"#;
     let forwarded = br#"{"model":"private-upstream-name","messages":[]}"#;
     let verifier_event = UpstreamVerifiedEvent {
-        vendor: "mock-upstream".to_string(),
+        upstream_name: "mock-upstream".to_string(),
+        provider: None,
         model_id: "private-upstream-name".to_string(),
         url_origin: Some("https://mock-upstream.example".to_string()),
         verifier_id: "mock-verifier/v1".to_string(),
@@ -1615,32 +1615,21 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
 }
 
 #[tokio::test]
-async fn receipt_path_and_body_retention_errors_follow_aci_shape() {
+async fn receipt_path_errors_follow_aci_shape() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
     let chat = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(chat.status, StatusCode::OK);
     let receipt_id = header_str(&chat.headers, "x-receipt-id").to_string();
 
-    let by_chat = h.requester.get("/v1/receipt/chat-mock-1").await;
+    let by_chat = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(by_chat.status, StatusCode::OK);
     assert_eq!(json_body(&by_chat)["receipt"]["chat_id"], "chat-mock-1");
     assert_eq!(json_body(&by_chat)["receipt"]["receipt_id"], receipt_id);
 
-    let unknown = h.requester.get("/v1/receipt/missing").await;
+    let unknown = h.requester.get("/v1/signature/missing").await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     assert_eq!(json_body(&unknown)["error"]["type"], "not_found");
-
-    let body = h.requester.get("/v1/receipt/chat-mock-1/body").await;
-    assert_eq!(body.status, StatusCode::NOT_FOUND);
-    assert_eq!(
-        json_body(&body)["error"]["type"],
-        "receipt_body_not_retained"
-    );
-
-    let unknown_body = h.requester.get("/v1/receipt/missing/body").await;
-    assert_eq!(unknown_body.status, StatusCode::NOT_FOUND);
-    assert_eq!(json_body(&unknown_body)["error"]["type"], "not_found");
 }
 
 #[tokio::test]
@@ -1945,7 +1934,8 @@ impl UpstreamVerifier for KeyedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verified = request.upstream_name != self.fail_for;
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name.clone(),
+            upstream_name: request.upstream_name.clone(),
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "keyed-verifier/v1".to_string(),

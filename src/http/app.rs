@@ -26,22 +26,25 @@
 //!   current upstream config, with secrets redacted.
 //! * `PUT  /v1/admin/upstreams` - authenticated admin replacement of
 //!   the single upstream config file.
-//! * `GET  /v1/receipt/{id}` - fetch the canonical receipt response.
-//!   The path parameter accepts either the upstream-issued `chat_id`
-//!   (chat/completions responses carry this) or the gateway-issued
-//!   `receipt_id` (always present on the `x-receipt-id` response
-//!   header; the only handle for `/v1/embeddings` receipts which have
-//!   no chat_id). The top-level fields match dstack-vllm-proxy's
-//!   legacy signature response; the signed ACI receipt is carried in
-//!   `receipt`.
-//! * `GET  /v1/signature/{id}` - alias of `/v1/receipt/{id}` with the
-//!   same chat_id-or-receipt_id semantics.
-//! * `GET  /v1/receipt/{id}/body` - fetch the retained post-rewrite
-//!   request body. Same id semantics. Returns
-//!   `receipt_body_not_retained` when retention is zero or the entry
-//!   expired.
-//! * `GET  /v1/audit/sessions/{session_id}` - fetch the attested-session
-//!   audit record referenced by a receipt.
+//!
+//! ACI verification artifacts live under the `/v1/aci/` namespace so they do
+//! not pollute the OpenAI surface. The id parameter accepts the gateway
+//! `receipt_id` (preferred; always on the `x-receipt-id` response header, and
+//! the only handle for `/v1/embeddings` receipts which have no chat_id) or the
+//! upstream `chat_id`.
+//!
+//! * `GET  /v1/aci/attestation` - the bare ACI attestation report.
+//! * `GET  /v1/aci/receipts/{id}` - the signed ACI receipt (canonical value).
+//! * `GET  /v1/aci/sessions/{session_id}` - the attested-session record a
+//!   receipt references.
+//! * `GET  /v1/aci/sessions?provider=&model=` - list attested sessions.
+//!
+//! Legacy aliases for dstack-vllm-proxy compatibility:
+//! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`
+//!   compatibility fields.
+//! * `GET  /v1/signature/{id}` - the legacy signature wrapper
+//!   (`text`/`signature`/`signing_address`) with the signed ACI receipt
+//!   carried in `receipt`.
 //!
 //! The router installs a middleware that emits `X-ACI-Version`,
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
@@ -251,22 +254,28 @@ fn build_router_inner(
     };
     Router::new()
         .route("/", get(root))
+        // OpenAI- and Anthropic-compatible inference surface.
         .route("/v1/models", get(models))
-        .route("/v1/metrics", get(metrics))
-        .route(
-            "/v1/admin/upstreams",
-            get(admin_get_upstreams).put(admin_put_upstreams),
-        )
-        .route("/v1/attestation/report", get(attestation_report))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
-        .route("/v1/receipt/:chat_id", get(receipt_by_chat_id))
+        // Gateway operations.
+        .route("/v1/metrics", get(metrics))
+        .route(
+            "/v1/admin/upstreams",
+            get(admin_get_upstreams).put(admin_put_upstreams),
+        )
+        // Canonical ACI verification surface (clean shapes).
+        .route("/v1/aci/attestation", get(aci_attestation_report))
+        .route("/v1/aci/receipts/:id", get(aci_receipt))
+        .route("/v1/aci/sessions", get(aci_list_sessions))
+        .route("/v1/aci/sessions/:session_id", get(attested_session))
+        // Legacy dstack-vllm-proxy aliases (vllm-proxy response shapes only;
+        // we owe no back-compat to earlier private-ai-gateway paths).
+        .route("/v1/attestation/report", get(attestation_report))
         .route("/v1/signature/:chat_id", get(receipt_by_chat_id))
-        .route("/v1/receipt/:chat_id/body", get(get_receipt_body))
-        .route("/v1/audit/sessions/:session_id", get(attested_session))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             aci_headers_middleware,
@@ -357,6 +366,12 @@ struct AttestationQuery {
 #[derive(Deserialize)]
 struct SignatureQuery {
     signing_algo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionListQuery {
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 async fn root(State(state): State<AppState>) -> Json<Value> {
@@ -473,6 +488,24 @@ async fn attestation_report(
                 Err(e) => internal_error_response(e),
             }
         }
+        Err(e) => internal_error_response(e),
+    }
+}
+
+/// Canonical ACI attestation report — the bare report, no legacy
+/// dstack-vllm-proxy compatibility fields injected.
+async fn aci_attestation_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AttestationQuery>,
+) -> Response {
+    let domain = request_host_domain(&headers);
+    match state
+        .service
+        .attestation_report_for_domain(q.nonce, domain.as_deref())
+        .await
+    {
+        Ok(report) => Json(report).into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -1500,6 +1533,79 @@ async fn completions(State(state): State<AppState>, headers: HeaderMap, body: By
     openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH, false).await
 }
 
+/// Canonical ACI receipt — the bare signed receipt (JCS canonical value), not
+/// the legacy dstack-vllm-proxy signature wrapper. `id` accepts the gateway
+/// `receipt_id` (preferred; on the `x-receipt-id` header) or the upstream
+/// `chat_id`.
+async fn aci_receipt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(receipt) = state
+        .service
+        .get_receipt_by_receipt_id(&id)
+        .or_else(|| state.service.get_receipt_by_chat_id(&id))
+    else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Receipt id (receipt_id or chat_id) not found or expired",
+        );
+    };
+    if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
+        return resp;
+    }
+    Json(receipt.to_canonical_value(true)).into_response()
+}
+
+/// List the attested TEE channels (one per upstream endpoint), optionally
+/// filtered by `?provider=` (the upstream config name) and/or `?model=`.
+///
+/// Sessions are per-TEE-channel, not per-model, so a `?model=` filter is
+/// resolved to the upstream(s) that serve that model (via the upstream config)
+/// and then matched on `provider`.
+///
+/// Intentionally unauthenticated (like [`attested_session`]): a session record
+/// is a transparency artifact carrying only verification material — provider,
+/// endpoint, the verified identity (e.g. signing address), channel bindings,
+/// claims, and an evidence digest. It holds no request or response content. The
+/// list response carries only the evidence **digest**, not the full evidence
+/// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{id}`) for the
+/// bytes. This keeps any larger/raw evidence payload off the broad listing.
+async fn aci_list_sessions(
+    State(state): State<AppState>,
+    Query(q): Query<SessionListQuery>,
+) -> Response {
+    let mut sessions = match q.model.as_deref() {
+        // Resolve the model to the upstream(s) serving it, then list each
+        // channel's sessions (honoring a provider filter if both are given).
+        Some(model) => {
+            let names = state
+                .upstream_config
+                .as_ref()
+                .map(|c| c.upstream_names_for_model(model))
+                .unwrap_or_default();
+            names
+                .iter()
+                .filter(|n| q.provider.as_deref().is_none_or(|p| p == n.as_str()))
+                .flat_map(|n| state.service.list_attested_sessions(Some(n)))
+                .collect::<Vec<_>>()
+        }
+        None => state.service.list_attested_sessions(q.provider.as_deref()),
+    };
+    // Keep the digest as the integrity anchor; drop the data-URI bytes from the
+    // broad listing.
+    for s in &mut sessions {
+        s.evidence.data_uri = None;
+    }
+    Json(json!({
+        "api_version": "aci/1",
+        "sessions": sessions,
+    }))
+    .into_response()
+}
+
 async fn receipt_by_chat_id(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1538,50 +1644,6 @@ async fn receipt_by_chat_id(
     }
 }
 
-async fn get_receipt_body(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(receipt) = state
-        .service
-        .get_receipt_by_chat_id(&id)
-        .or_else(|| state.service.get_receipt_by_receipt_id(&id))
-    else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Receipt id (chat_id or receipt_id) not found or expired",
-        );
-    };
-    let receipt_id = receipt.receipt_id.clone();
-    if let Some(resp) = enforce_owner(&state, &headers, &receipt_id) {
-        return resp;
-    }
-    if state.service.body_retention_seconds() == 0 {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "receipt_body_not_retained",
-            "receipt body not retained",
-        );
-    }
-    match state.service.get_retained_body(&receipt_id) {
-        Some(body) => {
-            let mut resp_headers = HeaderMap::new();
-            resp_headers.insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
-            (StatusCode::OK, resp_headers, body).into_response()
-        }
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            "receipt_body_not_retained",
-            "receipt body not retained",
-        ),
-    }
-}
-
 async fn attested_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -1593,11 +1655,7 @@ async fn attested_session(
             "Attested session not found or expired",
         );
     };
-    Json(json!({
-        "api_version": "aci/1",
-        "session": session,
-    }))
-    .into_response()
+    Json(session).into_response()
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {

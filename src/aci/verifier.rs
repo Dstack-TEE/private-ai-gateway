@@ -71,7 +71,8 @@ impl StaticUpstreamVerifier {
     /// `verifier_id`.
     pub fn verified(verifier_id: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
-            vendor: String::new(),
+            upstream_name: String::new(),
+            provider: None,
             model_id: String::new(),
             url_origin: None,
             verifier_id: verifier_id.into(),
@@ -87,7 +88,8 @@ impl StaticUpstreamVerifier {
     /// Convenience: build a `failed` event tagged with a fixed reason.
     pub fn failed(verifier_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
-            vendor: String::new(),
+            upstream_name: String::new(),
+            provider: None,
             model_id: String::new(),
             url_origin: None,
             verifier_id: verifier_id.into(),
@@ -109,8 +111,8 @@ impl UpstreamVerifier for StaticUpstreamVerifier {
         // configuration does not erase per-request context that helps
         // downstream verifiers.
         let mut event = self.event.clone();
-        if event.vendor.is_empty() {
-            event.vendor = request.upstream_name;
+        if event.upstream_name.is_empty() {
+            event.upstream_name = request.upstream_name;
         }
         if event.model_id.is_empty() {
             event.model_id = request.model_id;
@@ -144,7 +146,8 @@ impl PreverifiedUpstreamVerifier {
 impl UpstreamVerifier for PreverifiedUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: self.verifier_id.clone(),
@@ -455,7 +458,8 @@ impl ExternalProviderVerifier {
             );
         }
         Ok(UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: Some(self.provider.to_string()),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: output
@@ -493,7 +497,8 @@ impl ExternalProviderVerifier {
         reason: impl Into<String>,
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: Some(self.provider.to_string()),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: format!("{}/external-verifier/v1", self.provider),
@@ -547,7 +552,7 @@ struct CachedExternalProviderEvent {
 impl CachedExternalProviderEvent {
     fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let mut event = self.event.clone();
-        event.vendor = request.upstream_name.clone();
+        event.upstream_name = request.upstream_name.clone();
         event.model_id = request.model_id.clone();
         event.url_origin = request.url_origin.clone();
         event.required = request.required;
@@ -958,7 +963,8 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
             return verifier.verify(request).await;
         }
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "routing-upstream-verifier/v1".to_string(),
@@ -981,7 +987,8 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
             return verifier.refresh(request).await;
         }
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "routing-upstream-verifier/v1".to_string(),
@@ -1261,7 +1268,8 @@ impl CachedAciDcapVerification {
         verifier_id: &str,
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: self.vendor.clone(),
+            upstream_name: self.vendor.clone(),
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
@@ -1512,7 +1520,8 @@ impl UpstreamVerifier for AciDcapUpstreamVerifier {
                 verified.event_for(request, &self.verifier_id)
             }
             Err(err) => UpstreamVerifiedEvent {
-                vendor: request.upstream_name,
+                upstream_name: request.upstream_name,
+                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: self.verifier_id.clone(),

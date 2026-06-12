@@ -396,7 +396,8 @@ async fn chat_x_request_hash_is_ignored() {
 async fn attested_session_lookup_returns_audit_record() {
     let h = make_harness();
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -432,7 +433,7 @@ async fn attested_session_lookup_returns_audit_record() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/audit/sessions/{session_id}"))
+                .uri(format!("/v1/aci/sessions/{session_id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -442,25 +443,76 @@ async fn attested_session_lookup_returns_audit_record() {
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["session"]["session_id"], session_id);
-    assert_eq!(body["session"]["direction"], "upstream");
-    assert_eq!(
-        body["session"]["verification"]["verifier_id"],
-        "stub-verifier-1"
+    assert_eq!(body["session_id"], session_id);
+    assert_eq!(body["provider"], "stub-upstream");
+    assert_eq!(body["endpoint"], "https://stub-upstream");
+    assert_eq!(body["verifier_id"], "stub-verifier-1");
+    assert_eq!(body["channel_binding"][0]["type"], "tls_spki_sha256");
+    // The by-id record serves the full evidence bundle, including the data-URI.
+    assert!(body["evidence"]["data"].is_string());
+
+    // Canonical receipt endpoint returns the bare signed receipt (no legacy
+    // signature wrapper), addressable by the gateway receipt_id.
+    let receipt_id = result.receipt.receipt_id.clone();
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/aci/receipts/{receipt_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(body["receipt_id"], receipt_id);
+    assert_eq!(body["api_version"], "aci/1"); // signed ACI artifact keeps aci/1
+    assert!(body.get("event_log").is_some());
+    assert!(
+        body.get("signature").is_some() && body.get("text").is_none(),
+        "canonical receipt is bare, not the legacy signature wrapper"
     );
-    assert_eq!(body["session"]["target"]["type"], "upstream");
-    assert_eq!(body["session"]["target"]["provider"], "stub-upstream");
-    assert_eq!(
-        body["session"]["target"]["endpoint"],
-        "https://stub-upstream"
-    );
-    assert_eq!(
-        body["session"]["verification"]["verified_claims"][0],
-        "encrypted-session-verified"
-    );
-    assert_eq!(
-        body["session"]["session_binding"][0]["type"],
-        "tls_spki_sha256"
+
+    // Sessions list, filtered by provider.
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/aci/sessions?provider=stub-upstream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(body["api_version"], "aci/1");
+    assert_eq!(body["sessions"][0]["session_id"], session_id);
+    // The broad list keeps the integrity digest but strips the evidence bytes;
+    // fetch a single session by id for the full bundle (see above).
+    assert!(body["sessions"][0]["evidence"]["digest"].is_string());
+    assert!(body["sessions"][0]["evidence"]["data"].is_null());
+
+    // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/signature/{receipt_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert!(
+        body.get("signing_address").is_some() && body.get("receipt").is_some(),
+        "legacy alias keeps the signature-wrapper shape"
     );
 }
 
@@ -528,7 +580,7 @@ async fn receipt_lookup_by_chat_id() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/receipt/chat-xyz")
+                .uri("/v1/signature/chat-xyz")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -558,7 +610,7 @@ async fn receipt_lookup_unknown_chat_id_returns_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/receipt/nope")
+                .uri("/v1/signature/nope")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -216,7 +216,6 @@ pub struct ServiceCapabilities {
     /// advertising a version the workload cannot decrypt would
     /// mislead verifiers about the trust surface.
     pub supported_e2ee_versions: Vec<String>,
-    pub body_retention_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

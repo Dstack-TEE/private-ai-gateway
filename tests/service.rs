@@ -15,6 +15,8 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
     UpstreamVerificationError,
 };
+use private_ai_gateway::aggregator::session::ClaimStatus;
+use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{StaticKeyProvider, StubQuoter};
 
@@ -75,7 +77,6 @@ fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService
     // Do not advertise unwired E2EE.
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds: 0,
     };
     let svc = AciService::new(
         keys,
@@ -169,7 +170,8 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
 async fn verifier_event_result_verified_emits_upstream_verified() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("http://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -204,7 +206,8 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
 async fn verified_upstream_binding_creates_attested_session() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -244,34 +247,110 @@ async fn verified_upstream_binding_creates_attested_session() {
         .get_attested_session(session_id)
         .expect("session audit record should be queryable");
     assert_eq!(session.session_id, session_id);
-    assert_eq!(session.direction, "upstream");
-    assert_eq!(session.target.target_type, "upstream");
-    assert_eq!(session.target.provider.as_deref(), Some("stub-upstream"));
-    assert_eq!(session.target.model_id.as_deref(), Some("x"));
+    assert_eq!(session.api_version, "aci/1");
+    assert_eq!(session.provider, "stub-upstream");
+    assert_eq!(session.endpoint.as_deref(), Some("https://stub-upstream"));
+    assert_eq!(session.verifier_id, "stub-verifier-1");
+    // provider_claims are folded verbatim into claims.extra; typed claims beyond
+    // tee_attested stay Unknown until a per-provider mapping populates them.
     assert_eq!(
-        session.target.endpoint.as_deref(),
-        Some("https://stub-upstream")
+        session.claims.extra.get("release").and_then(|v| v.as_str()),
+        Some("fixture")
     );
-    assert_eq!(session.verification.verifier_id, "stub-verifier-1");
+    assert_eq!(session.channel_binding.len(), 1);
     assert_eq!(
-        session.verification.verified_claims,
-        vec![
-            "encrypted-session-verified".to_string(),
-            "source-verified".to_string()
-        ]
-    );
-    assert_eq!(session.session_binding.len(), 1);
-    assert_eq!(
-        session.session_binding[0]["spki_sha256"],
+        session.channel_binding[0]["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
     );
+
+    // Shallow audit: the receipt's upstream.verified carries the typed claim
+    // verdicts inline. A verified result asserts tee_attested (verifier-derived).
+    let receipt_claims = uv
+        .fields
+        .get("claims")
+        .expect("upstream.verified must carry typed claim verdicts");
+    assert_eq!(receipt_claims["tee_attested"]["status"], "asserted");
+    assert_eq!(receipt_claims["tee_attested"]["source"], "verifier_derived");
+    assert_eq!(receipt_claims["tcb_up_to_date"]["status"], "unknown");
+
+    // Deep audit: the persisted session carries the same verdicts plus evidence.
+    let session_claims = serde_json::to_value(&session.claims).unwrap();
+    assert_eq!(session_claims["tee_attested"]["status"], "asserted");
+    assert_eq!(
+        session.evidence.digest.as_deref(),
+        Some(format!("sha256:{}", "11".repeat(32)).as_str())
+    );
+}
+
+#[tokio::test]
+async fn session_is_per_tee_channel_not_per_model() {
+    // Two requests to the SAME TEE channel (same upstream / endpoint / binding /
+    // evidence) routed to different models must collapse to ONE session: a
+    // session attests the verified channel, not the model. (A router-based
+    // upstream serving N models therefore yields 1 session, not N.) The model
+    // served is recorded on the receipt, never on the session.
+    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
+    let event = |model: &str| UpstreamVerifiedEvent {
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
+        model_id: model.to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: None,
+    };
+    let session_id_of = |result: &private_ai_gateway::aggregator::service::ForwardResult| {
+        result
+            .receipt
+            .event_log
+            .iter()
+            .find(|e| e.event_type == "upstream.verified")
+            .and_then(|e| e.fields.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+
+    let r1 = svc
+        .forward_chat_completion(
+            br#"{"model":"model-a","messages":[]}"#,
+            None,
+            None,
+            Some(event("model-a")),
+        )
+        .await
+        .unwrap();
+    let r2 = svc
+        .forward_chat_completion(
+            br#"{"model":"model-b","messages":[]}"#,
+            None,
+            None,
+            Some(event("model-b")),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        session_id_of(&r1),
+        session_id_of(&r2),
+        "same TEE channel, different models -> one session"
+    );
+    // And only one session is stored for the channel.
+    assert_eq!(svc.list_attested_sessions(Some("stub-upstream")).len(), 1);
 }
 
 #[tokio::test]
 async fn attested_session_id_changes_when_verification_material_changes() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -337,21 +416,11 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let first_digest = format!("sha256:{}", "11".repeat(32));
     let second_digest = format!("sha256:{}", "22".repeat(32));
     assert_eq!(
-        first_session
-            .verification
-            .evidence
-            .as_ref()
-            .and_then(|v| v.get("digest"))
-            .and_then(|v| v.as_str()),
+        first_session.evidence.digest.as_deref(),
         Some(first_digest.as_str())
     );
     assert_eq!(
-        second_session
-            .verification
-            .evidence
-            .as_ref()
-            .and_then(|v| v.get("digest"))
-            .and_then(|v| v.as_str()),
+        second_session.evidence.digest.as_deref(),
         Some(second_digest.as_str())
     );
 }
@@ -360,7 +429,8 @@ async fn attested_session_id_changes_when_verification_material_changes() {
 async fn verifier_event_failed_with_required_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
         model_id: "x".to_string(),
         url_origin: None,
         verifier_id: "stub-verifier-1".to_string(),
@@ -474,4 +544,56 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
         .service_capabilities
         .supported_e2ee_versions
         .is_empty());
+}
+
+#[tokio::test]
+async fn background_verification_writes_inspectable_session_into_the_store() {
+    let (service, _) = make_service(b"{}", true);
+    let event = UpstreamVerifiedEvent {
+        upstream_name: "preflight-upstream".to_string(),
+        provider: Some("tinfoil".to_string()),
+        model_id: "preflight-model".to_string(),
+        url_origin: Some("https://preflight-upstream".to_string()),
+        verifier_id: "preflight-verifier/v1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://preflight-upstream".to_string(),
+            spki_sha256: "bb".repeat(32),
+        }],
+        provider_claims: Some(serde_json::json!({ "tcb_status": "UpToDate" })),
+    };
+
+    // Nothing verified yet — nothing to inspect.
+    assert!(service.list_attested_sessions(None).is_empty());
+
+    // The background verification writes the session through the sink — pure
+    // attestation, no client request and no body. The preflight API then reads
+    // this same store.
+    service.record_session(&event);
+
+    let listed = service.list_attested_sessions(Some("preflight-upstream"));
+    assert_eq!(listed.len(), 1);
+    let session = &listed[0];
+    assert_eq!(session.provider, "preflight-upstream");
+    assert_eq!(
+        session.endpoint.as_deref(),
+        Some("https://preflight-upstream")
+    );
+    // Typed claims are populated from the provider mapping (tinfoil + UpToDate).
+    assert_eq!(session.claims.tee_attested.status, ClaimStatus::Asserted);
+    assert_eq!(session.claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+    // Resolvable by its content-addressed id too.
+    assert!(service.get_attested_session(&session.session_id).is_some());
+
+    // Re-verifying the unchanged endpoint is idempotent: content-addressing
+    // means refresh writes the same record and never churns the store (and a
+    // later completion path references this same session rather than copying).
+    let id = session.session_id.clone();
+    service.record_session(&event);
+    let after = service.list_attested_sessions(Some("preflight-upstream"));
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].session_id, id);
 }

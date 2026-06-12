@@ -44,7 +44,15 @@ pub enum ReceiptError {
 /// An aggregator verifier event suitable for `upstream.verified`.
 #[derive(Debug, Clone)]
 pub struct UpstreamVerifiedEvent {
-    pub vendor: String,
+    /// The operator's per-endpoint upstream config `name` (e.g.
+    /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
+    pub upstream_name: String,
+    /// The provider *type* the verification logic keys on (e.g. "tinfoil",
+    /// "near-ai", "chutes", "phala-direct"). Many `upstream_name` entries can
+    /// share one `provider` (two configs both pointing at Tinfoil). Used to map provider
+    /// evidence onto typed session claims; `None` for generic/static verifiers
+    /// that have no provider type.
+    pub provider: Option<String>,
     pub model_id: String,
     pub url_origin: Option<String>,
     pub verifier_id: String,
@@ -157,7 +165,8 @@ impl TransparencyEventKind {
 impl UpstreamVerifiedEvent {
     fn to_fields(&self) -> Value {
         serde_json::json!({
-            "vendor": self.vendor,
+            "upstream_name": self.upstream_name,
+            "provider": self.provider,
             "model_id": self.model_id,
             "url_origin": self.url_origin,
             "verifier_id": self.verifier_id,
@@ -268,6 +277,11 @@ impl ReceiptBuilder {
         )
     }
 
+    /// Append `upstream.verified` with **no** attested session — used when
+    /// verification failed (or produced no enforceable channel binding), so there
+    /// is no session to reference. The event is still recorded so a downstream
+    /// verifier sees the (failed) outcome. The verified case uses
+    /// [`Self::add_upstream_verified_with_session`].
     pub fn add_upstream_verified(
         &mut self,
         event: UpstreamVerifiedEvent,
@@ -275,16 +289,31 @@ impl ReceiptBuilder {
         self.append(EVENT_UPSTREAM_VERIFIED, event.to_fields())
     }
 
-    pub fn add_upstream_verified_with_session(
+    /// Append `upstream.verified` for a verified upstream, attaching the
+    /// attested-session id and the typed claim verdicts (shallow audit). The two
+    /// are **inseparable** — a sealed session always carries its claims — so they
+    /// are taken together and required, not as two independent options. The
+    /// session id is content-addressed, so it commits the receipt to the exact
+    /// session (with its evidence + reasons) a deep audit would re-fetch.
+    pub fn add_upstream_verified_with_session<C: serde::Serialize>(
         &mut self,
         event: UpstreamVerifiedEvent,
-        session_id: Option<&str>,
+        session_id: &str,
+        claims: &C,
     ) -> Result<(), ReceiptError> {
+        // `claims` is typed at the call site (the aggregator's `SessionClaims`);
+        // it is serialized here only because the event-log fields are a generic
+        // JSON object. The ACI core stays decoupled from the aggregator's claim
+        // types via the `Serialize` bound rather than a `Value` parameter.
         let mut fields = event.to_fields();
-        if let (Some(session_id), Value::Object(obj)) = (session_id, &mut fields) {
+        if let Value::Object(obj) = &mut fields {
             obj.insert(
                 "session_id".to_string(),
                 Value::String(session_id.to_string()),
+            );
+            obj.insert(
+                "claims".to_string(),
+                serde_json::to_value(claims).unwrap_or(Value::Null),
             );
         }
         self.append(EVENT_UPSTREAM_VERIFIED, fields)

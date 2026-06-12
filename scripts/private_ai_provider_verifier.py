@@ -306,46 +306,70 @@ def chutes_verify_gpu(
     gpu_evidence: list[Any],
     expected_report_data: str,
     timeout: int,
-) -> None:
+) -> dict[str, Any]:
+    """Check the NVIDIA confidential-computing GPU evidence as SUPPLEMENTAL
+    metadata, never a gate (mirrors the PhalaDirect verifier).
+
+    We still run the check: when it succeeds it authenticates the GPU model and
+    related info we surface, which the CPU TEE quote alone does not vouch for. But
+    a real TEE GPU is already established by the measured serving software inside
+    that quote, and a standalone NRAS check only proves a CC-capable GPU exists
+    for a nonce — not that it is bound to this CPU TEE or served this request. So
+    a missing/invalid GPU result is recorded, not fatal: as long as the workload
+    is secure and the info we report is accurate, a failed GPU check never
+    rejects the session, and the typed gpu_attested claim stays Unknown. The CPU
+    TEE quote, report_data binding, debug bit and measurement match remain the
+    hard gates."""
+    result: dict[str, Any] = {
+        "gpu_evidence_present": bool(gpu_evidence),
+        "gpu_verified": False,
+        "gpu_evidence_nonce_matched": None,
+        "gpu_arch": None,
+    }
     if not gpu_evidence:
-        return
+        return result
 
     import jwt
     import requests
 
     first = gpu_evidence[0]
     arch = first.get("arch") if isinstance(first, dict) else None
+    result["gpu_arch"] = arch
     if not arch:
-        raise ValueError("Chutes GPU evidence is missing arch")
+        return result
 
-    response = requests.post(
-        "https://nras.attestation.nvidia.com/v3/attest/gpu",
-        json={
-            "evidence_list": gpu_evidence,
-            "nonce": expected_report_data,
-            "arch": arch,
-        },
-        headers={"accept": "application/json", "content-type": "application/json"},
-        timeout=timeout,
-    )
-    if response.status_code != 200:
-        raise ValueError(f"NRAS responded with status {response.status_code}")
-
-    tokens = response.json()
-    if not tokens or not isinstance(tokens, list):
-        raise ValueError("NRAS response did not include tokens")
-    platform = tokens[0]
-    if not isinstance(platform, list) or len(platform) < 2 or platform[0] != "JWT":
-        raise ValueError("NRAS platform token has invalid shape")
-    claims = jwt.decode(
-        platform[1],
-        options={"verify_signature": False},
-        algorithms=["RS256", "ES256", "ES384", "PS256"],
-    )
-    if claims.get("x-nvidia-overall-att-result") is not True:
-        raise ValueError("NVIDIA attestation result is false")
-    if claims.get("eat_nonce") != expected_report_data:
-        raise ValueError("NVIDIA eat_nonce does not match Chutes report_data binding")
+    try:
+        response = requests.post(
+            "https://nras.attestation.nvidia.com/v3/attest/gpu",
+            json={
+                "evidence_list": gpu_evidence,
+                "nonce": expected_report_data,
+                "arch": arch,
+            },
+            headers={"accept": "application/json", "content-type": "application/json"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return result
+        tokens = response.json()
+        if not tokens or not isinstance(tokens, list):
+            return result
+        platform = tokens[0]
+        if not isinstance(platform, list) or len(platform) < 2 or platform[0] != "JWT":
+            return result
+        claims = jwt.decode(
+            platform[1],
+            options={"verify_signature": False},
+            algorithms=["RS256", "ES256", "ES384", "PS256"],
+        )
+        nonce_matched = claims.get("eat_nonce") == expected_report_data
+        result["gpu_evidence_nonce_matched"] = nonce_matched
+        result["gpu_verified"] = (
+            claims.get("x-nvidia-overall-att-result") is True and nonce_matched
+        )
+    except Exception:  # noqa: BLE001 - supplemental; a GPU error is never fatal
+        return result
+    return result
 
 
 async def chutes_verify_instance(
@@ -372,13 +396,16 @@ async def chutes_verify_instance(
 
     verified_report = await dcap_qvl.get_collateral_and_verify(quote_bytes)
     dcap_result = json.loads(verified_report.to_json())
-    if dcap_result.get("status") != "UpToDate":
-        raise ValueError(f"Chutes TDX status is not UpToDate: {dcap_result.get('status')}")
+    # TCB freshness is recorded, not gated: a stale TCB surfaces as a refuted
+    # tcb_up_to_date claim in the session layer rather than failing the instance.
+    # The quote signature/collateral, report_data binding, debug-mode bit and
+    # measurement match above and below remain hard gates.
+    tcb_status = dcap_result.get("status")
     measurement = chutes_measurement_name(dcap_result, measurements)
     if not measurement:
         raise ValueError("Chutes quote measurements do not match a public profile")
 
-    await asyncio.to_thread(
+    gpu = await asyncio.to_thread(
         chutes_verify_gpu,
         evidence.get("gpu_evidence") or [],
         expected_report_data,
@@ -389,6 +416,8 @@ async def chutes_verify_instance(
         "instance_id": instance_id,
         "measurement": measurement,
         "public_key_sha256": sha256_base64_key(e2e_pubkey),
+        "tcb_status": tcb_status,
+        "gpu": gpu,
     }
 
 
@@ -480,6 +509,12 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 "code_fingerprint": doc.code_fingerprint,
                 "tls_spki_from_report_data": True,
                 "verification_steps": {k: v["status"] for k, v in steps.items()},
+                # NOTE: we deliberately do NOT emit a `tcb_status` here. Tinfoil's
+                # official verifier (SecureClient.verify) owns the TCB gate as part
+                # of security_verified, but exposes no separable TcbStatus, so there
+                # is no raw collateral value to surface. The session layer records a
+                # verifier-derived tcb_up_to_date claim for Tinfoil instead of
+                # fabricating a hardware-proven "UpToDate" status.
             },
         }
     )
@@ -592,6 +627,13 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             return
 
     model_attestations_sha256 = sha256_json_prefixed(model_attestations)
+    # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
+    # so the session layer can populate a tri-state `tcb_up_to_date` claim. The
+    # dstack verifier reports TCB freshness separately from its overall is_valid
+    # (is_valid covers quote signature / measurement / event-log replay, not TCB
+    # freshness), so a stale TCB surfaces here without failing the gateway.
+    gateway_dstack = (gateway_result.get("details") or {}).get("dstack") or {}
+    gateway_tcb_status = (gateway_dstack.get("details") or {}).get("tcb_status")
     provider_claims = {
         "trust_boundary": "near-ai-gateway",
         "gateway_verified": True,
@@ -601,6 +643,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         "model_attestations_sha256": model_attestations_sha256,
         "nested_model_attestations_checked_by_gateway": False,
         "canonical_model_id": report.model_id,
+        "tcb_status": gateway_tcb_status,
     }
     if all(isinstance(item, dict) and item.get("request_nonce") for item in model_attestations):
         provider_claims["model_attestations_nonce_matched"] = True
@@ -1075,6 +1118,22 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             ),
         )
         return
+    # Surface per-instance TDX TCB status and a single fleet-level status for the
+    # tri-state tcb_up_to_date claim: UpToDate only if every verified instance is
+    # UpToDate, otherwise a representative stale status so the claim refutes.
+    instance_tcb_statuses = {
+        item["instance_id"]: item.get("tcb_status") for item in verified
+    }
+    present_statuses = [s for s in instance_tcb_statuses.values() if s]
+    if present_statuses and all(s == "UpToDate" for s in present_statuses):
+        fleet_tcb_status: str | None = "UpToDate"
+    else:
+        fleet_tcb_status = next((s for s in present_statuses if s != "UpToDate"), None)
+    # GPU evidence is supplemental metadata, never a trust gate (see
+    # chutes_verify_gpu). Surface a per-instance map and a fleet summary so the
+    # deep audit sees the outcome; the typed gpu_attested claim stays Unknown.
+    instance_gpu = {item["instance_id"]: item.get("gpu") for item in verified}
+    gpus = [g for g in instance_gpu.values() if isinstance(g, dict)]
     provider_claims = {
         "trust_boundary": "model_instance",
         "evidence_scope": "model_instance",
@@ -1083,6 +1142,11 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         "verified_instance_count": len(verified),
         "verified_instance_ids": [item["instance_id"] for item in verified],
         "verified_public_key_sha256": [item["public_key_sha256"] for item in verified],
+        "tcb_status": fleet_tcb_status,
+        "instance_tcb_statuses": instance_tcb_statuses,
+        "gpu_verified": bool(gpus) and all(g.get("gpu_verified") for g in gpus),
+        "gpu_evidence_present": any(g.get("gpu_evidence_present") for g in gpus),
+        "instance_gpu": instance_gpu,
     }
     if nonce_expires_in is not None:
         provider_claims["nonce_expires_in"] = nonce_expires_in

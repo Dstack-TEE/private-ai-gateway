@@ -201,7 +201,8 @@ struct AlwaysVerified;
 impl UpstreamVerifier for AlwaysVerified {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
+            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "surface-verifier/v1".to_string(),
@@ -225,29 +226,18 @@ struct Harness {
 }
 
 fn harness() -> Harness {
-    harness_with_body_retention(0)
+    harness_with_upstream(RecordingUpstream::default())
 }
 
-fn harness_with_body_retention(body_retention_seconds: u64) -> Harness {
-    harness_with_body_retention_and_upstream(body_retention_seconds, RecordingUpstream::default())
-}
-
-fn harness_with_body_retention_and_upstream(
-    body_retention_seconds: u64,
-    upstream: RecordingUpstream,
-) -> Harness {
-    harness_with_body_retention_upstream_and_e2ee(body_retention_seconds, upstream, false)
+fn harness_with_upstream(upstream: RecordingUpstream) -> Harness {
+    harness_with_upstream_and_e2ee(upstream, false)
 }
 
 fn harness_with_e2ee(upstream: RecordingUpstream) -> Harness {
-    harness_with_body_retention_upstream_and_e2ee(0, upstream, true)
+    harness_with_upstream_and_e2ee(upstream, true)
 }
 
-fn harness_with_body_retention_upstream_and_e2ee(
-    body_retention_seconds: u64,
-    upstream: RecordingUpstream,
-    enable_e2ee: bool,
-) -> Harness {
+fn harness_with_upstream_and_e2ee(upstream: RecordingUpstream, enable_e2ee: bool) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream_calls = upstream.calls();
@@ -258,7 +248,6 @@ fn harness_with_body_retention_upstream_and_e2ee(
         } else {
             vec![]
         },
-        body_retention_seconds,
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {
@@ -293,8 +282,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
     headers.insert("transfer-encoding".to_string(), "chunked".to_string());
     headers.insert("content-length".to_string(), "999".to_string());
     headers.insert("x-upstream-error".to_string(), "true".to_string());
-    harness_with_body_retention_and_upstream(
-        0,
+    harness_with_upstream(
         RecordingUpstream {
             calls: Arc::new(Mutex::new(Vec::new())),
             response_body: CHAT_RESPONSE.to_vec(),
@@ -604,7 +592,7 @@ async fn plaintext_chat_response_headers_and_receipt_binding_are_covered() {
 }
 
 #[tokio::test]
-async fn receipt_endpoint_uses_chat_id_path_and_body_retention_disabled_is_explicit() {
+async fn receipt_lookup_by_chat_id_returns_signature_wrapper() {
     let h = harness();
     let chat = h
         .requester
@@ -612,16 +600,12 @@ async fn receipt_endpoint_uses_chat_id_path_and_body_retention_disabled_is_expli
         .await;
     assert_eq!(chat.status, StatusCode::OK);
 
-    let receipt = h.requester.get("/v1/receipt/chat-aci-1", &[]).await;
+    let receipt = h.requester.get("/v1/signature/chat-aci-1", &[]).await;
     assert_eq!(receipt.status, StatusCode::OK);
     let receipt_body = json_body(&receipt);
     assert_eq!(receipt_body["api_version"], "aci/1");
     assert_eq!(receipt_body["receipt"]["chat_id"], "chat-aci-1");
     assert!(receipt_body["signature"].is_string());
-
-    let body = h.requester.get("/v1/receipt/chat-aci-1/body", &[]).await;
-    assert_eq!(body.status, StatusCode::NOT_FOUND);
-    assert_eq!(error_type(&body), "receipt_body_not_retained");
 }
 
 #[tokio::test]
@@ -636,13 +620,13 @@ async fn receipt_lookup_requires_authenticated_original_requester() {
         )
         .await;
     assert_eq!(chat.status, StatusCode::OK);
-    let unauthenticated = h.requester.get("/v1/receipt/chat-aci-1", &[]).await;
+    let unauthenticated = h.requester.get("/v1/signature/chat-aci-1", &[]).await;
     assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
 
     let wrong_requester = h
         .requester
         .get(
-            "/v1/receipt/chat-aci-1",
+            "/v1/signature/chat-aci-1",
             &[("authorization", "Bearer requester-b")],
         )
         .await;
@@ -651,7 +635,7 @@ async fn receipt_lookup_requires_authenticated_original_requester() {
     let original = h
         .requester
         .get(
-            "/v1/receipt/chat-aci-1",
+            "/v1/signature/chat-aci-1",
             &[("authorization", "Bearer requester-a")],
         )
         .await;
@@ -659,8 +643,8 @@ async fn receipt_lookup_requires_authenticated_original_requester() {
 }
 
 #[tokio::test]
-async fn retained_body_endpoint_returns_post_rewrite_body_only_to_authorized_requester() {
-    let h = harness_with_body_retention(60);
+async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
+    let h = harness();
     let original = br#"{"model":"public","messages":[]}"#;
     let forwarded = br#"{"model":"private-upstream","messages":[]}"#;
 
@@ -673,7 +657,8 @@ async fn retained_body_endpoint_returns_post_rewrite_body_only_to_authorized_req
             forwarded_body: Some(forwarded.to_vec()),
             upstream_required: Some(true),
             upstream_verification_event: Some(UpstreamVerifiedEvent {
-                vendor: "surface-upstream".to_string(),
+                upstream_name: "surface-upstream".to_string(),
+                provider: None,
                 model_id: "private-upstream".to_string(),
                 url_origin: Some("https://surface-upstream.example".to_string()),
                 verifier_id: "surface-verifier/v1".to_string(),
@@ -704,17 +689,9 @@ async fn retained_body_endpoint_returns_post_rewrite_body_only_to_authorized_req
         receipt_event(&result.receipt, EVENT_TRANSPARENCY_REQUEST_MODIFIED),
         &serde_json::json!({})
     );
-
-    let body = h
-        .requester
-        .get(
-            "/v1/receipt/chat-aci-1/body",
-            &[("authorization", "Bearer requester-a")],
-        )
-        .await;
-    assert_eq!(body.status, StatusCode::OK);
-    assert_eq!(body.body, forwarded);
-    assert_ne!(body.body, original);
+    // The rewrite is committed by hash + the transparency event; the gateway
+    // never stores the post-rewrite body, so there is no body endpoint to read.
+    assert_ne!(sha256_hex(original), sha256_hex(forwarded));
 }
 
 #[tokio::test]
@@ -1241,10 +1218,6 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
     assert_eq!(body["signing_algo"], "ecdsa");
     assert_eq!(body["receipt"]["chat_id"], "chat-aci-1");
 
-    let receipt_alias = h.requester.get("/v1/receipt/chat-aci-1", &[]).await;
-    assert_eq!(receipt_alias.status, StatusCode::OK);
-    assert_eq!(json_body(&receipt_alias), body);
-
     let ed = h
         .requester
         .get("/v1/signature/chat-aci-1?signing_algo=ed25519", &[])
@@ -1431,7 +1404,7 @@ async fn completions_endpoint_streams_and_hashes_complete_response() {
         sha256_hex(expected_body)
     );
 
-    let receipt_response = h.requester.get("/v1/receipt/chat-stream-1", &[]).await;
+    let receipt_response = h.requester.get("/v1/signature/chat-stream-1", &[]).await;
     assert_eq!(receipt_response.status, StatusCode::OK);
     assert_eq!(
         json_body(&receipt_response)["receipt"]["receipt_id"],
@@ -1565,10 +1538,9 @@ fn legacy_ed25519_v2_embeddings_request(
 
 #[tokio::test]
 async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
-    let h = harness_with_body_retention_and_upstream(
-        0,
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
 
     let resp = h
         .requester
@@ -1607,13 +1579,12 @@ async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
 
 #[tokio::test]
 async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
-    // Embeddings responses have no `id`, so the `/v1/receipt/{id}`
+    // Embeddings responses have no `id`, so the `/v1/signature/{id}`
     // route must fall back to receipt_id lookup or callers have no way
     // to retrieve the receipt issued via the `x-receipt-id` header.
-    let h = harness_with_body_retention_and_upstream(
-        0,
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
 
     let resp = h
         .requester
@@ -1624,7 +1595,7 @@ async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
 
     let fetched = h
         .requester
-        .get(&format!("/v1/receipt/{receipt_id}"), &[])
+        .get(&format!("/v1/signature/{receipt_id}"), &[])
         .await;
     assert_eq!(fetched.status, StatusCode::OK);
     let body = json_body(&fetched);
@@ -1639,16 +1610,15 @@ async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
     );
     assert_eq!(body["receipt"]["endpoint"], "/v1/embeddings");
 
-    let unknown = h.requester.get("/v1/receipt/rcpt-deadbeef", &[]).await;
+    let unknown = h.requester.get("/v1/signature/rcpt-deadbeef", &[]).await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn embeddings_endpoint_forces_buffered_even_when_client_sets_stream_true() {
-    let h = harness_with_body_retention_and_upstream(
-        0,
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
     let request = br#"{"model":"aci-model","input":"hi","stream":true}"#;
 
     let resp = h.requester.post("/v1/embeddings", request, &[]).await;

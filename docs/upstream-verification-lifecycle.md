@@ -97,7 +97,7 @@ A separate, read-only audit artifact written when a verified upstream event is
 recorded (`record_attested_upstream_session`). It content-addresses the verified
 binding, verifier id, target, and evidence digest into a stable `session_id`, stores
 the matching `AttestedSessionRecord`, and attaches that id to the receipt. A relying
-party fetches it back from `/v1/audit/sessions/{session_id}` and confirms the record's
+party fetches it back from `/v1/aci/sessions/{session_id}` and confirms the record's
 target, verifier id, evidence digest, and channel bindings match the receipt event.
 
 Its `expires_at` is deliberately the receipt TTL, not the verification lease TTL. The

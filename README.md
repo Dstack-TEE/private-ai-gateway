@@ -121,7 +121,7 @@ additional ACI artifacts are:
 - `GET /v1/attestation/report`: proves which gateway workload you are talking
   to.
 - `x-receipt-id`: returned on provider-backed inference responses.
-- `GET /v1/receipt/{id}`: fetches the signed receipt by chat id or receipt id.
+- `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
 - `GET /v1/audit/sessions/{session_id}`: fetches an attested-session audit
   record referenced by a receipt.
 - Optional ACI E2EE headers: encrypt selected request/response fields when the
@@ -182,7 +182,7 @@ container.
 | Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, PhalaDirect, ACI/DCAP, and generic OpenAI-compatible upstreams |
 | Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
 | Middleware framework | Implemented over HTTP on Unix domain sockets |
-| Receipt/body store | In-memory; receipt TTL is configurable, body retention defaults to disabled |
+| Receipt store | In-memory; receipt TTL is configurable. The gateway never stores request bodies (receipts hold hashes, not content). |
 | Public transparency log | Not implemented |
 
 The binary has no ephemeral-key or stub-quote startup mode. It loads identity,
@@ -252,7 +252,7 @@ receipt was signed by a key endorsed by that identity.
 1. Fetch `GET /v1/attestation/report?nonce=<fresh nonce>`.
 2. Send the inference request and save the response body plus the
    `x-receipt-id` response header.
-3. Fetch `GET /v1/receipt/{id}` with that receipt id.
+3. Fetch `GET /v1/aci/receipts/{id}` with that receipt id.
 4. Verify the attestation report, keyset, receipt signature, response hash, and
    `upstream.verified` event.
 
@@ -411,11 +411,11 @@ writing middleware.
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
 | `POST /v1/completions` | OpenAI-compatible legacy completions. |
 | `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
-| `GET /v1/attestation/report?nonce=<n>` | Gateway workload identity and keyset evidence. |
-| `GET /v1/receipt/{id}` | Signed ACI receipt by chat id or receipt id. |
-| `GET /v1/signature/{id}` | Legacy alias of the receipt endpoint. |
-| `GET /v1/receipt/{id}/body` | Retained provider-facing request body when retention is enabled. |
-| `GET /v1/audit/sessions/{session_id}` | Attested-session audit record referenced by a receipt. |
+| `GET /v1/aci/attestation/report?nonce=<n>` | Gateway workload identity and keyset evidence. |
+| `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
+| `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
+| `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |
+| `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. |
 | `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
 | `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |
 | `PUT /v1/admin/upstreams` | Authenticated upstream config replacement. |

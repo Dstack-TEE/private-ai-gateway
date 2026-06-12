@@ -45,7 +45,7 @@ concept.
   types. Implemented for upstream sessions.
 - Write each successful upstream session verification to an audit log that can
   be queried by session id. Implemented at
-  `GET /v1/audit/sessions/{session_id}`.
+  `GET /v1/aci/sessions/{session_id}`.
 - Make receipts reference the upstream session id used for the request.
   Implemented as `upstream.verified.session_id` when a verified binding exists.
 - Add downstream session ids once the gateway can select and report
@@ -183,52 +183,15 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   size, cache-affinity behavior where observable, streaming, receipts, and
   source/launcher provenance.
 - Finish the user verification script for already captured responses.
-- Design and implement a verification bundle API before launch. Keep
-  `/v1/signature/{id}` backward compatible with existing vLLM-proxy clients, but
-  add a batch endpoint that returns the artifacts a new verifier needs in one
-  round trip:
-
-  ```text
-  POST /v1/verification/bundles
-  ```
-
-  Request shape:
-
-  ```json
-  {
-    "nonce": "<fresh verifier nonce>",
-    "items": [{"id": "<chat id or receipt id>"}],
-    "include": {
-      "legacy_signature": false,
-      "sessions": true,
-      "retained_body": false
-    }
-  }
-  ```
-
-  Response shape:
-
-  ```json
-  {
-    "api_version": "aci.verification_bundle.v1",
-    "attestation_report": {},
-    "items": [
-      {
-        "id": "<requested id>",
-        "receipt": {},
-        "legacy_signature": null,
-        "sessions": [],
-        "retained_body": null
-      }
-    ]
-  }
-  ```
-
-  The bundle endpoint is an artifact transport, not a trust oracle. Verifiers
-  still verify the attestation report, receipt signature, hashes, session
-  records, and production policy locally. `retained_body` must stay opt-in
-  because it can expose the post-rewrite request body and only exists when body
-  retention is enabled.
+- Verification artifacts are *linked, not bundled* (the batch verification-bundle
+  API was dropped). A receipt carries the typed claim verdicts inline (shallow
+  audit) plus a content-addressed `session_id`; a verifier follows that reference
+  to `GET /v1/aci/sessions/{id}` for the full evidence and re-verifies locally
+  (deep audit). Gateway identity is fetched once at preflight via
+  `GET /v1/aci/attestation?nonce=`. Keep `/v1/signature/{id}` backward
+  compatible with existing vLLM-proxy clients. If a high-volume auditor ever needs
+  to avoid the follow-up GET, `?expand=` on the receipt is a clean additive
+  optimization — not modeled now.
 - Document E2EE receipt semantics clearly. E2EE already provides AEAD integrity
   for encrypted fields. Receipts are still attached like normal TLS requests and
   hash the gateway-observed decrypted request body plus the returned response
@@ -256,14 +219,14 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
 
 ### P1: Production State and Operations
 
-- Decide the persistent receipt/body store boundary. The current in-memory
-  store is acceptable only for prototype and short-lived tests.
+- Decide the persistent receipt store boundary. The current in-memory store is
+  acceptable only for prototype and short-lived tests. (The gateway never stores
+  request bodies — receipts hold hashes, not content.)
 - Add durable provider lease/session observability and Chutes nonce pool
   metrics.
 - Replace runtime apt/rustup bootstrap with a gateway-owned runner image or
   prebuilt binary image.
-- Define multi-region behavior: replicated KMS app id, receipt locality, and
-  retained-body storage.
+- Define multi-region behavior: replicated KMS app id and receipt locality.
 
 ## Provider Soundness
 
