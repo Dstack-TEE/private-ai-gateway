@@ -185,7 +185,7 @@ impl UpstreamVerifier for ScriptedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
             provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
@@ -461,7 +461,6 @@ fn make_harness_with_upstream(
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds: 0,
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -691,7 +690,6 @@ async fn model_router_rewrites_before_verification_forwarding_and_receipt_hashin
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![E2EE_VERSION_V2.to_string()],
-        body_retention_seconds: 0,
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1555,7 +1553,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
     let received = br#"{"model":"public-name","messages":[]}"#;
     let forwarded = br#"{"model":"private-upstream-name","messages":[]}"#;
     let verifier_event = UpstreamVerifiedEvent {
-        vendor: "mock-upstream".to_string(),
+        upstream_name: "mock-upstream".to_string(),
         provider: None,
         model_id: "private-upstream-name".to_string(),
         url_origin: Some("https://mock-upstream.example".to_string()),
@@ -1936,7 +1934,7 @@ impl UpstreamVerifier for KeyedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verified = request.upstream_name != self.fail_for;
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name.clone(),
+            upstream_name: request.upstream_name.clone(),
             provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,

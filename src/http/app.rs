@@ -33,14 +33,13 @@
 //! the only handle for `/v1/embeddings` receipts which have no chat_id) or the
 //! upstream `chat_id`.
 //!
-//! * `GET  /v1/aci/attestation/report` - the bare ACI attestation report.
+//! * `GET  /v1/aci/attestation` - the bare ACI attestation report.
 //! * `GET  /v1/aci/receipts/{id}` - the signed ACI receipt (canonical value).
 //! * `GET  /v1/aci/sessions/{session_id}` - the attested-session record a
 //!   receipt references.
-//! * `GET  /v1/aci/sessions?provider=&model=` - list imported sessions.
+//! * `GET  /v1/aci/sessions?provider=&model=` - list attested sessions.
 //!
-//! Legacy aliases mirror dstack-vllm-proxy only (no back-compat is owed to
-//! earlier private-ai-gateway paths):
+//! Legacy aliases for dstack-vllm-proxy compatibility:
 //! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`
 //!   compatibility fields.
 //! * `GET  /v1/signature/{id}` - the legacy signature wrapper
@@ -255,7 +254,7 @@ fn build_router_inner(
     };
     Router::new()
         .route("/", get(root))
-        // OpenAI-compatible surface.
+        // OpenAI- and Anthropic-compatible inference surface.
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
@@ -269,7 +268,7 @@ fn build_router_inner(
             get(admin_get_upstreams).put(admin_put_upstreams),
         )
         // Canonical ACI verification surface (clean shapes).
-        .route("/v1/aci/attestation/report", get(aci_attestation_report))
+        .route("/v1/aci/attestation", get(aci_attestation_report))
         .route("/v1/aci/receipts/:id", get(aci_receipt))
         .route("/v1/aci/sessions", get(aci_list_sessions))
         .route("/v1/aci/sessions/:session_id", get(attested_session))

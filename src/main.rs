@@ -500,9 +500,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity_subject: None,
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],
-            // Body retention is removed: the gateway never stores request
-            // bodies, so the attested window is a hard zero.
-            body_retention_seconds: 0,
         },
         freshness_seconds: 3600,
         receipt_ttl_seconds,

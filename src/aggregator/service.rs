@@ -1249,7 +1249,7 @@ impl AciService {
         selected_route_id: &str,
         forwarded_body: &[u8],
         recorded_event: UpstreamVerifiedEvent,
-        recorded: Option<(String, Value)>,
+        recorded: Option<(String, SessionClaims)>,
     ) -> Result<ReceiptBuilder, ServiceError> {
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
@@ -1913,7 +1913,7 @@ impl AciService {
 
         let missing_verifier_result = upstream_verification_event.is_none();
         let event = upstream_verification_event.unwrap_or_else(|| UpstreamVerifiedEvent {
-            vendor: prepared.upstream_name.clone(),
+            upstream_name: prepared.upstream_name.clone(),
             provider: None,
             model_id: prepared.model_id.clone(),
             url_origin: prepared.url_origin.clone(),
@@ -1996,7 +1996,7 @@ impl AciService {
     fn record_attested_upstream_session(
         &self,
         event: &UpstreamVerifiedEvent,
-    ) -> Result<Option<(String, Value)>, ServiceError> {
+    ) -> Result<Option<(String, SessionClaims)>, ServiceError> {
         if event.result != VerificationResult::Verified || event.channel_bindings.is_empty() {
             return Ok(None);
         }
@@ -2012,7 +2012,6 @@ impl AciService {
 
         let channel_binding = AttestedSession::bindings_to_values(&event.channel_bindings);
         let claims = session_claims_for_event(event);
-        let claims_value = serde_json::to_value(&claims).unwrap_or(Value::Null);
 
         // Lift the response-signing address into the verified identity when present.
         let mut identity = WorkloadIdentityRef::default();
@@ -2030,14 +2029,14 @@ impl AciService {
             .unwrap_or_default();
 
         let session = AttestedSession::seal(
-            event.vendor.clone(),
+            event.upstream_name.clone(),
             event.model_id.clone(),
             None,
             event.url_origin.clone(),
             event.verifier_id.clone(),
             identity,
             channel_binding,
-            claims,
+            claims.clone(),
             evidence,
             now,
             expires_at,
@@ -2049,7 +2048,7 @@ impl AciService {
             // session simply resolves to "not found" for relying parties.
             tracing::warn!(error = %err, session_id = %session_id, "failed to persist attested session");
         }
-        Ok(Some((session_id, claims_value)))
+        Ok(Some((session_id, claims)))
     }
 
     /// Append the `upstream.verified` receipt event, attaching the session id and
@@ -2057,13 +2056,13 @@ impl AciService {
     fn append_upstream_verified(
         builder: &mut ReceiptBuilder,
         event: UpstreamVerifiedEvent,
-        recorded: Option<(String, Value)>,
+        recorded: Option<(String, SessionClaims)>,
     ) -> Result<(), ReceiptError> {
         let (session_id, claims) = match recorded {
             Some((id, claims)) => (Some(id), Some(claims)),
             None => (None, None),
         };
-        builder.add_upstream_verified_with_session(event, session_id.as_deref(), claims)
+        builder.add_upstream_verified_with_session(event, session_id.as_deref(), claims.as_ref())
     }
 
     fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {
@@ -3605,7 +3604,7 @@ mod claim_mapping_tests {
         provider_claims: Option<Value>,
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: "operator-config-name".to_string(),
+            upstream_name: "operator-config-name".to_string(),
             provider: provider.map(str::to_string),
             model_id: "m".to_string(),
             url_origin: Some("https://up".to_string()),

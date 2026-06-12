@@ -88,7 +88,6 @@ fn harness_with_ttl(receipt_ttl_seconds: u64) -> Harness {
     let mut cfg = AciServiceConfig::for_test("auth-and-retention");
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds: 0,
     };
     cfg.receipt_ttl_seconds = receipt_ttl_seconds;
     let clock = Arc::new(TestClock::new(1_700_000_000));

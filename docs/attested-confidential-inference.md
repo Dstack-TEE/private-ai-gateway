@@ -117,7 +117,7 @@ expired, unsigned, or rejected by policy.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v1/aci/attestation/report?nonce=<nonce>` | Fresh gateway attestation report. |
+| `GET /v1/aci/attestation?nonce=<nonce>` | Fresh gateway attestation report. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt (bare). `{id}` can be a receipt ID or response chat ID. |
 | `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by receipt events. |
 | `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |

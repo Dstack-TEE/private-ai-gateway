@@ -201,7 +201,7 @@ struct AlwaysVerified;
 impl UpstreamVerifier for AlwaysVerified {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            vendor: request.upstream_name,
+            upstream_name: request.upstream_name,
             provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
@@ -248,7 +248,6 @@ fn harness_with_upstream_and_e2ee(upstream: RecordingUpstream, enable_e2ee: bool
         } else {
             vec![]
         },
-        body_retention_seconds: 0,
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {
@@ -658,7 +657,7 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             forwarded_body: Some(forwarded.to_vec()),
             upstream_required: Some(true),
             upstream_verification_event: Some(UpstreamVerifiedEvent {
-                vendor: "surface-upstream".to_string(),
+                upstream_name: "surface-upstream".to_string(),
                 provider: None,
                 model_id: "private-upstream".to_string(),
                 url_origin: Some("https://surface-upstream.example".to_string()),

@@ -97,7 +97,7 @@ async fn run() -> Result<(), String> {
     // gateway. Pinning the binding to the just-fetched pubkey is enough
     // for the adapter's session-acquisition path to succeed.
     let event = UpstreamVerifiedEvent {
-        vendor: "chutes".to_string(),
+        upstream_name: "chutes".to_string(),
         // Live-probe bypass, not a real attestation — leave the provider type
         // unset so the session does not synthesize hardware-proven claims.
         provider: None,

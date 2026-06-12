@@ -396,7 +396,7 @@ async fn chat_x_request_hash_is_ignored() {
 async fn attested_session_lookup_returns_audit_record() {
     let h = make_harness();
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),

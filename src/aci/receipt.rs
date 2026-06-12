@@ -44,11 +44,14 @@ pub enum ReceiptError {
 /// An aggregator verifier event suitable for `upstream.verified`.
 #[derive(Debug, Clone)]
 pub struct UpstreamVerifiedEvent {
-    pub vendor: String,
-    /// Stable provider *type* (e.g. "tinfoil", "near-ai", "chutes",
-    /// "phala-direct") used to map provider evidence onto typed session
-    /// claims. `None` for generic/static verifiers with no provider identity.
-    /// Distinct from `vendor`, which is the operator's per-endpoint config name.
+    /// The operator's per-endpoint upstream config `name` (e.g.
+    /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
+    pub upstream_name: String,
+    /// The provider *type* the verification logic keys on (e.g. "tinfoil",
+    /// "near-ai", "chutes", "phala-direct"). Many `vendor` entries can share one
+    /// `provider` (two configs both pointing at Tinfoil). Used to map provider
+    /// evidence onto typed session claims; `None` for generic/static verifiers
+    /// that have no provider type.
     pub provider: Option<String>,
     pub model_id: String,
     pub url_origin: Option<String>,
@@ -162,7 +165,7 @@ impl TransparencyEventKind {
 impl UpstreamVerifiedEvent {
     fn to_fields(&self) -> Value {
         serde_json::json!({
-            "vendor": self.vendor,
+            "upstream_name": self.upstream_name,
             "provider": self.provider,
             "model_id": self.model_id,
             "url_origin": self.url_origin,
@@ -285,12 +288,16 @@ impl ReceiptBuilder {
     /// typed claim verdicts (shallow audit) when a verified session exists. The
     /// session id is content-addressed, so it commits the receipt to the exact
     /// session (with its evidence + reasons) a deep audit would re-fetch.
-    pub fn add_upstream_verified_with_session(
+    pub fn add_upstream_verified_with_session<C: serde::Serialize>(
         &mut self,
         event: UpstreamVerifiedEvent,
         session_id: Option<&str>,
-        claims: Option<Value>,
+        claims: Option<&C>,
     ) -> Result<(), ReceiptError> {
+        // `claims` is typed at the call site (the aggregator's `SessionClaims`);
+        // it is serialized here only because the event-log fields are a generic
+        // JSON object. The ACI core stays decoupled from the aggregator's claim
+        // types via the `Serialize` bound rather than a `Value` parameter.
         let mut fields = event.to_fields();
         if let Value::Object(obj) = &mut fields {
             if let Some(session_id) = session_id {
@@ -300,7 +307,10 @@ impl ReceiptBuilder {
                 );
             }
             if let Some(claims) = claims {
-                obj.insert("claims".to_string(), claims);
+                obj.insert(
+                    "claims".to_string(),
+                    serde_json::to_value(claims).unwrap_or(Value::Null),
+                );
             }
         }
         self.append(EVENT_UPSTREAM_VERIFIED, fields)

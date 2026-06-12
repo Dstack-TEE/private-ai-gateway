@@ -281,7 +281,7 @@ envelopes use `aci.<resource>.v1`.
 
 Canonical (clean shapes):
 
-- `GET /v1/aci/attestation/report?nonce=` — the bare gateway attestation report
+- `GET /v1/aci/attestation?nonce=` — the bare gateway attestation report
   (preflight identity / liveness).
 - `GET /v1/aci/receipts/{id}` — the signed ACI receipt (canonical value). `id`
   is the gateway `receipt_id` (preferred) or upstream `chat_id`. The

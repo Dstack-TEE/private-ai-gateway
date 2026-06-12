@@ -240,11 +240,9 @@ struct ConfiguredUpstreams {
 }
 
 /// Sink that materializes verified upstream events into stored attested
-/// sessions. Implemented by the service. The background verification loop calls
-/// it after each verify/refresh, so the session store is maintained by the same
-/// verification that already keeps the gateway's attestation fresh — one source
-/// of truth, no separate refresh, no drift. The completion path and the preflight
-/// API both just read that store.
+/// sessions. Implemented by the service; the background verification loop calls
+/// it after each verify/refresh so the session store is populated by the same
+/// verification used for serving, without a separate refresh path.
 pub trait UpstreamSessionSink: Send + Sync {
     fn record_session(&self, event: &UpstreamVerifiedEvent);
 }
@@ -1275,7 +1273,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
         match verifier {
             Some(verifier) => verifier.verify(request).await,
             None => UpstreamVerifiedEvent {
-                vendor: request.upstream_name,
+                upstream_name: request.upstream_name,
                 provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
@@ -1300,7 +1298,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
         match verifier {
             Some(verifier) => verifier.refresh(request).await,
             None => UpstreamVerifiedEvent {
-                vendor: request.upstream_name,
+                upstream_name: request.upstream_name,
                 provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
@@ -1374,7 +1372,7 @@ mod tests {
         async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
             self.verifications.fetch_add(1, Ordering::SeqCst);
             UpstreamVerifiedEvent {
-                vendor: request.upstream_name,
+                upstream_name: request.upstream_name,
                 provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,

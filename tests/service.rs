@@ -77,7 +77,6 @@ fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService
     // Do not advertise unwired E2EE.
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
-        body_retention_seconds: 0,
     };
     let svc = AciService::new(
         keys,
@@ -171,7 +170,7 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
 async fn verifier_event_result_verified_emits_upstream_verified() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "x".to_string(),
         url_origin: Some("http://stub-upstream".to_string()),
@@ -207,7 +206,7 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
 async fn verified_upstream_binding_creates_attested_session() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
@@ -289,7 +288,7 @@ async fn session_keys_on_requested_model_not_response_model() {
     // The upstream echoes a different `model` than the one we routed to.
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"served-by-upstream"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "requested-model".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
@@ -334,7 +333,7 @@ async fn session_keys_on_requested_model_not_response_model() {
 async fn attested_session_id_changes_when_verification_material_changes() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
@@ -414,7 +413,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
 async fn verifier_event_failed_with_required_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        vendor: "stub-upstream".to_string(),
+        upstream_name: "stub-upstream".to_string(),
         provider: None,
         model_id: "x".to_string(),
         url_origin: None,
@@ -535,7 +534,7 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
 async fn background_verification_writes_inspectable_session_into_the_store() {
     let (service, _) = make_service(b"{}", true);
     let event = UpstreamVerifiedEvent {
-        vendor: "preflight-upstream".to_string(),
+        upstream_name: "preflight-upstream".to_string(),
         provider: Some("tinfoil".to_string()),
         model_id: "preflight-model".to_string(),
         url_origin: Some("https://preflight-upstream".to_string()),

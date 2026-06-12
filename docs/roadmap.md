@@ -188,7 +188,7 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   audit) plus a content-addressed `session_id`; a verifier follows that reference
   to `GET /v1/aci/sessions/{id}` for the full evidence and re-verifies locally
   (deep audit). Gateway identity is fetched once at preflight via
-  `GET /v1/aci/attestation/report?nonce=`. Keep `/v1/signature/{id}` backward
+  `GET /v1/aci/attestation?nonce=`. Keep `/v1/signature/{id}` backward
   compatible with existing vLLM-proxy clients. If a high-volume auditor ever needs
   to avoid the follow-up GET, `?expand=` on the receipt is a clean additive
   optimization — not modeled now.
