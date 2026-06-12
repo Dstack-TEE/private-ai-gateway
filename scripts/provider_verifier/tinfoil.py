@@ -9,7 +9,7 @@ import gzip
 import sys
 from typing import Any
 
-from .common import emit, failed, json_evidence_bundle
+from .common import emit, failed, json_evidence_bundle, provider_options
 
 
 def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
@@ -46,7 +46,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     parsed = urlparse(url_origin if "://" in url_origin else f"https://{url_origin}")
     enclave_host = parsed.netloc or parsed.path
     attestation_url = f"{url_origin.rstrip('/')}/.well-known/tinfoil-attestation"
-    options = request.get("provider_options") or {}
+    options = provider_options(request)
     repo = options.get("tinfoil_repo") or "tinfoilsh/confidential-model-router"
 
     def _verify():
