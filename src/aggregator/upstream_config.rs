@@ -290,6 +290,20 @@ impl UpstreamConfigManager {
         })
     }
 
+    /// The upstream config `name`s that serve `model` (matched against both the
+    /// public alias and the upstream model id). Lets a model-based preflight
+    /// query resolve to the per-channel attested sessions, which are keyed on the
+    /// upstream name rather than the model.
+    pub fn upstream_names_for_model(&self, model: &str) -> Vec<String> {
+        let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
+        state
+            .config
+            .iter()
+            .filter(|cfg| cfg.models.contains_key(model) || cfg.models.values().any(|v| v == model))
+            .map(|cfg| cfg.name.clone())
+            .collect()
+    }
+
     pub fn snapshot(&self) -> UpstreamConfigSnapshot {
         let state = self
             .state

@@ -6,8 +6,8 @@ under "Attested session record" in
 [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md).
 
 This note specifies attested sessions as **immutable, content-addressed,
-provider-owned** records: one provider imports many sessions (one per
-model-endpoint, and a new one whenever the verified material changes), each
+provider-owned** records: one provider owns one session per verified TEE channel
+(its endpoint, with a new one whenever the verified material changes), each
 carrying a typed claim set and an enforceable channel binding, persisted so a
 receipt can always be traced back to the exact security context that served it.
 
@@ -45,8 +45,10 @@ content-addressed over that material, so:
 - A receipt references the exact session id it used. Resolving that id returns
   the precise, unchanging security context for that request.
 
-"One provider imports many sessions" follows naturally: many model-endpoints,
-plus a new session each time a model-endpoint's verified material changes.
+"One provider owns many sessions" follows naturally: many distinct TEE channels
+(endpoints), plus a new session each time a channel's verified material changes.
+A router-based upstream that fronts many models behind one TEE is a single
+channel — one session — and the model served is recorded on the receipt.
 
 ## Goals and non-goals
 
@@ -75,14 +77,18 @@ Non-goals (kept out deliberately):
 
 ## Data model
 
+A session is the verified **TEE channel** — the attested remote service a
+request binds to — identified by its endpoint + channel binding + evidence, not
+by model. A router-based upstream that serves many models behind one TEE
+therefore yields **one** session (no per-model duplication); the model served is
+recorded on the receipt's `upstream.verified` event, not on the session.
+
 ```rust
-/// One immutable, verified session. Content-addressed; never mutated.
+/// One immutable, verified TEE channel. Content-addressed; never mutated.
 struct AttestedSession {
     api_version: String,
     session_id: String,            // "as_" + sha256 over the verified material below
-    provider: String,              // e.g. "phala-direct"
-    model_id: String,              // the model attested, as routed to the upstream
-    upstream_model_id: Option<String>, // the upstream's own id, only when it differs
+    provider: String,              // the upstream config name this channel belongs to
     endpoint: Option<String>,      // the verified upstream origin
     verifier_id: String,
     established_at: u64,            // when this material was verified
@@ -95,12 +101,13 @@ struct AttestedSession {
 ```
 
 `session_id` is `"as_" + hex(sha256(JCS(material)))` where `material` is the
-immutable subset — provider, public/upstream model id, endpoint, verifier_id,
-identity, channel binding, claims, and the evidence digest. Timestamps are
-excluded so identical material dedups to one id. `established_at` records when it
-was verified; `expires_at` is a *retention* window (kept at least as long as the
-receipts that cite it), not a binding-validity deadline — the forwarding path
-only ever uses a binding from a fresh verification lease.
+immutable subset — provider, endpoint, verifier_id, identity, channel binding,
+claims, and the evidence digest (no model: the channel, not the model, is what
+is attested). Timestamps are excluded so identical material dedups to one id.
+`established_at` records when it was verified; `expires_at` is a *retention*
+window (kept at least as long as the receipts that cite it), not a
+binding-validity deadline — the forwarding path only ever uses a binding from a
+fresh verification lease.
 
 ## Typed claims
 

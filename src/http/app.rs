@@ -1560,33 +1560,48 @@ async fn aci_receipt(
 }
 
 /// List attested sessions, optionally filtered by `?provider=` and/or `?model=`
-/// (the routed model id). Surfaces the sessions a provider has attested.
+/// Surfaces the attested TEE channels (one per upstream endpoint), optionally
+/// filtered by `?provider=` (the upstream config name) and/or `?model=`.
+///
+/// Sessions are per-TEE-channel, not per-model, so a `?model=` filter is
+/// resolved to the upstream(s) that serve that model (via the upstream config)
+/// and then matched on `provider`.
 ///
 /// Intentionally unauthenticated (like [`attested_session`]): a session record
 /// is a transparency artifact carrying only verification material — provider,
-/// model, endpoint, the verified identity (e.g. signing address), channel
-/// bindings, claims, and an evidence digest. It holds no request or response
-/// content. The list response carries only the evidence **digest**, not the
-/// full evidence `data` bundle: fetch a single session by id (`/v1/aci/sessions/
-/// {id}`) for the bytes. This keeps any larger/raw evidence payload off the
-/// broad, unfiltered listing.
+/// endpoint, the verified identity (e.g. signing address), channel bindings,
+/// claims, and an evidence digest. It holds no request or response content. The
+/// list response carries only the evidence **digest**, not the full evidence
+/// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{id}`) for the
+/// bytes. This keeps any larger/raw evidence payload off the broad listing.
 async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let sessions: Vec<_> = state
-        .service
-        .list_attested_sessions(q.provider.as_deref(), q.model.as_deref())
-        .into_iter()
-        .map(|mut s| {
-            // Keep the digest as the integrity anchor; drop the data-URI bytes
-            // from the broad listing.
-            s.evidence.data_uri = None;
-            s
-        })
-        .collect();
+    let mut sessions = match q.model.as_deref() {
+        // Resolve the model to the upstream(s) serving it, then list each
+        // channel's sessions (honoring a provider filter if both are given).
+        Some(model) => {
+            let names = state
+                .upstream_config
+                .as_ref()
+                .map(|c| c.upstream_names_for_model(model))
+                .unwrap_or_default();
+            names
+                .iter()
+                .filter(|n| q.provider.as_deref().is_none_or(|p| p == n.as_str()))
+                .flat_map(|n| state.service.list_attested_sessions(Some(n)))
+                .collect::<Vec<_>>()
+        }
+        None => state.service.list_attested_sessions(q.provider.as_deref()),
+    };
+    // Keep the digest as the integrity anchor; drop the data-URI bytes from the
+    // broad listing.
+    for s in &mut sessions {
+        s.evidence.data_uri = None;
+    }
     Json(json!({
-        "api_version": "aci.session_list.v1",
+        "api_version": "aci/1",
         "sessions": sessions,
     }))
     .into_response()

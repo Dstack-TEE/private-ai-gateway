@@ -61,14 +61,11 @@ pub trait SessionStore: Send + Sync {
     /// Fetch a session by id if it exists and has not passed `expires_at`.
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession>;
 
-    /// List non-expired sessions, optionally filtered by provider and/or public
-    /// model id.
-    fn list_sessions(
-        &self,
-        provider: Option<&str>,
-        model_id: Option<&str>,
-        now: u64,
-    ) -> Vec<AttestedSession>;
+    /// List non-expired sessions, optionally filtered by provider (the upstream
+    /// config name). Sessions are per-TEE-channel, so there is no model filter
+    /// here; a model→channel lookup (via the upstream config) belongs to the
+    /// caller.
+    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession>;
 }
 
 /// Append-only JSONL-backed [`SessionStore`].
@@ -167,19 +164,13 @@ impl SessionStore for JsonlSessionStore {
         }
     }
 
-    fn list_sessions(
-        &self,
-        provider: Option<&str>,
-        model_id: Option<&str>,
-        now: u64,
-    ) -> Vec<AttestedSession> {
+    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<AttestedSession> = guard
             .by_id
             .values()
             .filter(|s| now < s.expires_at)
             .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .filter(|s| model_id.is_none_or(|m| s.model_id == m))
             .cloned()
             .collect();
         // Stable order for callers/tests: newest first, then by id.
@@ -227,19 +218,13 @@ impl SessionStore for InMemorySessionStore {
         }
     }
 
-    fn list_sessions(
-        &self,
-        provider: Option<&str>,
-        model_id: Option<&str>,
-        now: u64,
-    ) -> Vec<AttestedSession> {
+    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<AttestedSession> = guard
             .by_id
             .values()
             .filter(|s| now < s.expires_at)
             .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .filter(|s| model_id.is_none_or(|m| s.model_id == m))
             .cloned()
             .collect();
         out.sort_by(|a, b| {
@@ -270,8 +255,6 @@ mod tests {
     fn session(endpoint: &str, marker: &str, expires_at: u64) -> AttestedSession {
         AttestedSession::seal(
             "phala-direct",
-            "glm51-phala",
-            Some("zai-org/GLM-5.1".to_string()),
             Some(endpoint.to_string()),
             "phala-direct/1",
             None,
@@ -300,7 +283,7 @@ mod tests {
 
         assert!(store.get_session(&a.session_id, 5_000).is_none());
         assert!(store.get_session(&b.session_id, 5_000).is_some());
-        let listed = store.list_sessions(None, None, 5_000);
+        let listed = store.list_sessions(None, 5_000);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, b.session_id);
     }
@@ -315,14 +298,9 @@ mod tests {
         store.put_session(b.clone(), 1_001).unwrap();
 
         assert_eq!(store.get_session(&a.session_id, 2_000), Some(a.clone()));
-        assert_eq!(store.list_sessions(None, None, 2_000).len(), 2);
-        assert_eq!(
-            store
-                .list_sessions(Some("phala-direct"), Some("glm51-phala"), 2_000)
-                .len(),
-            2
-        );
-        assert!(store.list_sessions(Some("nope"), None, 2_000).is_empty());
+        assert_eq!(store.list_sessions(None, 2_000).len(), 2);
+        assert_eq!(store.list_sessions(Some("phala-direct"), 2_000).len(), 2);
+        assert!(store.list_sessions(Some("nope"), 2_000).is_empty());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -335,7 +313,7 @@ mod tests {
         store.put_session(s.clone(), 1_000).unwrap();
 
         assert!(store.get_session(&s.session_id, 5_000).is_none());
-        assert!(store.list_sessions(None, None, 5_000).is_empty());
+        assert!(store.list_sessions(None, 5_000).is_empty());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -379,7 +357,7 @@ mod tests {
 
         let store = JsonlSessionStore::open(&path).unwrap();
         assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
-        assert_eq!(store.list_sessions(None, None, 2_000).len(), 1);
+        assert_eq!(store.list_sessions(None, 2_000).len(), 1);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -413,7 +391,7 @@ mod tests {
         // id is not the content hash of its (altered) contents.
         let store = JsonlSessionStore::open(&path).unwrap();
         assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
-        assert_eq!(store.list_sessions(None, None, 2_000).len(), 1);
+        assert_eq!(store.list_sessions(None, 2_000).len(), 1);
 
         let _ = std::fs::remove_file(&path);
     }

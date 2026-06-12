@@ -48,8 +48,8 @@ pub struct UpstreamVerifiedEvent {
     /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
     pub upstream_name: String,
     /// The provider *type* the verification logic keys on (e.g. "tinfoil",
-    /// "near-ai", "chutes", "phala-direct"). Many `vendor` entries can share one
-    /// `provider` (two configs both pointing at Tinfoil). Used to map provider
+    /// "near-ai", "chutes", "phala-direct"). Many `upstream_name` entries can
+    /// share one `provider` (two configs both pointing at Tinfoil). Used to map provider
     /// evidence onto typed session claims; `None` for generic/static verifiers
     /// that have no provider type.
     pub provider: Option<String>,
@@ -288,6 +288,11 @@ impl ReceiptBuilder {
     /// typed claim verdicts (shallow audit) when a verified session exists. The
     /// session id is content-addressed, so it commits the receipt to the exact
     /// session (with its evidence + reasons) a deep audit would re-fetch.
+    ///
+    /// `session_id`/`claims` are `None` when no session was sealed — i.e. the
+    /// upstream verification failed (or produced no enforceable channel binding).
+    /// The event is still recorded so a downstream verifier sees the failed
+    /// outcome; there is simply no session to reference.
     pub fn add_upstream_verified_with_session<C: serde::Serialize>(
         &mut self,
         event: UpstreamVerifiedEvent,

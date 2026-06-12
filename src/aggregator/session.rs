@@ -25,9 +25,9 @@ use serde_json::{json, Value};
 use crate::aci::canonical::{self, CanonicalError};
 use crate::aci::receipt::ChannelBinding;
 
-/// `api_version` stamped on persisted session records. Gateway-local envelopes
-/// use the `aci.<resource>.v1` scheme; the signed ACI artifacts stay `aci/1`.
-pub const SESSION_API_VERSION: &str = "aci.session.v1";
+/// `api_version` stamped on persisted session records — `aci/1`, uniform with
+/// the rest of the ACI surface.
+pub const SESSION_API_VERSION: &str = "aci/1";
 
 /// Tri-state truth value for a claim. Missing evidence is [`ClaimStatus::Unknown`]
 /// — transparency, never a silent pass.
@@ -140,7 +140,11 @@ pub struct SessionClaims {
 }
 
 /// The common evidence object (audit-criteria §11): a `sha256:` digest over the
-/// decoded verifier-input bytes plus a data URI that preserves those bytes.
+/// decoded verifier-input bytes plus a data URI that preserves those bytes. A
+/// multipart bundle (e.g. several raw HTTP responses) is carried as a single
+/// `data:multipart/mixed;boundary=...;base64,...` URI, with the digest taken
+/// over the whole decoded payload — so this stays one `{digest, data}` pair
+/// regardless of how many parts it contains.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EvidenceRef {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -192,22 +196,19 @@ impl WorkloadIdentityRef {
     }
 }
 
-/// One immutable, verified session. Content-addressed; never mutated.
+/// One immutable, verified **TEE channel** — the attested remote service a
+/// request can be bound to, identified by its endpoint + channel binding +
+/// evidence, not by model. Content-addressed; never mutated. A router-based
+/// upstream that serves many models behind one TEE therefore yields **one**
+/// session (no per-model duplication); the specific model served is recorded on
+/// the receipt's `upstream.verified` event, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedSession {
     pub api_version: String,
     /// `"as_" + hex(sha256(JCS(verified material)))`.
     pub session_id: String,
+    /// The upstream this channel belongs to (the operator's upstream config name).
     pub provider: String,
-    /// The model id this session attests, as routed to the upstream (the model
-    /// string the gateway verified against). NOT necessarily a client-facing
-    /// alias — when the frontend pre-resolves a public name to a provider model,
-    /// this holds the resolved id. `/v1/aci/sessions?model=` filters on it.
-    pub model_id: String,
-    /// The upstream's own model id, set only when it differs from `model_id`
-    /// (reserved for per-model config that carries a distinct public alias).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     pub verifier_id: String,
@@ -238,8 +239,6 @@ impl AttestedSession {
     #[allow(clippy::too_many_arguments)]
     pub fn seal(
         provider: impl Into<String>,
-        model_id: impl Into<String>,
-        upstream_model_id: Option<String>,
         endpoint: Option<String>,
         verifier_id: impl Into<String>,
         identity: Option<WorkloadIdentityRef>,
@@ -253,8 +252,6 @@ impl AttestedSession {
             api_version: SESSION_API_VERSION.to_string(),
             session_id: String::new(),
             provider: provider.into(),
-            model_id: model_id.into(),
-            upstream_model_id,
             endpoint,
             verifier_id: verifier_id.into(),
             established_at,
@@ -277,8 +274,6 @@ impl AttestedSession {
     pub fn content_id(&self) -> Result<String, CanonicalError> {
         let material = json!({
             "provider": self.provider,
-            "model_id": self.model_id,
-            "upstream_model_id": self.upstream_model_id,
             "endpoint": self.endpoint,
             "verifier_id": self.verifier_id,
             "identity": self.identity,
@@ -309,8 +304,6 @@ mod tests {
     fn seal_with(endpoint: &str, spki: &str, claims: SessionClaims) -> AttestedSession {
         AttestedSession::seal(
             "phala-direct",
-            "glm51-phala",
-            Some("zai-org/GLM-5.1".to_string()),
             Some(endpoint.to_string()),
             "phala-direct/1",
             None,
@@ -360,8 +353,6 @@ mod tests {
     fn id_ignores_timestamps() {
         let a = AttestedSession::seal(
             "p",
-            "m",
-            None,
             None,
             "v/1",
             None,
@@ -374,8 +365,6 @@ mod tests {
         .unwrap();
         let b = AttestedSession::seal(
             "p",
-            "m",
-            None,
             None,
             "v/1",
             None,

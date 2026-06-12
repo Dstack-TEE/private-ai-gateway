@@ -442,7 +442,7 @@ async fn attested_session_lookup_returns_audit_record() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert_eq!(body["api_version"], "aci.session.v1");
+    assert_eq!(body["api_version"], "aci/1");
     assert_eq!(body["session_id"], session_id);
     assert_eq!(body["provider"], "stub-upstream");
     assert_eq!(body["endpoint"], "https://stub-upstream");
@@ -489,7 +489,7 @@ async fn attested_session_lookup_returns_audit_record() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert_eq!(body["api_version"], "aci.session_list.v1");
+    assert_eq!(body["api_version"], "aci/1");
     assert_eq!(body["sessions"][0]["session_id"], session_id);
     // The broad list keeps the integrity digest but strips the evidence bytes;
     // fetch a single session by id for the full bundle (see above).
