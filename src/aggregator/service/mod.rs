@@ -45,11 +45,19 @@ mod receipts;
 mod streaming;
 mod wire;
 
-pub use clock::*;
-pub use config::*;
-pub use errors::*;
-pub use receipt_store::*;
-pub use wire::*;
+pub use clock::{Clock, FixedClock, SystemClock};
+pub use config::{validate_source_provenance, AciServiceConfig, ReceiptOwner};
+pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
+pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
+pub use wire::{
+    ChatCompletionRequest, E2eePreparedRequest, E2eeRequestContext, E2eeRequestParts,
+    E2eeResponseInfo, ForwardCandidate, ForwardResult, GatewayRequestContext,
+    LegacySignatureResult, MiddlewareForwardResult, MiddlewareForwarded,
+    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
+    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
+    ServiceResponseStream, StreamingForwardResult, StreamingForwardStream, StreamingUpstreamError,
+    UpstreamVerificationRequest, UpstreamVerifier,
+};
 
 pub struct AciService {
     keys: Arc<dyn KeyProvider>,

@@ -1,3 +1,4 @@
+use super::config::normalize_downstream_domain;
 use super::wire::{E2eeAadMode, E2eeDecryptor};
 use super::*;
 
