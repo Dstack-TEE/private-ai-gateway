@@ -63,10 +63,10 @@ def run_embeddings_case(
 
     # Embeddings responses carry no upstream `id`, so the receipt
     # endpoint must be addressed by receipt_id. The gateway accepts
-    # either chat_id or receipt_id at /v1/receipt/{id}.
+    # either chat_id or receipt_id at /v1/signature/{id}.
     receipt_status, _, receipt_body, receipt_json = request_json(
         "GET",
-        f"{base_url}/v1/receipt/{receipt_id}",
+        f"{base_url}/v1/signature/{receipt_id}",
         headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
