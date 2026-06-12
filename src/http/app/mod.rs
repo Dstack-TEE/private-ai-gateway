@@ -60,15 +60,13 @@ use axum::{
     extract::{Request, State},
     http::{HeaderName, HeaderValue},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, post},
     Router,
 };
-use futures_util::StreamExt;
 use hyper::body::Incoming;
 use hyper::server::conn::http1::Builder as HyperHttp1Builder;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
-use rand::RngCore;
 use tokio::net::UnixListener;
 use tower::ServiceExt as _;
 
@@ -78,12 +76,17 @@ use crate::aggregator::service::{
 use crate::aggregator::upstream_config::UpstreamConfigManager;
 
 mod backend;
+mod error_responses;
 mod handlers;
 mod proxy;
 mod util;
 
-use backend::*;
-use handlers::*;
+use backend::internal_forward;
+use handlers::{
+    aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
+    admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
+    embeddings, messages, metrics, models, receipt_by_chat_id, responses, root,
+};
 
 #[derive(Clone)]
 pub struct AppState {

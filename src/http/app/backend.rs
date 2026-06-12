@@ -7,18 +7,24 @@ use axum::{
     body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
+use rand::RngCore;
 use serde_json::Value;
-
-use super::util::*;
-use super::*;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     MiddlewareForwardResult, ReceiptOwner, ServiceError, StreamingForwardResult,
 };
+
+use super::error_responses::{
+    e2ee_error_response, error_response, insert_str_header, internal_error_response,
+    upstream_verification_error_response,
+};
+use super::util::{build_forward_candidates, header_str, insert_attribution_headers};
+use super::InternalBackendState;
 
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,

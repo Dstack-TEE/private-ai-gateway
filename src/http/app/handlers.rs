@@ -4,16 +4,11 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-
-use super::backend::*;
-use super::proxy::*;
-use super::util::*;
-use super::*;
 
 use crate::aci::e2ee::{
     E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM,
@@ -27,6 +22,24 @@ use crate::aggregator::service::{
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
 use crate::aggregator::upstream_config::parse_config_text;
+
+use super::backend::{
+    forward_to_backend, generate_request_id, strip_empty_tool_calls, upstream_direct_response,
+    upstream_proxy_error_response, BackendForwardInput,
+};
+use super::error_responses::{
+    admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
+    internal_error_response, invalid_signing_algo_response, unsupported_e2ee_response,
+    upstream_config_error_response,
+};
+use super::proxy::{
+    finalize_middleware_http_response, forward_to_middleware, get_from_middleware,
+    MiddlewareFinalizeContext,
+};
+use super::util::{
+    enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
+};
+use super::{AppState, StoredGatewayRequest};
 
 #[derive(Deserialize)]
 pub(super) struct AttestationQuery {

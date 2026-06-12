@@ -10,17 +10,19 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use futures_util::Stream;
-
-use super::backend::*;
-use super::util::*;
-use super::*;
+use futures_util::{Stream, StreamExt};
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
 };
+
+use super::backend::reqwest_response_headers;
+use super::error_responses::{
+    e2ee_error_response, error_response, insert_str_header, internal_error_response,
+};
+use super::{GatewayRequestStore, UdsMiddleware};
 
 pub(super) async fn forward_to_middleware(
     middleware: UdsMiddleware,
