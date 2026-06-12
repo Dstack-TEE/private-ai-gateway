@@ -2129,12 +2129,6 @@ impl AciService {
     }
 }
 
-/// Derive the typed claim verdicts for a verified upstream event. A verified
-/// result means the provider's verifier proved a genuine TEE workload identity
-/// and bound the request channel to it, so `tee_attested` is asserted
-/// (`VerifierDerived`). The remaining typed claims stay `Unknown` until a
-/// per-provider mapper fills them; the verifier's raw `provider_claims` are
-/// preserved verbatim as scope facts under `claims.extra`.
 /// The background upstream verification writes attested sessions into the store
 /// through this sink, keeping it fresh from the same verification that keeps the
 /// gateway's attestation fresh — independent of traffic. The live completion
@@ -2166,7 +2160,7 @@ trait ProviderClaimMapper {
 fn claim_mapper(provider: Option<&str>) -> &'static dyn ProviderClaimMapper {
     match provider {
         Some("tinfoil") => &TinfoilClaims,
-        Some("near-ai") | Some("chutes") | Some("phala-direct") => &DstackClaims,
+        Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
     }
 }
@@ -2200,19 +2194,22 @@ fn hardware_tee_attested(event: &UpstreamVerifiedEvent) -> Claim {
     )
 }
 
-/// dstack-based providers (NEAR AI, Chutes, Phala-direct): a real hardware quote
-/// plus a `TcbStatus` from DCAP collateral (a HardwareProven tri-state) and OS
-/// provenance from the attested image hash.
-struct DstackClaims;
-impl ProviderClaimMapper for DstackClaims {
+/// Intel TDX providers (NEAR AI, Chutes, Phala-direct): a real TDX quote, a
+/// granular `TcbStatus` from the verified collateral (a HardwareProven
+/// tri-state), OS provenance from the attested image hash, and — when the
+/// provider supplies it — a verified NVIDIA confidential-computing GPU
+/// attestation. (Chutes uses TDX too; it just isn't dstack-based, hence the
+/// name is by TEE type, not by stack.)
+struct IntelTdxClaims;
+impl ProviderClaimMapper for IntelTdxClaims {
     fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
-        // gpu_attested / model_weights_provenance stay Unknown: a GPU/NRAS token
-        // proves only that a CC-capable GPU exists, not that it served this
-        // request, and no verifier here checks the served weights.
+        // model_weights_provenance stays Unknown: no verifier here checks the
+        // served weights.
         SessionClaims {
             tee_attested: hardware_tee_attested(event),
             tcb_up_to_date: tcb_up_to_date_claim(event),
             os_known_good: os_known_good_claim(event),
+            gpu_attested: gpu_attested_claim(event),
             ..SessionClaims::default()
         }
     }
@@ -2304,6 +2301,40 @@ fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
             "attested OS image is a dev image (SSH / serial console enabled), not production",
         ),
         None => Claim::unknown(),
+    }
+}
+
+/// GPU attestation from the provider's NVIDIA confidential-computing evidence.
+/// When `gpu_verified` is set, the GPU's own attestation report was
+/// cryptographically verified and nonce-bound to this verification round, so we
+/// **assert** it — but as `VerifierDerived`, not `HardwareProven`: it attests a
+/// genuine CC GPU, not (on its own) that this GPU is bound to the CPU TEE that
+/// served the request. Absent GPU evidence (or a provider that doesn't supply
+/// it) leaves the claim Unknown — we never assert it by policy.
+fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let claims = event.provider_claims.as_ref();
+    let verified = claims
+        .and_then(|c| c.get("gpu_verified"))
+        .and_then(Value::as_bool);
+    match verified {
+        Some(true) => {
+            let arch = claims
+                .and_then(|c| c.get("gpu_arch"))
+                .and_then(Value::as_str);
+            let reason = match arch {
+                Some(arch) => format!(
+                    "NVIDIA confidential-computing GPU attestation verified and nonce-bound \
+                     (arch {arch}); attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                ),
+                None => "NVIDIA confidential-computing GPU attestation verified and nonce-bound; \
+                         attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                    .to_string(),
+            };
+            Claim::asserted(ClaimSource::VerifierDerived, reason)
+        }
+        // `false` is ambiguous (no evidence vs. a swallowed verify error), so we
+        // do not refute — only assert on a genuine, nonce-bound verification.
+        _ => Claim::unknown(),
     }
 }
 
@@ -3759,6 +3790,43 @@ mod claim_mapping_tests {
         let unknown =
             session_claims_for_event(&event(Some("tinfoil"), VerificationResult::Verified, None));
         assert_eq!(unknown.os_known_good.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn gpu_attested_asserts_only_on_a_verified_nonce_bound_gpu() {
+        // A verified, nonce-bound GPU attestation asserts — but VerifierDerived,
+        // never HardwareProven (it attests a genuine CC GPU, not its binding to
+        // the serving CPU TEE).
+        let verified = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "gpu_verified": true, "gpu_arch": "hopper" })),
+        ));
+        assert_eq!(verified.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            verified.gpu_attested.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_ne!(
+            verified.gpu_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+
+        // No GPU evidence ⇒ Unknown; never asserted by policy.
+        let absent = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "tcb_status": "UpToDate" })),
+        ));
+        assert_eq!(absent.gpu_attested.status, ClaimStatus::Unknown);
+
+        // Present-but-unverified is ambiguous, so we do not refute ⇒ Unknown.
+        let unverified = session_claims_for_event(&event(
+            Some("chutes"),
+            VerificationResult::Verified,
+            Some(json!({ "gpu_verified": false })),
+        ));
+        assert_eq!(unverified.gpu_attested.status, ClaimStatus::Unknown);
     }
 
     #[test]

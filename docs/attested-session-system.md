@@ -146,18 +146,17 @@ struct SessionClaims {
 The verifier *asserts* each claim and supplies the reason; the gateway records
 and surfaces it. The gateway does not compute provenance itself.
 
-**GPU attestation.** `gpu_attested` is a real, assertable claim, but it is
-established the sound way: from **CPU attestation + a software source-code
-check** — the reviewed serving software measured into the CPU TEE quote is what
-locally attests the GPU and sets up the encrypted CPU↔GPU channel, so a verifier
-that has checked that software can explicitly assert "the GPU is good" (and may
-include the hardware model). What is *not* sound is treating a standalone GPU
-attestation as the basis: an NRAS token only proves a CC-capable GPU *exists*,
-not that it serves this request or is bound to the serving CPU TEE, so the
-gateway never gates on a gateway-side NRAS check (verifying its JWT against
-NRAS' JWKS does not change that — it is an existence oracle, not a binding
-proof). Source for `gpu_attested` is therefore `VerifierDerived` via the
-CPU+software chain, never a raw GPU-token check.
+**GPU attestation.** `gpu_attested` asserts (`VerifierDerived`) when the
+provider's NVIDIA confidential-computing GPU attestation is verified **and
+nonce-bound** to this verification round — a genuine CC GPU, cryptographically
+checked. It is deliberately *not* `HardwareProven`, and the reason is explicit
+that this attests the GPU itself, **not** its binding to the serving CPU TEE:
+an NRAS check proves a CC-capable GPU *exists* for a nonce, not that it serves
+this request or is bound to the CPU quote. Proving *that* needs the reviewed
+serving software (measured into the CPU TEE quote) to locally attest the GPU and
+set up the encrypted CPU↔GPU channel — a stronger statement we do not make here.
+The gateway never *gates* on the GPU check (it stays supplemental); it only
+records the honest claim. Absent or unverified GPU evidence leaves it `Unknown`.
 
 ## Source-code provenance
 
@@ -193,7 +192,7 @@ mapping. A `failed` result asserts nothing.
 | `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | unknown |
 | `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | unknown |
 | `os_known_good` | unknown | unknown | unknown | unknown | unknown |
-| `gpu_attested` | unknown³ | unknown³ | unknown³ | unknown³ | unknown |
+| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | unknown |
 | `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown |
 
 - For the four real provider verifiers `tee_attested` is `HardwareProven`: a
@@ -214,13 +213,14 @@ mapping. A `failed` result asserts nothing.
 - ² Tinfoil compares its SEV-SNP launch measurement against the Sigstore golden
   values published for the build's repo; the reason cites `config_repo` /
   `release_digest`. Source is `VerifierDerived`.
-- ³ `gpu_attested` is never asserted from a GPU/NRAS token alone (see the GPU
-  note above); the raw `gpu_verified` / `gpu_arch` facts remain in `extra`. The
-  GPU check still runs — when it succeeds it authenticates the GPU model/info the
-  CPU TEE quote does not itself vouch for — but it never gates a session: a real
-  TEE GPU is already established by the measured serving software inside the
-  quote, so a failed or absent GPU result is recorded as supplemental metadata,
-  not a rejection (Chutes and Phala-direct both treat it this way).
+- ³ `gpu_attested` asserts (`VerifierDerived`) when the provider's NVIDIA
+  confidential-computing GPU attestation is verified *and* nonce-bound (Chutes
+  and Phala-direct surface it; NEAR AI / Tinfoil do not). It attests a genuine CC
+  GPU, **not** its binding to the serving CPU TEE — hence `VerifierDerived`, not
+  `HardwareProven` (see the GPU note above) — and it never gates a session.
+  Absent or unverified GPU evidence leaves it `unknown` (we do not refute on an
+  ambiguous negative). The raw `gpu_verified` / `gpu_arch` facts also stay in
+  `extra`.
 - "generic" is the static / preverified / DCAP path with no provider identity:
   it asserts only `tee_attested` (`VerifierDerived`), nothing else.
 

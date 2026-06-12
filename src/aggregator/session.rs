@@ -10,8 +10,9 @@
 //! the exact session it used, so the security context behind a receipt can
 //! never silently change.
 //!
-//! "One provider imports many sessions" follows naturally: many model-endpoints,
-//! plus a new session whenever a model-endpoint's verified material changes.
+//! "One provider owns many sessions" follows naturally: one per verified TEE
+//! channel (endpoint), plus a new one whenever a channel's verified material
+//! changes. A router fronting many models behind one TEE is a single session.
 //!
 //! Source-code-level provenance is the verifier's responsibility, not a schema
 //! here: the verifier asserts the `serving_software_known_good` / `os_known_good`
@@ -67,9 +68,6 @@ pub struct Claim {
     /// The verifier's plain reason, e.g. "matches hard-coded known measurements".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Pointer into the session evidence backing this claim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evidence_ref: Option<String>,
 }
 
 impl Default for Claim {
@@ -85,7 +83,6 @@ impl Claim {
             status: ClaimStatus::Unknown,
             source: None,
             reason: None,
-            evidence_ref: None,
         }
     }
 
@@ -94,7 +91,6 @@ impl Claim {
             status: ClaimStatus::Asserted,
             source: Some(source),
             reason: Some(reason.into()),
-            evidence_ref: None,
         }
     }
 
@@ -103,13 +99,7 @@ impl Claim {
             status: ClaimStatus::Refuted,
             source: Some(source),
             reason: Some(reason.into()),
-            evidence_ref: None,
         }
-    }
-
-    pub fn with_evidence_ref(mut self, evidence_ref: impl Into<String>) -> Self {
-        self.evidence_ref = Some(evidence_ref.into());
-        self
     }
 }
 
@@ -120,9 +110,10 @@ impl Claim {
 pub struct SessionClaims {
     /// §1 — a genuine CPU TEE, with the workload identity bound.
     pub tee_attested: Claim,
-    /// "The GPU is good", asserted from CPU attestation + a software source
-    /// check (the measured serving software verifies the GPU). Never based on a
-    /// standalone GPU/NRAS token, which only proves a CC-capable GPU exists.
+    /// The provider's NVIDIA confidential-computing GPU attestation, when
+    /// verified and nonce-bound: asserted `VerifierDerived` — it attests a
+    /// genuine CC GPU, not (on its own) that GPU's binding to the serving CPU
+    /// TEE, which would need a measured-software check inside the CPU quote.
     pub gpu_attested: Claim,
     /// §14 — platform TCB freshness (TDX/SGX `TcbStatus`, SEV reported TCB).
     pub tcb_up_to_date: Claim,
@@ -176,10 +167,6 @@ impl EvidenceRef {
 /// channel binding, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkloadIdentityRef {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workload_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement: Option<String>,
     /// secp256k1 response-signing address (e.g. vllm-proxy `/v1/signature`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_address: Option<String>,
@@ -189,10 +176,7 @@ pub struct WorkloadIdentityRef {
 
 impl WorkloadIdentityRef {
     pub fn is_empty(&self) -> bool {
-        self.workload_id.is_none()
-            && self.measurement.is_none()
-            && self.signing_address.is_none()
-            && self.extra.is_empty()
+        self.signing_address.is_none() && self.extra.is_empty()
     }
 }
 
@@ -389,8 +373,7 @@ mod tests {
         let claim = Claim::asserted(
             ClaimSource::VerifierDerived,
             "hard-coded known measurements",
-        )
-        .with_evidence_ref("sha256:abc");
+        );
         let json = serde_json::to_value(&claim).unwrap();
         assert_eq!(
             json,
@@ -398,7 +381,6 @@ mod tests {
                 "status": "asserted",
                 "source": "verifier_derived",
                 "reason": "hard-coded known measurements",
-                "evidence_ref": "sha256:abc",
             })
         );
     }

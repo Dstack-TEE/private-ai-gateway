@@ -1559,8 +1559,7 @@ async fn aci_receipt(
     Json(receipt.to_canonical_value(true)).into_response()
 }
 
-/// List attested sessions, optionally filtered by `?provider=` and/or `?model=`
-/// Surfaces the attested TEE channels (one per upstream endpoint), optionally
+/// List the attested TEE channels (one per upstream endpoint), optionally
 /// filtered by `?provider=` (the upstream config name) and/or `?model=`.
 ///
 /// Sessions are per-TEE-channel, not per-model, so a `?model=` filter is
