@@ -40,6 +40,7 @@ mod e2ee_crypto;
 mod errors;
 mod forward;
 mod helpers;
+mod middleware;
 mod receipt_store;
 mod receipts;
 mod streaming;
