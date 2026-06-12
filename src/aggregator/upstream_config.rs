@@ -239,11 +239,22 @@ struct ConfiguredUpstreams {
     sessions: Arc<ProviderSessionRegistry>,
 }
 
+/// Sink that materializes verified upstream events into stored attested
+/// sessions. Implemented by the service. The background verification loop calls
+/// it after each verify/refresh, so the session store is maintained by the same
+/// verification that already keeps the gateway's attestation fresh — one source
+/// of truth, no separate refresh, no drift. The completion path and the preflight
+/// API both just read that store.
+pub trait UpstreamSessionSink: Send + Sync {
+    fn record_session(&self, event: &UpstreamVerifiedEvent);
+}
+
 #[derive(Clone)]
 pub struct UpstreamConfigManager {
     path: PathBuf,
     options: UpstreamRuntimeOptions,
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
+    session_sink: Arc<RwLock<Option<Arc<dyn UpstreamSessionSink>>>>,
 }
 
 impl UpstreamConfigManager {
@@ -258,7 +269,18 @@ impl UpstreamConfigManager {
             path,
             options,
             state: Arc::new(RwLock::new(state)),
+            session_sink: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Attach the sink that the background verification writes attested sessions
+    /// into. Set once after the service is built, before the lifecycle is
+    /// spawned.
+    pub fn set_session_sink(&self, sink: Arc<dyn UpstreamSessionSink>) {
+        *self
+            .session_sink
+            .write()
+            .expect("upstream config manager session sink poisoned") = Some(sink);
     }
 
     pub fn backend(&self) -> Arc<dyn UpstreamBackend> {
@@ -334,7 +356,7 @@ impl UpstreamConfigManager {
     }
 
     async fn run_upstream_verification(&self, refresh: bool) -> Vec<UpstreamPrewarmResult> {
-        let (verifier, targets) = {
+        let (verifier, targets, sink) = {
             let state = self
                 .state
                 .read()
@@ -348,7 +370,12 @@ impl UpstreamConfigManager {
             } else {
                 verification_targets(&state.config)
             };
-            (verifier, targets)
+            let sink = self
+                .session_sink
+                .read()
+                .expect("upstream config manager session sink poisoned")
+                .clone();
+            (verifier, targets, sink)
         };
 
         let mut results = Vec::with_capacity(targets.len());
@@ -365,6 +392,12 @@ impl UpstreamConfigManager {
             } else {
                 verifier.verify(request).await
             };
+            // Materialize the verified state into the session store. This is the
+            // single writer: the background verification keeps the store fresh,
+            // and both the preflight API and the completion path just read it.
+            if let Some(sink) = sink.as_ref() {
+                sink.record_session(&event);
+            }
             results.push(UpstreamPrewarmResult {
                 upstream_name: target.upstream_name,
                 model_id: target.model_id,
@@ -482,6 +515,9 @@ impl UpstreamConfigManager {
     }
 }
 
+/// One configured model-endpoint to verify: the upstream's config `name`, the
+/// configured upstream `model_id`, and the endpoint origin. Drives both the
+/// verifier-cache prewarm and the attested-session writes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct UpstreamVerificationTarget {
     upstream_name: String,
@@ -1500,6 +1536,7 @@ mod tests {
                 verifier_request_timeout_seconds: 60,
             },
             state,
+            session_sink: Arc::new(RwLock::new(None)),
         };
 
         let results = manager.prewarm_upstream_verification().await;

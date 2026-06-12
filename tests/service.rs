@@ -15,6 +15,8 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
     UpstreamVerificationError,
 };
+use private_ai_gateway::aggregator::session::ClaimStatus;
+use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{StaticKeyProvider, StubQuoter};
 
@@ -316,7 +318,11 @@ async fn session_keys_on_requested_model_not_response_model() {
     assert_eq!(uv.fields.get("model_id").unwrap(), "served-by-upstream");
     // ...but the session is keyed on the requested (routed) model, so its
     // identity never depends on the response body.
-    let session_id = uv.fields.get("session_id").and_then(|v| v.as_str()).unwrap();
+    let session_id = uv
+        .fields
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap();
     let session = svc.get_attested_session(session_id).unwrap();
     assert_eq!(session.public_model_id, "requested-model");
 }
@@ -520,4 +526,53 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
         .service_capabilities
         .supported_e2ee_versions
         .is_empty());
+}
+
+#[tokio::test]
+async fn background_verification_writes_inspectable_session_into_the_store() {
+    let (service, _) = make_service(b"{}", true);
+    let event = UpstreamVerifiedEvent {
+        vendor: "preflight-upstream".to_string(),
+        provider: Some("tinfoil".to_string()),
+        model_id: "preflight-model".to_string(),
+        url_origin: Some("https://preflight-upstream".to_string()),
+        verifier_id: "preflight-verifier/v1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://preflight-upstream".to_string(),
+            spki_sha256: "bb".repeat(32),
+        }],
+        provider_claims: Some(serde_json::json!({ "tcb_status": "UpToDate" })),
+    };
+
+    // Nothing verified yet — nothing to inspect.
+    assert!(service.list_attested_sessions(None, None).is_empty());
+
+    // The background verification writes the session through the sink — pure
+    // attestation, no client request and no body. The preflight API then reads
+    // this same store.
+    service.record_session(&event);
+
+    let listed = service.list_attested_sessions(None, Some("preflight-model"));
+    assert_eq!(listed.len(), 1);
+    let session = &listed[0];
+    assert_eq!(session.public_model_id, "preflight-model");
+    assert_eq!(session.provider, "preflight-upstream");
+    // Typed claims are populated from the provider mapping (tinfoil + UpToDate).
+    assert_eq!(session.claims.tee_attested.status, ClaimStatus::Asserted);
+    assert_eq!(session.claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+    // Resolvable by its content-addressed id too.
+    assert!(service.get_attested_session(&session.session_id).is_some());
+
+    // Re-verifying the unchanged endpoint is idempotent: content-addressing
+    // means refresh writes the same record and never churns the store (and a
+    // later completion path references this same session rather than copying).
+    let id = session.session_id.clone();
+    service.record_session(&event);
+    let after = service.list_attested_sessions(None, Some("preflight-model"));
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].session_id, id);
 }

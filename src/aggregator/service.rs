@@ -51,6 +51,7 @@ use crate::aggregator::session::{
     AttestedSession, Claim, ClaimSource, EvidenceRef, SessionClaims, WorkloadIdentityRef,
 };
 use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
+use crate::aggregator::upstream_config::UpstreamSessionSink;
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
@@ -2135,6 +2136,20 @@ impl AciService {
 /// (`VerifierDerived`). The remaining typed claims stay `Unknown` until a
 /// per-provider mapper fills them; the verifier's raw `provider_claims` are
 /// preserved verbatim as scope facts under `claims.extra`.
+/// The background upstream verification writes attested sessions into the store
+/// through this sink, so the store has a single writer kept fresh by the same
+/// verification that keeps the gateway's attestation fresh. Sealing is
+/// content-addressed and idempotent: re-verifying an unchanged endpoint resolves
+/// to the same session, and the live completion path's own seal references that
+/// same record rather than copying it.
+impl UpstreamSessionSink for AciService {
+    fn record_session(&self, event: &UpstreamVerifiedEvent) {
+        if let Err(err) = self.record_attested_upstream_session(event) {
+            tracing::warn!(error = %err, "failed to record attested session from verification");
+        }
+    }
+}
+
 /// Map a verified upstream event onto the typed claim vocabulary, honestly: a
 /// claim is asserted only when *this* verifier's evidence backs it. Everything
 /// else stays `Unknown` rather than inflating the audit record. The raw
@@ -2200,12 +2215,14 @@ fn tcb_up_to_date_claim(event: &UpstreamVerifiedEvent) -> Claim {
         .and_then(|c| c.get("tcb_status"))
         .and_then(Value::as_str);
     match status {
-        Some(status) if status.eq_ignore_ascii_case("uptodate") => {
-            Claim::asserted(ClaimSource::HardwareProven, format!("platform TCB status {status}"))
-        }
-        Some(status) => {
-            Claim::refuted(ClaimSource::HardwareProven, format!("platform TCB status {status}"))
-        }
+        Some(status) if status.eq_ignore_ascii_case("uptodate") => Claim::asserted(
+            ClaimSource::HardwareProven,
+            format!("platform TCB status {status}"),
+        ),
+        Some(status) => Claim::refuted(
+            ClaimSource::HardwareProven,
+            format!("platform TCB status {status}"),
+        ),
         None => Claim::unknown(),
     }
 }
@@ -3573,11 +3590,20 @@ mod claim_mapping_tests {
         ));
         // TEE + TCB are hardware-proven (TCB from the reported tcb_status).
         assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
-        assert_eq!(claims.tee_attested.source, Some(ClaimSource::HardwareProven));
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
         assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
-        assert_eq!(claims.tcb_up_to_date.source, Some(ClaimSource::HardwareProven));
+        assert_eq!(
+            claims.tcb_up_to_date.source,
+            Some(ClaimSource::HardwareProven)
+        );
         // Serving software is verifier-derived (Sigstore), and cites the source.
-        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Asserted
+        );
         assert_eq!(
             claims.serving_software_known_good.source,
             Some(ClaimSource::VerifierDerived)
@@ -3615,7 +3641,11 @@ mod claim_mapping_tests {
                 ClaimStatus::Unknown,
                 "{provider}"
             );
-            assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown, "{provider}");
+            assert_eq!(
+                claims.gpu_attested.status,
+                ClaimStatus::Unknown,
+                "{provider}"
+            );
         }
     }
 
@@ -3628,7 +3658,11 @@ mod claim_mapping_tests {
                 VerificationResult::Verified,
                 Some(json!({ "tcb_status": "UpToDate" })),
             ));
-            assert_eq!(up.tcb_up_to_date.status, ClaimStatus::Asserted, "{provider}");
+            assert_eq!(
+                up.tcb_up_to_date.status,
+                ClaimStatus::Asserted,
+                "{provider}"
+            );
 
             // A stale TCB is refuted from the quote — but the session is still
             // created (we do not hard-reject), and TEE attestation still holds.
@@ -3654,8 +3688,11 @@ mod claim_mapping_tests {
             );
 
             // No surfaced status ⇒ Unknown; freshness is never asserted by policy.
-            let missing =
-                session_claims_for_event(&event(Some(provider), VerificationResult::Verified, None));
+            let missing = session_claims_for_event(&event(
+                Some(provider),
+                VerificationResult::Verified,
+                None,
+            ));
             assert_eq!(
                 missing.tcb_up_to_date.status,
                 ClaimStatus::Unknown,
@@ -3673,10 +3710,16 @@ mod claim_mapping_tests {
     fn generic_provider_asserts_only_tee_verifier_derived() {
         let claims = session_claims_for_event(&event(None, VerificationResult::Verified, None));
         assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
-        assert_eq!(claims.tee_attested.source, Some(ClaimSource::VerifierDerived));
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::VerifierDerived)
+        );
         // No TCB/software guarantees from an unidentified verifier.
         assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
-        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
     }
 
     #[test]
@@ -3688,7 +3731,10 @@ mod claim_mapping_tests {
         ));
         assert_eq!(claims.tee_attested.status, ClaimStatus::Unknown);
         assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
-        assert_eq!(claims.serving_software_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
         // Raw claims are still recorded for the audit trail.
         assert!(claims.extra.contains_key("config_repo"));
     }

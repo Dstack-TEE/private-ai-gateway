@@ -351,13 +351,31 @@ mod tests {
     #[test]
     fn id_ignores_timestamps() {
         let a = AttestedSession::seal(
-            "p", "m", None, None, "v/1", None, vec![], SessionClaims::default(),
-            EvidenceRef::default(), 100, 400,
+            "p",
+            "m",
+            None,
+            None,
+            "v/1",
+            None,
+            vec![],
+            SessionClaims::default(),
+            EvidenceRef::default(),
+            100,
+            400,
         )
         .unwrap();
         let b = AttestedSession::seal(
-            "p", "m", None, None, "v/1", None, vec![], SessionClaims::default(),
-            EvidenceRef::default(), 999, 9999,
+            "p",
+            "m",
+            None,
+            None,
+            "v/1",
+            None,
+            vec![],
+            SessionClaims::default(),
+            EvidenceRef::default(),
+            999,
+            9999,
         )
         .unwrap();
         assert_eq!(a.session_id, b.session_id);
@@ -371,8 +389,11 @@ mod tests {
 
     #[test]
     fn asserted_claim_serializes_with_source_and_reason() {
-        let claim = Claim::asserted(ClaimSource::VerifierDerived, "hard-coded known measurements")
-            .with_evidence_ref("sha256:abc");
+        let claim = Claim::asserted(
+            ClaimSource::VerifierDerived,
+            "hard-coded known measurements",
+        )
+        .with_evidence_ref("sha256:abc");
         let json = serde_json::to_value(&claim).unwrap();
         assert_eq!(
             json,

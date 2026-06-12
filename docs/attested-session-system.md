@@ -289,8 +289,37 @@ Canonical (clean shapes):
   audit) plus the content-addressed `session_id`.
 - `GET /v1/aci/sessions/{session_id}` — the immutable session record
   (`aci.session.v1`), with full evidence + per-claim reasons (deep audit).
-- `GET /v1/aci/sessions?provider=&model=` — a provider's imported sessions
-  (`aci.session_list.v1`).
+- `GET /v1/aci/sessions?provider=&model=` — a provider's attested sessions
+  (`aci.session_list.v1`). This is the **preflight survey**: a read of the
+  session store (see below), so a user can inspect the attested session + claims
+  for a model *before* releasing any data.
+
+### One store, one writer
+
+The in-memory session store is the single source of truth, and the **background
+upstream verification is its single writer**. The gateway already re-attests
+every configured model-endpoint at startup and on a refresh cadence to stay
+ready to serve; that same verification now seals each verified result into a
+session (via an `UpstreamSessionSink` the service implements). So sessions are
+established and kept fresh by the verification that runs anyway — there is no
+separate import pass and no separate refresh loop, and therefore no drift.
+
+Sealing a session is **pure attestation**: the verification fetches and checks
+the provider's attestation (the TEE quote, the pinned TLS public key / SPKI, the
+signing key) and stores that verified material plus the typed claims. It is
+**never** a model call — no prompt, no inference, none of the user's data.
+Sessions are keyed on the configured upstream `model_id` and content-addressed,
+so re-verifying an unchanged endpoint resolves to the same record (an idempotent
+no-op), while a rotated key or changed measurement seals a new session and the
+previous one ages out with its retention TTL.
+
+Everything else just reads this store. The preflight API
+(`GET /v1/aci/sessions?...`) returns the currently available sessions; the live
+completion path references the session for the request it served by its
+content-addressed `session_id` rather than copying one. A user reads the
+preflight survey to see the verified identity, channel binding, and typed claims
+— and check the pinned public key / SPKI — before deciding whether to release
+their prompts.
 
 No bundle and no `/body`: the artifacts are *linked, not bundled*. A receipt
 references its session by content-addressed `session_id`; a verifier follows the
@@ -315,8 +344,13 @@ private-ai-gateway paths):
    `SessionClaims` (status + source + reason) from its verified evidence —
    including `serving_software_known_good` / `os_known_good` as the
    source-provenance surface.
-3. **Thin per-model config + import.** Per-model `endpoint`; one session per
-   model-endpoint at import.
+3. **One store, one writer (preflight).** *Done.* The background upstream
+   verification seals each verified result into the session store through an
+   `UpstreamSessionSink`, so `/v1/aci/sessions` is a real preflight survey
+   maintained by the verification that already runs for serving — no separate
+   import or refresh loop, no drift. Still open: the per-model `endpoint` object
+   config form (today each model maps to a single `upstream_model_id` inheriting
+   the provider `base_url`).
 
 The `/v1/aci/` namespace, the sessions-list endpoint, and the dropping of the
 `/body` route are already in place.

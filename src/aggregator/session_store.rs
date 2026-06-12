@@ -105,9 +105,7 @@ impl JsonlSessionStore {
                 };
                 next_seq = next_seq.max(record.seq + 1);
                 if record.record_type == RECORD_TYPE_SESSION {
-                    if let Ok(session) =
-                        serde_json::from_value::<AttestedSession>(record.payload)
-                    {
+                    if let Ok(session) = serde_json::from_value::<AttestedSession>(record.payload) {
                         // Enforce content-addressing on replay: a record whose
                         // session_id does not match a fresh hash of its own
                         // contents was tampered with (or written by an

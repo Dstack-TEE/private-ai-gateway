@@ -1539,9 +1539,9 @@ fn legacy_ed25519_v2_embeddings_request(
 
 #[tokio::test]
 async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
-    let h = harness_with_upstream(
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
 
     let resp = h
         .requester
@@ -1583,9 +1583,9 @@ async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
     // Embeddings responses have no `id`, so the `/v1/signature/{id}`
     // route must fall back to receipt_id lookup or callers have no way
     // to retrieve the receipt issued via the `x-receipt-id` header.
-    let h = harness_with_upstream(
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
 
     let resp = h
         .requester
@@ -1617,9 +1617,9 @@ async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
 
 #[tokio::test]
 async fn embeddings_endpoint_forces_buffered_even_when_client_sets_stream_true() {
-    let h = harness_with_upstream(
-        RecordingUpstream::with_response_body(EMBEDDINGS_PLAIN_RESPONSE),
-    );
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        EMBEDDINGS_PLAIN_RESPONSE,
+    ));
     let request = br#"{"model":"aci-model","input":"hi","stream":true}"#;
 
     let resp = h.requester.post("/v1/embeddings", request, &[]).await;

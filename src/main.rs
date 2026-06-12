@@ -477,7 +477,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             verifier_request_timeout_seconds: upstream_verifier_request_timeout_seconds,
         },
     )?);
-    spawn_upstream_lifecycle(upstream_config.clone());
     let upstream = upstream_config.backend();
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
@@ -535,6 +534,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let service = Arc::new(service_inner);
+    // The background upstream verification is the single writer of attested
+    // sessions: it keeps the store fresh on the same cadence it re-attests for
+    // serving, so `/v1/aci/sessions` (preflight) and the completion path both
+    // just read it. Attach the sink before spawning the lifecycle so the boot
+    // prewarm already populates the store.
+    upstream_config.set_session_sink(service.clone());
+    spawn_upstream_lifecycle(upstream_config.clone());
 
     let app = if let Some(executor_uds_path) = executor_uds_path {
         let request_store = GatewayRequestStore::default();
@@ -650,9 +656,8 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        parse_domain_spki_map, parse_positive_seconds,
-        parse_tls_cert_paths, parse_tls_spki_list, resolve_tls_public_keys,
-        seed_upstream_config_if_empty,
+        parse_domain_spki_map, parse_positive_seconds, parse_tls_cert_paths, parse_tls_spki_list,
+        resolve_tls_public_keys, seed_upstream_config_if_empty,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
