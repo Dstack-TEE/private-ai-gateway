@@ -2002,11 +2002,12 @@ impl AciService {
         }
 
         let now = self.clock.now_secs();
-        // Retention window: keep at least as long as the receipts that cite this
-        // session (`receipt_ttl_seconds`), so a relying party verifying that receipt can
-        // always resolve its `session_id`. `established_at` records when the binding was
-        // verified; the forwarding path only ever uses a binding from a fresh
-        // verification lease, so this is a retention deadline, not a validity one.
+        // Retention window (`receipt_ttl_seconds`), so a relying party verifying a
+        // citing receipt can resolve its `session_id`. The session is sealed
+        // slightly before its receipt, so it expires up to one request-processing
+        // interval (sub-second) sooner than that receipt — both use the same TTL
+        // off a per-call `now`. This is a retention deadline, not a binding
+        // validity one (the forwarding path only ever uses a fresh lease).
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
 
         let channel_binding = AttestedSession::bindings_to_values(&event.channel_bindings);
@@ -2138,11 +2139,12 @@ impl AciService {
 /// per-provider mapper fills them; the verifier's raw `provider_claims` are
 /// preserved verbatim as scope facts under `claims.extra`.
 /// The background upstream verification writes attested sessions into the store
-/// through this sink, so the store has a single writer kept fresh by the same
-/// verification that keeps the gateway's attestation fresh. Sealing is
-/// content-addressed and idempotent: re-verifying an unchanged endpoint resolves
-/// to the same session, and the live completion path's own seal references that
-/// same record rather than copying it.
+/// through this sink, keeping it fresh from the same verification that keeps the
+/// gateway's attestation fresh — independent of traffic. The live completion
+/// path also writes (the session it served). Both are safe because sealing is
+/// content-addressed and idempotent: an unchanged endpoint resolves to the same
+/// record, so the two writers converge on one logical session per verified state
+/// rather than duplicating it.
 impl UpstreamSessionSink for AciService {
     fn record_session(&self, event: &UpstreamVerifiedEvent) {
         if let Err(err) = self.record_attested_upstream_session(event) {
@@ -2187,13 +2189,16 @@ fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
                     // verified DCAP collateral: a true HardwareProven tri-state.
                     claims.tcb_up_to_date = tcb_up_to_date_claim(event);
                 }
-                // os_known_good: no verifier here traces the guest OS/firmware to
-                // reviewed source. gpu_attested: never asserted from a GPU/NRAS
-                // token alone — it proves only that a CC-capable GPU exists, not
-                // that this request was served on it; the sound path is CPU
-                // attestation plus a measured-software GPU check, which we do not
-                // have. model_weights_provenance: no verifier checks the served
-                // weights. All three stay Unknown.
+                // os_known_good: from the attested OS-image provenance when the
+                // verifier resolved it (Phala-direct); a dev image is refuted, not
+                // silently Unknown. Other providers surface nothing here ⇒ Unknown.
+                claims.os_known_good = os_known_good_claim(event);
+                // gpu_attested: never asserted from a GPU/NRAS token alone — it
+                // proves only that a CC-capable GPU exists, not that this request
+                // was served on it; the sound path is CPU attestation plus a
+                // measured-software GPU check, which we do not have.
+                // model_weights_provenance: no verifier checks the served weights.
+                // Both stay Unknown.
             }
             // Generic verifier (static/preverified/DCAP test path): we only know
             // it returned Verified with an enforceable channel binding.
@@ -2236,6 +2241,32 @@ fn tcb_up_to_date_claim(event: &UpstreamVerifiedEvent) -> Claim {
         Some(status) => Claim::refuted(
             ClaimSource::HardwareProven,
             format!("platform TCB status {status}"),
+        ),
+        None => Claim::unknown(),
+    }
+}
+
+/// OS-image provenance from the attested `os_image_hash`. Phala-direct resolves
+/// that hash to dstack's published image and reads its prod-vs-dev flag, so
+/// `production_os_image` is a verifier-derived verdict: a known production image
+/// asserts; a dev image (SSH / serial console enabled — an operator shell that
+/// defeats the confidentiality guarantee) **refutes**, recorded rather than
+/// hard-rejected; an unresolved hash stays Unknown. Providers that surface no
+/// such fact are Unknown.
+fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let production = event
+        .provider_claims
+        .as_ref()
+        .and_then(|c| c.get("production_os_image"))
+        .and_then(Value::as_bool);
+    match production {
+        Some(true) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            "attested OS image resolves to a known production image",
+        ),
+        Some(false) => Claim::refuted(
+            ClaimSource::VerifierDerived,
+            "attested OS image is a dev image (SSH / serial console enabled), not production",
         ),
         None => Claim::unknown(),
     }
@@ -3667,6 +3698,32 @@ mod claim_mapping_tests {
                 "{provider}"
             );
         }
+    }
+
+    #[test]
+    fn os_known_good_refutes_a_dev_image_and_asserts_production() {
+        // Phala surfaces production_os_image, resolved from the attested
+        // os_image_hash. A dev image (operator console) is refuted, not silently
+        // Unknown — a real platform-security signal the client can see.
+        let dev = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "production_os_image": false })),
+        ));
+        assert_eq!(dev.os_known_good.status, ClaimStatus::Refuted);
+        assert_eq!(dev.os_known_good.source, Some(ClaimSource::VerifierDerived));
+
+        let prod = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "production_os_image": true })),
+        ));
+        assert_eq!(prod.os_known_good.status, ClaimStatus::Asserted);
+
+        // Not surfaced / unresolved ⇒ Unknown (e.g. Tinfoil, or an unresolved hash).
+        let unknown =
+            session_claims_for_event(&event(Some("tinfoil"), VerificationResult::Verified, None));
+        assert_eq!(unknown.os_known_good.status, ClaimStatus::Unknown);
     }
 
     #[test]

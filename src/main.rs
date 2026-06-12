@@ -347,12 +347,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PRIVATE_AI_GATEWAY_REPO_COMMIT",
         "DSTACK_LLM_ROUTER_REPO_COMMIT",
     );
+    // Must be > 0: it is also the session retention window, and a 0 TTL would
+    // make every session born-expired (evicted on write) so receipts resolve to
+    // not-found.
     let receipt_ttl_seconds = env_pref(
         "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS",
         "DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS",
     )
     .as_deref()
-    .map(|value| parse_seconds("receipt TTL", value))
+    .map(|value| parse_positive_seconds("receipt TTL", value))
     .transpose()?
     .unwrap_or(3600);
     let tls_cert_paths = env_pref(
@@ -534,11 +537,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let service = Arc::new(service_inner);
-    // The background upstream verification is the single writer of attested
-    // sessions: it keeps the store fresh on the same cadence it re-attests for
-    // serving, so `/v1/aci/sessions` (preflight) and the completion path both
-    // just read it. Attach the sink before spawning the lifecycle so the boot
-    // prewarm already populates the store.
+    // The background upstream verification keeps the attested-session store fresh
+    // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
+    // (preflight) is populated before any traffic. (The completion path also
+    // writes the session it served; writes are idempotent + content-addressed.)
+    // Attach the sink before spawning the lifecycle so the boot prewarm populates
+    // the store.
     upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(upstream_config.clone());
 

@@ -448,6 +448,8 @@ async fn attested_session_lookup_returns_audit_record() {
     assert_eq!(body["endpoint"], "https://stub-upstream");
     assert_eq!(body["verifier_id"], "stub-verifier-1");
     assert_eq!(body["channel_binding"][0]["type"], "tls_spki_sha256");
+    // The by-id record serves the full evidence bundle, including the data-URI.
+    assert!(body["evidence"]["data"].is_string());
 
     // Canonical receipt endpoint returns the bare signed receipt (no legacy
     // signature wrapper), addressable by the gateway receipt_id.
@@ -489,6 +491,10 @@ async fn attested_session_lookup_returns_audit_record() {
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body["api_version"], "aci.session_list.v1");
     assert_eq!(body["sessions"][0]["session_id"], session_id);
+    // The broad list keeps the integrity digest but strips the evidence bytes;
+    // fetch a single session by id for the full bundle (see above).
+    assert!(body["sessions"][0]["evidence"]["digest"].is_string());
+    assert!(body["sessions"][0]["evidence"]["data"].is_null());
 
     // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
     let app = build_router(h.service.clone());

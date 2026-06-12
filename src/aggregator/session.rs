@@ -213,8 +213,10 @@ pub struct AttestedSession {
     pub verifier_id: String,
     /// When this material was verified.
     pub established_at: u64,
-    /// Retention deadline (>= the TTL of receipts that cite this session). A
-    /// retention window, not a binding-validity deadline.
+    /// Retention deadline: roughly the TTL of receipts that cite this session
+    /// (sealed just before its receipt, so it expires up to one sub-second
+    /// request interval sooner). A retention window, not a binding-validity
+    /// deadline.
     pub expires_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<WorkloadIdentityRef>,

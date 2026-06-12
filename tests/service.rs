@@ -316,8 +316,11 @@ async fn session_keys_on_requested_model_not_response_model() {
         .expect("must emit upstream.verified");
     // The receipt records the exact upstream-served model...
     assert_eq!(uv.fields.get("model_id").unwrap(), "served-by-upstream");
-    // ...but the session is keyed on the requested (routed) model, so its
-    // identity never depends on the response body.
+    // ...but the session is keyed on the routed model id from the verification
+    // event (here "requested-model"; in production this is the upstream-routed
+    // id), so its identity never depends on the response body. NB: this injects
+    // the event directly and does not exercise public-vs-upstream alias
+    // resolution.
     let session_id = uv
         .fields
         .get("session_id")

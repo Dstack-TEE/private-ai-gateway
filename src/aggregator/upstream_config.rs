@@ -389,9 +389,10 @@ impl UpstreamConfigManager {
             } else {
                 verifier.verify(request).await
             };
-            // Materialize the verified state into the session store. This is the
-            // single writer: the background verification keeps the store fresh,
-            // and both the preflight API and the completion path just read it.
+            // Materialize the verified state into the session store, keeping the
+            // preflight view fresh independent of traffic. (The completion path
+            // also writes the session it served; writes are idempotent +
+            // content-addressed, so they converge on one record.)
             if let Some(sink) = sink.as_ref() {
                 sink.record_session(&event);
             }
