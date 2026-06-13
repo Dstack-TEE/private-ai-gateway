@@ -54,7 +54,7 @@ def assert_upstream_attested_session(
 
     status, _, body, parsed = request_json(
         "GET",
-        f"{base_url}/v1/audit/sessions/{session_id}",
+        f"{base_url}/v1/aci/sessions/{session_id}",
         timeout=120,
     )
     write_bytes(artifact_dir / f"attested-session-{index}.json", body)
@@ -64,60 +64,56 @@ def assert_upstream_attested_session(
         )
     write_json(artifact_dir / f"attested-session-{index}.summary.json", parsed_summary(parsed))
 
-    if parsed.get("api_version") != "aci/1":
-        raise RuntimeError(f"{provider.name} attested session response has wrong api_version")
-    session = parsed.get("session")
-    if not isinstance(session, dict):
-        raise RuntimeError(f"{provider.name} attested session response missing session")
+    # The gateway serves a flat, immutable AttestedSession record (no wrapper):
+    # {api_version, session_id, provider, endpoint, verifier_id, established_at,
+    #  expires_at, identity?, channel_binding[], claims{...}, evidence{digest,data}}.
+    session = parsed
     if session.get("api_version") != "aci/1":
         raise RuntimeError(f"{provider.name} attested session has wrong api_version")
     if session.get("session_id") != session_id:
         raise RuntimeError(f"{provider.name} attested session id mismatch")
-    if session.get("direction") != "upstream":
-        raise RuntimeError(f"{provider.name} attested session direction must be upstream")
 
-    target = require_object(session, "target", provider.name)
-    expect_equal(provider, "target.type", target.get("type"), "upstream")
-    expect_equal(provider, "target.provider", target.get("provider"), event.get("vendor"))
-    expect_equal(provider, "target.provider", target.get("provider"), provider.name)
+    # `provider` is the operator's upstream config name (== event.upstream_name);
+    # `provider.provider` ("tinfoil") is the vendor and lives in event.provider.
+    expect_equal(provider, "session.provider", session.get("provider"), provider.name)
     expect_equal(
-        provider,
-        "target.model_id",
-        target.get("model_id"),
-        event.get("model_id"),
-    )
-    expect_equal(provider, "target.model_id", target.get("model_id"), provider.upstream_model)
-    expect_equal(
-        provider,
-        "target.endpoint",
-        target.get("endpoint"),
-        event.get("url_origin"),
+        provider, "session.provider", session.get("provider"), event.get("upstream_name")
     )
     expect_equal(
         provider,
-        "target.endpoint",
-        target.get("endpoint"),
-        provider.base_url,
+        "session.endpoint",
+        _norm_endpoint(session.get("endpoint")),
+        _norm_endpoint(event.get("url_origin")),
     )
-
-    verification = require_object(session, "verification", provider.name)
     expect_equal(
         provider,
-        "verification.verifier_id",
-        verification.get("verifier_id"),
+        "session.endpoint",
+        _norm_endpoint(session.get("endpoint")),
+        _norm_endpoint(provider.base_url),
+    )
+    expect_equal(
+        provider,
+        "session.verifier_id",
+        session.get("verifier_id"),
         event.get("verifier_id"),
     )
-    claims = verification.get("verified_claims")
-    if not isinstance(claims, list) or "encrypted-session-verified" not in claims:
+
+    # Typed claim vocabulary (SessionClaims). The §1 tee_attested claim — a
+    # genuine CPU TEE with the workload identity bound — must be `asserted` for
+    # every verified upstream; that is what a "fully verified" session means.
+    claims = require_object(session, "claims", provider.name)
+    tee = require_object(claims, "tee_attested", provider.name)
+    if tee.get("status") != "asserted":
         raise RuntimeError(
-            f"{provider.name} attested session missing encrypted-session-verified claim"
+            f"{provider.name} attested session tee_attested not asserted: "
+            f"{tee.get('status')!r}"
         )
 
     event_evidence = require_object(event, "evidence", provider.name)
-    session_evidence = require_object(verification, "evidence", provider.name)
+    session_evidence = require_object(session, "evidence", provider.name)
     expect_equal(
         provider,
-        "verification.evidence.digest",
+        "evidence.digest",
         session_evidence.get("digest"),
         event_evidence.get("digest"),
     )
@@ -126,29 +122,39 @@ def assert_upstream_attested_session(
         raise RuntimeError(f"{provider.name} attested session evidence missing data URI")
 
     event_bindings = event.get("channel_bindings")
-    session_bindings = session.get("session_binding")
+    session_bindings = session.get("channel_binding")
     if not isinstance(event_bindings, list) or not event_bindings:
         raise RuntimeError(f"{provider.name} upstream event missing channel bindings")
     if not isinstance(session_bindings, list) or not session_bindings:
-        raise RuntimeError(f"{provider.name} attested session missing session_binding")
-    if session_bindings != event_bindings:
-        raise RuntimeError(f"{provider.name} attested session binding mismatch")
-    binding_types = {
+        raise RuntimeError(f"{provider.name} attested session missing channel_binding")
+    session_binding_types = {
         binding.get("type") for binding in session_bindings if isinstance(binding, dict)
     }
-    if provider.binding not in binding_types:
+    event_binding_types = {
+        binding.get("type") for binding in event_bindings if isinstance(binding, dict)
+    }
+    if session_binding_types != event_binding_types:
+        raise RuntimeError(
+            f"{provider.name} attested session binding types {session_binding_types} "
+            f"!= receipt event binding types {event_binding_types}"
+        )
+    if provider.binding not in session_binding_types:
         raise RuntimeError(
             f"{provider.name} attested session missing binding {provider.binding}"
         )
 
     return {
         "session_id": session_id,
-        "provider": target.get("provider"),
-        "model_id": target.get("model_id"),
-        "endpoint": target.get("endpoint"),
-        "verifier_id": verification.get("verifier_id"),
-        "verified_claims": claims,
+        "provider": session.get("provider"),
+        "endpoint": session.get("endpoint"),
+        "verifier_id": session.get("verifier_id"),
+        "claims": {
+            name: claim.get("status")
+            for name, claim in claims.items()
+            if isinstance(claim, dict)
+        },
         "binding_count": len(session_bindings),
+        "binding_types": sorted(t for t in session_binding_types if t),
         "evidence_digest": session_evidence.get("digest"),
         "evidence_has_data_uri": True,
     }
@@ -168,35 +174,33 @@ def expect_equal(provider: Provider, field: str, actual: Any, expected: Any) -> 
         )
 
 
+def _norm_endpoint(value: Any) -> Any:
+    return value.rstrip("/") if isinstance(value, str) else value
+
+
 def parsed_summary(value: dict[str, Any]) -> dict[str, Any]:
-    session = value.get("session")
-    if not isinstance(session, dict):
-        return value
-    verification = session.get("verification")
-    if not isinstance(verification, dict):
-        verification = {}
-    evidence = verification.get("evidence")
-    if not isinstance(evidence, dict):
-        evidence = {}
+    claims = value.get("claims") if isinstance(value.get("claims"), dict) else {}
+    evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
     return {
         "api_version": value.get("api_version"),
-        "session": {
-            "api_version": session.get("api_version"),
-            "session_id": session.get("session_id"),
-            "direction": session.get("direction"),
-            "established_at": session.get("established_at"),
-            "expires_at": session.get("expires_at"),
-            "target": session.get("target"),
-            "verification": {
-                "verifier_id": verification.get("verifier_id"),
-                "verified_claims": verification.get("verified_claims"),
-                "evidence": {
-                    "digest": evidence.get("digest"),
-                    "has_data_uri": isinstance(evidence.get("data"), str)
-                    and evidence["data"].startswith("data:"),
-                },
-                "provider_claims": verification.get("provider_claims"),
-            },
-            "session_binding_count": len(session.get("session_binding") or []),
+        "session_id": value.get("session_id"),
+        "provider": value.get("provider"),
+        "endpoint": value.get("endpoint"),
+        "verifier_id": value.get("verifier_id"),
+        "established_at": value.get("established_at"),
+        "expires_at": value.get("expires_at"),
+        "claims": {
+            name: (claim.get("status") if isinstance(claim, dict) else claim)
+            for name, claim in claims.items()
+        },
+        "channel_binding_types": [
+            binding.get("type")
+            for binding in (value.get("channel_binding") or [])
+            if isinstance(binding, dict)
+        ],
+        "evidence": {
+            "digest": evidence.get("digest"),
+            "has_data_uri": isinstance(evidence.get("data"), str)
+            and evidence["data"].startswith("data:"),
         },
     }
