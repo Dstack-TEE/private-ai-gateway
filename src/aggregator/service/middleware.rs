@@ -36,21 +36,40 @@ fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: Service
     }
 }
 
+/// The request/response context observed for one forwarded candidate,
+/// captured inside the TEE. Grouped so
+/// [`AciService::build_middleware_receipt_prefix`] reads by field name rather
+/// than ten positional arguments.
+pub(super) struct MiddlewareReceiptInputs<'a> {
+    pub receipt_id: &'a str,
+    pub chat_id: Option<String>,
+    pub served_at: u64,
+    pub endpoint_path: &'a str,
+    pub received_body: &'a [u8],
+    pub middleware_forwarded_body: &'a [u8],
+    pub selected_route_id: &'a str,
+    pub forwarded_body: &'a [u8],
+    pub recorded_event: UpstreamVerifiedEvent,
+    pub recorded: Option<(String, SessionClaims)>,
+}
+
 impl AciService {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_middleware_receipt_prefix(
         &self,
-        receipt_id: &str,
-        chat_id: Option<String>,
-        served_at: u64,
-        endpoint_path: &str,
-        received_body: &[u8],
-        middleware_forwarded_body: &[u8],
-        selected_route_id: &str,
-        forwarded_body: &[u8],
-        recorded_event: UpstreamVerifiedEvent,
-        recorded: Option<(String, SessionClaims)>,
+        inputs: MiddlewareReceiptInputs<'_>,
     ) -> Result<ReceiptBuilder, ServiceError> {
+        let MiddlewareReceiptInputs {
+            receipt_id,
+            chat_id,
+            served_at,
+            endpoint_path,
+            received_body,
+            middleware_forwarded_body,
+            selected_route_id,
+            forwarded_body,
+            recorded_event,
+            recorded,
+        } = inputs;
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
             chat_id,
@@ -248,18 +267,18 @@ impl AciService {
                 let served_at = self.clock.now_secs();
                 let recorded = self.record_attested_upstream_session(&recorded_event)?;
                 let session_id = recorded.as_ref().map(|(id, _)| id.clone());
-                let builder = self.build_middleware_receipt_prefix(
-                    &receipt_id,
-                    None,
+                let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+                    receipt_id: &receipt_id,
+                    chat_id: None,
                     served_at,
                     endpoint_path,
                     received_body,
-                    &candidate.body,
-                    &route_id,
-                    &forwarded_body,
+                    middleware_forwarded_body: &candidate.body,
+                    selected_route_id: &route_id,
+                    forwarded_body: &forwarded_body,
                     recorded_event,
                     recorded,
-                )?;
+                })?;
                 receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                 let body = MiddlewareProviderResponseDraftingStream::new(
@@ -358,18 +377,18 @@ impl AciService {
             let chat_id = extract_chat_id(&upstream_response.body);
             let recorded = self.record_attested_upstream_session(&recorded_event)?;
             let session_id = recorded.as_ref().map(|(id, _)| id.clone());
-            let mut builder = self.build_middleware_receipt_prefix(
-                &receipt_id,
+            let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+                receipt_id: &receipt_id,
                 chat_id,
                 served_at,
                 endpoint_path,
                 received_body,
-                &candidate.body,
-                &route_id,
-                &forwarded_body,
+                middleware_forwarded_body: &candidate.body,
+                selected_route_id: &route_id,
+                forwarded_body: &forwarded_body,
                 recorded_event,
                 recorded,
-            )?;
+            })?;
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's upstream.verified.
             builder.set_upstream_verified_model_id(response_model.clone());
