@@ -37,6 +37,7 @@ fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: Service
 }
 
 impl AciService {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_middleware_receipt_prefix(
         &self,
         receipt_id: &str,
