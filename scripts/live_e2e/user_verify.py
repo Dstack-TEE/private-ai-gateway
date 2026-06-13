@@ -56,7 +56,7 @@ def main() -> None:
             raise SystemExit(f"report fetch failed with HTTP {report_status}")
         receipt_status, _, receipt_body, _ = request_json(
             "GET",
-            f"{args.base_url.rstrip('/')}/v1/receipt/{args.chat_id}",
+            f"{args.base_url.rstrip('/')}/v1/signature/{args.chat_id}",
             headers=headers,
             timeout=120,
         )

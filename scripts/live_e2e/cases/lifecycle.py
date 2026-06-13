@@ -71,7 +71,7 @@ def run_lifecycle_case(
 
     receipt_status, _, receipt_body, receipt_json = request_json(
         "GET",
-        f"{base_url}/v1/receipt/{chat_id}",
+        f"{base_url}/v1/signature/{chat_id}",
         headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
