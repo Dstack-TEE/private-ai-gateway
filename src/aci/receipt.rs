@@ -5,6 +5,7 @@
 //! signs the canonical bytes of the receipt minus `signature.value`
 //! with a key listed in the established workload keyset.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::canonical::{self, CanonicalError};
@@ -81,7 +82,14 @@ impl VerificationResult {
 
 /// Channel binding material verified before the aggregator forwards
 /// sensitive bytes to an upstream.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `tag = "type"` serializes this as a flat, self-describing object — e.g.
+/// `{"type":"tls_spki_sha256","origin":..,"spki_sha256":..}` — rather than
+/// serde's default externally tagged `{"TlsSpkiSha256":{..}}`, which would
+/// leak Rust variant names; `rename_all` keeps the discriminator in the
+/// snake_case ACI JSON convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChannelBinding {
     TlsSpkiSha256 {
         origin: String,
@@ -93,6 +101,7 @@ pub enum ChannelBinding {
     },
     E2eePublicKeySha256 {
         provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         key_id: Option<String>,
         algorithm: String,
         public_key_sha256: String,
@@ -105,39 +114,6 @@ impl ChannelBinding {
             Self::TlsSpkiSha256 { origin, .. } => origin,
             Self::TlsCertificateSha256 { origin, .. } => origin,
             Self::E2eePublicKeySha256 { .. } => "",
-        }
-    }
-
-    pub fn to_value(&self) -> Value {
-        match self {
-            Self::TlsSpkiSha256 {
-                origin,
-                spki_sha256,
-            } => serde_json::json!({
-                "type": "tls_spki_sha256",
-                "origin": origin,
-                "spki_sha256": spki_sha256,
-            }),
-            Self::TlsCertificateSha256 {
-                origin,
-                certificate_sha256,
-            } => serde_json::json!({
-                "type": "tls_certificate_sha256",
-                "origin": origin,
-                "certificate_sha256": certificate_sha256,
-            }),
-            Self::E2eePublicKeySha256 {
-                provider,
-                key_id,
-                algorithm,
-                public_key_sha256,
-            } => serde_json::json!({
-                "type": "e2ee_public_key_sha256",
-                "provider": provider,
-                "key_id": key_id,
-                "algorithm": algorithm,
-                "public_key_sha256": public_key_sha256,
-            }),
         }
     }
 }
@@ -174,11 +150,7 @@ impl UpstreamVerifiedEvent {
             "required": self.required,
             "reason": self.reason,
             "evidence": self.evidence.clone(),
-            "channel_bindings": self
-                .channel_bindings
-                .iter()
-                .map(ChannelBinding::to_value)
-                .collect::<Vec<_>>(),
+            "channel_bindings": self.channel_bindings,
             "provider_claims": self.provider_claims.clone(),
         })
     }

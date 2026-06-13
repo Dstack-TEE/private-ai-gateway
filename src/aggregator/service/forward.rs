@@ -450,7 +450,6 @@ impl AciService {
         // validity one (the forwarding path only ever uses a fresh lease).
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
 
-        let channel_binding = AttestedSession::bindings_to_values(&event.channel_bindings);
         let claims = session_claims_for_event(event);
 
         // Lift the response-signing address into the verified identity when present.
@@ -473,7 +472,7 @@ impl AciService {
             event.url_origin.clone(),
             event.verifier_id.clone(),
             identity,
-            channel_binding,
+            event.channel_bindings.clone(),
             claims.clone(),
             evidence,
             now,
