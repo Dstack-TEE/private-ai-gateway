@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::aci::upstream::UpstreamError;
+use crate::aci::upstream::{ClientAuthorization, UpstreamError};
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     MiddlewareForwardResult, ReceiptOwner, ServiceError, StreamingForwardResult,
@@ -34,6 +34,10 @@ pub(super) struct BackendForwardInput {
     pub(super) upstream_required: bool,
     pub(super) requester: Option<ReceiptOwner>,
     pub(super) e2ee: Option<E2eeRequestContext>,
+    /// Caller credential for BYOK auth-passthrough upstreams. Forwarded to the
+    /// backend in memory only; the [`ClientAuthorization`] newtype redacts on
+    /// `Debug` so the raw secret cannot be logged or persisted.
+    pub(super) client_authorization: ClientAuthorization,
     pub(super) stream: bool,
 }
 
@@ -52,6 +56,7 @@ pub(super) async fn forward_to_backend(
                 upstream_verification_event: None,
                 requester: input.requester,
                 e2ee: input.e2ee,
+                client_authorization: input.client_authorization,
             })
             .await;
         return match result {
@@ -104,6 +109,7 @@ pub(super) async fn forward_to_backend(
             upstream_verification_event: None,
             requester: input.requester,
             e2ee: input.e2ee,
+            client_authorization: input.client_authorization,
         })
         .await;
     match result {
@@ -181,6 +187,11 @@ pub(super) async fn internal_forward(
                 upstream_verification_event: None,
                 requester: stored.requester,
                 e2ee: stored.e2ee,
+                // Middleware mode deliberately does not carry the raw caller
+                // credential (the request store keeps only a hashed requester),
+                // so BYOK passthrough is unsupported on this path by design
+                // (and rejected at startup when middleware is enabled).
+                client_authorization: ClientAuthorization(None),
             },
             candidates,
             stream,

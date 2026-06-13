@@ -17,6 +17,7 @@ use crate::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
 use crate::aci::types::AttestationReport;
+use crate::aci::upstream::ClientAuthorization;
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
@@ -481,6 +482,9 @@ pub(super) async fn openai_completion_endpoint(
             upstream_required,
             requester,
             e2ee,
+            // BYOK passthrough: the backend forwards this only for
+            // auth_passthrough upstreams; ignored otherwise.
+            client_authorization: ClientAuthorization(extract_bearer(&headers)),
             stream,
         },
     )

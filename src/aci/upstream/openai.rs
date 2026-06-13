@@ -28,6 +28,11 @@ pub struct OpenAICompatibleBackend {
     base_url: String,
     path: String,
     bearer_token: Option<String>,
+    /// When true, the caller's per-request credential
+    /// ([`UpstreamRequest::client_authorization`]) is forwarded as the
+    /// upstream `Authorization` and the static `bearer_token` is never used
+    /// (BYOK). Set from `UpstreamConfig::auth_passthrough`.
+    auth_passthrough: bool,
     client: reqwest::Client,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
@@ -61,6 +66,7 @@ impl OpenAICompatibleBackend {
             base_url: base,
             path: "/v1/chat/completions".to_string(),
             bearer_token: None,
+            auth_passthrough: false,
             client,
             connect_timeout_seconds,
             read_timeout_seconds,
@@ -83,6 +89,13 @@ impl OpenAICompatibleBackend {
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// Enable BYOK auth-passthrough: forward the caller's per-request
+    /// credential to the upstream instead of a statically-configured token.
+    pub fn with_auth_passthrough(mut self, enabled: bool) -> Self {
+        self.auth_passthrough = enabled;
         self
     }
 }
@@ -325,7 +338,15 @@ impl OpenAICompatibleBackend {
         for (k, v) in req.headers.iter() {
             builder = builder.header(k, v);
         }
-        if let Some(t) = &self.bearer_token {
+        if self.auth_passthrough {
+            // BYOK: forward only the caller's credential; never fall back to
+            // a static token for a passthrough upstream. Absent credential =>
+            // no auth header (the upstream rejects, which is the correct,
+            // visible failure).
+            if let Some(t) = &req.client_authorization.0 {
+                builder = builder.header("authorization", format!("Bearer {t}"));
+            }
+        } else if let Some(t) = &self.bearer_token {
             builder = builder.header("authorization", format!("Bearer {t}"));
         }
         builder

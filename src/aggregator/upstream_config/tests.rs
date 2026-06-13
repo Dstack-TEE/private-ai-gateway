@@ -23,6 +23,7 @@ fn test_upstream_config(
         path: None,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
+        auth_passthrough: false,
         accepted_workload_ids: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,
@@ -87,6 +88,82 @@ fn parse_config_allows_same_public_model_on_distinct_route_ids() {
     .expect("same public model can have multiple route ids");
 
     assert_eq!(config.len(), 2);
+}
+
+#[test]
+fn byok_auth_passthrough_parses_and_defaults_off() {
+    let config = parse_config_text(
+        r#"
+            [
+              {
+                "name": "near-ai",
+                "provider": "near-ai",
+                "base_url": "https://cloud-api.near.ai",
+                "models": {"openai/gpt-oss-120b": "near-model"},
+                "auth_passthrough": true
+              },
+              {
+                "name": "plain",
+                "provider": "openai-compatible",
+                "base_url": "https://plain.example",
+                "models": {"m": "u"}
+              }
+            ]
+            "#,
+    )
+    .expect("auth_passthrough upstream is valid without a static token");
+
+    assert!(config[0].auth_passthrough);
+    assert!(!config[1].auth_passthrough, "defaults off when omitted");
+}
+
+#[test]
+fn byok_auth_passthrough_rejects_static_bearer_token() {
+    let err = parse_config_text(
+        r#"
+            [
+              {
+                "name": "near-ai",
+                "provider": "near-ai",
+                "base_url": "https://cloud-api.near.ai",
+                "models": {"openai/gpt-oss-120b": "near-model"},
+                "auth_passthrough": true,
+                "bearer_token": "should-not-be-here"
+              }
+            ]
+            "#,
+    )
+    .expect_err("auth_passthrough + bearer_token must be rejected");
+
+    assert!(
+        matches!(err, UpstreamConfigError::InvalidConfig(msg) if msg.contains("auth_passthrough")),
+        "error should name the offending field",
+    );
+}
+
+#[test]
+fn byok_auth_passthrough_rejects_providers_that_do_not_support_it() {
+    // Chutes uses a dedicated E2EE transport that ignores auth_passthrough,
+    // so enabling it there is a silent no-op and must be rejected.
+    let err = parse_config_text(
+        r#"
+            [
+              {
+                "name": "chutes-provider",
+                "provider": "chutes",
+                "base_url": "https://chutes.example",
+                "models": {"m": "u"},
+                "auth_passthrough": true
+              }
+            ]
+            "#,
+    )
+    .expect_err("auth_passthrough on an unsupported provider must be rejected");
+
+    assert!(
+        matches!(err, UpstreamConfigError::InvalidConfig(msg) if msg.contains("does not")),
+        "error should explain the provider does not support passthrough",
+    );
 }
 
 #[test]
@@ -166,6 +243,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
             ("public-c".to_string(), "upstream-c".to_string()),
         ]),
         bearer_token: None,
+        auth_passthrough: false,
         accepted_workload_ids: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,

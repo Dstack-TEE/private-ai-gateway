@@ -328,6 +328,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
             upstream_verification_event: None,
             requester: None,
             e2ee: None,
+            client_authorization: Default::default(),
         })
         .await
         .unwrap();

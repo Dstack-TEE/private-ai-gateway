@@ -132,6 +132,7 @@ async fn run() -> Result<(), String> {
         headers: HashMap::new(),
         path: Some("/v1/embeddings".to_string()),
         target_route_id: None,
+        client_authorization: Default::default(),
     };
     let prepared = backend
         .prepare(request)

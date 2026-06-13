@@ -544,6 +544,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_upstream_lifecycle(upstream_config.clone());
 
     let app = if let Some(executor_uds_path) = executor_uds_path {
+        // BYOK auth-passthrough cannot work in middleware mode: the request
+        // store keeps only a hashed requester, so the caller credential is not
+        // available on the middleware finalize path. Fail closed at startup
+        // rather than silently 401 every passthrough request at runtime.
+        if upstream_config
+            .snapshot()
+            .upstreams
+            .iter()
+            .any(|u| u.auth_passthrough)
+        {
+            return Err(
+                "auth_passthrough upstreams are not supported in middleware mode; \
+                 disable middleware (unset the executor UDS path) or remove auth_passthrough"
+                    .into(),
+            );
+        }
         let request_store = GatewayRequestStore::default();
         let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
         let backend_listener = bind_unix_listener(&backend_uds_path)?;
