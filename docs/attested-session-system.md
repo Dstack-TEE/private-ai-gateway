@@ -288,8 +288,14 @@ On startup the log is replayed into an in-memory materialized index (by
 ## API surface
 
 All ACI verification artifacts live under `/v1/aci/` so they do not pollute the
-OpenAI surface. Signed ACI artifacts keep `api_version: "aci/1"`; gateway-local
-envelopes use `aci.<resource>.v1`.
+OpenAI surface. Every artifact and gateway envelope carries one umbrella
+API-version token, `aci/1`: in-body as `api_version` on signed artifacts (so the
+version lives inside the signed bytes, where a header cannot), and as the
+`X-ACI-Version` response header on every HTTP response (stamped by a single
+middleware, error paths included). This is a separate axis from the
+`aci.<purpose>.v1` strings (`aci.identity.v1`, `aci.receipt.v1`,
+`aci.report_data.v1`) — those are cryptographic domain-separation tags for
+signed messages, not API versions, and version independently.
 
 Canonical (clean shapes):
 
@@ -299,10 +305,10 @@ Canonical (clean shapes):
   is the gateway `receipt_id` (preferred) or upstream `chat_id`. The
   `upstream.verified` event carries the typed claim verdicts inline (shallow
   audit) plus the content-addressed `session_id`.
-- `GET /v1/aci/sessions/{session_id}` — the immutable session record
-  (`aci.session.v1`), with full evidence + per-claim reasons (deep audit).
-- `GET /v1/aci/sessions?provider=&model=` — a provider's attested sessions
-  (`aci.session_list.v1`). This is the **preflight survey**: a read of the
+- `GET /v1/aci/sessions/{session_id}` — the immutable session record, with full
+  evidence + per-claim reasons (deep audit).
+- `GET /v1/aci/sessions?provider=&model=` — a provider's attested sessions. This
+  is the **preflight survey**: a read of the
   session store (see below), so a user can inspect the attested session + claims
   for a model *before* releasing any data.
 
