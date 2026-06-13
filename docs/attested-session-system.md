@@ -196,7 +196,12 @@ mapping. A `failed` result asserts nothing.
 | `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown |
 
 - For the four real provider verifiers `tee_attested` is `HardwareProven`: a
-  genuine TEE quote was verified and the request channel bound to it.
+  genuine TEE quote was verified and the request channel bound to it. For NEAR AI
+  this is the **gateway** TD (the request channel binds to the verified gateway
+  TEE); the nested per-model TDs behind it are *not* re-verified by this gateway
+  (honestly recorded as `nested_model_attestations_checked_by_gateway: false` in
+  `claims.extra`). So `tee_attested` there means "bound to a verified gateway
+  TEE," not end-to-end to the model TD serving the tokens.
 - ¹ `tcb_up_to_date` is an honest tri-state from the verifier's reported
   `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
   **refutes** (the quote proves a stale TCB — the gateway records the bad claim

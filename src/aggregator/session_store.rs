@@ -36,7 +36,7 @@ use super::session::AttestedSession;
 /// Record type tag for a session line.
 const RECORD_TYPE_SESSION: &str = "session";
 
-/// One line in the append-only session log.
+/// One line in the append-only session log, as read back on replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionLogRecord {
     pub seq: u64,
@@ -44,6 +44,17 @@ pub struct SessionLogRecord {
     #[serde(rename = "type")]
     pub record_type: String,
     pub payload: Value,
+}
+
+/// Write-side view of a log record that borrows the session, so a line is
+/// serialized in one pass instead of building an intermediate `Value` tree.
+#[derive(Serialize)]
+struct SessionLogRecordRef<'a> {
+    seq: u64,
+    ts: u64,
+    #[serde(rename = "type")]
+    record_type: &'a str,
+    payload: &'a AttestedSession,
 }
 
 /// The session registry behind the audit endpoints.
@@ -106,8 +117,13 @@ impl JsonlSessionStore {
                         // Enforce content-addressing on replay: a record whose
                         // session_id does not match a fresh hash of its own
                         // contents was tampered with (or written by an
-                        // incompatible version). Skip it rather than serve it.
-                        if session.content_id().ok().as_deref() == Some(&session.session_id) {
+                        // incompatible version). Also require the evidence
+                        // `data` to hash to its `digest` — the content id commits
+                        // to the digest, not the bytes, so this catches a swapped
+                        // evidence payload. Skip either way rather than serve it.
+                        if session.content_id().ok().as_deref() == Some(&session.session_id)
+                            && session.evidence.digest_matches_data()
+                        {
                             by_id.insert(session.session_id.clone(), session);
                         }
                     }
@@ -128,18 +144,15 @@ impl JsonlSessionStore {
 
 impl SessionStore for JsonlSessionStore {
     fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
-        let payload = serde_json::to_value(&session)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let seq = guard.next_seq;
-        let record = SessionLogRecord {
+        let mut line = serde_json::to_string(&SessionLogRecordRef {
             seq,
             ts,
-            record_type: RECORD_TYPE_SESSION.to_string(),
-            payload,
-        };
-        let mut line = serde_json::to_string(&record)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            record_type: RECORD_TYPE_SESSION,
+            payload: &session,
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
         guard.writer.write_all(line.as_bytes())?;
         guard.writer.flush()?;
@@ -392,6 +405,47 @@ mod tests {
         let store = JsonlSessionStore::open(&path).unwrap();
         assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
         assert_eq!(store.list_sessions(None, 2_000).len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn evidence_data_not_matching_its_digest_is_skipped_on_replay() {
+        use crate::aci::canonical;
+
+        // Seal a session whose evidence digest covers "abc" (base64 "YWJj").
+        let mut s = AttestedSession::seal(
+            "phala-direct",
+            Some("https://node-7.example.net".to_string()),
+            "phala-direct/1",
+            None,
+            vec![],
+            SessionClaims::default(),
+            EvidenceRef {
+                digest: Some(canonical::sha256_hex(b"abc")),
+                data_uri: Some("data:text/plain;base64,YWJj".to_string()),
+            },
+            1_000,
+            9_000,
+        )
+        .unwrap();
+        assert!(s.evidence.digest_matches_data());
+
+        // Swap the evidence bytes but keep the digest — the content id is over
+        // the digest, so the session_id still "matches" while the data does not.
+        s.evidence.data_uri = Some("data:text/plain;base64,eHl6".to_string()); // "xyz"
+        assert_eq!(s.content_id().unwrap(), s.session_id);
+        assert!(!s.evidence.digest_matches_data());
+
+        let path = temp_path();
+        JsonlSessionStore::open(&path)
+            .unwrap()
+            .put_session(s.clone(), 1_000)
+            .unwrap();
+
+        // On replay the swapped-evidence record is rejected.
+        let reopened = JsonlSessionStore::open(&path).unwrap();
+        assert!(reopened.get_session(&s.session_id, 2_000).is_none());
 
         let _ = std::fs::remove_file(&path);
     }

@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -158,6 +159,27 @@ impl EvidenceRef {
                 .get("data")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+        }
+    }
+
+    /// True when there is nothing to verify (no `data_uri`, or a `data_uri` shape
+    /// we do not produce) or the `data_uri`'s decoded bytes hash to `digest`.
+    /// The content id commits to `digest`, not the bytes, so this guards against
+    /// a persisted record whose evidence `data` was substituted for bytes that
+    /// do not match the digest the receipt is signed over.
+    pub fn digest_matches_data(&self) -> bool {
+        let (Some(digest), Some(data_uri)) = (self.digest.as_deref(), self.data_uri.as_deref())
+        else {
+            return true;
+        };
+        // We only ever emit `data:<content-type>;base64,<b64>`; any other shape
+        // is not ours, so there is nothing to check against our digest.
+        let Some((_, b64)) = data_uri.split_once(";base64,") else {
+            return true;
+        };
+        match BASE64.decode(b64.as_bytes()) {
+            Ok(bytes) => canonical::sha256_hex(&bytes) == digest,
+            Err(_) => false, // claims a digest but the data is not decodable
         }
     }
 }
@@ -383,6 +405,29 @@ mod tests {
                 "reason": "hard-coded known measurements",
             })
         );
+    }
+
+    #[test]
+    fn evidence_digest_matches_data_guards_a_swapped_payload() {
+        let digest = canonical::sha256_hex(b"abc"); // "sha256:..."
+                                                    // base64("abc") = "YWJj" — matches the digest.
+        let ok = EvidenceRef {
+            digest: Some(digest.clone()),
+            data_uri: Some("data:text/plain;base64,YWJj".to_string()),
+        };
+        assert!(ok.digest_matches_data());
+        // base64("xyz") = "eHl6" — does NOT match the digest of "abc".
+        let swapped = EvidenceRef {
+            digest: Some(digest.clone()),
+            data_uri: Some("data:text/plain;base64,eHl6".to_string()),
+        };
+        assert!(!swapped.digest_matches_data());
+        // No data to check against ⇒ nothing to verify.
+        let no_data = EvidenceRef {
+            digest: Some(digest),
+            data_uri: None,
+        };
+        assert!(no_data.digest_matches_data());
     }
 
     #[test]
