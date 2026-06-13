@@ -23,6 +23,21 @@ use super::{
     CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
 };
 
+/// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
+/// each non-success variant to its own policy — abort (single forward) or fail
+/// over to the next candidate (middleware).
+pub(super) enum ReverifyOutcome<R> {
+    /// Forwarding succeeded, after zero or more transparent reverify rounds.
+    Forwarded(R),
+    /// A reverify (cached-event refresh) attempt itself failed.
+    RefreshFailed(ServiceError),
+    /// Forwarding failed: either a terminal channel-binding mismatch (after the
+    /// verifier cache was invalidated per policy) or an unrelated upstream
+    /// error. Both map to the caller's failure path; the helper has already
+    /// applied any mismatch invalidation.
+    Failed(UpstreamError),
+}
+
 impl AciService {
     pub async fn forward_chat_completion(
         &self,
@@ -78,31 +93,25 @@ impl AciService {
             )
             .await?;
 
-        let mut reverify_attempts = 0;
-        let upstream_response = loop {
-            match self
-                .upstream
-                .forward_verified_prepared(prepared.clone(), &recorded_event)
-                .await
-            {
-                Ok(response) => break response,
-                Err(UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event
-                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
-                {
-                    reverify_attempts += 1;
-                    recorded_event = self
-                        .refresh_upstream_event(&prepared, req.upstream_required)
-                        .await?;
-                }
-                Err(err @ UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event =>
-                {
-                    self.invalidate_upstream_event(&prepared, req.upstream_required);
-                    return Err(err.into());
-                }
-                Err(err) => return Err(err.into()),
-            }
+        let upstream_response = match self
+            .forward_with_binding_reverify(
+                &prepared,
+                &mut recorded_event,
+                req.upstream_required,
+                caller_supplied_upstream_event,
+                // Single forward: only flush the cache for an event we own.
+                false,
+                |prepared, event| async move {
+                    self.upstream
+                        .forward_verified_prepared(prepared, &event)
+                        .await
+                },
+            )
+            .await
+        {
+            ReverifyOutcome::Forwarded(response) => response,
+            ReverifyOutcome::RefreshFailed(err) => return Err(err),
+            ReverifyOutcome::Failed(err) => return Err(err.into()),
         };
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body);
@@ -221,31 +230,25 @@ impl AciService {
             )
             .await?;
 
-        let mut reverify_attempts = 0;
-        let upstream_response = loop {
-            match self
-                .upstream
-                .forward_stream_verified_prepared(prepared.clone(), &recorded_event)
-                .await
-            {
-                Ok(response) => break response,
-                Err(UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event
-                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
-                {
-                    reverify_attempts += 1;
-                    recorded_event = self
-                        .refresh_upstream_event(&prepared, req.upstream_required)
-                        .await?;
-                }
-                Err(err @ UpstreamError::ChannelBindingMismatch(_))
-                    if !caller_supplied_upstream_event =>
-                {
-                    self.invalidate_upstream_event(&prepared, req.upstream_required);
-                    return Err(err.into());
-                }
-                Err(err) => return Err(err.into()),
-            }
+        let upstream_response = match self
+            .forward_with_binding_reverify(
+                &prepared,
+                &mut recorded_event,
+                req.upstream_required,
+                caller_supplied_upstream_event,
+                // Single forward: only flush the cache for an event we own.
+                false,
+                |prepared, event| async move {
+                    self.upstream
+                        .forward_stream_verified_prepared(prepared, &event)
+                        .await
+                },
+            )
+            .await
+        {
+            ReverifyOutcome::Forwarded(response) => response,
+            ReverifyOutcome::RefreshFailed(err) => return Err(err),
+            ReverifyOutcome::Failed(err) => return Err(err.into()),
         };
         // Match dstack-vllm-proxy compatibility behavior: streaming
         // requests whose upstream response is not exactly HTTP 200
@@ -389,6 +392,67 @@ impl AciService {
         // event. The opt-out path records a synthesized failed event
         // so downstream verifiers see the actual state.
         Ok(event)
+    }
+
+    /// Forward `prepared` against `recorded_event`, transparently reverifying
+    /// (refreshing the cached upstream event) and retrying on a channel-binding
+    /// mismatch up to [`CHANNEL_BINDING_REVERIFY_ATTEMPTS`] times. A successful
+    /// refresh is written back through `recorded_event`, so the caller sees the
+    /// event actually forwarded with.
+    ///
+    /// `caller_supplied_event` (the gateway does not own the event) suppresses
+    /// reverify entirely. On a *terminal* mismatch the gateway's verifier cache
+    /// is invalidated when the gateway owns the event (`!caller_supplied_event`),
+    /// or unconditionally when `always_invalidate_on_mismatch` is set — the
+    /// failover path's conservative "flush a possibly-stale binding" default.
+    pub(super) async fn forward_with_binding_reverify<R, Fwd, Fut>(
+        &self,
+        prepared: &PreparedUpstreamRequest,
+        recorded_event: &mut UpstreamVerifiedEvent,
+        upstream_required: Option<bool>,
+        caller_supplied_event: bool,
+        always_invalidate_on_mismatch: bool,
+        mut forward: Fwd,
+    ) -> ReverifyOutcome<R>
+    where
+        Fwd: FnMut(PreparedUpstreamRequest, UpstreamVerifiedEvent) -> Fut,
+        Fut: std::future::Future<Output = Result<R, UpstreamError>>,
+    {
+        let mut reverify_attempts = 0;
+        loop {
+            // `recorded_event` is cloned per attempt because the forwarded future
+            // owns its inputs. Bounded to CHANNEL_BINDING_REVERIFY_ATTEMPTS + 1,
+            // and `prepared` was already cloned per attempt before this refactor.
+            match forward(prepared.clone(), recorded_event.clone()).await {
+                Ok(response) => return ReverifyOutcome::Forwarded(response),
+                Err(UpstreamError::ChannelBindingMismatch(_))
+                    if !caller_supplied_event
+                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                {
+                    reverify_attempts += 1;
+                    match self
+                        .refresh_upstream_event(prepared, upstream_required)
+                        .await
+                    {
+                        Ok(event) => *recorded_event = event,
+                        Err(err) => return ReverifyOutcome::RefreshFailed(err),
+                    }
+                }
+                Err(err) => {
+                    // Reached on a terminal channel-binding mismatch (retries
+                    // exhausted, or suppressed because the event is
+                    // caller-supplied) OR any other upstream error. Only a
+                    // mismatch flushes the cache, and only when we own the event
+                    // or the failover path asks us to always flush.
+                    if matches!(err, UpstreamError::ChannelBindingMismatch(_))
+                        && (always_invalidate_on_mismatch || !caller_supplied_event)
+                    {
+                        self.invalidate_upstream_event(prepared, upstream_required);
+                    }
+                    return ReverifyOutcome::Failed(err);
+                }
+            }
+        }
     }
 
     pub(super) async fn refresh_upstream_event(

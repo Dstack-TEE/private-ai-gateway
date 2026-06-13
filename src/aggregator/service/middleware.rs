@@ -3,6 +3,7 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
+use super::forward::ReverifyOutcome;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -16,7 +17,6 @@ use super::{
     MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
     MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
     ReceiptOwner, ServiceError, ServiceResponseStream, StreamingUpstreamError,
-    CHANNEL_BINDING_REVERIFY_ATTEMPTS,
 };
 use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
@@ -171,47 +171,39 @@ impl AciService {
             let forwarded_body = prepared.request.body.clone();
 
             if stream {
-                let mut reverify_attempts = 0;
-                let upstream_response = loop {
-                    match self
-                        .upstream
-                        .forward_stream_verified_prepared(prepared.clone(), &recorded_event)
-                        .await
-                    {
-                        Ok(response) => break Some(response),
-                        Err(UpstreamError::ChannelBindingMismatch(_))
-                            if !caller_supplied_upstream_event
-                                && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
-                        {
-                            reverify_attempts += 1;
-                            match self
-                                .refresh_upstream_event(&prepared, candidate_required)
+                let upstream_response = match self
+                    .forward_with_binding_reverify(
+                        &prepared,
+                        &mut recorded_event,
+                        candidate_required,
+                        caller_supplied_upstream_event,
+                        // Failover path: flush a possibly-stale binding on any
+                        // terminal mismatch so the next candidate/request re-verifies.
+                        true,
+                        |prepared, event| async move {
+                            self.upstream
+                                .forward_stream_verified_prepared(prepared, &event)
                                 .await
-                            {
-                                Ok(event) => recorded_event = event,
-                                // A reverify failure must fail over to the
-                                // next candidate, not abort the whole list.
-                                Err(err) => {
-                                    let priority =
-                                        if matches!(err, ServiceError::UpstreamVerification(_)) {
-                                            3
-                                        } else {
-                                            2
-                                        };
-                                    upgrade_err(&mut aggregated_err, priority, err);
-                                    break None;
-                                }
-                            }
-                        }
-                        Err(err @ UpstreamError::ChannelBindingMismatch(_)) => {
-                            self.invalidate_upstream_event(&prepared, candidate_required);
-                            upgrade_err(&mut aggregated_err, 2, err.into());
-                            break None;
-                        }
-                        Err(err) => {
-                            upgrade_err(&mut aggregated_err, 2, err.into());
-                            break None;
-                        }
+                        },
+                    )
+                    .await
+                {
+                    ReverifyOutcome::Forwarded(response) => Some(response),
+                    ReverifyOutcome::RefreshFailed(err) => {
+                        let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
+                            3
+                        } else {
+                            2
+                        };
+                        upgrade_err(&mut aggregated_err, priority, err);
+                        None
+                    }
+                    ReverifyOutcome::Failed(err) => {
+                        // Terminal binding mismatch and transport errors
+                        // intentionally share failover priority 2 (a failed
+                        // reverify outranks them at 3).
+                        upgrade_err(&mut aggregated_err, 2, err.into());
+                        None
                     }
                 };
                 let Some(upstream_response) = upstream_response else {
@@ -286,47 +278,39 @@ impl AciService {
             }
 
             // Buffered forward.
-            let mut reverify_attempts = 0;
-            let upstream_response = loop {
-                match self
-                    .upstream
-                    .forward_verified_prepared(prepared.clone(), &recorded_event)
-                    .await
-                {
-                    Ok(response) => break Some(response),
-                    Err(UpstreamError::ChannelBindingMismatch(_))
-                        if !caller_supplied_upstream_event
-                            && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
-                    {
-                        reverify_attempts += 1;
-                        match self
-                            .refresh_upstream_event(&prepared, candidate_required)
+            let upstream_response = match self
+                .forward_with_binding_reverify(
+                    &prepared,
+                    &mut recorded_event,
+                    candidate_required,
+                    caller_supplied_upstream_event,
+                    // Failover path: flush a possibly-stale binding on any
+                    // terminal mismatch so the next candidate/request re-verifies.
+                    true,
+                    |prepared, event| async move {
+                        self.upstream
+                            .forward_verified_prepared(prepared, &event)
                             .await
-                        {
-                            Ok(event) => recorded_event = event,
-                            // A reverify failure must fail over to the next
-                            // candidate, not abort the whole list.
-                            Err(err) => {
-                                let priority =
-                                    if matches!(err, ServiceError::UpstreamVerification(_)) {
-                                        3
-                                    } else {
-                                        2
-                                    };
-                                upgrade_err(&mut aggregated_err, priority, err);
-                                break None;
-                            }
-                        }
-                    }
-                    Err(err @ UpstreamError::ChannelBindingMismatch(_)) => {
-                        self.invalidate_upstream_event(&prepared, candidate_required);
-                        upgrade_err(&mut aggregated_err, 2, err.into());
-                        break None;
-                    }
-                    Err(err) => {
-                        upgrade_err(&mut aggregated_err, 2, err.into());
-                        break None;
-                    }
+                    },
+                )
+                .await
+            {
+                ReverifyOutcome::Forwarded(response) => Some(response),
+                ReverifyOutcome::RefreshFailed(err) => {
+                    let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
+                        3
+                    } else {
+                        2
+                    };
+                    upgrade_err(&mut aggregated_err, priority, err);
+                    None
+                }
+                ReverifyOutcome::Failed(err) => {
+                    // Terminal binding mismatch and transport errors
+                    // intentionally share failover priority 2 (a failed
+                    // reverify outranks them at 3).
+                    upgrade_err(&mut aggregated_err, 2, err.into());
+                    None
                 }
             };
             let Some(upstream_response) = upstream_response else {
