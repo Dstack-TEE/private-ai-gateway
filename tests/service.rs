@@ -258,8 +258,10 @@ async fn verified_upstream_binding_creates_attested_session() {
         Some("fixture")
     );
     assert_eq!(session.channel_binding.len(), 1);
+    let binding = serde_json::to_value(&session.channel_binding[0]).unwrap();
+    assert_eq!(binding["type"], "tls_spki_sha256");
     assert_eq!(
-        session.channel_binding[0]["spki_sha256"],
+        binding["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
     );
 

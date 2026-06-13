@@ -47,6 +47,9 @@ pub enum CanonicalError {
     /// through a non-standard path.
     #[error("JCS: object key must be a string")]
     NonStringKey,
+    /// A typed value could not be serialized to JSON before canonicalisation.
+    #[error("JCS: value could not be serialized to JSON: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 /// Canonicalise an arbitrary [`serde_json::Value`] subtree.

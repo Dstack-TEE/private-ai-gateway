@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::aci::canonical::{self, CanonicalError};
 use crate::aci::receipt::ChannelBinding;
@@ -227,18 +227,13 @@ pub struct AttestedSession {
     pub expires_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<WorkloadIdentityRef>,
-    /// Enforceable channel binding(s), serialized via [`ChannelBinding::to_value`].
-    pub channel_binding: Vec<Value>,
+    /// Enforceable channel binding(s).
+    pub channel_binding: Vec<ChannelBinding>,
     pub claims: SessionClaims,
     pub evidence: EvidenceRef,
 }
 
 impl AttestedSession {
-    /// Serialize channel bindings to their canonical wire values.
-    pub fn bindings_to_values(bindings: &[ChannelBinding]) -> Vec<Value> {
-        bindings.iter().map(ChannelBinding::to_value).collect()
-    }
-
     /// Seal an immutable session, computing its content-addressed id over the
     /// verified material. Timestamps are excluded from the id so identical
     /// material dedups to one session.
@@ -248,7 +243,7 @@ impl AttestedSession {
         endpoint: Option<String>,
         verifier_id: impl Into<String>,
         identity: Option<WorkloadIdentityRef>,
-        channel_binding: Vec<Value>,
+        channel_binding: Vec<ChannelBinding>,
         claims: SessionClaims,
         evidence: EvidenceRef,
         established_at: u64,
@@ -278,15 +273,28 @@ impl AttestedSession {
     /// contents; that recomputation, not any stored signature, is what makes the
     /// record tamper-evident.
     pub fn content_id(&self) -> Result<String, CanonicalError> {
-        let material = json!({
-            "provider": self.provider,
-            "endpoint": self.endpoint,
-            "verifier_id": self.verifier_id,
-            "identity": self.identity,
-            "channel_binding": self.channel_binding,
-            "claims": self.claims,
-            "evidence_digest": self.evidence.digest,
-        });
+        /// The immutable subset the content id commits to. Timestamps are
+        /// excluded so identical material dedups to one session; field names
+        /// here are load-bearing (they feed the canonical hash).
+        #[derive(Serialize)]
+        struct ContentMaterial<'a> {
+            provider: &'a str,
+            endpoint: &'a Option<String>,
+            verifier_id: &'a str,
+            identity: &'a Option<WorkloadIdentityRef>,
+            channel_binding: &'a [ChannelBinding],
+            claims: &'a SessionClaims,
+            evidence_digest: &'a Option<String>,
+        }
+        let material = serde_json::to_value(ContentMaterial {
+            provider: &self.provider,
+            endpoint: &self.endpoint,
+            verifier_id: &self.verifier_id,
+            identity: &self.identity,
+            channel_binding: &self.channel_binding,
+            claims: &self.claims,
+            evidence_digest: &self.evidence.digest,
+        })?;
         let digest = canonical::jcs_sha256_hex(&material)?;
         Ok(format!(
             "as_{}",
@@ -298,13 +306,13 @@ impl AttestedSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn binding(spki: &str) -> Value {
+    fn binding(spki: &str) -> ChannelBinding {
         ChannelBinding::TlsSpkiSha256 {
             origin: "https://node-7.example.net".to_string(),
             spki_sha256: spki.repeat(32),
         }
-        .to_value()
     }
 
     fn seal_with(endpoint: &str, spki: &str, claims: SessionClaims) -> AttestedSession {
