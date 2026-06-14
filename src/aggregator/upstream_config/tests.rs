@@ -68,11 +68,14 @@ fn router_provider_verifies_once_per_channel() {
 }
 
 #[test]
-fn only_near_ai_is_a_router() {
+fn routers_are_near_ai_and_tinfoil() {
+    // Both front many models behind one verified channel (NEAR AI gateway TD,
+    // Tinfoil confidential-model-router), so they are per-router. Per-model
+    // (Phala-direct) and per-instance (Chutes) providers are not.
     assert!(UpstreamProvider::NearAi.is_router());
+    assert!(UpstreamProvider::Tinfoil.is_router());
     assert!(!UpstreamProvider::PhalaDirect.is_router());
     assert!(!UpstreamProvider::Chutes.is_router());
-    assert!(!UpstreamProvider::Tinfoil.is_router());
     assert!(!UpstreamProvider::OpenAiCompatible.is_router());
     assert!(!UpstreamProvider::AciDcap.is_router());
 }
@@ -190,7 +193,9 @@ async fn prewarm_verification_deduplicates_upstream_models() {
     let invalidations = Arc::new(AtomicUsize::new(0));
     let config = vec![UpstreamConfig {
         name: "provider-a".to_string(),
-        provider: UpstreamProvider::Tinfoil,
+        // Per-model provider (not a router): two public models sharing one
+        // upstream model dedup to one target; a third yields a second.
+        provider: UpstreamProvider::PhalaDirect,
         base_url: "https://provider-a.example/".to_string(),
         path: None,
         models: BTreeMap::from([

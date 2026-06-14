@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Live check for router channel-keying.
 
-Boots the gateway with ONE NEAR AI upstream mapping two models, sends a request
-to each, and asserts both receipts cite the SAME `upstream.verified.session_id`
-— i.e. a router yields one attested session per channel, not one per model.
+Boots the gateway with ONE router upstream (NEAR AI or Tinfoil) mapping two
+models, sends a request to each, and asserts both receipts cite the SAME
+`upstream.verified.session_id` — i.e. a router yields one attested session per
+channel, not one per model, while each receipt records its own model.
 
-Run from scripts/ with NEARAI_API_KEY in the environment.
+Usage (from scripts/, with the provider key in the environment):
+    uv run python live_e2e/router_session_smoke.py near-ai
+    uv run python live_e2e/router_session_smoke.py tinfoil
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import signal
@@ -30,9 +34,18 @@ from live_e2e.common import (  # noqa: E402
 
 PORT = 18086
 BASE = f"http://127.0.0.1:{PORT}"
-MODELS = {
-    "router-gemma": "google/gemma-4-31B-it",
-    "router-deepseek": "deepseek-ai/DeepSeek-V4-Flash",
+
+PRESETS = {
+    "near-ai": {
+        "base_url": "https://cloud-api.near.ai",
+        "api_key_env": "NEARAI_API_KEY",
+        "models": ["google/gemma-4-31B-it", "deepseek-ai/DeepSeek-V4-Flash"],
+    },
+    "tinfoil": {
+        "base_url": "https://inference.tinfoil.sh",
+        "api_key_env": "TINFOIL_API_KEY",
+        "models": ["kimi-k2-6", "llama3-3-70b"],
+    },
 }
 
 
@@ -53,17 +66,24 @@ def session_id_for(model: str) -> tuple[int, str | None, str | None]:
 
 
 def main() -> int:
-    token = os.environ.get("NEARAI_API_KEY")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("provider", choices=sorted(PRESETS), default="near-ai", nargs="?")
+    args = parser.parse_args()
+    preset = PRESETS[args.provider]
+
+    token = os.environ.get(preset["api_key_env"])
     if not token:
-        print("missing NEARAI_API_KEY")
+        print(f"missing {preset['api_key_env']}")
         return 2
 
+    # public alias -> upstream model
+    public = {f"router-{i}": m for i, m in enumerate(preset["models"])}
     config = [
         {
-            "name": "near-router",
-            "provider": "near-ai",
-            "base_url": "https://cloud-api.near.ai",
-            "models": MODELS,
+            "name": f"{args.provider}-router",
+            "provider": args.provider,
+            "base_url": preset["base_url"],
+            "models": public,
             "bearer_token": token,
             "connect_timeout_seconds": 10,
             "read_timeout_seconds": 600,
@@ -86,7 +106,7 @@ def main() -> int:
             "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS": "3600",
             "RUST_LOG": "warn",
         }
-        env.pop("NEARAI_API_KEY", None)  # lives in the config file, not the env
+        env.pop(preset["api_key_env"], None)  # lives in the config file, not the env
         log = log_path.open("wb")
         proc = subprocess.Popen(
             ["cargo", "run", "--bin", "private-ai-gateway"],
@@ -107,7 +127,7 @@ def main() -> int:
                     r = requests.get(f"{BASE}/v1/models", timeout=2)
                     if r.status_code == 200:
                         ids = {m.get("id") for m in r.json().get("data", [])}
-                        if set(MODELS) <= ids:
+                        if set(public) <= ids:
                             ready = True
                             break
                 except Exception:
@@ -118,12 +138,12 @@ def main() -> int:
                 return 1
 
             results = {}
-            for model in MODELS:
-                status, sid, model_id = session_id_for(model)
-                print(f"  {model}: status={status} session_id={sid} model_id={model_id}")
+            for alias in public:
+                status, sid, model_id = session_id_for(alias)
+                print(f"  {alias} ({public[alias]}): status={status} session_id={sid} model_id={model_id}")
                 if status != 200 or not sid:
                     return 1
-                results[model] = sid
+                results[alias] = sid
 
             sids = set(results.values())
             if len(sids) == 1:

@@ -269,10 +269,13 @@ impl ExternalProviderVerifier {
     }
 
     pub(super) fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        // Must use the same key as `verify`/`refresh` (channel-keyed for routers),
+        // otherwise invalidation would target a different entry than the one
+        // cached and a router's verification could never be flushed.
         self.cache
             .write()
             .expect("external provider verifier cache poisoned")
-            .remove(&ExternalProviderVerifierCacheKey::from_request(request));
+            .remove(&self.cache_key(request));
     }
 
     async fn run(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -433,12 +436,12 @@ impl ExternalProviderVerifierCacheKey {
     }
 }
 
-/// Whether a provider is a router: one verified gateway TEE channel fronts many
-/// models, so the attested session is the channel (not per model). Keep in sync
-/// with `UpstreamProvider::is_router` — these two name the same set by the
-/// provider's wire string vs its config enum.
+/// Whether a provider is a router: one verified TEE channel (a gateway TD or a
+/// confidential model router) fronts many models, so the attested session is the
+/// channel, not per model. Keep in sync with `UpstreamProvider::is_router` —
+/// these two name the same set by the provider's wire string vs its config enum.
 fn provider_is_router(provider: &str) -> bool {
-    matches!(provider, "near-ai")
+    matches!(provider, "near-ai" | "tinfoil")
 }
 
 #[derive(Clone, Debug)]
