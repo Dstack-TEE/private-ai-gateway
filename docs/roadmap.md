@@ -53,6 +53,32 @@ concept.
 - Keep the implementation small: reuse the existing upstream lease lifecycle
   where possible, and avoid introducing a policy DSL.
 
+### Router Upstreams: Model Attestation and One Session per Channel
+
+An attested session is a verified secure channel, and we never create more than
+one session per channel. The channel boundary differs by provider: per E2EE
+instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
+(NEAR AI), where one gateway fronts many models. For NEAR AI the session is the
+verified gateway channel; the per-model TD quotes are shallow-checked at verify
+time but deliberately kept out of the session (see
+[attested-session-system.md](attested-session-system.md)). Two improvements
+remain:
+
+- **Request-bound, per-instance model attestation on the receipt.** A router's
+  per-model TD quotes are fetched at verify time and only shallow-checked (valid
+  TDX bytes, nonce, not debug-mode); they are not re-verified, and nothing binds
+  them to the specific instance that served a given request. They are kept out of
+  the attested session to avoid implying a per-model attestation the gateway did
+  not perform. Once an upstream can attest the exact instance that served a
+  request, surface that as a verified, request-bound reference on the receipt —
+  not in the channel session.
+- **One session per router channel.** Verification is currently keyed per model
+  (the report endpoint is `?model=`, and the verifier cache and refresh targets
+  include the model id), so a router still produces one channel session per
+  configured model. Key verification and the session on the channel for router
+  providers so a router yields exactly one session, with the served model staying
+  a receipt-level fact.
+
 ### P0: Multi-Domain Downstream TLS Binding
 
 The gateway currently assumes one downstream TLS identity. Production deployments

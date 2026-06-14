@@ -197,11 +197,18 @@ mapping. A `failed` result asserts nothing.
 
 - For the four real provider verifiers `tee_attested` is `HardwareProven`: a
   genuine TEE quote was verified and the request channel bound to it. For NEAR AI
-  this is the **gateway** TD (the request channel binds to the verified gateway
-  TEE); the nested per-model TDs behind it are *not* re-verified by this gateway
-  (honestly recorded as `nested_model_attestations_checked_by_gateway: false` in
-  `claims.extra`). So `tee_attested` there means "bound to a verified gateway
-  TEE," not end-to-end to the model TD serving the tokens.
+  this is the **gateway** TD — a router that fronts many models behind one TEE,
+  so its attested session is the gateway *channel*: one session per router, not
+  per model, with the served model recorded on the receipt. The nested per-model
+  TDs behind it are *not* re-verified by this gateway. Their quotes are
+  shallow-checked at verify time (valid TDX bytes, nonce match, not debug-mode)
+  as a safety gate, but are deliberately kept **out of** the session evidence and
+  claims: they are not bound to the instance that serves a given request, so
+  folding them in would imply a per-model attestation the gateway did not perform
+  and split one channel into a session per model. So `tee_attested` there means
+  "bound to a verified gateway TEE," not end-to-end to the model TD serving the
+  tokens. Surfacing a request-bound, per-instance model attestation is a roadmap
+  item (see [roadmap.md](roadmap.md)).
 - ¹ `tcb_up_to_date` is an honest tri-state from the verifier's reported
   `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
   **refutes** (the quote proves a stale TCB — the gateway records the bad claim

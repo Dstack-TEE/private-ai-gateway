@@ -13,7 +13,6 @@ from .common import (
     failed,
     json_evidence_bundle,
     model_dump,
-    sha256_json_prefixed,
     tdx_debug_enabled,
     verifier_id_for,
 )
@@ -125,7 +124,17 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             )
             return
 
-    model_attestations_sha256 = sha256_json_prefixed(model_attestations)
+    # The attested session is the verified *gateway* TEE channel, which is the
+    # same for every model behind the router. NEAR AI's per-model TD quotes
+    # (model_attestations) are shallow-checked above as a safety gate (valid TDX
+    # bytes, nonce match, not debug-mode) but are deliberately NOT folded into
+    # the session evidence or claims: the gateway does not re-verify them, and
+    # they are not bound to the instance that serves a given request, so putting
+    # them in the session would imply a per-model attestation we did not perform
+    # and split one channel into a session per model. The served model is
+    # recorded on the receipt instead. Surfacing a request-bound, per-instance
+    # model attestation is a roadmap item (docs/roadmap.md).
+    #
     # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
     # so the session layer can populate a tri-state `tcb_up_to_date` claim. The
     # dstack verifier reports TCB freshness separately from its overall is_valid
@@ -133,25 +142,28 @@ async def verify_nearai(request: dict[str, Any]) -> None:
     # freshness), so a stale TCB surfaces here without failing the gateway.
     gateway_dstack = (gateway_result.get("details") or {}).get("dstack") or {}
     gateway_tcb_status = (gateway_dstack.get("details") or {}).get("tcb_status")
+
+    # Channel-scoped, model-independent evidence: the gateway TD attestation and
+    # the TLS binding the dstack verifier checked, nonce-bound for freshness.
+    channel_evidence = {
+        "provider": "nearai",
+        "trust_boundary": "near-ai-gateway",
+        "request_nonce": report.request_nonce,
+        "tls_cert_fingerprint": spki,
+        "gateway_attestation": gateway,
+    }
     provider_claims = {
         "trust_boundary": "near-ai-gateway",
         "gateway_verified": True,
         "gateway_tls_spki_sha256": spki,
-        "model_evidence_present": True,
-        "model_attestation_count": len(model_attestations),
-        "model_attestations_sha256": model_attestations_sha256,
-        "nested_model_attestations_checked_by_gateway": False,
-        "canonical_model_id": report.model_id,
         "tcb_status": gateway_tcb_status,
     }
-    if all(isinstance(item, dict) and item.get("request_nonce") for item in model_attestations):
-        provider_claims["model_attestations_nonce_matched"] = True
 
     emit(
         {
             "result": "verified",
             "verifier_id": verifier_id,
-            "evidence": json_evidence_bundle(report_obj, attestation_url),
+            "evidence": json_evidence_bundle(channel_evidence, attestation_url),
             "channel_bindings": [
                 {
                     "type": "tls_spki_sha256",
