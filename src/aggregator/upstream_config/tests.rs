@@ -40,6 +40,43 @@ fn test_upstream_config(
     }
 }
 
+#[test]
+fn router_provider_verifies_once_per_channel() {
+    // A router (NEAR AI) with several models yields ONE verification target — the
+    // shared gateway channel — so it seals one session per channel, not one per
+    // model. A per-model provider keeps one target per model.
+    let mut router = test_upstream_config("near-router", UpstreamProvider::NearAi, "pub-a", "up-a");
+    router
+        .models
+        .insert("pub-b".to_string(), "up-b".to_string());
+    assert_eq!(
+        super::validation::verification_targets(std::slice::from_ref(&router)).len(),
+        1,
+        "router collapses its models to one channel target"
+    );
+
+    let mut per_model =
+        test_upstream_config("phala", UpstreamProvider::PhalaDirect, "pub-a", "up-a");
+    per_model
+        .models
+        .insert("pub-b".to_string(), "up-b".to_string());
+    assert_eq!(
+        super::validation::verification_targets(std::slice::from_ref(&per_model)).len(),
+        2,
+        "per-model provider verifies every model"
+    );
+}
+
+#[test]
+fn only_near_ai_is_a_router() {
+    assert!(UpstreamProvider::NearAi.is_router());
+    assert!(!UpstreamProvider::PhalaDirect.is_router());
+    assert!(!UpstreamProvider::Chutes.is_router());
+    assert!(!UpstreamProvider::Tinfoil.is_router());
+    assert!(!UpstreamProvider::OpenAiCompatible.is_router());
+    assert!(!UpstreamProvider::AciDcap.is_router());
+}
+
 #[async_trait]
 impl UpstreamVerifier for CountingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {

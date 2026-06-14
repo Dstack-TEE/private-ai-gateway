@@ -157,6 +157,16 @@ pub enum UpstreamProvider {
     PhalaDirect,
 }
 
+impl UpstreamProvider {
+    /// Whether this provider is a router: one verified gateway TEE channel fronts
+    /// many models, so its attested session is the channel and it is verified
+    /// once per channel rather than once per model. Keep in sync with
+    /// `provider_is_router` in the external verifier.
+    pub(crate) fn is_router(self) -> bool {
+        matches!(self, UpstreamProvider::NearAi)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum UpstreamVerifierMode {
     None,

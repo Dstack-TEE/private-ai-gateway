@@ -125,11 +125,34 @@ impl ExternalProviderVerifier {
         self
     }
 
+    /// Cache / channel-identity key for a verification. Router providers (e.g.
+    /// NEAR AI) verify one gateway TEE channel shared by every model behind it,
+    /// so the model is omitted from the key: a request for any model resolves to
+    /// that one verified channel, and the channel-addressed session dedups to one
+    /// per router. Per-model (Phala-direct) and per-instance (Chutes) providers
+    /// keep the model in the key, so each really is its own channel.
+    ///
+    /// A router-cached event is still tagged with the requesting model by
+    /// `CachedExternalProviderEvent::event_for`, so the receipt reports the right
+    /// per-request model. The tradeoff: a request for a model other than the one
+    /// that populated the cache reuses the gateway verification without fetching
+    /// that model's report, so the per-model debug-TD shallow-check (see
+    /// `scripts/provider_verifier/nearai.py`) only covers the cache-populating
+    /// model. That is consistent with attesting the gateway channel rather than
+    /// the model; full per-model model-TD verification is a roadmap item.
+    fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
+        let mut key = ExternalProviderVerifierCacheKey::from_request(request);
+        if provider_is_router(self.provider) {
+            key.model_id = String::new();
+        }
+        key
+    }
+
     pub(super) async fn verify(
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = ExternalProviderVerifierCacheKey::from_request(&request);
+        let cache_key = self.cache_key(&request);
         if let Some(event) = self.cached_event(&cache_key, &request) {
             return event;
         }
@@ -144,7 +167,7 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = ExternalProviderVerifierCacheKey::from_request(&request);
+        let cache_key = self.cache_key(&request);
         let _verify_guard = self.verify_lock.lock().await;
         self.verify_uncached(request, cache_key).await
     }
@@ -408,6 +431,14 @@ impl ExternalProviderVerifierCacheKey {
             model_id: request.model_id.clone(),
         }
     }
+}
+
+/// Whether a provider is a router: one verified gateway TEE channel fronts many
+/// models, so the attested session is the channel (not per model). Keep in sync
+/// with `UpstreamProvider::is_router` — these two name the same set by the
+/// provider's wire string vs its config enum.
+fn provider_is_router(provider: &str) -> bool {
+    matches!(provider, "near-ai")
 }
 
 #[derive(Clone, Debug)]

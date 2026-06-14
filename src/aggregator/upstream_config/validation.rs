@@ -42,7 +42,16 @@ fn verification_targets_for_configs<'a>(
     let mut targets = Vec::new();
     for cfg in configs {
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
-        for model_id in cfg.models.values() {
+        // Router providers verify one gateway channel shared by every model, so
+        // probe it once (a single representative model — `models` is a BTreeMap,
+        // so `.take(1)` is deterministic); per-model requests reuse that channel
+        // verification. Per-model / per-instance providers verify every model.
+        let model_ids: Vec<&String> = if cfg.provider.is_router() {
+            cfg.models.values().take(1).collect()
+        } else {
+            cfg.models.values().collect()
+        };
+        for model_id in model_ids {
             let target = UpstreamVerificationTarget {
                 upstream_name: cfg.name.clone(),
                 model_id: model_id.clone(),
