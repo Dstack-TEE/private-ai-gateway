@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, VerificationResult};
+use private_ai_gateway::aci::receipt::ChannelBinding;
 use private_ai_gateway::aci::upstream::{
     UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
@@ -13,7 +13,7 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{verified_event, StaticKeyProvider, StubQuoter};
 
 struct NoopUpstream;
 
@@ -107,20 +107,13 @@ async fn aci_report_binding_validation_rejects_bad_keyset_endorsement() {
 #[tokio::test]
 async fn service_fails_if_selected_backend_cannot_enforce_channel_binding() {
     let event = private_ai_gateway::aci::receipt::UpstreamVerifiedEvent {
-        upstream_name: "noop-upstream".to_string(),
-        provider: None,
-        model_id: "model-a".to_string(),
         url_origin: Some("https://noop-upstream.example".to_string()),
         verifier_id: "fixture-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://noop-upstream.example".to_string(),
             spki_sha256: "aa".repeat(32),
         }],
-        provider_claims: None,
+        ..verified_event("noop-upstream", "model-a")
     };
     let err = service()
         .forward_chat_completion(

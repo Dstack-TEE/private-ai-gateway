@@ -357,16 +357,13 @@ impl AciService {
         let missing_verifier_result = upstream_verification_event.is_none();
         let event = upstream_verification_event.unwrap_or_else(|| UpstreamVerifiedEvent {
             upstream_name: prepared.upstream_name.clone(),
-            provider: None,
             model_id: prepared.model_id.clone(),
             url_origin: prepared.url_origin.clone(),
             verifier_id: "none".to_string(),
             result: VerificationResult::Failed,
             required: upstream_required,
             reason: Some("no upstream verifier configured".to_string()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         });
         self.metrics.record_upstream_verification(&event);
 

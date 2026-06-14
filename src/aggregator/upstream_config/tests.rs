@@ -46,16 +46,12 @@ impl UpstreamVerifier for CountingVerifier {
         self.verifications.fetch_add(1, Ordering::SeqCst);
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "counting-verifier/v1".to_string(),
             result: VerificationResult::Verified,
             required: request.required,
-            reason: None,
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 

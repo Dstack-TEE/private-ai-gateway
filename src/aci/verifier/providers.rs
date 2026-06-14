@@ -331,16 +331,13 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
         }
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "routing-upstream-verifier/v1".to_string(),
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some("no verifier configured for selected upstream".to_string()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 
@@ -355,16 +352,13 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
         }
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: "routing-upstream-verifier/v1".to_string(),
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some("no verifier configured for selected upstream".to_string()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 

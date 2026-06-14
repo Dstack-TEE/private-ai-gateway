@@ -150,16 +150,13 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
             Some(verifier) => verifier.verify(request).await,
             None => UpstreamVerifiedEvent {
                 upstream_name: request.upstream_name,
-                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
                 reason: Some("no upstream verifier configured".to_string()),
-                evidence: None,
-                channel_bindings: Vec::new(),
-                provider_claims: None,
+                ..Default::default()
             },
         }
     }
@@ -175,16 +172,13 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
             Some(verifier) => verifier.refresh(request).await,
             None => UpstreamVerifiedEvent {
                 upstream_name: request.upstream_name,
-                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
                 reason: Some("no upstream verifier configured".to_string()),
-                evidence: None,
-                channel_bindings: Vec::new(),
-                provider_claims: None,
+                ..Default::default()
             },
         }
     }

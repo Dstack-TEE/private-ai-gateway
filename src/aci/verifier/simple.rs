@@ -23,16 +23,11 @@ impl StaticUpstreamVerifier {
     pub fn verified(verifier_id: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
             upstream_name: String::new(),
-            provider: None,
             model_id: String::new(),
-            url_origin: None,
             verifier_id: verifier_id.into(),
             result: VerificationResult::Verified,
             required: true,
-            reason: None,
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         })
     }
 
@@ -40,16 +35,12 @@ impl StaticUpstreamVerifier {
     pub fn failed(verifier_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
             upstream_name: String::new(),
-            provider: None,
             model_id: String::new(),
-            url_origin: None,
             verifier_id: verifier_id.into(),
             result: VerificationResult::Failed,
             required: true,
             reason: Some(reason.into()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         })
     }
 }
@@ -98,16 +89,12 @@ impl UpstreamVerifier for PreverifiedUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: self.verifier_id.clone(),
             result: VerificationResult::Verified,
             required: request.required,
-            reason: None,
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 }

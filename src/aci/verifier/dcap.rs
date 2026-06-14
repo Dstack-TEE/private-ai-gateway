@@ -163,16 +163,14 @@ impl CachedAciDcapVerification {
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: self.vendor.clone(),
-            provider: None,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
             result: VerificationResult::Verified,
             required: request.required,
-            reason: None,
             evidence: self.evidence.clone(),
             channel_bindings: self.channel_bindings.clone(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 }
@@ -415,16 +413,13 @@ impl UpstreamVerifier for AciDcapUpstreamVerifier {
             }
             Err(err) => UpstreamVerifiedEvent {
                 upstream_name: request.upstream_name,
-                provider: None,
                 model_id: request.model_id,
                 url_origin: request.url_origin,
                 verifier_id: self.verifier_id.clone(),
                 result: VerificationResult::Failed,
                 required: request.required,
                 reason: Some(err.to_string()),
-                evidence: None,
-                channel_bindings: Vec::new(),
-                provider_claims: None,
+                ..Default::default()
             },
         }
     }

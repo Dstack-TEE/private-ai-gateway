@@ -249,13 +249,12 @@ mod claim_mapping_tests {
             verifier_id: "vid/v1".to_string(),
             result,
             required: true,
-            reason: None,
-            evidence: None,
             channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
                 origin: "https://up".to_string(),
                 spki_sha256: "aa".repeat(32),
             }],
             provider_claims,
+            ..Default::default()
         }
     }
 

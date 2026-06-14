@@ -374,9 +374,7 @@ impl ExternalProviderVerifier {
             result: VerificationResult::Failed,
             required: request.required,
             reason: Some(reason.into()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..Default::default()
         }
     }
 }

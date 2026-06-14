@@ -54,7 +54,7 @@ use serde_json::Value;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0}"#;
@@ -185,17 +185,10 @@ impl UpstreamVerifier for ScriptedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            provider: None,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
             verifier_id: "mock-verifier/v1".to_string(),
-            result: self.result,
-            required: request.required,
             reason: self.reason.clone(),
             evidence: self.evidence.clone(),
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..event_from_request(&request, self.result)
         }
     }
 }
@@ -1553,20 +1546,13 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
     let received = br#"{"model":"public-name","messages":[]}"#;
     let forwarded = br#"{"model":"private-upstream-name","messages":[]}"#;
     let verifier_event = UpstreamVerifiedEvent {
-        upstream_name: "mock-upstream".to_string(),
-        provider: None,
-        model_id: "private-upstream-name".to_string(),
         url_origin: Some("https://mock-upstream.example".to_string()),
         verifier_id: "mock-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(serde_json::json!({
             "digest": format!("sha256:{}", "cd".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJpdmF0ZS11cHN0cmVhbS1uYW1lIn0=",
         })),
-        channel_bindings: Vec::new(),
-        provider_claims: None,
+        ..verified_event("mock-upstream", "private-upstream-name")
     };
 
     let result = service
@@ -1933,22 +1919,15 @@ struct KeyedVerifier {
 impl UpstreamVerifier for KeyedVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verified = request.upstream_name != self.fail_for;
+        let result = if verified {
+            VerificationResult::Verified
+        } else {
+            VerificationResult::Failed
+        };
         UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name.clone(),
-            provider: None,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
             verifier_id: "keyed-verifier/v1".to_string(),
-            result: if verified {
-                VerificationResult::Verified
-            } else {
-                VerificationResult::Failed
-            },
-            required: request.required,
             reason: (!verified).then(|| "verification failed".to_string()),
-            evidence: None,
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..event_from_request(&request, result)
         }
     }
 }
