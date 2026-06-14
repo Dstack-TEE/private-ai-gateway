@@ -116,16 +116,6 @@ pub enum ChannelBinding {
     },
 }
 
-impl ChannelBinding {
-    pub fn origin(&self) -> &str {
-        match self {
-            Self::TlsSpkiSha256 { origin, .. } => origin,
-            Self::TlsCertificateSha256 { origin, .. } => origin,
-            Self::E2eePublicKeySha256 { .. } => "",
-        }
-    }
-}
-
 /// Minimal transparency event names for operations the workload applied.
 ///
 /// The receipt's existing hash events carry the actual before/after
