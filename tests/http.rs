@@ -14,7 +14,7 @@ use axum::{
 };
 use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
 use private_ai_gateway::aci::receipt::{
-    canonical_bytes_for_signing, ChannelBinding, UpstreamVerifiedEvent, VerificationResult,
+    canonical_bytes_for_signing, ChannelBinding, UpstreamVerifiedEvent,
 };
 use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -26,7 +26,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::http::build_router;
 use tower::ServiceExt;
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{verified_event, StaticKeyProvider, StubQuoter};
 
 const RESPONSE_BODY: &[u8] = br#"{"id":"chat-xyz","object":"chat.completion"}"#;
 
@@ -396,14 +396,8 @@ async fn chat_x_request_hash_is_ignored() {
 async fn attested_session_lookup_returns_audit_record() {
     let h = make_harness();
     let event = UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(serde_json::json!({
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
@@ -412,7 +406,7 @@ async fn attested_session_lookup_returns_audit_record() {
             origin: "https://stub-upstream".to_string(),
             spki_sha256: "aa".repeat(32),
         }],
-        provider_claims: None,
+        ..verified_event("stub-upstream", "x")
     };
     let result = h
         .service

@@ -43,7 +43,13 @@ pub enum ReceiptError {
 }
 
 /// An aggregator verifier event suitable for `upstream.verified`.
-#[derive(Debug, Clone)]
+///
+/// `Default` is provided so constructions can set only the fields they care
+/// about and `..Default::default()` the rest — adding a field then doesn't
+/// ripple across every call site. The default `result` is fail-closed
+/// ([`VerificationResult::Failed`]), so an event is never accidentally
+/// "verified" by omission.
+#[derive(Debug, Clone, Default)]
 pub struct UpstreamVerifiedEvent {
     /// The operator's per-endpoint upstream config `name` (e.g.
     /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
@@ -65,9 +71,11 @@ pub struct UpstreamVerifiedEvent {
     pub provider_claims: Option<Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VerificationResult {
     Verified,
+    /// Fail-closed default: an event with no explicit result is not "verified".
+    #[default]
     Failed,
 }
 

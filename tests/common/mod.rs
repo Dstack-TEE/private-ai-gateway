@@ -19,7 +19,51 @@ use private_ai_gateway::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, KeyProvider, LegacySignature, Quote,
     Quoter, ALGO_ECDSA_SECP256K1, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
+use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::types::{KeyedPublicKey, PublicKeyMaterial, TlsSpki};
+use private_ai_gateway::aggregator::service::UpstreamVerificationRequest;
+
+/// A `verified` upstream event with only identity fields and the required flag
+/// set; everything else takes the struct default. Tests override individual
+/// fields with struct-update syntax (`..verified_event("x", "y")`).
+pub fn verified_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEvent {
+    UpstreamVerifiedEvent {
+        upstream_name: upstream_name.to_string(),
+        model_id: model_id.to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        ..Default::default()
+    }
+}
+
+/// Like [`verified_event`] but fail-closed (`result: Failed`).
+pub fn failed_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEvent {
+    UpstreamVerifiedEvent {
+        upstream_name: upstream_name.to_string(),
+        model_id: model_id.to_string(),
+        result: VerificationResult::Failed,
+        required: true,
+        ..Default::default()
+    }
+}
+
+/// Builds an event the way a mock `UpstreamVerifier` does: copying
+/// `upstream_name` / `model_id` / `url_origin` / `required` straight off the
+/// request, with the given `result`. The caller fills `verifier_id` and any
+/// `reason` / `evidence` via struct-update syntax.
+pub fn event_from_request(
+    request: &UpstreamVerificationRequest,
+    result: VerificationResult,
+) -> UpstreamVerifiedEvent {
+    UpstreamVerifiedEvent {
+        upstream_name: request.upstream_name.clone(),
+        model_id: request.model_id.clone(),
+        url_origin: request.url_origin.clone(),
+        required: request.required,
+        result,
+        ..Default::default()
+    }
+}
 
 pub struct StaticKeyProvider {
     identity: K256SigningKey,

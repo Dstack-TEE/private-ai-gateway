@@ -35,8 +35,7 @@ use ml_kem::{
 };
 use private_ai_gateway::aci::canonical::sha256_hex;
 use private_ai_gateway::aci::receipt::{
-    ChannelBinding, UpstreamVerifiedEvent, VerificationResult, EVENT_REQUEST_FORWARDED,
-    EVENT_UPSTREAM_VERIFIED,
+    ChannelBinding, UpstreamVerifiedEvent, EVENT_REQUEST_FORWARDED, EVENT_UPSTREAM_VERIFIED,
 };
 use private_ai_gateway::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
@@ -56,7 +55,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use tower::ServiceExt;
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{verified_event, StaticKeyProvider, StubQuoter};
 
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"public-model","messages":[{"role":"user","content":"hello"}]}"#;
@@ -839,20 +838,14 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         })
         .unwrap();
     let event = UpstreamVerifiedEvent {
-        upstream_name: "openai-compatible-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url.clone()),
         verifier_id: "fixture-spki-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("attestation")),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: base_url,
             spki_sha256: "aa".repeat(32),
         }],
-        provider_claims: None,
+        ..verified_event("openai-compatible-provider", "provider-model")
     };
 
     let err = backend
@@ -876,14 +869,8 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
         .unwrap()
         .with_name("openai-compatible-provider");
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "openai-compatible-provider".to_string(),
-        provider: None,
-        model_id: "public-model".to_string(),
         url_origin: Some(base_url.clone()),
         verifier_id: "fixture-spki-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("attestation")),
         channel_bindings: vec![
             private_ai_gateway::aci::receipt::ChannelBinding::TlsSpkiSha256 {
@@ -891,7 +878,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
                 spki_sha256: "aa".repeat(32),
             },
         ],
-        provider_claims: None,
+        ..verified_event("openai-compatible-provider", "public-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -928,17 +915,11 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -995,17 +976,11 @@ async fn chutes_provider_requires_exact_catalog_match() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1051,17 +1026,11 @@ async fn chutes_provider_uses_configured_chute_id_pin() {
             CHUTES_CHUTE_ID.to_string(),
         )]));
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1100,17 +1069,11 @@ async fn chutes_provider_pools_verified_single_use_nonces() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1187,17 +1150,11 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
         .with_e2ee_api_base(base_url.clone())
         .with_session_store(store);
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1243,17 +1200,11 @@ async fn chutes_provider_refreshes_verified_nonce_pool_without_forwarding() {
         .with_e2ee_api_base(base_url.clone())
         .with_session_store(store);
     let event = UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     };
 
     let refreshed = backend
@@ -1313,14 +1264,8 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![
             chutes_key_binding_for(
@@ -1332,7 +1277,7 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
                 e2e_pubkeys.get(CHUTES_INSTANCE_ID_B).unwrap(),
             ),
         ],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1389,17 +1334,11 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1437,14 +1376,8 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-        upstream_name: "chutes-provider".to_string(),
-        provider: None,
-        model_id: "provider-model".to_string(),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(provider_evidence_fixture("chutes-attestation")),
         channel_bindings: vec![
             private_ai_gateway::aci::receipt::ChannelBinding::E2eePublicKeySha256 {
@@ -1454,7 +1387,7 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
                 public_key_sha256: "aa".repeat(32),
             },
         ],
-        provider_claims: None,
+        ..verified_event("chutes-provider", "provider-model")
     });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(

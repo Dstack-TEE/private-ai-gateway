@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 mod common;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -18,7 +18,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::session::ClaimStatus;
 use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
 type ReceivedBody = Arc<Mutex<Option<Vec<u8>>>>;
 
@@ -170,17 +170,9 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
 async fn verifier_event_result_verified_emits_upstream_verified() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("http://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
-        channel_bindings: Vec::new(),
-        provider_claims: None,
+        ..verified_event("stub-upstream", "x")
     };
     let result = svc
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
@@ -206,14 +198,8 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
 async fn verified_upstream_binding_creates_attested_session() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let event = UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(serde_json::json!({
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
@@ -226,6 +212,7 @@ async fn verified_upstream_binding_creates_attested_session() {
             "release": "fixture",
             "verified_claims": ["source-verified"]
         })),
+        ..verified_event("stub-upstream", "x")
     };
 
     let result = svc
@@ -293,20 +280,13 @@ async fn session_is_per_tee_channel_not_per_model() {
     // served is recorded on the receipt, never on the session.
     let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = |model: &str| UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: model.to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://stub-upstream".to_string(),
             spki_sha256: "aa".repeat(32),
         }],
-        provider_claims: None,
+        ..verified_event("stub-upstream", model)
     };
     let session_id_of = |result: &private_ai_gateway::aggregator::service::ForwardResult| {
         result
@@ -351,14 +331,8 @@ async fn session_is_per_tee_channel_not_per_model() {
 async fn attested_session_id_changes_when_verification_material_changes() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
         evidence: Some(serde_json::json!({
             "digest": format!("sha256:{}", digest_byte.repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
@@ -370,6 +344,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
         provider_claims: Some(serde_json::json!({
             "release": "fixture",
         })),
+        ..verified_event("stub-upstream", "x")
     };
 
     let first = svc
@@ -431,17 +406,9 @@ async fn attested_session_id_changes_when_verification_material_changes() {
 async fn verifier_event_failed_with_required_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let event = UpstreamVerifiedEvent {
-        upstream_name: "stub-upstream".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
-        url_origin: None,
         verifier_id: "stub-verifier-1".to_string(),
-        result: VerificationResult::Failed,
-        required: true,
         reason: Some("quote did not match expected app-id".to_string()),
-        evidence: None,
-        channel_bindings: Vec::new(),
-        provider_claims: None,
+        ..failed_event("stub-upstream", "x")
     };
     let err = svc
         .forward_chat_completion(
@@ -552,20 +519,15 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
 async fn background_verification_writes_inspectable_session_into_the_store() {
     let (service, _) = make_service(b"{}", true);
     let event = UpstreamVerifiedEvent {
-        upstream_name: "preflight-upstream".to_string(),
         provider: Some("tinfoil".to_string()),
-        model_id: "preflight-model".to_string(),
         url_origin: Some("https://preflight-upstream".to_string()),
         verifier_id: "preflight-verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://preflight-upstream".to_string(),
             spki_sha256: "bb".repeat(32),
         }],
         provider_claims: Some(serde_json::json!({ "tcb_status": "UpToDate" })),
+        ..verified_event("preflight-upstream", "preflight-model")
     };
 
     // Nothing verified yet — nothing to inspect.

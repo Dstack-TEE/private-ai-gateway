@@ -24,7 +24,7 @@ use private_ai_gateway::aggregator::service::{
     UpstreamVerificationRequest, UpstreamVerifier,
 };
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
 const UPSTREAM_NAME: &str = "mismatch-upstream";
 const UPSTREAM_ORIGIN: &str = "https://mismatch-upstream.example";
@@ -46,21 +46,12 @@ struct RecordingVerifier {
 impl UpstreamVerifier for RecordingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verify_calls.fetch_add(1, Ordering::SeqCst);
+        // No channel bindings (left at default): the canned event itself never
+        // makes the backend's default fail-closed guard fire; the mock backend
+        // below raises the mismatch deterministically instead.
         UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            provider: None,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
             verifier_id: "recording-verifier/v1".to_string(),
-            result: VerificationResult::Verified,
-            required: request.required,
-            reason: None,
-            evidence: None,
-            // No channel bindings: the canned event itself never makes the
-            // backend's default fail-closed guard fire; the mock backend below
-            // raises the mismatch deterministically instead.
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..event_from_request(&request, VerificationResult::Verified)
         }
     }
 
@@ -207,17 +198,9 @@ fn build_service(
 /// true) is satisfied and the flow reaches the forward step.
 fn caller_event() -> UpstreamVerifiedEvent {
     UpstreamVerifiedEvent {
-        upstream_name: UPSTREAM_NAME.to_string(),
-        provider: None,
-        model_id: "model-a".to_string(),
         url_origin: Some(UPSTREAM_ORIGIN.to_string()),
         verifier_id: "caller-supplied/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
-        channel_bindings: Vec::new(),
-        provider_claims: None,
+        ..verified_event(UPSTREAM_NAME, "model-a")
     }
 }
 

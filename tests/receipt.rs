@@ -7,11 +7,10 @@ use private_ai_gateway::aci::canonical;
 use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, ChannelBinding, ReceiptBuilder, ReceiptError,
-    TransparencyEventKind, UpstreamVerifiedEvent, VerificationResult,
-    EVENT_TRANSPARENCY_REQUEST_MODIFIED,
+    TransparencyEventKind, UpstreamVerifiedEvent, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
 };
 
-use common::StaticKeyProvider;
+use common::{verified_event, StaticKeyProvider};
 
 fn keys() -> StaticKeyProvider {
     StaticKeyProvider::default()
@@ -81,17 +80,9 @@ fn event_seqs_strictly_increasing_and_first_is_request_received() {
     b.add_request_received(b"a").unwrap();
     b.add_request_forwarded(b"a").unwrap();
     b.add_upstream_verified(UpstreamVerifiedEvent {
-        upstream_name: "openai-compatible".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("http://upstream".to_string()),
         verifier_id: "verifier-stub-1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
-        channel_bindings: Vec::new(),
-        provider_claims: None,
+        ..verified_event("openai-compatible", "x")
     })
     .unwrap();
     b.add_response_returned(b"b", b"b").unwrap();
@@ -113,15 +104,8 @@ fn upstream_verified_event_records_channel_bindings() {
     b.add_request_received(b"a").unwrap();
     b.add_request_forwarded(b"a").unwrap();
     b.add_upstream_verified(UpstreamVerifiedEvent {
-        upstream_name: "openai-compatible".to_string(),
-        provider: None,
-        model_id: "x".to_string(),
         url_origin: Some("https://upstream.example".to_string()),
         verifier_id: "external/verifier/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        reason: None,
-        evidence: None,
         channel_bindings: vec![
             ChannelBinding::TlsSpkiSha256 {
                 origin: "https://upstream.example".to_string(),
@@ -142,6 +126,7 @@ fn upstream_verified_event_records_channel_bindings() {
             "trust_boundary": "fixture",
             "model_evidence_present": true,
         })),
+        ..verified_event("openai-compatible", "x")
     })
     .unwrap();
     b.add_response_returned(b"b", b"b").unwrap();

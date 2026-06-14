@@ -41,7 +41,7 @@ use private_ai_gateway::http::build_router;
 use serde_json::Value;
 use tower::ServiceExt;
 
-use common::{StaticKeyProvider, StubQuoter};
+use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"aci-model","messages":[{"role":"user","content":"hello"}]}"#;
@@ -201,20 +201,12 @@ struct AlwaysVerified;
 impl UpstreamVerifier for AlwaysVerified {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            provider: None,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
             verifier_id: "surface-verifier/v1".to_string(),
-            result: VerificationResult::Verified,
-            required: request.required,
-            reason: None,
             evidence: Some(serde_json::json!({
                 "digest": format!("sha256:{}", "11".repeat(32)),
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
             })),
-            channel_bindings: Vec::new(),
-            provider_claims: None,
+            ..event_from_request(&request, VerificationResult::Verified)
         }
     }
 }
@@ -657,20 +649,13 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             forwarded_body: Some(forwarded.to_vec()),
             upstream_required: Some(true),
             upstream_verification_event: Some(UpstreamVerifiedEvent {
-                upstream_name: "surface-upstream".to_string(),
-                provider: None,
-                model_id: "private-upstream".to_string(),
                 url_origin: Some("https://surface-upstream.example".to_string()),
                 verifier_id: "surface-verifier/v1".to_string(),
-                result: VerificationResult::Verified,
-                required: true,
-                reason: None,
                 evidence: Some(serde_json::json!({
                     "digest": format!("sha256:{}", "11".repeat(32)),
                     "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
                 })),
-                channel_bindings: Vec::new(),
-                provider_claims: None,
+                ..verified_event("surface-upstream", "private-upstream")
             }),
             requester: Some(ReceiptOwner::from_bearer("requester-a")),
             e2ee: None,
