@@ -22,7 +22,7 @@
 //! session is idempotent in the index. `expires_at` is a retention window;
 //! expired records are dropped lazily on read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -79,6 +79,93 @@ pub trait SessionStore: Send + Sync {
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession>;
 }
 
+/// In-memory session index shared by both stores: the id→session map plus an
+/// `expires_at`→ids index so eviction costs only what actually expired (O(k)),
+/// not a full scan of the store on every write.
+#[derive(Default)]
+struct SessionIndex {
+    by_id: HashMap<String, AttestedSession>,
+    by_expiry: BTreeMap<u64, HashSet<String>>,
+}
+
+impl SessionIndex {
+    /// Insert (or refresh) a session, then evict everything whose retention
+    /// deadline has passed at `ts`. A session is content-addressed but re-put on
+    /// every request with a later `expires_at`; when the deadline moves we drop
+    /// the stale expiry hint so the index never points an id at the wrong bucket.
+    fn put_and_evict(&mut self, session: AttestedSession, ts: u64) {
+        self.insert(session);
+        self.evict_expired(ts);
+    }
+
+    /// Insert without evicting — used to replay a log into the index at startup.
+    fn insert(&mut self, session: AttestedSession) {
+        let id = session.session_id.clone();
+        let expires_at = session.expires_at;
+        if let Some(prev) = self.by_id.insert(id.clone(), session) {
+            if prev.expires_at != expires_at {
+                self.drop_expiry_hint(&id, prev.expires_at);
+            }
+        }
+        self.by_expiry.entry(expires_at).or_default().insert(id);
+    }
+
+    fn drop_expiry_hint(&mut self, id: &str, expires_at: u64) {
+        if let Some(ids) = self.by_expiry.get_mut(&expires_at) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_expiry.remove(&expires_at);
+            }
+        }
+    }
+
+    /// Pop every bucket whose deadline is at or before `now`.
+    fn evict_expired(&mut self, now: u64) {
+        while let Some((&expires_at, _)) = self.by_expiry.first_key_value() {
+            if expires_at > now {
+                break;
+            }
+            let (_, ids) = self
+                .by_expiry
+                .pop_first()
+                .expect("first_key_value just returned a bucket");
+            for id in ids {
+                self.by_id.remove(&id);
+            }
+        }
+    }
+
+    fn get(&mut self, session_id: &str, now: u64) -> Option<AttestedSession> {
+        match self.by_id.get(session_id) {
+            Some(session) if now >= session.expires_at => {
+                let expires_at = session.expires_at;
+                self.by_id.remove(session_id);
+                self.drop_expiry_hint(session_id, expires_at);
+                None
+            }
+            Some(session) => Some(session.clone()),
+            None => None,
+        }
+    }
+
+    fn list(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
+        let mut out: Vec<AttestedSession> = self
+            .by_id
+            .values()
+            .filter(|s| now < s.expires_at)
+            .filter(|s| provider.is_none_or(|p| s.provider == p))
+            .cloned()
+            .collect();
+        // Stable order for callers/tests: newest first, then by id.
+        out.sort_by(|a, b| {
+            b.established_at
+                .cmp(&a.established_at)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        out
+    }
+}
+
 /// Append-only JSONL-backed [`SessionStore`].
 pub struct JsonlSessionStore {
     inner: Mutex<Inner>,
@@ -87,7 +174,7 @@ pub struct JsonlSessionStore {
 struct Inner {
     writer: File,
     next_seq: u64,
-    by_id: HashMap<String, AttestedSession>,
+    index: SessionIndex,
 }
 
 impl JsonlSessionStore {
@@ -98,7 +185,7 @@ impl JsonlSessionStore {
         let path: PathBuf = path.as_ref().to_path_buf();
 
         let mut next_seq = 0u64;
-        let mut by_id = HashMap::new();
+        let mut index = SessionIndex::default();
         if let Ok(file) = File::open(&path) {
             for line in BufReader::new(file).lines() {
                 let line = match line {
@@ -124,7 +211,7 @@ impl JsonlSessionStore {
                         if session.content_id().ok().as_deref() == Some(&session.session_id)
                             && session.evidence.digest_matches_data()
                         {
-                            by_id.insert(session.session_id.clone(), session);
+                            index.insert(session);
                         }
                     }
                 }
@@ -136,7 +223,7 @@ impl JsonlSessionStore {
             inner: Mutex::new(Inner {
                 writer,
                 next_seq,
-                by_id,
+                index,
             }),
         })
     }
@@ -157,42 +244,21 @@ impl SessionStore for JsonlSessionStore {
         guard.writer.write_all(line.as_bytes())?;
         guard.writer.flush()?;
         guard.next_seq = seq + 1;
-        guard.by_id.insert(session.session_id.clone(), session);
         // Bound the in-memory index: drop entries past their retention deadline.
         // (The append-only log itself still grows; compaction is an ops concern —
         // rotate/replay the log file. Relying parties always fetch a live id.)
-        guard.by_id.retain(|_, s| ts < s.expires_at);
+        guard.index.put_and_evict(session, ts);
         Ok(seq)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match guard.by_id.get(session_id) {
-            Some(session) if now >= session.expires_at => {
-                guard.by_id.remove(session_id);
-                None
-            }
-            Some(session) => Some(session.clone()),
-            None => None,
-        }
+        guard.index.get(session_id, now)
     }
 
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let mut out: Vec<AttestedSession> = guard
-            .by_id
-            .values()
-            .filter(|s| now < s.expires_at)
-            .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .cloned()
-            .collect();
-        // Stable order for callers/tests: newest first, then by id.
-        out.sort_by(|a, b| {
-            b.established_at
-                .cmp(&a.established_at)
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
-        out
+        guard.index.list(provider, now)
     }
 }
 
@@ -206,46 +272,26 @@ pub struct InMemorySessionStore {
 
 #[derive(Default)]
 struct InMemoryInner {
-    by_id: HashMap<String, AttestedSession>,
+    index: SessionIndex,
 }
 
 impl SessionStore for InMemorySessionStore {
     fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        guard.by_id.insert(session.session_id.clone(), session);
         // Bound the store: drop entries past their retention deadline so a
         // long-running gateway does not accumulate a session per key rotation.
-        guard.by_id.retain(|_, s| ts < s.expires_at);
+        guard.index.put_and_evict(session, ts);
         Ok(0)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match guard.by_id.get(session_id) {
-            Some(session) if now >= session.expires_at => {
-                guard.by_id.remove(session_id);
-                None
-            }
-            Some(session) => Some(session.clone()),
-            None => None,
-        }
+        guard.index.get(session_id, now)
     }
 
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let mut out: Vec<AttestedSession> = guard
-            .by_id
-            .values()
-            .filter(|s| now < s.expires_at)
-            .filter(|s| provider.is_none_or(|p| s.provider == p))
-            .cloned()
-            .collect();
-        out.sort_by(|a, b| {
-            b.established_at
-                .cmp(&a.established_at)
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
-        out
+        guard.index.list(provider, now)
     }
 }
 
@@ -299,6 +345,34 @@ mod tests {
         let listed = store.list_sessions(None, 5_000);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, b.session_id);
+    }
+
+    #[test]
+    fn refreshed_session_survives_its_old_deadline() {
+        // A channel is content-addressed, so re-verifying it re-puts the same
+        // session_id with a later expires_at. The expiry index must drop the
+        // superseded deadline; otherwise eviction at the old deadline would
+        // wrongly remove a still-live session.
+        let store = InMemorySessionStore::default();
+        let early = session("https://node.example", "same", 5_000);
+        let id = early.session_id.clone();
+        store.put_session(early, 1_000).unwrap();
+
+        let refreshed = session("https://node.example", "same", 9_000);
+        assert_eq!(refreshed.session_id, id, "same channel => same content id");
+        store.put_session(refreshed, 4_000).unwrap();
+
+        // A later write advances eviction past the OLD deadline (5_000). With a
+        // stale expiry hint, this would drop the id even though it now lives to
+        // 9_000.
+        store
+            .put_session(session("https://other.example", "x", 20_000), 6_000)
+            .unwrap();
+
+        assert!(
+            store.get_session(&id, 7_000).is_some(),
+            "refreshed session must outlive its superseded deadline"
+        );
     }
 
     #[test]
