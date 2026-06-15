@@ -110,14 +110,19 @@ Required behavior:
   the verified workload
 - prevent aliases from bypassing the verified model identity
 
-For gateway providers, a model-scoped probe is preferred over trusting static
-catalog metadata. The NEAR AI rule is the reference example:
+For gateway providers, verifying the gateway channel is preferred over trusting
+static catalog metadata. NEAR AI is the reference example — it is a router, so
+the authoritative check is the verified gateway channel itself; the model is only
+the shape of NEAR's `/v1/attestation/report` endpoint, and the gateway
+attestation it returns is the same for every model:
 
 ```text
 verified gateway channel
-+ /v1/attestation/report?model=<canonical-model>
-+ non-empty model_attestations[]
+(workload identity + source provenance + runtime policy + TLS SPKI binding)
 ```
+
+The nested `model_attestations[]` are not required or checked: a router attests
+the channel, not the model that serves a given request.
 
 The review must call out aliasing and actual served weights. If the provider
 cannot prove the exact backend model or quantization, receipts must be honest
@@ -374,6 +379,7 @@ Every provider adapter should return the same class of result to Rust:
   "provider": "near-ai",
   "model_id": "canonical-model",
   "verifier_id": "provider-verifier/version",
+  "attested_scope": "router",
   "evidence": {
     "digest": "sha256:...",
     "data": "data:application/json;base64,<exact-verifier-input-bytes>"
@@ -388,10 +394,10 @@ Every provider adapter should return the same class of result to Rust:
     }
   ],
   "provider_claims": {
-    "trust_boundary": "gateway",
-    "evidence_scope": "model",
+    "trust_boundary": "near-ai-gateway",
     "gateway_verified": true,
-    "model_evidence_present": true
+    "gateway_tls_spki_sha256": "...",
+    "tcb_status": "UpToDate"
   }
 }
 ```

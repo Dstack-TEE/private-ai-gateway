@@ -28,20 +28,16 @@ Source reports:
 NEAR AI gateway mode is acceptable as a gateway-soundness provider when the
 verification lease is established through the verified gateway.
 
-Private AI Gateway does not need to re-verify every nested `model_attestations[]` entry.
-The NEAR gateway is the trust boundary. Once Private AI Gateway verifies the gateway
-workload identity, source provenance, runtime policy, and TLS SPKI binding, a
-model-scoped attestation response from that same verified gateway can be
-treated as the gateway's statement that the requested model has attested
-backend evidence.
-
-The model evidence is still required, but its role changes:
-
-- It is not a standalone proof that Private AI Gateway must parse and re-verify.
-- It is the verified gateway's model-scoped claim that this model currently has
-  an attested backend.
-- It must be fetched over the verified gateway channel during lease
-  establishment.
+NEAR AI is a router (`AttestationScope::PerRouter`): the NEAR gateway is the
+trust boundary, and the attested session is that one verified gateway channel,
+shared by every model behind it. Private AI Gateway verifies the gateway
+workload identity, source provenance, runtime policy, and TLS SPKI binding — and
+nothing about the served model. It does **not** fetch, parse, or check the
+nested `model_attestations[]`: the gateway does not re-verify those quotes and
+nothing binds them to the instance that serves a given request, so requiring them
+would imply a per-model attestation we did not perform (and would split one
+channel into a session per model). The served model is recorded on the receipt as
+an identifier; a request-bound, per-instance model attestation is a roadmap item.
 
 The main loophole is catalog metadata. `verifiable` and
 `attestationSupported` are DB/admin-controlled fields. They are useful hints,
@@ -49,8 +45,7 @@ but they are not sufficient proof. The authoritative check for Private AI Gatewa
 
 ```text
 verified gateway channel
-+ model-scoped /v1/attestation/report
-+ non-empty model_attestations[]
+(workload identity + source provenance + runtime policy + TLS SPKI binding)
 ```
 
 ## Criteria Status
@@ -70,13 +65,12 @@ Passed:
 P0 adapter requirements:
 
 - Verify the gateway workload identity and gateway TLS SPKI binding.
-- Fetch model-scoped attestation over the verified gateway channel.
-- Require non-empty `model_attestations[]` for the requested model.
 - Treat catalog flags as advisory only.
 - Enforce the verified gateway SPKI on every request.
-- Record compact provider claims in receipts:
-  `gateway_verified`, `model_evidence_present`,
-  `model_attestation_count`, and a digest of the model evidence.
+- Record compact, channel-scoped provider claims in receipts (e.g.
+  `gateway_verified`, `gateway_tls_spki_sha256`, `tcb_status`). No model
+  attestation: the session is the gateway channel, and the served model is a
+  receipt-level identifier.
 
 P0 TODOs before strict-release inclusion:
 
@@ -102,8 +96,8 @@ P1 TODOs:
 
 ## Lease Contract
 
-The NEAR provider adapter should establish one verification lease per accepted
-model.
+The NEAR provider adapter establishes one verification lease per gateway channel
+(router scope): every accepted model behind the gateway shares it.
 
 Lease establishment:
 
@@ -115,10 +109,13 @@ Lease establishment:
 4. Pin that gateway SPKI for the lease window.
 5. Fetch
    `/v1/attestation/report?model=<canonical-model>&include_tls_fingerprint=true`
-   over the pinned gateway channel.
-6. Require HTTP 200 and at least one `model_attestations[]` entry.
-7. Record the model-attestation digest and compact gateway claim in the lease
-   and receipt.
+   over the pinned gateway channel. The model is only the shape of NEAR AI's
+   endpoint; the gateway attestation it returns is the same for every model.
+6. Require HTTP 200 and a verified gateway component. The nested
+   `model_attestations[]` are neither required nor checked (see
+   [`model_attestations[]` Semantics](#model_attestations-semantics)).
+7. Record the channel-scoped gateway claim in the lease and receipt; the served
+   model is a receipt-level identifier only.
 
 Request forwarding:
 
@@ -208,9 +205,12 @@ TLS channel.
 ```
 
 That is enough for gateway-soundness mode if Private AI Gateway has accepted the gateway
-as the trust boundary. The nested entries are useful audit artifacts and should
-be hashed or recorded, but Private AI Gateway does not need to re-verify them during lease
-establishment.
+as the trust boundary. Private AI Gateway does not consume the nested entries at
+all: they are not bound to the instance that serves a given request, so hashing
+or recording them in the attested session would imply a per-model attestation we
+did not perform. They remain a roadmap input for a future request-bound,
+per-instance model attestation surfaced on the receipt — not in the channel
+session.
 
 ## Required Gateway Assumptions
 
@@ -341,26 +341,29 @@ Live probes during review:
 
 P0:
 
-- Move NEAR verification to gateway-soundness lease establishment:
-  verify gateway identity/provenance/TLS binding, then require a model-scoped
-  attestation report over the verified gateway channel.
-- Stop treating nested `model_attestations[]` verification as a Rust
-  gateway responsibility. The provider verifier may record the nested
-  evidence digest, but Rust should enforce only the verified gateway lease and
-  channel binding.
+- Move NEAR verification to gateway-soundness lease establishment: verify
+  gateway identity/provenance/TLS binding. NEAR AI is a router, so the verified
+  gateway channel is the attested session; the model-scoped report is only the
+  shape of NEAR's endpoint.
+- Do not fetch, verify, or record the nested `model_attestations[]`: the gateway
+  does not re-verify them and nothing binds them to the request's instance
+  (router scope). Rust enforces only the verified gateway lease and channel
+  binding.
 - Treat `/v1/model/list` catalog flags as hints. They may help choose models to
-  probe, but they must not authorize a lease without a successful model-scoped
-  attestation response.
-- Reject or do not configure model IDs that cannot produce non-empty
-  `model_attestations[]` through the verified gateway.
+  probe, but the lease is authorized by the verified gateway channel, not by any
+  per-model claim.
+- Whether a configured model is genuinely TEE-backed (vs an external provider
+  behind the gateway) is not proven by the channel attestation, so do not imply
+  per-model TEE protection in receipts. A request-bound, per-instance model
+  attestation is the roadmap path to surface that distinction.
 
 P1:
 
 - Surface and pin the gateway compose/image digest in the NEAR verifier result.
   The allowlist should map audited source/release evidence to accepted
   deployment digests.
-- Record `model_attestations_sha256` and model canonical id in the lease and
-  receipt.
+- Record the served model id on the receipt as an identifier only — no model
+  attestation digest (router scope).
 - Decide how to represent the gateway runtime-policy assumptions, especially
   upstream image/compose allowlists, without adding a generic policy DSL.
 - Ask NEAR to expose stable bucket/backend/cache-hit evidence, for example
