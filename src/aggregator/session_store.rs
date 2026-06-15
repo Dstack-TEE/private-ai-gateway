@@ -255,7 +255,9 @@ impl SessionStore for JsonlSessionStore {
             line.push('\n');
             // `write_all` hands the bytes to the kernel; there is no `flush` — for
             // a `File` it is a no-op, and the log is not fsync'd (durability is the
-            // deployment's TEE-sealed-volume concern). On a write error we return
+            // deployment's TEE-sealed-volume concern). If `file` ever becomes a
+            // userspace-buffered writer (`BufWriter`), restore a `flush` here or
+            // records can sit unwritten on a crash. On a write error we return
             // before touching the index, so it stays consistent with the log.
             w.file.write_all(line.as_bytes())?;
             w.next_seq = seq + 1;
