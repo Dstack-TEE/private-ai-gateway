@@ -162,8 +162,6 @@ impl SessionIndex {
 }
 
 /// Stable presentation order for a session listing: newest first, then by id.
-/// Shared so a multi-channel listing (e.g. a `?model=` fan-out across upstreams)
-/// orders the merged result the same way a single channel's listing does.
 pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
     sessions.sort_by(|a, b| {
         b.established_at
@@ -172,15 +170,8 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
     });
 }
 
-/// Append-only JSONL-backed [`SessionStore`].
-///
-/// The append log and the in-memory index sit behind separate locks, so a read
-/// (`get`/`list`) never waits on a write's `write_all`. Writes serialize through
-/// the writer lock (preserving seq order) and the index is updated under its own
-/// lock immediately after. The write still runs on the caller's thread — moving
-/// it off the latency path via a dedicated writer task is a future enhancement
-/// for a hot durable store, and a no-op today since the default store is
-/// in-memory and the log is not fsync'd.
+/// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
+/// index sit behind separate locks, so a read never waits on a write.
 pub struct JsonlSessionStore {
     writer: Mutex<LogWriter>,
     index: Mutex<SessionIndex>,
@@ -253,22 +244,16 @@ impl SessionStore for JsonlSessionStore {
             })
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             line.push('\n');
-            // `write_all` hands the bytes to the kernel; there is no `flush` — for
-            // a `File` it is a no-op, and the log is not fsync'd (durability is the
-            // deployment's TEE-sealed-volume concern). If `file` ever becomes a
-            // userspace-buffered writer (`BufWriter`), restore a `flush` here or
-            // records can sit unwritten on a crash. On a write error we return
-            // before touching the index, so it stays consistent with the log.
+            // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
+            // `file` ever becomes a `BufWriter`, restore a flush or records can sit
+            // unwritten on a crash.
             w.file.write_all(line.as_bytes())?;
             w.next_seq = seq + 1;
             seq
         };
-        // Update the index under its own lock — a concurrent get/list never waited
-        // on the write above. Bound the in-memory index: drop entries past their
-        // retention deadline. (The append-only log itself still grows; compaction
-        // is an ops concern — rotate/replay the file. Relying parties fetch a live
-        // id, and replay rebuilds the index, so a crash between write and index
-        // update loses nothing.)
+        // Index under its own lock, so a get/list never waited on the write above.
+        // A crash between the write and this update loses nothing — replay rebuilds
+        // the index from the log.
         self.index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
