@@ -430,6 +430,82 @@ async fn external_provider_verifier_caches_verified_bindings() {
 }
 
 #[tokio::test]
+async fn router_shares_one_channel_verification_across_models() {
+    // Security-critical: a router keys its verifier cache on the channel, not the
+    // model, so verifying a second model reuses the first model's verification
+    // (one external run) and event_for re-tags it with the requesting model. A
+    // per-model provider must NOT share — each model is its own channel.
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "router-cache-test/v1",
+        "evidence": {
+            "digest": format!("sha256:{}", "11".repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://router.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+    })
+    .to_string();
+    // Counts every external run and verifies any model (unlike
+    // counting_provider_script, which is pinned to one model_id).
+    let script = format!(
+        r#"cat >/dev/null
+count="$(cat "$1" 2>/dev/null || printf '0')"
+count="$((count + 1))"
+printf '%s' "$count" > "$1"
+printf '%s' '{output}'"#
+    );
+    for (provider, expected_runs) in [("near-ai", "1"), ("phala-direct", "2")] {
+        let counter_path = std::env::temp_dir().join(format!(
+            "private-ai-gateway-router-cache-test-{}-{provider}",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&counter_path);
+        let verifier = ExternalProviderVerifier::with_command_and_cache(
+            provider,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script.clone(),
+                "router-cache-test".to_string(),
+                counter_path.display().to_string(),
+            ],
+            5,
+            300,
+        )
+        .unwrap();
+        let base = UpstreamVerificationRequest {
+            upstream_name: "router-upstream".to_string(),
+            url_origin: Some("https://router.example".to_string()),
+            model_id: "model-a".to_string(),
+            forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+            required: true,
+        };
+        let _ = verifier.verify(base.clone()).await;
+        let second = verifier
+            .verify(UpstreamVerificationRequest {
+                model_id: "model-b".to_string(),
+                ..base
+            })
+            .await;
+
+        assert_eq!(second.result, VerificationResult::Verified);
+        // The served event always reports the requesting model, even on reuse.
+        assert_eq!(second.model_id, "model-b");
+        assert_eq!(
+            std::fs::read_to_string(&counter_path).unwrap(),
+            expected_runs,
+            "{provider}: external verifier runs (a router reuses one channel \
+             verification across models; a per-model provider verifies each)"
+        );
+        let _ = std::fs::remove_file(counter_path);
+    }
+}
+
+#[tokio::test]
 async fn external_provider_refresh_keeps_existing_cache_on_failure() {
     let counter_path = std::env::temp_dir().join(format!(
         "private-ai-gateway-provider-refresh-cache-test-{}",
