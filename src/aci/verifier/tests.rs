@@ -90,10 +90,21 @@ fn custody_report(identity: &SigningKey, signature_chain: Vec<String>) -> Attest
     }
 }
 
+/// The attestation scope a stub verifier should declare to satisfy the
+/// fail-closed scope seam — mirrors `attestation_scope_for_provider`.
+fn declared_scope(provider: &str) -> &'static str {
+    match provider {
+        "near-ai" | "tinfoil" => "router",
+        "chutes" => "instance",
+        _ => "model",
+    }
+}
+
 fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<String> {
     let output = json!({
         "result": "verified",
         "verifier_id": verifier_id,
+        "attested_scope": declared_scope(provider),
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
@@ -124,6 +135,7 @@ fn counting_provider_script(
     let output = json!({
         "result": "verified",
         "verifier_id": verifier_id,
+        "attested_scope": declared_scope(provider),
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
@@ -435,30 +447,32 @@ async fn router_shares_one_channel_verification_across_models() {
     // model, so verifying a second model reuses the first model's verification
     // (one external run) and event_for re-tags it with the requesting model. A
     // per-model provider must NOT share — each model is its own channel.
-    let output = json!({
-        "result": "verified",
-        "verifier_id": "router-cache-test/v1",
-        "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
-            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
-        },
-        "channel_bindings": [{
-            "type": "tls_spki_sha256",
-            "origin": "https://router.example",
-            "spki_sha256": "AA".repeat(32),
-        }],
-    })
-    .to_string();
-    // Counts every external run and verifies any model (unlike
-    // counting_provider_script, which is pinned to one model_id).
-    let script = format!(
-        r#"cat >/dev/null
+    for (provider, expected_runs) in [("near-ai", "1"), ("phala-direct", "2")] {
+        // Each provider declares its own scope so the fail-closed seam accepts it.
+        let output = json!({
+            "result": "verified",
+            "verifier_id": "router-cache-test/v1",
+            "attested_scope": declared_scope(provider),
+            "evidence": {
+                "digest": format!("sha256:{}", "11".repeat(32)),
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
+            },
+            "channel_bindings": [{
+                "type": "tls_spki_sha256",
+                "origin": "https://router.example",
+                "spki_sha256": "AA".repeat(32),
+            }],
+        })
+        .to_string();
+        // Counts every external run and verifies any model (unlike
+        // counting_provider_script, which is pinned to one model_id).
+        let script = format!(
+            r#"cat >/dev/null
 count="$(cat "$1" 2>/dev/null || printf '0')"
 count="$((count + 1))"
 printf '%s' "$count" > "$1"
 printf '%s' '{output}'"#
-    );
-    for (provider, expected_runs) in [("near-ai", "1"), ("phala-direct", "2")] {
+        );
         let counter_path = std::env::temp_dir().join(format!(
             "private-ai-gateway-router-cache-test-{}-{provider}",
             std::process::id(),
@@ -469,7 +483,7 @@ printf '%s' '{output}'"#
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                script.clone(),
+                script,
                 "router-cache-test".to_string(),
                 counter_path.display().to_string(),
             ],
@@ -515,6 +529,7 @@ async fn external_provider_refresh_keeps_existing_cache_on_failure() {
     let output = json!({
         "result": "verified",
         "verifier_id": "tinfoil/external-test/v1",
+        "attested_scope": "router",
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",

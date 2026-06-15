@@ -158,13 +158,83 @@ pub enum UpstreamProvider {
 }
 
 impl UpstreamProvider {
-    /// Whether this provider is a router: one verified TEE channel (a gateway TD
-    /// or a confidential model router) fronts many models, so its attested
-    /// session is the channel and it is verified once per channel rather than
-    /// once per model. Keep in sync with `provider_is_router` in the external
-    /// verifier.
-    pub(crate) fn is_router(self) -> bool {
-        matches!(self, UpstreamProvider::NearAi | UpstreamProvider::Tinfoil)
+    /// The provider's stable wire string — the kebab name shared by this enum's
+    /// serde and the external verifier's `provider` field.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            UpstreamProvider::OpenAiCompatible => "openai-compatible",
+            UpstreamProvider::AciDcap => "aci-dcap",
+            UpstreamProvider::Chutes => "chutes",
+            UpstreamProvider::Tinfoil => "tinfoil",
+            UpstreamProvider::NearAi => "near-ai",
+            UpstreamProvider::PhalaDirect => "phala-direct",
+        }
+    }
+
+    /// The channel boundary this provider attests; see [`AttestationScope`].
+    pub(crate) fn attestation_scope(self) -> AttestationScope {
+        attestation_scope_for_provider(self.as_str())
+    }
+}
+
+/// The channel boundary a provider's attestation proves — and therefore what
+/// identifies its attested session.
+///
+/// A *per-router* provider verifies one TEE channel (a gateway TD or a
+/// confidential model router) that fronts many models, so the model is not part
+/// of the channel identity and one session is shared across models. *Per-model*
+/// and *per-instance* providers verify a distinct channel for each model or
+/// serving instance, so the model participates in the channel identity.
+///
+/// This is the single axis that decides channel-keyed verification (the model
+/// is dropped from the verifier cache key for routers) and is enforced
+/// fail-closed at the verifier seam: a verifier must attest the scope its
+/// provider is declared to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationScope {
+    PerRouter,
+    PerModel,
+    PerInstance,
+}
+
+impl AttestationScope {
+    /// Routers share one channel across models, so verification is keyed on the
+    /// channel alone (model dropped from the cache key).
+    pub(crate) fn is_per_router(self) -> bool {
+        matches!(self, AttestationScope::PerRouter)
+    }
+
+    /// Parse the scope token a provider verifier emits in its result.
+    pub(crate) fn from_declared(token: &str) -> Option<Self> {
+        match token {
+            "router" => Some(Self::PerRouter),
+            "model" => Some(Self::PerModel),
+            "instance" => Some(Self::PerInstance),
+            _ => None,
+        }
+    }
+
+    /// The wire token for this scope (matches [`Self::from_declared`]).
+    pub(crate) fn as_declared(self) -> &'static str {
+        match self {
+            Self::PerRouter => "router",
+            Self::PerModel => "model",
+            Self::PerInstance => "instance",
+        }
+    }
+}
+
+/// The attestation scope for a provider's wire string — the single source of
+/// truth, consulted by both [`UpstreamProvider::attestation_scope`] and the
+/// external verifier (for channel-keying and the fail-closed scope seam).
+///
+/// Unrecognized providers default to per-model: never collapse models onto one
+/// channel without a positive reason to.
+pub(crate) fn attestation_scope_for_provider(provider: &str) -> AttestationScope {
+    match provider {
+        "near-ai" | "tinfoil" => AttestationScope::PerRouter,
+        "chutes" => AttestationScope::PerInstance,
+        _ => AttestationScope::PerModel,
     }
 }
 

@@ -46,7 +46,7 @@ fn verification_targets_for_configs<'a>(
         // probe it once (a single representative model — `models` is a BTreeMap,
         // so `.take(1)` is deterministic); per-model requests reuse that channel
         // verification. Per-model / per-instance providers verify every model.
-        let model_ids: Vec<&String> = if cfg.provider.is_router() {
+        let model_ids: Vec<&String> = if cfg.provider.attestation_scope().is_per_router() {
             cfg.models.values().take(1).collect()
         } else {
             cfg.models.values().collect()

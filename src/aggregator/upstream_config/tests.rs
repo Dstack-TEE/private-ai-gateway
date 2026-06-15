@@ -68,16 +68,23 @@ fn router_provider_verifies_once_per_channel() {
 }
 
 #[test]
-fn routers_are_near_ai_and_tinfoil() {
-    // Both front many models behind one verified channel (NEAR AI gateway TD,
-    // Tinfoil confidential-model-router), so they are per-router. Per-model
-    // (Phala-direct) and per-instance (Chutes) providers are not.
-    assert!(UpstreamProvider::NearAi.is_router());
-    assert!(UpstreamProvider::Tinfoil.is_router());
-    assert!(!UpstreamProvider::PhalaDirect.is_router());
-    assert!(!UpstreamProvider::Chutes.is_router());
-    assert!(!UpstreamProvider::OpenAiCompatible.is_router());
-    assert!(!UpstreamProvider::AciDcap.is_router());
+fn provider_attestation_scopes() {
+    // NEAR AI (gateway TD) and Tinfoil (confidential-model-router) front many
+    // models behind one verified channel, so they are per-router. Phala-direct
+    // verifies a TEE per model; Chutes a key per instance; the rest default to
+    // per-model. Only per-router drops the model from the channel identity.
+    use AttestationScope::*;
+    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
+    assert_eq!(
+        UpstreamProvider::OpenAiCompatible.attestation_scope(),
+        PerModel
+    );
+    assert_eq!(UpstreamProvider::AciDcap.attestation_scope(), PerModel);
+    assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
+    assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
 }
 
 #[async_trait]

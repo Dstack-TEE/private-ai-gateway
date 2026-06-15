@@ -115,6 +115,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         {
             "result": "verified",
             "verifier_id": "tinfoil-verifier/v1",
+            "attested_scope": "router",
             "evidence": evidence,
             "channel_bindings": [
                 {

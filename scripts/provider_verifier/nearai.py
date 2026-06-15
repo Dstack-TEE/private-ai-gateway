@@ -13,7 +13,6 @@ from .common import (
     failed,
     json_evidence_bundle,
     model_dump,
-    tdx_debug_enabled,
     verifier_id_for,
 )
 
@@ -74,66 +73,15 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         )
         return
 
-    raw_report = report.raw or {}
-    model_attestations = raw_report.get("model_attestations") or []
-    if not isinstance(model_attestations, list) or not model_attestations:
-        failed(
-            provider,
-            "NEAR AI model-scoped report did not include model_attestations",
-            evidence=json_evidence_bundle(report_obj, attestation_url),
-            verifier_id=verifier_id,
-        )
-        return
-
-    for index, item in enumerate(model_attestations):
-        if not isinstance(item, dict) or not item.get("intel_quote"):
-            failed(
-                provider,
-                f"NEAR AI model_attestations[{index}] did not include intel_quote",
-                evidence=json_evidence_bundle(report_obj, attestation_url),
-                verifier_id=verifier_id,
-            )
-            return
-        item_nonce = item.get("request_nonce")
-        if item_nonce is not None and str(item_nonce).lower() != str(report.request_nonce).lower():
-            failed(
-                provider,
-                f"NEAR AI model_attestations[{index}] nonce did not match request nonce",
-                evidence=json_evidence_bundle(report_obj, attestation_url),
-                verifier_id=verifier_id,
-            )
-            return
-        # The gateway does not re-verify these nested model quotes through the
-        # dstack verifier, so check the TD debug bit here: a debug-mode model TD
-        # would otherwise be accepted on the gateway's word alone.
-        try:
-            if tdx_debug_enabled(bytes.fromhex(item["intel_quote"])):
-                failed(
-                    provider,
-                    f"NEAR AI model_attestations[{index}] TDX quote is in debug mode",
-                    evidence=json_evidence_bundle(report_obj, attestation_url),
-                    verifier_id=verifier_id,
-                )
-                return
-        except ValueError as exc:
-            failed(
-                provider,
-                f"NEAR AI model_attestations[{index}] intel_quote is not valid TDX bytes: {exc}",
-                evidence=json_evidence_bundle(report_obj, attestation_url),
-                verifier_id=verifier_id,
-            )
-            return
-
-    # The attested session is the verified *gateway* TEE channel, which is the
-    # same for every model behind the router. NEAR AI's per-model TD quotes
-    # (model_attestations) are shallow-checked above as a safety gate (valid TDX
-    # bytes, nonce match, not debug-mode) but are deliberately NOT folded into
-    # the session evidence or claims: the gateway does not re-verify them, and
-    # they are not bound to the instance that serves a given request, so putting
-    # them in the session would imply a per-model attestation we did not perform
-    # and split one channel into a session per model. The served model is
-    # recorded on the receipt instead. Surfacing a request-bound, per-instance
-    # model attestation is a roadmap item (docs/roadmap.md).
+    # NEAR AI is a router: this verifier attests the gateway TEE channel, which
+    # is the same for every model behind it (attested_scope = "router" below).
+    # The model is only a fetch parameter for the model-scoped report endpoint —
+    # it is recorded on the receipt, never folded into the channel session. We
+    # deliberately do NOT fetch-and-check NEAR AI's per-model TD quotes here: the
+    # gateway does not re-verify them, they are not bound to the instance that
+    # serves a given request, and gating on them would be attestation theater.
+    # A request-bound, per-instance model attestation is a roadmap item
+    # (docs/roadmap.md) and would be its own scoped evidence on the receipt.
     #
     # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
     # so the session layer can populate a tri-state `tcb_up_to_date` claim. The
@@ -163,6 +111,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         {
             "result": "verified",
             "verifier_id": verifier_id,
+            "attested_scope": "router",
             "evidence": json_evidence_bundle(channel_evidence, attestation_url),
             "channel_bindings": [
                 {

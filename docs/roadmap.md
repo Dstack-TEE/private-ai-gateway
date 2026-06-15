@@ -56,26 +56,29 @@ concept.
 ### Router Upstreams: Model Attestation and One Session per Channel
 
 An attested session is a verified secure channel, and we never create more than
-one session per channel. The channel boundary differs by provider: per E2EE
+one session per channel. The channel boundary a provider attests is a first-class
+property, `UpstreamProvider::attestation_scope()` → `AttestationScope`: per E2EE
 instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
-(NEAR AI), where one gateway fronts many models. For NEAR AI the session is the
-verified gateway channel: the per-model TD quotes are shallow-checked at verify
-time but deliberately kept out of the session, and verification is keyed on the
-channel (`UpstreamProvider::is_router`), so every model resolves to one verified
-channel and one attested session — the served model staying a receipt-level fact
-(see [attested-session-system.md](attested-session-system.md)).
+(NEAR AI) or model router (Tinfoil), where one channel fronts many models. The
+scope is the single source of truth: it drives channel-keyed verification (the
+model is dropped from the verifier cache key for routers, so every model resolves
+to one verified channel and one attested session) and is enforced fail-closed at
+the verifier seam — a verifier must attest the scope its provider is declared to
+use, so a router channel can never be sealed from model-scoped evidence. The
+served model stays a receipt-level fact (see
+[attested-session-system.md](attested-session-system.md)).
 
 Remaining:
 
-- **Request-bound, per-instance model attestation on the receipt.** A router's
-  per-model TD quotes are fetched at verify time and only shallow-checked (valid
-  TDX bytes, nonce, not debug-mode); they are not re-verified, and nothing binds
-  them to the specific instance that served a given request. They are kept out of
-  the attested session to avoid implying a per-model attestation the gateway did
-  not perform. Because verification is now channel-keyed, that shallow check also
-  only covers the model that populated the channel cache, not every model. Once an
-  upstream can attest the exact instance that served a request, surface that as a
-  verified, request-bound reference on the receipt — not in the channel session.
+- **Request-bound, per-instance model attestation on the receipt.** A router
+  attests the channel, not the model that serves a given request. Today the
+  served model is recorded on the receipt as an identifier only; we do not fetch
+  or verify the per-model TD that handled it, because the gateway does not
+  re-verify those quotes and nothing binds them to the request's instance —
+  gating on them would be attestation theater. Once an upstream can attest the
+  exact instance that served a request, surface that as its own scoped,
+  request-bound attestation on the receipt — never folded into the channel
+  session.
 
 ### P0: Multi-Domain Downstream TLS Binding
 
