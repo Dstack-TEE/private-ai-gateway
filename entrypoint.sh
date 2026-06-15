@@ -22,15 +22,15 @@
 #      failure, not silent dependency drift).
 #   3. exec's the freshly built binary so it becomes the process the TEE
 #      keeps running. The binary itself enforces all of ACI's fail-closed
-#      policy (refuses test-only keys, requires source provenance, etc.);
+#      policy (refuses test-only keys, upstream verification, etc.);
 #      this script does not duplicate that logic.
 #
 # What it deliberately does NOT do
 #   * Set the aggregator's upstream URL, identity subject, or any
-#     trust-bearing policy. Non-secret runtime policy flows in through Docker
-#     Compose `environment:` so a verifier audits it as deployment config, not
-#     as bytes inside this script. Secrets should come from encrypted secrets,
-#     KMS, or mounted secret files.
+#     trust-bearing policy. Runtime policy flows in through the static gateway
+#     config selected by Docker Compose `environment:`, so a verifier audits it
+#     as deployment config, not as bytes inside this script. Secrets should
+#     come from encrypted secrets, KMS, or mounted secret files.
 #   * Fall back if any step fails. Build / install / exec failure is a
 #     hard exit.
 #

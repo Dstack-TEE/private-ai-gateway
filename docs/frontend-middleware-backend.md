@@ -124,20 +124,15 @@ headers or claims.
 
 ## Config Sketch
 
-Disabled mode stays the default. If no middleware socket path is configured,
-the frontend calls the backend directly in-process.
+Disabled mode is the current binary behavior. The static gateway config has no
+middleware socket fields, so the frontend calls the backend directly in-process.
 
 ```text
 # no middleware variables required
 ```
 
-Middleware mode is enabled by one Unix socket path. The gateway also starts an
-internal backend Unix socket for the middleware to call:
-
-```text
-PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
-PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
-```
+Middleware mode is a router-helper contract for custom embedding and tests. It
+is not exposed by the checked-in static config.
 
 The pending request-context TTL is 300 seconds. A middleware must call
 `POST /internal/forward` before the context expires.

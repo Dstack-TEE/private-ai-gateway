@@ -99,12 +99,12 @@ Use this checklist before treating a deployment as private inference.
 
 | Check | Evidence |
 | --- | --- |
-| Gateway identity is real | `GET /v1/attestation/report?nonce=<fresh nonce>` proves the TEE quote, workload id, and keyset. The report also carries source provenance that must match the reviewed deployment. |
+| Gateway identity is real | `GET /v1/attestation/report?nonce=<fresh nonce>` proves the TEE quote, workload id, and keyset. When source provenance is present, it must match the reviewed deployment. |
 | Keys are bound to the workload | The keyset in the report lists identity, receipt-signing, E2EE, and optional TLS SPKI keys endorsed by the workload identity. |
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
-| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/audit/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
+| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/aci/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
 | Provider is admissible | Review the provider's `docs/providers/<provider>/review.md` against `docs/providers/audit-criteria.md`. |
@@ -122,7 +122,7 @@ additional ACI artifacts are:
   to.
 - `x-receipt-id`: returned on provider-backed inference responses.
 - `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
-- `GET /v1/audit/sessions/{session_id}`: fetches an attested-session audit
+- `GET /v1/aci/sessions/{session_id}`: fetches an attested-session audit
   record referenced by a receipt.
 - Optional ACI E2EE headers: encrypt selected request/response fields when the
   client wants application-level encryption in addition to TLS.
@@ -192,8 +192,8 @@ and it uses the same SDK for TDX quotes.
 ## Quick Start For New Users
 
 This repository expects a dstack SDK endpoint. By default the gateway uses
-`/var/run/dstack.sock`. For local development, point
-`PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` at a forwarded dstack socket.
+`/var/run/dstack.sock`. For local development, set `dstack_endpoint` in the
+gateway config to a forwarded dstack socket.
 
 Prerequisites:
 
@@ -213,12 +213,17 @@ cargo clippy --all-targets -- -D warnings
 Start an identity-only gateway:
 
 ```bash
-printf '[]\n' >/tmp/private-ai-gateway-upstreams.json
+mkdir -p /tmp/private-ai-gateway-state
+printf '[]\n' >/tmp/private-ai-gateway-upstreams.seed.json
+cat >/tmp/private-ai-gateway.config.json <<EOF
+{
+  "state_dir": "/tmp/private-ai-gateway-state",
+  "upstream_config_seed_path": "/tmp/private-ai-gateway-upstreams.seed.json",
+  "dstack_endpoint": "unix:/tmp/aci-dstack-sock-dev.dstack.sock"
+}
+EOF
 
-PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=unix:/tmp/aci-dstack-sock-dev.dstack.sock \
-PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git \
-PRIVATE_AI_GATEWAY_REPO_COMMIT="$(git rev-parse HEAD)" \
-PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/tmp/private-ai-gateway-upstreams.json \
+PRIVATE_AI_GATEWAY_CONFIG_PATH=/tmp/private-ai-gateway.config.json \
 cargo run --release --bin private-ai-gateway
 ```
 
@@ -277,9 +282,9 @@ cargo run --quiet --example verify_aci_artifacts -- \
 
 ## Configure Upstreams
 
-The gateway has one mutable upstream config file. Set
-`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH`; if unset, the default is
-`/var/lib/private-ai-gateway/upstreams.json`.
+The gateway owns one mutable state directory. Set `state_dir` in the static
+gateway config; if omitted, the default is `/var/lib/private-ai-gateway`.
+The active upstream config is always `upstreams.json` inside that directory.
 
 A missing, empty, or whitespace-only file is valid and means no upstreams are
 configured yet. Inference routes require a JSON array with at least one
@@ -311,33 +316,28 @@ Supported `provider` values:
 
 | Provider | Use |
 | --- | --- |
-| `openai-compatible` | Generic OpenAI-compatible upstream. Verification is controlled by `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER`; the upstream config does not currently accept static TLS pin fields. |
+| `openai-compatible` | Generic OpenAI-compatible upstream with no provider-owned verifier. |
 | `aci-dcap` | Upstream ACI service that exposes ACI attestation and dstack/DCAP evidence. |
 | `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
 | `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
 | `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
 
-ACI/DCAP verification policy can be set globally with
-`PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS`,
-`PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS`,
-`PRIVATE_AI_GATEWAY_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS`, and
-`PRIVATE_AI_GATEWAY_UPSTREAM_PCCS_URL`, or per upstream with
+ACI/DCAP verification policy is set on the upstream entry with
 `accepted_workload_ids`, `accepted_image_digests`,
 `accepted_dstack_kms_root_public_keys`, and `pccs_url`.
 
-Tinfoil, NEAR AI, Chutes, and PhalaDirect use the provider verifier bridge in
-`scripts/private_ai_provider_verifier.py`. Install `uv` and set
-`PRIVATE_AI_VERIFIER_DIR` to a `private-ai-verifier` checkout, or keep that
-checkout as a sibling directory of this repo.
+Tinfoil, NEAR AI, Chutes, and PhalaDirect use the vendored provider verifier
+bridge. Set `PRIVATE_AI_VERIFIER_DIR` only when you need to override the
+vendored verifier package with an external checkout.
 
-For one-command Compose deployments, set
-`PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` to a read-only seed file. The
-gateway copies the seed only when the mutable config path is missing or empty.
-An existing admin-updated config is never overwritten.
+For one-command Compose deployments, set `upstream_config_seed_path` in the
+static gateway config to a read-only seed file. The gateway validates and
+copies the seed to `<state_dir>/upstreams.json` only when the active config is
+missing or empty. An existing admin-updated config is never overwritten.
 
-When `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is set, operators can inspect and replace
-the live config:
+When `admin_token` is set in the gateway config, operators can inspect and
+replace the live config:
 
 ```bash
 curl -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
@@ -364,6 +364,12 @@ The recommended dstack deployment path uses `git-launcher`:
 4. The built binary runs with runtime config from Compose environment, mounted
    files, dstack encrypted secrets, and dstack KMS.
 
+Source provenance in attestation reports is derived from the git-launcher pin,
+not from gateway JSON. If the launcher config is absent, the report omits
+source provenance and the value is unknown. In production, compare the report's
+source provenance with `REPO_URL` and `COMMIT_SHA` in the attested launcher
+config.
+
 The launcher stays generic. Build, install, and run logic belongs to this repo.
 For production, prefer a Rust-capable gateway image so the toolchain is covered
 by a gateway-owned image digest instead of installing Rust at boot.
@@ -377,13 +383,9 @@ Deployment files:
 
 ## Middleware
 
-Middleware mode is enabled by a middleware Unix socket path. The gateway also
-starts an internal backend socket for middleware to call:
-
-```bash
-PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
-PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
-```
+The current binary deployment runs in no-middleware mode. Middleware router
+helpers exist for future executor integration, but the static gateway config
+does not expose middleware socket fields.
 
 In middleware mode:
 
@@ -411,7 +413,7 @@ writing middleware.
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
 | `POST /v1/completions` | OpenAI-compatible legacy completions. |
 | `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
-| `GET /v1/aci/attestation/report?nonce=<n>` | Gateway workload identity and keyset evidence. |
+| `GET /v1/aci/attestation?nonce=<n>` | Gateway workload identity and keyset evidence. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
 | `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
 | `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |
@@ -422,59 +424,75 @@ writing middleware.
 
 ## Runtime Configuration
 
-Use `PRIVATE_AI_GATEWAY_*` variables. Older `DSTACK_LLM_ROUTER_*` aliases are
-still accepted for compatibility; the `PRIVATE_AI_GATEWAY_*` value wins when
-both are set.
+The full field and environment-variable reference is
+[docs/configuration-reference.md](docs/configuration-reference.md).
 
-| Setting | Variable | Default |
+The gateway consumes one read-only JSON config and one writable state directory:
+
+| Item | Path | Mutability |
 | --- | --- | --- |
-| Public bind address | `PRIVATE_AI_GATEWAY_BIND` | `127.0.0.1:8086` |
-| Upstream config path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` | `/var/lib/private-ai-gateway/upstreams.json` |
-| Initial upstream config seed | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` | unset |
-| Admin bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | unset; admin API returns `404` |
-| Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` | required |
-| Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | required |
-| Body retention seconds | `PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS` | `0` |
-| Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `3600` |
-| TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | unset |
-| TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | unset |
-| Domain TLS certificate map | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` | unset |
-| Domain TLS SPKI SHA-256 map | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256` | unset |
-| Upstream verifier mode | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` | `none` |
-| Accepted upstream workload IDs | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS` | unset |
-| Accepted upstream image digests | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` | unset |
-| Accepted upstream dstack KMS root public keys | `PRIVATE_AI_GATEWAY_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS` | unset |
-| Upstream verifier PCCS URL | `PRIVATE_AI_GATEWAY_UPSTREAM_PCCS_URL` | default verifier PCCS |
-| Upstream verifier cache seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS` | `300` |
-| Upstream connect timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `10` |
-| Upstream read idle timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `600` |
-| Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `60` |
-| dstack SDK endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | dstack SDK default socket |
-| Executor UDS path | `PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH` | unset; executor disabled |
-| Internal backend UDS path | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | `/run/private-ai-gateway/backend.sock` |
+| Static gateway config | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required. Read at startup. |
+| Gateway state directory | `state_dir` inside the gateway config, default `/var/lib/private-ai-gateway` | Gateway-owned writable files. |
 
-Prefer certificate-path variables for client-facing TLS binding. The gateway
-reads each mounted leaf certificate, computes `sha256(SPKI)`, and publishes
-that digest in the attested keyset. Use SPKI variables only for manual or test
-deployments.
+The gateway derives its writable files from `state_dir`: `upstreams.json` for
+the active upstream database and `sessions.jsonl` for the attested-session log.
+Deployment-owned read-only inputs, such as an upstream seed file or TLS
+certificates, stay explicit paths in the static config.
 
-Use `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` when the gateway serves multiple
-custom domains:
+Unknown config fields are rejected at startup. See
+[docs/configuration-reference.md](docs/configuration-reference.md) for the
+minimal config example and the full field reference.
 
-```bash
-PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS=api.example.com=/run/certs/api.pem,chat.example.com=/run/certs/chat.pem
+For client-facing TLS binding, set `tls.domain_certificates` with one mounted
+leaf certificate per public hostname. The gateway reads each certificate,
+computes `sha256(SPKI)`, and publishes that digest in the attested keyset. Raw
+SPKI configuration is not supported; all TLS bindings are derived from mounted
+certificate material.
+
+### Multi-Domain Listening
+
+The gateway process still has one `bind` listener. Multi-domain support means
+the same gateway workload can answer attestation requests for multiple public
+hostnames and select the correct downstream TLS binding from the request host.
+TLS termination, certificate issuance, DNS, SNI routing, and reverse-proxy
+configuration are deployment-owned and out of scope for this repo.
+
+For each public hostname, mount the leaf certificate that the external
+TLS-terminating component serves for that hostname, then list it in
+`tls.domain_certificates`:
+
+```json
+{
+  "tls": {
+    "domain_certificates": [
+      {
+        "domain": "api.example.com",
+        "certificate_path": "/run/certs/api.pem"
+      },
+      {
+        "domain": "chat.example.com",
+        "certificate_path": "/run/certs/chat.pem"
+      }
+    ]
+  }
+}
 ```
 
-The equivalent manual form is
-`PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256=api.example.com=<hex>,chat.example.com=<hex>`.
-Set only one TLS binding source among the service-wide and domain-mapped
-variables. When domain bindings are configured,
+The component in front of the gateway must forward the original HTTP `Host`.
+Clients should request the attestation report through the same public hostname
+they will use for gateway traffic. For example, a frontend pinned to
+`https://chat.example.com` should fetch
+`https://chat.example.com/v1/attestation/report`; the gateway will bind
+`chat.example.com` to the SPKI derived from `/run/certs/chat.pem`.
+
+When domain bindings are configured,
 `GET /v1/attestation/report` uses the request `Host` to add the matching
 `attestation.evidence.downstream_tls_binding` entry while keeping all configured
-TLS keys in the attested keyset.
+TLS keys in the attested keyset. Requests whose `Host` does not match a
+configured domain binding fail closed instead of returning an unbound report.
 
-`PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` accepts HTTP(S) endpoints and Unix socket
-endpoints such as `unix:/var/run/dstack.sock`.
+`dstack_endpoint` accepts HTTP(S) endpoints and Unix socket endpoints such as
+`unix:/var/run/dstack.sock`.
 
 ## Test And Smoke Suites
 
@@ -503,7 +521,7 @@ uv run python scripts/live_e2e/run.py --profile quick --port 0
 The live smoke verifies every configured upstream in
 `scripts/live_e2e/providers.json`, sends one request per supported surface, then
 checks each receipt's `upstream.verified.session_id` against
-`GET /v1/audit/sessions/{session_id}`.
+`GET /v1/aci/sessions/{session_id}`.
 
 Run the slower Phala deployment smoke when you need to validate the deployment
 surface:

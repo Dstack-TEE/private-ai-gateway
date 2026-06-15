@@ -19,11 +19,13 @@ Environment:
   ROUTER_PORT            Host port for router. Default: 18088
   UPSTREAM_A_PORT        Host port for upstream A. Default: 18086
   UPSTREAM_B_PORT        Host port for upstream B. Default: 18087
+  UPSTREAM_A_TLS_PORT    Host port for upstream A TLS proxy. Default: 18446
+  UPSTREAM_B_TLS_PORT    Host port for upstream B TLS proxy. Default: 18447
   READY_ATTEMPTS         HTTP readiness attempts. Default: 60
   KEEP_STACK             Keep compose stack after completion when set to 1.
 
 Requirements:
-  docker compose, curl, jq, cargo, sha256sum, awk
+  docker compose, curl, jq, cargo, sha256sum, awk, openssl
 EOF
 }
 
@@ -42,6 +44,8 @@ IMAGE_REF="${IMAGE_REF:-private-ai-gateway:local-smoke}"
 ROUTER_PORT="${ROUTER_PORT:-18088}"
 UPSTREAM_A_PORT="${UPSTREAM_A_PORT:-18086}"
 UPSTREAM_B_PORT="${UPSTREAM_B_PORT:-18087}"
+UPSTREAM_A_TLS_PORT="${UPSTREAM_A_TLS_PORT:-18446}"
+UPSTREAM_B_TLS_PORT="${UPSTREAM_B_TLS_PORT:-18447}"
 READY_ATTEMPTS="${READY_ATTEMPTS:-60}"
 ADMIN_TOKEN="${ADMIN_TOKEN:-local-admin-secret}"
 KEEP_STACK="${KEEP_STACK:-0}"
@@ -65,6 +69,7 @@ need_cmd jq
 need_cmd cargo
 need_cmd sha256sum
 need_cmd awk
+need_cmd openssl
 
 docker compose version >/dev/null 2>&1 || die "docker compose plugin is required"
 [[ -S "$DSTACK_SOCK" ]] || die "dstack socket not found: $DSTACK_SOCK"
@@ -79,6 +84,8 @@ COMMIT_SHA="$(git rev-parse HEAD)"
 ROUTER_URL="http://127.0.0.1:${ROUTER_PORT}"
 UPSTREAM_A_URL="http://127.0.0.1:${UPSTREAM_A_PORT}"
 UPSTREAM_B_URL="http://127.0.0.1:${UPSTREAM_B_PORT}"
+UPSTREAM_A_TLS_URL="https://upstream-a-tls:${UPSTREAM_A_TLS_PORT}"
+UPSTREAM_B_TLS_URL="https://upstream-b-tls:${UPSTREAM_B_TLS_PORT}"
 
 export DSTACK_SOCK
 export WORK_DIR
@@ -87,6 +94,8 @@ export IMAGE_REF
 export ROUTER_PORT
 export UPSTREAM_A_PORT
 export UPSTREAM_B_PORT
+export UPSTREAM_A_TLS_PORT
+export UPSTREAM_B_TLS_PORT
 
 cleanup() {
   if [[ "$KEEP_STACK" == "1" ]]; then
@@ -103,6 +112,13 @@ sha256_prefixed() {
   printf '%s' "$value" | sha256sum | awk '{print "sha256:" $1}'
 }
 
+receipt_id_from_headers() {
+  local headers="$1"
+
+  awk -F': ' 'tolower($1) == "x-receipt-id" { sub(/\r/, "", $2); print $2; exit }' \
+    "$headers" | tr -d '[:space:]'
+}
+
 wait_for_http_ok() {
   local url="$1"
   local output="$2"
@@ -115,6 +131,70 @@ wait_for_http_ok() {
     sleep 2
   done
   die "endpoint did not become ready: ${url}"
+}
+
+wait_for_https_ok() {
+  local url="$1"
+  local resolve_host="$2"
+  local ca_cert="$3"
+  local output="$4"
+
+  for attempt in $(seq 1 "$READY_ATTEMPTS"); do
+    if curl -fsS --max-time 10 \
+      --noproxy '*' \
+      --cacert "$ca_cert" \
+      --resolve "$resolve_host:127.0.0.1" \
+      "$url" >"$output"; then
+      return 0
+    fi
+    log "waiting for ${url} (${attempt}/${READY_ATTEMPTS})"
+    sleep 2
+  done
+  die "endpoint did not become ready: ${url}"
+}
+
+generate_tls_ca() {
+  local prefix="$1"
+
+  openssl req \
+    -x509 \
+    -newkey rsa:2048 \
+    -nodes \
+    -sha256 \
+    -days 2 \
+    -subj "/CN=private-ai-gateway-local-smoke-ca" \
+    -keyout "${prefix}.key" \
+    -out "${prefix}.crt" \
+    >/dev/null 2>&1
+}
+
+generate_tls_cert() {
+  local domain="$1"
+  local prefix="$2"
+  local ca_prefix="$3"
+  local extfile="${prefix}.ext"
+
+  printf 'subjectAltName=DNS:%s\n' "$domain" >"$extfile"
+
+  openssl req \
+    -newkey rsa:2048 \
+    -nodes \
+    -sha256 \
+    -subj "/CN=${domain}" \
+    -keyout "${prefix}.key" \
+    -out "${prefix}.csr" \
+    >/dev/null 2>&1
+  openssl x509 \
+    -req \
+    -in "${prefix}.csr" \
+    -CA "${ca_prefix}.crt" \
+    -CAkey "${ca_prefix}.key" \
+    -CAcreateserial \
+    -sha256 \
+    -days 2 \
+    -extfile "$extfile" \
+    -out "${prefix}.crt" \
+    >/dev/null 2>&1
 }
 
 post_chat_until_ok() {
@@ -185,27 +265,32 @@ assert_route_receipt() {
   local receipt="$WORK_DIR/router-${suffix}.receipt.json"
   local received_body
   local forwarded_body
-  local chat_id
+  local response_headers="$WORK_DIR/router-${public_model}.headers"
+  local receipt_id
 
   response=$(post_chat_until_ok "$public_model")
   jq -e --arg model "$upstream_model" '.model == $model' "$response" >/dev/null
-  chat_id=$(jq -r '.id' "$response")
-  wait_for_http_ok "${ROUTER_URL}/v1/receipt/${chat_id}" "$receipt"
+  receipt_id=$(receipt_id_from_headers "$response_headers")
+  if [[ -z "$receipt_id" ]]; then
+    cat "$response_headers" >&2
+    die "chat response did not include x-receipt-id"
+  fi
+  wait_for_http_ok "${ROUTER_URL}/v1/aci/receipts/${receipt_id}" "$receipt"
 
   received_body=$(printf '{"model":"%s","messages":[]}' "$public_model")
   forwarded_body=$(printf '{"model":"%s","messages":[]}' "$upstream_model")
 
   jq -e --arg h "$(sha256_prefixed "$received_body")" '
-    .receipt.event_log | any(.type == "request.received" and .body_hash == $h)
+    .event_log | any(.type == "request.received" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e --arg h "$(sha256_prefixed "$forwarded_body")" '
-    .receipt.event_log | any(.type == "request.forwarded" and .body_hash == $h)
+    .event_log | any(.type == "request.forwarded" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e '
-    .receipt.event_log | any(.type == "transparency.request_modified")
+    .event_log | any(.type == "transparency.request_modified")
   ' "$receipt" >/dev/null
   jq -e --arg model "$upstream_model" '
-    .receipt.event_log
+    .event_log
     | any(.type == "upstream.verified" and .result == "verified" and .model_id == $model)
   ' "$receipt" >/dev/null
 }
@@ -225,30 +310,27 @@ assert_embeddings_receipt() {
     (.object == "list") and (.model == $model) and ((.data | length) == 1)
   ' "$response" >/dev/null
 
-  # Embeddings responses carry no `id`; look up the receipt by the
-  # x-receipt-id header instead of /v1/receipt/{chat_id}.
-  receipt_id=$(awk -F': ' 'tolower($1) == "x-receipt-id" { sub(/\r/, "", $2); print $2 }' \
-    "$response_headers" | tr -d '[:space:]')
+  receipt_id=$(receipt_id_from_headers "$response_headers")
   if [[ -z "$receipt_id" ]]; then
     cat "$response_headers" >&2
     die "embeddings response did not include x-receipt-id"
   fi
-  wait_for_http_ok "${ROUTER_URL}/v1/receipt/${receipt_id}" "$receipt"
+  wait_for_http_ok "${ROUTER_URL}/v1/aci/receipts/${receipt_id}" "$receipt"
 
   received_body=$(printf '{"model":"%s","input":"hello"}' "$public_model")
   forwarded_body=$(printf '{"model":"%s","input":"hello"}' "$upstream_model")
 
   jq -e --arg endpoint "/v1/embeddings" '
-    .receipt.endpoint == $endpoint
+    .endpoint == $endpoint
   ' "$receipt" >/dev/null
   jq -e --arg h "$(sha256_prefixed "$received_body")" '
-    .receipt.event_log | any(.type == "request.received" and .body_hash == $h)
+    .event_log | any(.type == "request.received" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e --arg h "$(sha256_prefixed "$forwarded_body")" '
-    .receipt.event_log | any(.type == "request.forwarded" and .body_hash == $h)
+    .event_log | any(.type == "request.forwarded" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e --arg model "$upstream_model" '
-    .receipt.event_log
+    .event_log
     | any(.type == "upstream.verified" and .result == "verified" and .model_id == $model)
   ' "$receipt" >/dev/null
 }
@@ -291,6 +373,76 @@ JSON
 }
 
 write_compose() {
+  cat >"$WORK_DIR/upstream-a.nginx.conf" <<NGINX
+events {}
+http {
+  server {
+    listen 8443 ssl;
+    server_name upstream-a-tls;
+    ssl_certificate /etc/nginx/certs/upstream-a.crt;
+    ssl_certificate_key /etc/nginx/certs/upstream-a.key;
+    location / {
+      proxy_set_header Host \$host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_pass http://upstream-a:8086;
+    }
+  }
+}
+NGINX
+  cat >"$WORK_DIR/upstream-b.nginx.conf" <<NGINX
+events {}
+http {
+  server {
+    listen 8443 ssl;
+    server_name upstream-b-tls;
+    ssl_certificate /etc/nginx/certs/upstream-b.crt;
+    ssl_certificate_key /etc/nginx/certs/upstream-b.key;
+    location / {
+      proxy_set_header Host \$host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_pass http://upstream-b:8086;
+    }
+  }
+}
+NGINX
+  cat >"$WORK_DIR/upstream-a.gateway.json" <<JSON
+{
+  "bind": "0.0.0.0:8086",
+  "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+  "dstack_endpoint": "unix:/var/run/dstack.sock",
+  "tls": {
+    "domain_certificates": [
+      {
+        "domain": "upstream-a-tls",
+        "certificate_path": "/etc/private-ai-gateway/tls/upstream-a.crt"
+      }
+    ]
+  }
+}
+JSON
+  cat >"$WORK_DIR/upstream-b.gateway.json" <<JSON
+{
+  "bind": "0.0.0.0:8086",
+  "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+  "dstack_endpoint": "unix:/var/run/dstack.sock",
+  "tls": {
+    "domain_certificates": [
+      {
+        "domain": "upstream-b-tls",
+        "certificate_path": "/etc/private-ai-gateway/tls/upstream-b.crt"
+      }
+    ]
+  }
+}
+JSON
+  cat >"$WORK_DIR/router.gateway.json" <<JSON
+{
+  "bind": "0.0.0.0:8086",
+  "state_dir": "/var/lib/private-ai-gateway",
+  "admin_token": "${ADMIN_TOKEN}",
+  "dstack_endpoint": "unix:/var/run/dstack.sock"
+}
+JSON
   cat >"$WORK_DIR/compose.yml" <<'YAML'
 services:
   mock-a:
@@ -378,51 +530,70 @@ services:
     depends_on:
       - mock-a
     environment:
-      PRIVATE_AI_GATEWAY_BIND: 0.0.0.0:8086
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /etc/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: preverified
-      PRIVATE_AI_GATEWAY_REPO_URL: local-build://private-ai-gateway
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${COMMIT_SHA}
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
     ports:
       - "${UPSTREAM_A_PORT}:8086"
     volumes:
       - ${DSTACK_SOCK}:/var/run/dstack.sock
-      - ${WORK_DIR}/upstream-a.json:/etc/private-ai-gateway/upstreams.json:ro
+      - ${WORK_DIR}/upstream-a.gateway.json:/etc/private-ai-gateway/gateway.config.json:ro
+      - ${WORK_DIR}/upstream-a.json:/etc/private-ai-gateway/upstreams.seed.json:ro
+      - ${WORK_DIR}/certs/upstream-a.crt:/etc/private-ai-gateway/tls/upstream-a.crt:ro
+
+  upstream-a-tls:
+    image: nginx:1.27-alpine
+    depends_on:
+      - upstream-a
+    ports:
+      - "${UPSTREAM_A_TLS_PORT}:8443"
+    volumes:
+      - ${WORK_DIR}/upstream-a.nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${WORK_DIR}/certs:/etc/nginx/certs:ro
 
   upstream-b:
     image: ${IMAGE_REF}
     depends_on:
       - mock-b
     environment:
-      PRIVATE_AI_GATEWAY_BIND: 0.0.0.0:8086
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /etc/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: preverified
-      PRIVATE_AI_GATEWAY_REPO_URL: local-build://private-ai-gateway
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${COMMIT_SHA}
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
     ports:
       - "${UPSTREAM_B_PORT}:8086"
     volumes:
       - ${DSTACK_SOCK}:/var/run/dstack.sock
-      - ${WORK_DIR}/upstream-b.json:/etc/private-ai-gateway/upstreams.json:ro
+      - ${WORK_DIR}/upstream-b.gateway.json:/etc/private-ai-gateway/gateway.config.json:ro
+      - ${WORK_DIR}/upstream-b.json:/etc/private-ai-gateway/upstreams.seed.json:ro
+      - ${WORK_DIR}/certs/upstream-b.crt:/etc/private-ai-gateway/tls/upstream-b.crt:ro
+
+  upstream-b-tls:
+    image: nginx:1.27-alpine
+    depends_on:
+      - upstream-b
+    ports:
+      - "${UPSTREAM_B_TLS_PORT}:8443"
+    volumes:
+      - ${WORK_DIR}/upstream-b.nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${WORK_DIR}/certs:/etc/nginx/certs:ro
 
   router:
     image: ${IMAGE_REF}
     depends_on:
-      - upstream-a
-      - upstream-b
+      - upstream-a-tls
+      - upstream-b-tls
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cp /etc/private-ai-gateway/tls/local-smoke-ca.crt /usr/local/share/ca-certificates/local-smoke-ca.crt
+        update-ca-certificates >/dev/null
+        exec /usr/local/bin/private-ai-gateway
     environment:
-      PRIVATE_AI_GATEWAY_BIND: 0.0.0.0:8086
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /var/lib/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_ADMIN_TOKEN: ${ADMIN_TOKEN}
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: aci-dcap
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS: "300"
-      PRIVATE_AI_GATEWAY_REPO_URL: local-build://private-ai-gateway
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${COMMIT_SHA}
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
     ports:
       - "${ROUTER_PORT}:8086"
     volumes:
       - ${DSTACK_SOCK}:/var/run/dstack.sock
+      - ${WORK_DIR}/router.gateway.json:/etc/private-ai-gateway/gateway.config.json:ro
       - ${WORK_DIR}/router-state:/var/lib/private-ai-gateway
+      - ${WORK_DIR}/certs/local-smoke-ca.crt:/etc/private-ai-gateway/tls/local-smoke-ca.crt:ro
 YAML
 }
 
@@ -431,20 +602,33 @@ export ADMIN_TOKEN
 
 write_upstream_a_config_with_embed routed-upstream-a-model routed-upstream-a-embed-model
 write_upstream_config b routed-upstream-b-model
+mkdir -p "$WORK_DIR/certs"
+generate_tls_ca "$WORK_DIR/certs/local-smoke-ca"
+generate_tls_cert upstream-a-tls "$WORK_DIR/certs/upstream-a" "$WORK_DIR/certs/local-smoke-ca"
+generate_tls_cert upstream-b-tls "$WORK_DIR/certs/upstream-b" "$WORK_DIR/certs/local-smoke-ca"
 write_compose
 
 log "building ${IMAGE_REF}"
-docker build -f Dockerfile.smoke -t "$IMAGE_REF" .
+docker build \
+  -f Dockerfile.smoke \
+  --build-arg SOURCE_REPO_URL=local-build://private-ai-gateway \
+  --build-arg SOURCE_COMMIT="$COMMIT_SHA" \
+  -t "$IMAGE_REF" \
+  .
 
 log "starting local upstream ACI services"
 docker compose -f "$WORK_DIR/compose.yml" -p "$COMPOSE_PROJECT_NAME" up -d \
-  mock-a mock-b upstream-a upstream-b
+  mock-a mock-b upstream-a upstream-b upstream-a-tls upstream-b-tls
 
 wait_for_http_ok "${UPSTREAM_A_URL}/" "$WORK_DIR/upstream-a-root.json"
 wait_for_http_ok "${UPSTREAM_B_URL}/" "$WORK_DIR/upstream-b-root.json"
-wait_for_http_ok "${UPSTREAM_A_URL}/v1/attestation/report?nonce=local-a" \
+wait_for_https_ok "${UPSTREAM_A_TLS_URL}/v1/attestation/report?nonce=local-a" \
+  "upstream-a-tls:${UPSTREAM_A_TLS_PORT}" \
+  "$WORK_DIR/certs/local-smoke-ca.crt" \
   "$WORK_DIR/upstream-a-report.json"
-wait_for_http_ok "${UPSTREAM_B_URL}/v1/attestation/report?nonce=local-b" \
+wait_for_https_ok "${UPSTREAM_B_TLS_URL}/v1/attestation/report?nonce=local-b" \
+  "upstream-b-tls:${UPSTREAM_B_TLS_PORT}" \
+  "$WORK_DIR/certs/local-smoke-ca.crt" \
   "$WORK_DIR/upstream-b-report.json"
 
 cargo run --quiet --example dstack_kms_root_from_report \
@@ -465,7 +649,8 @@ jq -cn \
   '[
     {
       name: "route-a",
-      base_url: "http://upstream-a:8086",
+      provider: "aci-dcap",
+      base_url: "https://upstream-a-tls:8443",
       models: {
         "public-a": "routed-upstream-a-model",
         "public-embed": "routed-upstream-a-embed-model"
@@ -476,7 +661,8 @@ jq -cn \
     },
     {
       name: "route-b",
-      base_url: "http://upstream-b:8086",
+      provider: "aci-dcap",
+      base_url: "https://upstream-b-tls:8443",
       models: {"public-b": "routed-upstream-b-model"},
       accepted_workload_ids: [$wid_b],
       accepted_dstack_kms_root_public_keys: [$kms_b]

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 mod common;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -15,7 +15,8 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
     UpstreamVerificationError,
 };
-use private_ai_gateway::aggregator::session::ClaimStatus;
+use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
+use private_ai_gateway::aggregator::session_store::SessionStore;
 use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
@@ -25,6 +26,22 @@ type ReceivedBody = Arc<Mutex<Option<Vec<u8>>>>;
 struct StubUpstream {
     body: Vec<u8>,
     received: ReceivedBody,
+}
+
+struct FailingSessionStore;
+
+impl SessionStore for FailingSessionStore {
+    fn put_session(&self, _session: AttestedSession, _ts: u64) -> std::io::Result<u64> {
+        Err(std::io::Error::other("session store unavailable"))
+    }
+
+    fn get_session(&self, _session_id: &str, _now: u64) -> Option<AttestedSession> {
+        None
+    }
+
+    fn list_sessions(&self, _provider: Option<&str>, _now: u64) -> Vec<AttestedSession> {
+        Vec::new()
+    }
 }
 
 impl StubUpstream {
@@ -66,7 +83,7 @@ impl UpstreamBackend for StubUpstream {
     }
 }
 
-fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService>, ReceivedBody) {
+fn make_service_raw(body: &[u8], upstream_required_default: bool) -> (AciService, ReceivedBody) {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, received) = StubUpstream::new(body);
@@ -87,6 +104,11 @@ fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService
         Arc::new(FixedClock(1_700_000_000)),
     )
     .unwrap();
+    (svc, received)
+}
+
+fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService>, ReceivedBody) {
+    let (svc, received) = make_service_raw(body, upstream_required_default);
     (Arc::new(svc), received)
 }
 
@@ -272,6 +294,36 @@ async fn verified_upstream_binding_creates_attested_session() {
 }
 
 #[tokio::test]
+async fn verified_upstream_binding_fails_without_persisted_session() {
+    let (svc, received) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let svc = svc.with_session_store(Arc::new(FailingSessionStore));
+    let event = UpstreamVerifiedEvent {
+        upstream_name: "stub-upstream".to_string(),
+        provider: None,
+        model_id: "x".to_string(),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "stub-verifier-1".to_string(),
+        result: VerificationResult::Verified,
+        required: true,
+        reason: None,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://stub-upstream".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+        provider_claims: None,
+    };
+
+    let err = svc
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .await
+        .expect_err("receipt must not cite a session that was not persisted");
+
+    assert!(matches!(err, ServiceError::SessionStore(_)));
+    assert!(received.lock().unwrap().is_some());
+}
+
+#[tokio::test]
 async fn session_is_per_tee_channel_not_per_model() {
     // Two requests to the SAME TEE channel (same upstream / endpoint / binding /
     // evidence) routed to different models must collapse to ONE session: a
@@ -429,7 +481,7 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
 }
 
 #[test]
-fn service_init_rejects_empty_source_provenance() {
+fn service_init_accepts_unknown_source_provenance() {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, _) = StubUpstream::new(b"{}");
@@ -437,10 +489,7 @@ fn service_init_rejects_empty_source_provenance() {
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test("x");
     cfg.source_provenance = SourceProvenance::default();
-    let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
-        .err()
-        .expect("must fail");
-    assert!(matches!(err, ServiceError::InvalidSourceProvenance));
+    AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0))).unwrap();
 }
 
 #[test]

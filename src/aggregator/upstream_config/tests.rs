@@ -133,6 +133,45 @@ fn parse_config_allows_same_public_model_on_distinct_route_ids() {
 }
 
 #[test]
+fn parse_config_rejects_preverified_provider() {
+    let err = parse_config_text(
+        r#"
+            [
+              {
+                "name": "fixture",
+                "provider": "preverified",
+                "base_url": "https://fixture.example",
+                "models": {"public-model": "upstream-model"}
+              }
+            ]
+            "#,
+    )
+    .expect_err("preverified must not be accepted as upstream config");
+
+    assert!(err.to_string().contains("unknown variant"));
+}
+
+#[test]
+fn parse_config_rejects_attestation_report_base_url() {
+    let err = parse_config_text(
+        r#"
+            [
+              {
+                "name": "aci",
+                "provider": "aci-dcap",
+                "base_url": "https://aci.example",
+                "attestation_report_base_url": "http://aci.internal:8086",
+                "models": {"public-model": "upstream-model"}
+              }
+            ]
+            "#,
+    )
+    .expect_err("attestation report URL must not be configured separately from base_url");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
 fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams() {
     let config = vec![
         test_upstream_config(

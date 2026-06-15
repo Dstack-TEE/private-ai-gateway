@@ -46,9 +46,11 @@ fn phala_multi_upstream_smoke_script_keeps_core_assertions() {
     let body = smoke_script_text("phala_multi_upstream_smoke.sh");
     for needle in [
         "set -euo pipefail",
-        "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH",
+        "PRIVATE_AI_GATEWAY_CONFIG_PATH",
         "configs:",
-        "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: aci-dcap",
+        "--build-arg SOURCE_REPO_URL=local-build://private-ai-gateway",
+        "--build-arg SOURCE_COMMIT=\"$COMMIT_SHA\"",
+        "provider: \"aci-dcap\"",
         "routed-upstream-a-model",
         "routed-upstream-b-model",
         "request.forwarded",
@@ -62,6 +64,10 @@ fn phala_multi_upstream_smoke_script_keeps_core_assertions() {
             "smoke script must retain assertion surface {needle:?}"
         );
     }
+    assert!(
+        !body.contains("\"provider\": \"preverified\""),
+        "preverified must not be exposed as an upstream provider"
+    );
 }
 
 #[test]
@@ -71,8 +77,10 @@ fn local_multi_upstream_smoke_script_keeps_core_assertions() {
         "set -euo pipefail",
         "DSTACK_SOCK",
         "docker compose",
-        "PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
-        "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: aci-dcap",
+        "\"admin_token\": \"${ADMIN_TOKEN}\"",
+        "--build-arg SOURCE_REPO_URL=local-build://private-ai-gateway",
+        "--build-arg SOURCE_COMMIT=\"$COMMIT_SHA\"",
+        "provider: \"aci-dcap\"",
         "routed-upstream-a-model",
         "routed-upstream-b-model",
         "routed-upstream-a-embed-model",
@@ -89,6 +97,10 @@ fn local_multi_upstream_smoke_script_keeps_core_assertions() {
             "local smoke script must retain assertion surface {needle:?}"
         );
     }
+    assert!(
+        !body.contains("\"provider\": \"preverified\""),
+        "preverified must not be exposed as an upstream provider"
+    );
 }
 
 #[test]

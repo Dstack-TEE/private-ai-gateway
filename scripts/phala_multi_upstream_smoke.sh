@@ -75,6 +75,13 @@ sha256_prefixed() {
   printf '%s' "$value" | sha256sum | awk '{print "sha256:" $1}'
 }
 
+receipt_id_from_headers() {
+  local headers="$1"
+
+  awk -F': ' 'tolower($1) == "x-receipt-id" { sub(/\r/, "", $2); print $2; exit }' \
+    "$headers" | tr -d '[:space:]'
+}
+
 extract_json_object() {
   local input="$1"
   local output="$2"
@@ -150,7 +157,14 @@ post_chat_until_ok() {
 build_image() {
   local digest
   log "building and pushing ${IMAGE_TAG}"
-  docker buildx build --platform linux/amd64 -f Dockerfile.smoke -t "$IMAGE_TAG" --push .
+  docker buildx build \
+    --platform linux/amd64 \
+    -f Dockerfile.smoke \
+    --build-arg SOURCE_REPO_URL=local-build://private-ai-gateway \
+    --build-arg SOURCE_COMMIT="$COMMIT_SHA" \
+    -t "$IMAGE_TAG" \
+    --push \
+    .
   digest=$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')
   printf '%s@%s\n' "${IMAGE_TAG%:24h}" "$digest"
 }
@@ -225,14 +239,12 @@ services:
     depends_on:
       - mock
     environment:
-      PRIVATE_AI_GATEWAY_BIND: 0.0.0.0:8086
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /etc/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: preverified
-      PRIVATE_AI_GATEWAY_REPO_URL: local-build://private-ai-gateway
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${COMMIT_SHA}
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
     configs:
+      - source: gateway-config
+        target: /etc/private-ai-gateway/gateway.config.json
       - source: upstream-config
-        target: /etc/private-ai-gateway/upstreams.json
+        target: /etc/private-ai-gateway/upstreams.seed.json
     ports:
       - "8086:8086"
     volumes:
@@ -240,6 +252,14 @@ services:
     restart: unless-stopped
 
 configs:
+  gateway-config:
+    content: |
+      {
+        "bind": "0.0.0.0:8086",
+        "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+        "dstack_endpoint": "unix:/var/run/dstack.sock"
+      }
+
   upstream-config:
     content: |
       [
@@ -294,12 +314,16 @@ assert_route_receipt() {
   local receipt="$WORK_DIR/router-${suffix}.receipt.json"
   local received_body
   local forwarded_body
-  local chat_id
+  local receipt_id
 
   post_chat_until_ok "$ROUTER_URL" "$public_model" "$headers" "$response" "$ROUTE_READY_ATTEMPTS"
   jq -e --arg model "$upstream_model" '.model == $model' "$response" >/dev/null
-  chat_id=$(jq -r '.id' "$response")
-  wait_for_http_ok "${ROUTER_URL}/v1/receipt/${chat_id}" "$receipt" "$HTTP_READY_ATTEMPTS"
+  receipt_id=$(receipt_id_from_headers "$headers")
+  if [[ -z "$receipt_id" ]]; then
+    cat "$headers" >&2
+    die "chat response did not include x-receipt-id"
+  fi
+  wait_for_http_ok "${ROUTER_URL}/v1/aci/receipts/${receipt_id}" "$receipt" "$HTTP_READY_ATTEMPTS"
 
   received_body=$(printf '{"model":"%s","messages":[]}' "$public_model")
   forwarded_body=$(printf '{"model":"%s","messages":[]}' "$upstream_model")
@@ -309,16 +333,16 @@ assert_route_receipt() {
   forwarded_hash=$(sha256_prefixed "$forwarded_body")
 
   jq -e --arg h "$received_hash" '
-    .receipt.event_log | any(.type == "request.received" and .body_hash == $h)
+    .event_log | any(.type == "request.received" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e --arg h "$forwarded_hash" '
-    .receipt.event_log | any(.type == "request.forwarded" and .body_hash == $h)
+    .event_log | any(.type == "request.forwarded" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e '
-    .receipt.event_log | any(.type == "transparency.request_modified")
+    .event_log | any(.type == "transparency.request_modified")
   ' "$receipt" >/dev/null
   jq -e --arg model "$upstream_model" '
-    .receipt.event_log
+    .event_log
     | any(.type == "upstream.verified" and .result == "verified" and .model_id == $model)
   ' "$receipt" >/dev/null
 }
@@ -380,6 +404,7 @@ routes_json=$(
     '[
       {
         name: "route-a",
+        provider: "aci-dcap",
         base_url: $url_a,
         models: {"public-a": "routed-upstream-a-model"},
         accepted_workload_ids: [$wid_a],
@@ -387,6 +412,7 @@ routes_json=$(
       },
       {
         name: "route-b",
+        provider: "aci-dcap",
         base_url: $url_b,
         models: {"public-b": "routed-upstream-b-model"},
         accepted_workload_ids: [$wid_b],
@@ -402,15 +428,12 @@ services:
   router:
     image: ${IMAGE_REF}
     environment:
-      PRIVATE_AI_GATEWAY_BIND: 0.0.0.0:8086
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /etc/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: aci-dcap
-      PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS: "300"
-      PRIVATE_AI_GATEWAY_REPO_URL: local-build://private-ai-gateway
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${COMMIT_SHA}
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
     configs:
+      - source: gateway-config
+        target: /etc/private-ai-gateway/gateway.config.json
       - source: router-upstream-config
-        target: /etc/private-ai-gateway/upstreams.json
+        target: /etc/private-ai-gateway/upstreams.seed.json
     ports:
       - "8086:8086"
     volumes:
@@ -418,6 +441,14 @@ services:
     restart: unless-stopped
 
 configs:
+  gateway-config:
+    content: |
+      {
+        "bind": "0.0.0.0:8086",
+        "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+        "dstack_endpoint": "unix:/var/run/dstack.sock"
+      }
+
   router-upstream-config:
     content: |
 ${routes_config_yaml}

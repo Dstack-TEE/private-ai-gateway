@@ -4,38 +4,21 @@
 //! the dstack TDX quote API through the Rust dstack SDK. There is no
 //! ephemeral-key or stub-quote startup path.
 //!
-//! Configuration (env vars). Each setting uses the
-//! `PRIVATE_AI_GATEWAY_*` prefix. The older `DSTACK_LLM_ROUTER_*`
-//! names are still accepted as compatibility aliases; the
-//! `PRIVATE_AI_GATEWAY_*` value wins when both are set.
+//! Configuration. `PRIVATE_AI_GATEWAY_CONFIG_PATH` points at the static gateway
+//! JSON config. Gateway policy belongs in that file, not in environment
+//! fallbacks. See `docs/configuration-reference.md` for the full config and env
+//! reference.
 //!
-//! | Setting | Primary name | Compatibility alias |
-//! | --- | --- | --- |
-//! | Bind address | `PRIVATE_AI_GATEWAY_BIND` | `DSTACK_LLM_ROUTER_BIND` |
-//! | Upstream config path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH` | `DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_PATH` |
-//! | Initial upstream config seed path | `PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH` | `DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_SEED_PATH` |
-//! | Admin API bearer token | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | `DSTACK_LLM_ROUTER_ADMIN_TOKEN` |
-//! | Source-provenance repo URL | `PRIVATE_AI_GATEWAY_REPO_URL` | `DSTACK_LLM_ROUTER_REPO_URL` |
-//! | Source-provenance commit | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | `DSTACK_LLM_ROUTER_REPO_COMMIT` |
-//! | Receipt TTL seconds | `PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS` | `DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS` |
-//! | TLS certificate paths | `PRIVATE_AI_GATEWAY_TLS_CERT_PATHS` | `DSTACK_LLM_ROUTER_TLS_CERT_PATHS` |
-//! | TLS SPKI SHA-256 list | `PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256` | `DSTACK_LLM_ROUTER_TLS_SPKI_SHA256` |
-//! | Domain TLS certificate map (`domain=path`) | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` | `DSTACK_LLM_ROUTER_TLS_DOMAIN_CERT_PATHS` |
-//! | Domain TLS SPKI map (`domain=sha256`) | `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256` | `DSTACK_LLM_ROUTER_TLS_DOMAIN_SPKI_SHA256` |
-//! | Upstream verifier mode (`none`, `preverified`, `aci-dcap`) | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER` | `DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER` |
-//! | Accepted upstream workload IDs | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS` | `DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_WORKLOAD_IDS` |
-//! | Accepted upstream image digests | `PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` | `DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_IMAGE_DIGESTS` |
-//! | Accepted upstream dstack KMS root public keys | `PRIVATE_AI_GATEWAY_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS` | `DSTACK_LLM_ROUTER_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS` |
-//! | Upstream verifier PCCS URL | `PRIVATE_AI_GATEWAY_UPSTREAM_PCCS_URL` | `DSTACK_LLM_ROUTER_UPSTREAM_PCCS_URL` |
-//! | Upstream connect timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_CONNECT_TIMEOUT_SECONDS` |
-//! | Upstream read timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_READ_TIMEOUT_SECONDS` |
-//! | Upstream verifier request timeout seconds | `PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` | `DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS` |
-//! | dstack endpoint | `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` | `DSTACK_LLM_ROUTER_DSTACK_ENDPOINT` |
-//! | Optional executor Unix socket path | `PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH` | none |
-//! | Internal backend Unix socket path for middleware mode | `PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` | none |
+//! | Setting | Environment variable |
+//! | --- | --- |
+//! | Gateway config path | `PRIVATE_AI_GATEWAY_CONFIG_PATH` |
+//!
+//! Gateway-owned writable files are derived from `state_dir` in the static
+//! config. The active upstream database is `upstreams.json` and the
+//! attested-session log is `sessions.jsonl` inside that directory.
 
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,135 +36,164 @@ use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{
-    bind_unix_listener, build_internal_backend_router, build_router_with_admin,
-    build_router_with_admin_and_uds_middleware, serve_unix_listener, GatewayRequestStore,
-};
+use private_ai_gateway::http::build_router_with_admin;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
 
-/// Read an env var, preferring the current name over the compatibility alias.
-fn env_pref(current: &str, alias: &str) -> Option<String> {
-    std::env::var(current)
+const GIT_LAUNCHER_CONFIG_PATH: &str = "/etc/git-launcher/gateway.conf";
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
         .ok()
-        .or_else(|| std::env::var(alias).ok())
-}
-
-fn parse_seconds(setting: &str, value: &str) -> Result<u64, String> {
-    value
-        .parse::<u64>()
-        .map_err(|e| format!("invalid {setting} seconds {value:?}: {e}"))
-}
-
-fn parse_positive_seconds(setting: &str, value: &str) -> Result<u64, String> {
-    let seconds = parse_seconds(setting, value)?;
-    if seconds == 0 {
-        return Err(format!("{setting} seconds must be greater than zero"));
-    }
-    Ok(seconds)
-}
-
-fn parse_comma_list(value: Option<&str>) -> Vec<String> {
-    value
-        .into_iter()
-        .flat_map(|v| v.split(','))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-        .collect()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
 
-fn parse_tls_spki_list(value: &str) -> Result<Vec<TlsSpki>, String> {
-    let mut keys = Vec::new();
-    for raw in value.split(',') {
-        let item = raw.trim();
-        if item.len() != 64 || !item.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-            return Err(format!(
-                "invalid TLS SPKI SHA-256 digest {item:?}: expected 64 hex characters"
-            ));
-        }
-        keys.push(TlsSpki {
-            domain: None,
-            spki_sha256_hex: item.to_ascii_lowercase(),
-        });
-    }
-    if keys.is_empty() {
-        return Err("TLS SPKI SHA-256 list must not be empty".to_string());
-    }
-    Ok(keys)
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GatewayConfigFile {
+    bind: Option<String>,
+    state_dir: Option<String>,
+    upstream_config_seed_path: Option<String>,
+    admin_token: Option<String>,
+    tls: GatewayTlsConfig,
+    dstack_endpoint: Option<String>,
 }
 
-fn parse_domain_spki_map(value: &str) -> Result<Vec<TlsSpki>, String> {
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GatewayTlsConfig {
+    domain_certificates: Vec<TlsDomainCertificateEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TlsDomainCertificateEntry {
+    domain: String,
+    certificate_path: String,
+}
+
+fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
+    let path = Path::new(path);
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))
+}
+
+fn resolve_state_dir(config_state_dir: Option<&str>) -> Result<PathBuf, String> {
+    let state_dir = config_state_dir
+        .unwrap_or("/var/lib/private-ai-gateway")
+        .trim();
+    if state_dir.is_empty() {
+        return Err("gateway state_dir must not be empty".to_string());
+    }
+    Ok(PathBuf::from(state_dir))
+}
+
+fn upstream_config_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("upstreams.json")
+}
+
+fn session_log_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("sessions.jsonl")
+}
+
+fn resolve_source_provenance() -> Result<SourceProvenance, String> {
+    Ok(
+        source_provenance_from_git_launcher_config(Path::new(GIT_LAUNCHER_CONFIG_PATH))?
+            .unwrap_or_default(),
+    )
+}
+
+fn source_provenance_from_git_launcher_config(
+    path: &Path,
+) -> Result<Option<SourceProvenance>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "failed to read git-launcher config {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let mut repo_url = None;
+    let mut repo_commit = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "REPO_URL" if !value.is_empty() => repo_url = Some(value.to_string()),
+            "COMMIT_SHA" if !value.is_empty() => repo_commit = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    let repo_url = repo_url
+        .ok_or_else(|| format!("git-launcher config {} is missing REPO_URL", path.display()))?;
+    let repo_commit = repo_commit.ok_or_else(|| {
+        format!(
+            "git-launcher config {} is missing COMMIT_SHA",
+            path.display()
+        )
+    })?;
+    validate_git_launcher_commit_sha(&repo_commit).map_err(|err| {
+        format!(
+            "git-launcher config {} has invalid COMMIT_SHA: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(SourceProvenance {
+        repo_url: Some(repo_url),
+        repo_commit: Some(repo_commit),
+        image_digest: None,
+        image_provenance: None,
+    }))
+}
+
+fn validate_git_launcher_commit_sha(value: &str) -> Result<(), String> {
+    if (value.len() == 40 || value.len() == 64) && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err("expected a full 40- or 64-character hexadecimal commit hash".to_string())
+}
+
+fn parse_domain_cert_entries(
+    entries: &[TlsDomainCertificateEntry],
+) -> Result<Vec<TlsSpki>, String> {
     let mut keys = Vec::new();
     let mut domains = std::collections::BTreeSet::new();
-    for raw in value.split(',') {
-        let (domain, spki) = parse_domain_value(raw, "TLS domain SPKI")?;
+    for entry in entries {
+        let domain = normalize_config_domain(&entry.domain)?;
         if !domains.insert(domain.clone()) {
             return Err(format!("TLS domain {domain:?} is duplicated"));
         }
-        if spki.len() != 64 || !spki.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        let certificate_path = entry.certificate_path.trim();
+        if certificate_path.is_empty() {
             return Err(format!(
-                "invalid TLS SPKI SHA-256 digest {spki:?}: expected 64 hex characters"
+                "TLS domain certificate entry for {domain:?} has an empty certificate_path"
             ));
         }
-        keys.push(TlsSpki {
-            domain: Some(domain),
-            spki_sha256_hex: spki.to_ascii_lowercase(),
-        });
-    }
-    if keys.is_empty() {
-        return Err("TLS domain SPKI map must not be empty".to_string());
-    }
-    Ok(keys)
-}
-
-fn parse_tls_cert_paths(value: &str) -> Result<Vec<TlsSpki>, String> {
-    let mut keys = Vec::new();
-    for raw in value.split(',') {
-        let path = raw.trim();
-        if path.is_empty() {
-            return Err("TLS certificate path list contains an empty path".to_string());
-        }
-        keys.push(tls_spki_from_cert_path(Path::new(path))?);
-    }
-    if keys.is_empty() {
-        return Err("TLS certificate path list must not be empty".to_string());
-    }
-    Ok(keys)
-}
-
-fn parse_domain_cert_paths(value: &str) -> Result<Vec<TlsSpki>, String> {
-    let mut keys = Vec::new();
-    let mut domains = std::collections::BTreeSet::new();
-    for raw in value.split(',') {
-        let (domain, path) = parse_domain_value(raw, "TLS domain certificate")?;
-        if !domains.insert(domain.clone()) {
-            return Err(format!("TLS domain {domain:?} is duplicated"));
-        }
-        let mut key = tls_spki_from_cert_path(Path::new(&path))?;
+        let mut key = tls_spki_from_cert_path(Path::new(certificate_path))?;
         key.domain = Some(domain);
         keys.push(key);
     }
     if keys.is_empty() {
-        return Err("TLS domain certificate map must not be empty".to_string());
+        return Err("TLS domain config must contain at least one domain".to_string());
     }
     Ok(keys)
-}
-
-fn parse_domain_value(raw: &str, label: &str) -> Result<(String, String), String> {
-    let (domain, value) = raw
-        .split_once('=')
-        .ok_or_else(|| format!("{label} entry must be domain=value, got {raw:?}"))?;
-    let domain = normalize_config_domain(domain)?;
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(format!("{label} entry for {domain:?} has an empty value"));
-    }
-    Ok((domain, value.to_string()))
 }
 
 fn normalize_config_domain(raw: &str) -> Result<String, String> {
@@ -223,40 +235,9 @@ fn leaf_certificate_der(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-fn resolve_tls_public_keys(
-    cert_paths: Option<&str>,
-    explicit_spkis: Option<&str>,
-    domain_cert_paths: Option<&str>,
-    domain_spkis: Option<&str>,
-) -> Result<Option<Vec<TlsSpki>>, String> {
-    let configured = [
-        cert_paths.is_some(),
-        explicit_spkis.is_some(),
-        domain_cert_paths.is_some(),
-        domain_spkis.is_some(),
-    ]
-    .into_iter()
-    .filter(|configured| *configured)
-    .count();
-    if configured > 1 {
-        return Err(
-            "set only one TLS binding source: PRIVATE_AI_GATEWAY_TLS_CERT_PATHS, \
-             PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256, PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS, \
-             or PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256"
-                .to_string(),
-        );
-    }
-    if let Some(paths) = cert_paths {
-        return parse_tls_cert_paths(paths).map(Some);
-    }
-    if let Some(spkis) = explicit_spkis {
-        return parse_tls_spki_list(spkis).map(Some);
-    }
-    if let Some(paths) = domain_cert_paths {
-        return parse_domain_cert_paths(paths).map(Some);
-    }
-    if let Some(spkis) = domain_spkis {
-        return parse_domain_spki_map(spkis).map(Some);
+fn resolve_tls_public_keys(config: &GatewayTlsConfig) -> Result<Option<Vec<TlsSpki>>, String> {
+    if !config.domain_certificates.is_empty() {
+        return parse_domain_cert_entries(&config.domain_certificates).map(Some);
     }
     Ok(None)
 }
@@ -327,157 +308,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let bind = env_pref("PRIVATE_AI_GATEWAY_BIND", "DSTACK_LLM_ROUTER_BIND")
+    let gateway_config_path = env_non_empty("PRIVATE_AI_GATEWAY_CONFIG_PATH").ok_or_else(|| {
+        invalid_input("PRIVATE_AI_GATEWAY_CONFIG_PATH must point to the static gateway config file")
+    })?;
+    let gateway_config = load_gateway_config(&gateway_config_path)?;
+
+    let bind = gateway_config
+        .bind
+        .clone()
         .unwrap_or_else(|| "127.0.0.1:8086".to_string());
-    let upstream_config_path = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH",
-        "DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_PATH",
-    )
-    .unwrap_or_else(|| "/var/lib/private-ai-gateway/upstreams.json".to_string());
-    let upstream_config_seed_path = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH",
-        "DSTACK_LLM_ROUTER_UPSTREAM_CONFIG_SEED_PATH",
-    );
-    let admin_token = env_pref(
-        "PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
-        "DSTACK_LLM_ROUTER_ADMIN_TOKEN",
-    );
-    let repo_url = env_pref("PRIVATE_AI_GATEWAY_REPO_URL", "DSTACK_LLM_ROUTER_REPO_URL");
-    let repo_commit = env_pref(
-        "PRIVATE_AI_GATEWAY_REPO_COMMIT",
-        "DSTACK_LLM_ROUTER_REPO_COMMIT",
-    );
-    // Must be > 0: it is also the session retention window, and a 0 TTL would
-    // make every session born-expired (evicted on write) so receipts resolve to
-    // not-found.
-    let receipt_ttl_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS",
-        "DSTACK_LLM_ROUTER_RECEIPT_TTL_SECONDS",
-    )
-    .as_deref()
-    .map(|value| parse_positive_seconds("receipt TTL", value))
-    .transpose()?
-    .unwrap_or(3600);
-    let tls_cert_paths = env_pref(
-        "PRIVATE_AI_GATEWAY_TLS_CERT_PATHS",
-        "DSTACK_LLM_ROUTER_TLS_CERT_PATHS",
-    );
-    let tls_spkis = env_pref(
-        "PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256",
-        "DSTACK_LLM_ROUTER_TLS_SPKI_SHA256",
-    );
-    let tls_domain_cert_paths = env_pref(
-        "PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS",
-        "DSTACK_LLM_ROUTER_TLS_DOMAIN_CERT_PATHS",
-    );
-    let tls_domain_spkis = env_pref(
-        "PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256",
-        "DSTACK_LLM_ROUTER_TLS_DOMAIN_SPKI_SHA256",
-    );
-    let tls_public_keys = resolve_tls_public_keys(
-        tls_cert_paths.as_deref(),
-        tls_spkis.as_deref(),
-        tls_domain_cert_paths.as_deref(),
-        tls_domain_spkis.as_deref(),
-    )?;
-    let upstream_verifier_mode = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER",
-        "DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER",
-    )
-    .unwrap_or_else(|| "none".to_string());
-    let upstream_verifier_mode = UpstreamVerifierMode::parse(&upstream_verifier_mode)
-        .map_err(|e| invalid_input(e.to_string()))?;
-    let upstream_verifier_cache_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_CACHE_SECONDS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER_CACHE_SECONDS",
-    )
-    .as_deref()
-    .map(|value| parse_positive_seconds("upstream verifier cache", value))
-    .transpose()?
-    .unwrap_or(300);
-    let upstream_connect_timeout_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_CONNECT_TIMEOUT_SECONDS",
-    )
-    .as_deref()
-    .map(|value| parse_positive_seconds("upstream connect timeout", value))
-    .transpose()?
-    .unwrap_or(DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS);
-    let upstream_read_timeout_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_READ_TIMEOUT_SECONDS",
-    )
-    .as_deref()
-    .map(|value| parse_positive_seconds("upstream read timeout", value))
-    .transpose()?
-    .unwrap_or(DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS);
-    let upstream_verifier_request_timeout_seconds = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS",
-    )
-    .as_deref()
-    .map(|value| parse_positive_seconds("upstream verifier request timeout", value))
-    .transpose()?
-    .unwrap_or(DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS);
-    let upstream_accepted_workload_ids = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_WORKLOAD_IDS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_WORKLOAD_IDS",
-    );
-    let upstream_accepted_image_digests = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_ACCEPTED_IMAGE_DIGESTS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_ACCEPTED_IMAGE_DIGESTS",
-    );
-    let upstream_dstack_kms_root_public_keys = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS",
-        "DSTACK_LLM_ROUTER_UPSTREAM_DSTACK_KMS_ROOT_PUBLIC_KEYS",
-    );
-    let upstream_pccs_url = env_pref(
-        "PRIVATE_AI_GATEWAY_UPSTREAM_PCCS_URL",
-        "DSTACK_LLM_ROUTER_UPSTREAM_PCCS_URL",
-    );
-    let dstack_endpoint = env_pref(
-        "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT",
-        "DSTACK_LLM_ROUTER_DSTACK_ENDPOINT",
-    )
-    .or_else(|| {
-        env_pref(
-            "PRIVATE_AI_GATEWAY_DSTACK_QUOTER_URL",
-            "DSTACK_LLM_ROUTER_DSTACK_QUOTER_URL",
-        )
-    });
-    let executor_uds_path = std::env::var("PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let backend_uds_path = std::env::var("PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "/run/private-ai-gateway/backend.sock".to_string());
+    let state_dir = resolve_state_dir(gateway_config.state_dir.as_deref())?;
+    std::fs::create_dir_all(&state_dir).map_err(|err| {
+        invalid_input(format!(
+            "failed to create gateway state directory {}: {err}",
+            state_dir.display()
+        ))
+    })?;
+    let upstream_config_path = upstream_config_path(&state_dir);
+    let session_log_path = session_log_path(&state_dir);
+    let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
+    let admin_token = gateway_config.admin_token.clone();
+    let source_provenance = resolve_source_provenance()?;
+    let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
+    let dstack_endpoint = gateway_config.dstack_endpoint.clone();
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
     );
     let keys: Arc<dyn KeyProvider> = provider.clone();
     let quoter: Arc<dyn Quoter> = provider;
-    seed_upstream_config_if_empty(
-        Path::new(&upstream_config_path),
-        upstream_config_seed_path.as_deref(),
-    )?;
+    seed_upstream_config_if_empty(&upstream_config_path, upstream_config_seed_path.as_deref())?;
     let upstream_config = Arc::new(UpstreamConfigManager::load(
-        upstream_config_path,
+        upstream_config_path.clone(),
         UpstreamRuntimeOptions {
-            verifier_mode: upstream_verifier_mode.clone(),
-            accepted_workload_ids: parse_comma_list(upstream_accepted_workload_ids.as_deref()),
-            accepted_image_digests: parse_comma_list(upstream_accepted_image_digests.as_deref()),
-            accepted_dstack_kms_root_public_keys: parse_comma_list(
-                upstream_dstack_kms_root_public_keys.as_deref(),
-            ),
-            pccs_url: upstream_pccs_url,
-            verifier_cache_seconds: upstream_verifier_cache_seconds,
-            connect_timeout_seconds: upstream_connect_timeout_seconds,
-            read_timeout_seconds: upstream_read_timeout_seconds,
-            verifier_request_timeout_seconds: upstream_verifier_request_timeout_seconds,
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_workload_ids: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+            read_timeout_seconds: DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+            verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
         },
     )?);
     let upstream = upstream_config.backend();
@@ -487,12 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AciServiceConfig {
         vendor: "private-ai-gateway-dev".to_string(),
         tee_type: "tdx".to_string(),
-        source_provenance: SourceProvenance {
-            repo_url,
-            repo_commit,
-            image_digest: None,
-            image_provenance: None,
-        },
+        source_provenance,
         keyset_epoch: KeysetEpoch {
             version: 1,
             not_after: u64::MAX,
@@ -502,13 +369,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             supported_e2ee_versions: vec!["2".to_string()],
         },
         freshness_seconds: 3600,
-        receipt_ttl_seconds,
+        receipt_ttl_seconds: 3600,
         upstream_required_default: true,
         allow_test_keys: false,
         tls_public_keys,
     };
 
-    let mut service_inner = AciService::new_with_upstream_verifier(
+    let service_inner = AciService::new_with_upstream_verifier(
         keys,
         quoter,
         upstream,
@@ -517,22 +384,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         Arc::new(SystemClock),
     )?;
-    // Opt into a durable append-only session log when a path is configured;
-    // otherwise sessions stay in memory (prior behavior).
-    if let Ok(path) = std::env::var("PRIVATE_AI_GATEWAY_SESSION_LOG_PATH") {
-        let path = path.trim();
-        if !path.is_empty() {
-            match JsonlSessionStore::open(path) {
-                Ok(store) => {
-                    tracing::info!(session_log = %path, "persisting attested sessions to JSONL log");
-                    service_inner = service_inner.with_session_store(Arc::new(store));
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, session_log = %path, "failed to open session log; using in-memory session store");
-                }
-            }
-        }
-    }
+    let session_store = JsonlSessionStore::open(&session_log_path).map_err(|err| {
+        invalid_input(format!(
+            "failed to open gateway session log {}: {err}",
+            session_log_path.display()
+        ))
+    })?;
+    tracing::info!(session_log = %session_log_path.display(), "persisting attested sessions to JSONL log");
+    let service_inner = service_inner.with_session_store(Arc::new(session_store));
     let service = Arc::new(service_inner);
     // The background upstream verification keeps the attested-session store fresh
     // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
@@ -543,30 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(upstream_config.clone());
 
-    let app = if let Some(executor_uds_path) = executor_uds_path {
-        let request_store = GatewayRequestStore::default();
-        let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
-        let backend_listener = bind_unix_listener(&backend_uds_path)?;
-        tracing::info!(
-            backend_uds_path = %backend_uds_path,
-            executor_uds_path = %executor_uds_path,
-            "private-ai-gateway internal backend listening on Unix socket"
-        );
-        tokio::spawn(async move {
-            if let Err(err) = serve_unix_listener(backend_listener, backend_app).await {
-                tracing::error!(error = %err, "private-ai-gateway internal backend stopped");
-            }
-        });
-        build_router_with_admin_and_uds_middleware(
-            service,
-            upstream_config,
-            admin_token,
-            request_store,
-            executor_uds_path,
-        )
-    } else {
-        build_router_with_admin(service, upstream_config, admin_token)
-    };
+    let app = build_router_with_admin(service, upstream_config, admin_token);
 
     tracing::info!(%bind, "private-ai-gateway listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -657,8 +493,9 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        parse_domain_spki_map, parse_positive_seconds, parse_tls_cert_paths, parse_tls_spki_list,
-        resolve_tls_public_keys, seed_upstream_config_if_empty,
+        load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
+        seed_upstream_config_if_empty, session_log_path,
+        source_provenance_from_git_launcher_config, upstream_config_path,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -707,58 +544,153 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn positive_timeout_seconds_rejects_zero() {
-        assert_eq!(
-            parse_positive_seconds("upstream connect timeout", "1").unwrap(),
-            1
-        );
-        assert!(parse_positive_seconds("upstream connect timeout", "0").is_err());
-    }
-
-    #[test]
-    fn parses_tls_spki_list_as_lowercase_hex_digests() {
-        let first = "AA".repeat(32);
-        let second = "bb".repeat(32);
-        let parsed = parse_tls_spki_list(&format!("{first},{second}")).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].domain, None);
-        assert_eq!(parsed[0].spki_sha256_hex, "aa".repeat(32));
-        assert_eq!(parsed[1].spki_sha256_hex, "bb".repeat(32));
-    }
-
-    #[test]
-    fn parses_domain_tls_spki_map_as_lowercase_domains_and_digests() {
-        let parsed = parse_domain_spki_map(&format!(
-            "Api.Example.COM={first},chat.example.com={second}",
-            first = "AA".repeat(32),
-            second = "bb".repeat(32),
-        ))
+    fn gateway_config_parses_state_dir() {
+        let config_path = temp_path("gateway-config-state-dir");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "state_dir": "/gateway/state"
+            }"#,
+        )
         .unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].domain.as_deref(), Some("api.example.com"));
-        assert_eq!(parsed[0].spki_sha256_hex, "aa".repeat(32));
-        assert_eq!(parsed[1].domain.as_deref(), Some("chat.example.com"));
-        assert_eq!(parsed[1].spki_sha256_hex, "bb".repeat(32));
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(config.state_dir.as_deref(), Some("/gateway/state"));
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
-    fn rejects_invalid_domain_tls_spki_map() {
-        assert!(parse_domain_spki_map("api.example.com").is_err());
-        assert!(parse_domain_spki_map(&format!("api.example.com={}", "aa")).is_err());
-        assert!(parse_domain_spki_map(&format!("api:443={}", "aa".repeat(32))).is_err());
-        assert!(parse_domain_spki_map(&format!(
-            "api.example.com={},API.example.com={}",
-            "aa".repeat(32),
-            "bb".repeat(32)
-        ))
-        .is_err());
+    fn gateway_config_rejects_removed_fields() {
+        for (name, body) in [
+            ("receipt-ttl", r#"{"receipt_ttl_seconds": 3600}"#),
+            (
+                "upstream-verifier",
+                r#"{"upstream_verifier": {"mode": "none"}}"#,
+            ),
+            (
+                "source-provenance",
+                r#"{"source_provenance": {"repo_url": "https://example.com/repo", "repo_commit": "deadbeef"}}"#,
+            ),
+            (
+                "tls-certificate-paths",
+                r#"{"tls": {"certificate_paths": ["/cert.pem"]}}"#,
+            ),
+            (
+                "executor-uds",
+                r#"{"executor_uds_path": "/tmp/executor.sock"}"#,
+            ),
+            (
+                "backend-uds",
+                r#"{"backend_uds_path": "/tmp/backend.sock"}"#,
+            ),
+        ] {
+            let config_path = temp_path(name);
+            std::fs::write(&config_path, body).unwrap();
+
+            let err = load_gateway_config(config_path.to_str().unwrap())
+                .expect_err("removed gateway config field must be rejected");
+
+            assert!(
+                err.contains("unknown field"),
+                "unexpected parse error for {name}: {err}"
+            );
+            let _ = std::fs::remove_file(config_path);
+        }
     }
 
     #[test]
-    fn rejects_invalid_tls_spki_list() {
-        assert!(parse_tls_spki_list("").is_err());
-        assert!(parse_tls_spki_list("aa").is_err());
-        assert!(parse_tls_spki_list(&format!("{},zz", "aa".repeat(32))).is_err());
+    fn source_provenance_parses_git_launcher_pin() {
+        let config_path = temp_path("git-launcher-config");
+        std::fs::write(
+            &config_path,
+            r#"
+                # fetched by git-launcher before entrypoint.sh runs
+                REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+                COMMIT_SHA=0123456789abcdef0123456789abcdef01234567
+                WORK_DIR=/var/lib/git-launcher/private-ai-gateway
+            "#,
+        )
+        .unwrap();
+
+        let provenance = source_provenance_from_git_launcher_config(&config_path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            provenance.repo_url.as_deref(),
+            Some("https://github.com/Dstack-TEE/private-ai-gateway.git")
+        );
+        assert_eq!(
+            provenance.repo_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(provenance.image_digest.is_none());
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn source_provenance_rejects_incomplete_git_launcher_pin() {
+        let config_path = temp_path("git-launcher-config-missing-commit");
+        std::fs::write(
+            &config_path,
+            "REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git\n",
+        )
+        .unwrap();
+
+        let err = source_provenance_from_git_launcher_config(&config_path)
+            .expect_err("incomplete git-launcher config must fail startup");
+
+        assert!(err.contains("COMMIT_SHA"));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn source_provenance_rejects_non_full_git_launcher_commit_pin() {
+        let config_path = temp_path("git-launcher-config-short-commit");
+        std::fs::write(
+            &config_path,
+            r#"
+                REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+                COMMIT_SHA=main
+            "#,
+        )
+        .unwrap();
+
+        let err = source_provenance_from_git_launcher_config(&config_path)
+            .expect_err("git-launcher config must pin a full commit hash");
+
+        assert!(err.contains("full 40- or 64-character hexadecimal commit hash"));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn source_provenance_is_unknown_when_git_launcher_pin_is_absent() {
+        let config_path = temp_path("git-launcher-config-missing");
+        let _ = std::fs::remove_file(&config_path);
+
+        let provenance = source_provenance_from_git_launcher_config(&config_path).unwrap();
+
+        assert!(provenance.is_none());
+    }
+
+    #[test]
+    fn gateway_state_paths_are_derived_from_state_dir() {
+        let state_dir = std::path::PathBuf::from("/var/lib/private-ai-gateway");
+
+        assert_eq!(
+            resolve_state_dir(Some("/var/lib/private-ai-gateway")).unwrap(),
+            state_dir
+        );
+        assert_eq!(
+            upstream_config_path(&state_dir),
+            state_dir.join("upstreams.json")
+        );
+        assert_eq!(
+            session_log_path(&state_dir),
+            state_dir.join("sessions.jsonl")
+        );
+        assert!(resolve_state_dir(Some("  ")).is_err());
     }
 
     #[test]
@@ -947,27 +879,68 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn parses_tls_cert_paths_as_spki_digests() {
-        let path = write_temp_cert();
-        let parsed = parse_tls_cert_paths(path.to_str().unwrap()).unwrap();
-        let _ = std::fs::remove_file(path);
-        assert_eq!(parsed.len(), 1);
+    fn gateway_config_domain_certificates_parse_as_spki_digests() {
+        let api_cert = write_temp_cert();
+        let chat_cert = write_temp_cert();
+        let config_path = temp_path("gateway-config-domain-certificates");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{
+                    "tls": {{
+                        "domain_certificates": [
+                            {{"domain":"Api.Example.COM", "certificate_path":"{}"}},
+                            {{"domain":"chat.example.com.", "certificate_path":"{}"}}
+                        ]
+                    }}
+                }}"#,
+                api_cert.display(),
+                chat_cert.display()
+            ),
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        let parsed = resolve_tls_public_keys(&config.tls).unwrap().unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].domain.as_deref(), Some("api.example.com"));
+        assert_eq!(parsed[1].domain.as_deref(), Some("chat.example.com"));
         assert_eq!(
             parsed[0].spki_sha256_hex,
             "c6686007081874ef8a5e8f95b7620e16c0ff0c65235ff8efcf9350cd9c5cf9dd"
         );
+        let _ = std::fs::remove_file(api_cert);
+        let _ = std::fs::remove_file(chat_cert);
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
-    fn tls_cert_paths_and_explicit_spkis_are_mutually_exclusive() {
-        let explicit = "aa".repeat(32);
-        assert!(resolve_tls_public_keys(Some("/cert.pem"), Some(&explicit), None, None).is_err());
-        assert!(resolve_tls_public_keys(
-            None,
-            Some(&explicit),
-            None,
-            Some(&format!("api.example.com={}", "bb".repeat(32)))
+    fn rejects_duplicate_domain_tls_config_entries() {
+        let cert = write_temp_cert();
+        let config_path = temp_path("gateway-config-domain-certificates-duplicate");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{
+                    "tls": {{
+                        "domain_certificates": [
+                            {{"domain":"api.example.com", "certificate_path":"{}"}},
+                            {{"domain":"API.example.com", "certificate_path":"{}"}}
+                        ]
+                    }}
+                }}"#,
+                cert.display(),
+                cert.display()
+            ),
         )
-        .is_err());
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        let err = resolve_tls_public_keys(&config.tls).unwrap_err();
+
+        assert!(err.contains("duplicated"));
+        let _ = std::fs::remove_file(cert);
+        let _ = std::fs::remove_file(config_path);
     }
 }

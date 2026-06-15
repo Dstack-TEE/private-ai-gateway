@@ -212,6 +212,30 @@ async fn attestation_report_selects_domain_tls_binding_from_host_header() {
 }
 
 #[tokio::test]
+async fn attestation_report_rejects_unconfigured_domain_tls_binding_host() {
+    let h = make_harness_with_tls_public_keys(Some(vec![TlsSpki {
+        domain: Some("api.example.com".to_string()),
+        spki_sha256_hex: "aa".repeat(32),
+    }]));
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/attestation/report?nonce=abcd")
+                .header("host", "other.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(body["error"]["type"], "not_found");
+}
+
+#[tokio::test]
 async fn attestation_report_nonce_null_when_absent() {
     let h = make_harness();
     let app = build_router(h.service.clone());

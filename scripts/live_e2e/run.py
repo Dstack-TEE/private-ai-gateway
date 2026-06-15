@@ -19,6 +19,7 @@ from live_e2e.cases.fidelity_structured_outputs import (  # noqa: E402
 from live_e2e.cases.lifecycle import run_lifecycle_case  # noqa: E402
 from live_e2e.common import (  # noqa: E402
     DEFAULT_ARTIFACT_DIR,
+    DEFAULT_DSTACK_ENDPOINT,
     DEFAULT_ENV_FILE,
     ROOT,
     find_free_port,
@@ -39,6 +40,7 @@ def main() -> None:
     parser.add_argument("--provider", action="append", default=[])
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     parser.add_argument("--port", type=int, default=18086)
+    parser.add_argument("--dstack-endpoint", default=DEFAULT_DSTACK_ENDPOINT)
     parser.add_argument("--artifacts-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--skip-provider-verify", action="store_true")
     parser.add_argument("--no-build", action="store_true")
@@ -61,6 +63,7 @@ def main() -> None:
         summary["phases"]["preflight"] = preflight(
             providers,
             port=args.port,
+            dstack_endpoint=args.dstack_endpoint,
             env_file=args.env_file,
             check_build=not args.no_build,
         )
@@ -81,6 +84,7 @@ def main() -> None:
         with AggregatorProcess(
             providers,
             port=args.port,
+            dstack_endpoint=args.dstack_endpoint,
             env=merged_env(),
             artifact_dir=artifact_dir,
         ) as aggregator:

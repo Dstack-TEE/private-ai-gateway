@@ -86,18 +86,26 @@ def main() -> int:
     ]
 
     with tempfile.TemporaryDirectory(prefix="router-refresh-smoke-") as tmp:
-        cfg_path = Path(tmp) / "upstreams.json"
-        cfg_path.write_text(json.dumps(config))
+        upstream_seed_path = Path(tmp) / "upstreams.seed.json"
+        gateway_config_path = Path(tmp) / "gateway.config.json"
+        state_dir = Path(tmp) / "state"
+        upstream_seed_path.write_text(json.dumps(config))
+        gateway_config_path.write_text(
+            json.dumps(
+                {
+                    "bind": f"127.0.0.1:{PORT}",
+                    "state_dir": str(state_dir),
+                    "upstream_config_seed_path": str(upstream_seed_path),
+                    "dstack_endpoint": DEFAULT_DSTACK_ENDPOINT,
+                    "receipt_ttl_seconds": 3600,
+                }
+            )
+        )
         log_path = Path(tmp) / "aggregator.log"
         env = {
             **os.environ,
-            "PRIVATE_AI_GATEWAY_BIND": f"127.0.0.1:{PORT}",
-            "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH": str(cfg_path),
-            "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT": DEFAULT_DSTACK_ENDPOINT,
+            "PRIVATE_AI_GATEWAY_CONFIG_PATH": str(gateway_config_path),
             "DSTACK_VERIFIER_URL": os.environ.get("DSTACK_VERIFIER_URL", DEFAULT_DSTACK_VERIFIER_URL),
-            "PRIVATE_AI_GATEWAY_REPO_URL": "https://github.com/Dstack-TEE/private-ai-gateway",
-            "PRIVATE_AI_GATEWAY_REPO_COMMIT": "live-e2e",
-            "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS": "3600",
             "RUST_LOG": "warn",
         }
         env.pop(key_env, None)

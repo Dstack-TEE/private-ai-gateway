@@ -6,11 +6,11 @@
 #   PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-token> \
 #   phala-h4xuser deploy -n private-ai-gateway -c compose.yaml
 #
-# The compose inlines the launcher pin, non-secret runtime env, and initial
+# The compose inlines the launcher pin, static gateway config, and initial
 # upstream config so dstack's compose_hash covers the complete launch policy.
-# The gateway copies the read-only upstream seed into its mutable state path
-# only when no mutable config exists yet; later admin updates replace the
-# mutable file without changing this attested compose.
+# The gateway copies the read-only upstream seed into its mutable state path only
+# when no mutable config exists yet; later admin updates replace the mutable file
+# without changing this attested compose.
 
 services:
   private-ai-gateway:
@@ -21,28 +21,13 @@ services:
     configs:
       - source: gateway-pin
         target: /etc/git-launcher/gateway.conf
+      - source: gateway-config
+        target: /etc/private-ai-gateway/gateway.config.json
       - source: gateway-upstreams
         target: /etc/private-ai-gateway/upstreams.seed.json
     environment:
-      PRIVATE_AI_GATEWAY_BIND: "0.0.0.0:8086"
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH: /var/lib/private-ai-gateway/upstreams.json
-      PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_SEED_PATH: /etc/private-ai-gateway/upstreams.seed.json
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
       PRIVATE_AI_GATEWAY_CACHE_DIR: /var/lib/private-ai-gateway/cache
-      PRIVATE_AI_GATEWAY_ADMIN_TOKEN: ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN:?set PRIVATE_AI_GATEWAY_ADMIN_TOKEN}
-      PRIVATE_AI_GATEWAY_REPO_URL: https://github.com/Dstack-TEE/private-ai-gateway.git
-      PRIVATE_AI_GATEWAY_REPO_COMMIT: ${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
-      # PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS: "0"
-      # PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS: "3600"
-      # PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS: "10"
-      # PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS: "600"
-      # PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS: "60"
-      # PRIVATE_AI_GATEWAY_TLS_CERT_PATHS: /etc/tls/aci-endpoint.crt
-      # PRIVATE_AI_GATEWAY_TLS_SPKI_SHA256: <64-hex-spki-sha256>[,<64-hex-spki-sha256>]
-      # PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT: unix:/var/run/dstack.sock
-      # Middleware mode is optional and requires a middleware service in the
-      # same attested compose with a shared socket volume.
-      # PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH: /run/private-ai-gateway/executor.sock
-      # PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH: /run/private-ai-gateway/backend.sock
     volumes:
       - gateway-checkout:/var/lib/git-launcher
       - gateway-state:/var/lib/private-ai-gateway
@@ -55,6 +40,16 @@ configs:
       REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
       COMMIT_SHA=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
       WORK_DIR=/var/lib/git-launcher/private-ai-gateway
+
+  gateway-config:
+    content: |
+      {
+        "bind": "0.0.0.0:8086",
+        "state_dir": "/var/lib/private-ai-gateway",
+        "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+        "admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN:?set PRIVATE_AI_GATEWAY_ADMIN_TOKEN}",
+        "dstack_endpoint": "unix:/var/run/dstack.sock"
+      }
 
   gateway-upstreams:
     content: |

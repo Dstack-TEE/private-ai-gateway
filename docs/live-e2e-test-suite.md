@@ -203,7 +203,7 @@ Provider-specific rules:
   NVIDIA evidence when present, and hash the decoded ML-KEM public-key bytes
   for the binding enforced by the transport. Strict production entries should
   pin upstream model ids to concrete `chute_id` UUIDs with `chutes_chute_ids`;
-  the verifier and gateway config use the same pins.
+  the verifier and upstream config use the same pins.
 - ACI/DCAP: verify `/v1/attestation/report?nonce=...`, quote report data,
   dstack KMS identity custody, accepted workload id or image digest, accepted
   KMS root, and attested TLS SPKI.
@@ -218,10 +218,13 @@ Reference updates must be reviewed. The script may print a proposed diff with
 Checks:
 
 - Required API keys are present but never printed.
-- `PRIVATE_AI_VERIFIER_DIR` exists or the sibling verifier checkout exists.
+- The vendored `scripts/confidential_verifier` package exists, or
+  `PRIVATE_AI_VERIFIER_DIR` points at an explicit verifier override.
 - `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI/DCAP tests.
-- `PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT` or a local dstack socket exists for
-  gateway attestation tests.
+- A local dstack socket exists for gateway attestation tests. The runner writes
+  the static gateway config and defaults `dstack_endpoint` to
+  `unix:/tmp/aci-dstack-sock-dev.dstack.sock`; pass `--dstack-endpoint` to use
+  a different endpoint.
 - The gateway binary builds.
 - No live server is already bound to the selected local port.
 
@@ -255,7 +258,8 @@ Checks:
   - keyset endorsement verifies,
   - quote report data binds the ACI attestation statement,
   - dstack KMS custody verifies when using dstack,
-  - source provenance fields match the expected repo/commit or image digest,
+  - source provenance is absent when unknown, or matches the git-launcher
+    repo/commit pin when present,
   - attested TLS SPKI is present when configured.
 
 ### 30 Lifecycle
@@ -473,13 +477,13 @@ Procedure:
    evidence digest, session binding material, and verified claim tags.
 
 The final output should be a human-readable summary plus a machine-readable
-JSON result:
+JSON result. The verifier should omit `source_provenance` when the gateway
+report omits it because the git-launcher pin is unavailable.
 
 ```json
 {
   "verified": true,
   "workload_id": "sha256:...",
-  "source_provenance": {"repo_url": "...", "repo_commit": "..."},
   "receipt": {"chat_id": "...", "signature_valid": true},
   "upstream": {
     "vendor": "chutes-live",
@@ -518,4 +522,4 @@ providers. Our suite should explicitly cover the same classes of behavior:
 7. Tool and structured-output cases.
 8. Multimodal and context cases.
 9. Cache observability.
-10. Strict-release source provenance and launcher/image provenance checks.
+10. Strict-release source provenance from the launcher pin and image provenance checks.
