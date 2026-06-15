@@ -71,12 +71,13 @@ served model stays a receipt-level fact (see
 Remaining:
 
 - **Request-bound, per-instance model attestation on the receipt.** A router
-  attests the channel, not the model that serves a given request. Today the
-  served model is recorded on the receipt as an identifier only; we do not fetch
-  or verify the per-model TD that handled it, because the gateway does not
-  re-verify those quotes and nothing binds them to the request's instance —
-  gating on them would be attestation theater. Once an upstream can attest the
-  exact instance that served a request, surface that as its own scoped,
+  attests the channel, not the model that serves a given request. The served
+  model is recorded on the receipt as an identifier. The per-model TD quotes a
+  router exposes are not part of the channel attestation: the gateway does not
+  re-verify them and they are not bound to the specific instance that serves a
+  request, so they cannot stand as a sound per-model attestation. Once an upstream
+  can attest the exact instance that served a request, surface that as its own
+  scoped,
   request-bound attestation on the receipt — never folded into the channel
   session.
 

@@ -202,9 +202,9 @@ mapping. A `failed` result asserts nothing.
   per model, with the served model recorded on the receipt. The verifier attests
   exactly that channel — its `AttestationScope` is `PerRouter`, enforced
   fail-closed at the binding seam — and does *not* fetch or re-verify the nested
-  per-model TDs: the gateway does not re-verify those quotes and nothing binds
-  them to the instance that served a given request, so gating on them would be
-  attestation theater and could only ever describe one model, not the channel. So
+  per-model TDs: the gateway does not re-verify those quotes and they are not
+  bound to the instance that served a given request, so they cannot stand as a
+  sound per-model attestation and are not part of the channel evidence. So
   `tee_attested` there means "bound to a verified gateway TEE," not end-to-end to
   the model TD serving the tokens. A request-bound, per-instance model attestation
   would be its own scoped evidence on the receipt and is a roadmap item (see

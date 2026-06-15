@@ -34,10 +34,10 @@ shared by every model behind it. Private AI Gateway verifies the gateway
 workload identity, source provenance, runtime policy, and TLS SPKI binding — and
 nothing about the served model. It does **not** fetch, parse, or check the
 nested `model_attestations[]`: the gateway does not re-verify those quotes and
-nothing binds them to the instance that serves a given request, so requiring them
-would imply a per-model attestation we did not perform (and would split one
-channel into a session per model). The served model is recorded on the receipt as
-an identifier; a request-bound, per-instance model attestation is a roadmap item.
+they are not bound to the instance that serves a given request, so they cannot
+stand as a sound per-model attestation. The served model is recorded on the
+receipt as an identifier; a request-bound, per-instance model attestation is a
+roadmap item.
 
 The main loophole is catalog metadata. `verifiable` and
 `attestationSupported` are DB/admin-controlled fields. They are useful hints,
@@ -205,12 +205,11 @@ TLS channel.
 ```
 
 That is enough for gateway-soundness mode if Private AI Gateway has accepted the gateway
-as the trust boundary. Private AI Gateway does not consume the nested entries at
-all: they are not bound to the instance that serves a given request, so hashing
-or recording them in the attested session would imply a per-model attestation we
-did not perform. They remain a roadmap input for a future request-bound,
-per-instance model attestation surfaced on the receipt — not in the channel
-session.
+as the trust boundary. Private AI Gateway does not consume the nested entries: they are
+not bound to the instance that serves a given request, so they cannot stand as a
+sound per-model attestation and are not recorded in the attested session. A
+future request-bound, per-instance model attestation would surface them on the
+receipt — not in the channel session.
 
 ## Required Gateway Assumptions
 
