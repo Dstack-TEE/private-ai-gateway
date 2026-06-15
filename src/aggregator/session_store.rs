@@ -156,25 +156,30 @@ impl SessionIndex {
             .filter(|s| provider.is_none_or(|p| s.provider == p))
             .cloned()
             .collect();
-        // Stable order for callers/tests: newest first, then by id.
-        out.sort_by(|a, b| {
-            b.established_at
-                .cmp(&a.established_at)
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
+        sort_sessions_newest_first(&mut out);
         out
     }
 }
 
-/// Append-only JSONL-backed [`SessionStore`].
-pub struct JsonlSessionStore {
-    inner: Mutex<Inner>,
+/// Stable presentation order for a session listing: newest first, then by id.
+pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
+    sessions.sort_by(|a, b| {
+        b.established_at
+            .cmp(&a.established_at)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
 }
 
-struct Inner {
-    writer: File,
+/// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
+/// index sit behind separate locks, so a read never waits on a write.
+pub struct JsonlSessionStore {
+    writer: Mutex<LogWriter>,
+    index: Mutex<SessionIndex>,
+}
+
+struct LogWriter {
+    file: File,
     next_seq: u64,
-    index: SessionIndex,
 }
 
 impl JsonlSessionStore {
@@ -218,47 +223,56 @@ impl JsonlSessionStore {
             }
         }
 
-        let writer = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
-            inner: Mutex::new(Inner {
-                writer,
-                next_seq,
-                index,
-            }),
+            writer: Mutex::new(LogWriter { file, next_seq }),
+            index: Mutex::new(index),
         })
     }
 }
 
 impl SessionStore for JsonlSessionStore {
     fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let seq = guard.next_seq;
-        let mut line = serde_json::to_string(&SessionLogRecordRef {
-            seq,
-            ts,
-            record_type: RECORD_TYPE_SESSION,
-            payload: &session,
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        line.push('\n');
-        guard.writer.write_all(line.as_bytes())?;
-        guard.writer.flush()?;
-        guard.next_seq = seq + 1;
-        // Bound the in-memory index: drop entries past their retention deadline.
-        // (The append-only log itself still grows; compaction is an ops concern —
-        // rotate/replay the log file. Relying parties always fetch a live id.)
-        guard.index.put_and_evict(session, ts);
+        let seq = {
+            let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+            let seq = w.next_seq;
+            let mut line = serde_json::to_string(&SessionLogRecordRef {
+                seq,
+                ts,
+                record_type: RECORD_TYPE_SESSION,
+                payload: &session,
+            })
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            line.push('\n');
+            // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
+            // `file` ever becomes a `BufWriter`, restore a flush or records can sit
+            // unwritten on a crash.
+            w.file.write_all(line.as_bytes())?;
+            w.next_seq = seq + 1;
+            seq
+        };
+        // Index under its own lock, so a get/list never waited on the write above.
+        // A crash between the write and this update loses nothing — replay rebuilds
+        // the index from the log.
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .put_and_evict(session, ts);
         Ok(seq)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        guard.index.get(session_id, now)
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id, now)
     }
 
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        guard.index.list(provider, now)
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .list(provider, now)
     }
 }
 
@@ -327,6 +341,45 @@ mod tests {
             expires_at,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sort_sessions_newest_first_orders_a_merged_listing() {
+        // What the `?model=` fan-out relies on: a concatenation of per-upstream
+        // lists is re-sorted newest established_at first, with id as the tiebreak.
+        let mk = |marker: &str, established_at: u64| {
+            AttestedSession::seal(
+                "phala-direct",
+                Some("https://x".to_string()),
+                "phala-direct/1",
+                None,
+                vec![],
+                SessionClaims::default(),
+                EvidenceRef {
+                    digest: Some(format!("sha256:{}", marker.repeat(32))),
+                    data_uri: None,
+                },
+                established_at,
+                established_at + 1_000,
+            )
+            .unwrap()
+        };
+        let older = mk("aa", 1_000);
+        let newer = mk("bb", 3_000);
+        let tie_c = mk("cc", 2_000);
+        let tie_d = mk("dd", 2_000);
+
+        // Hand them in deliberately wrong order, as the fan-out concatenation would.
+        let mut merged = vec![older.clone(), tie_d.clone(), newer.clone(), tie_c.clone()];
+        sort_sessions_newest_first(&mut merged);
+        let order: Vec<&str> = merged.iter().map(|s| s.session_id.as_str()).collect();
+
+        assert_eq!(order[0], newer.session_id, "newest established_at first");
+        assert_eq!(order[3], older.session_id, "oldest last");
+        // The two established_at == 2000 ties sort by id ascending.
+        let mut ties = [tie_c.session_id.clone(), tie_d.session_id.clone()];
+        ties.sort();
+        assert_eq!(&order[1..3], &[ties[0].as_str(), ties[1].as_str()]);
     }
 
     #[test]
