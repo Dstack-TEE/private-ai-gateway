@@ -156,6 +156,22 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.auth_passthrough && upstream.bearer_token.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} sets both auth_passthrough and bearer_token; \
+                 a passthrough upstream must not configure a static token",
+                upstream.name
+            )));
+        }
+        if upstream.auth_passthrough
+            && !super::builders::provider_supports_auth_passthrough(upstream.provider)
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} sets auth_passthrough but provider {:?} does not \
+                 support it (only OpenAI-compatible-forwarded providers do)",
+                upstream.name, upstream.provider
+            )));
+        }
         for (field, value) in [
             ("connect_timeout_seconds", upstream.connect_timeout_seconds),
             ("read_timeout_seconds", upstream.read_timeout_seconds),

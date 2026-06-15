@@ -43,12 +43,30 @@ use openai::request_model_id;
 pub const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS: u64 = 600;
 
+/// Per-request upstream credential carried through the forwarding path
+/// for BYOK auth-passthrough. Holds the caller's token in memory only and
+/// redacts on `Debug` so a raw key can never land in logs or receipts.
+#[derive(Clone, Default)]
+pub struct ClientAuthorization(pub Option<String>);
+
+impl std::fmt::Debug for ClientAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(_) => f.write_str("ClientAuthorization(<redacted>)"),
+            None => f.write_str("ClientAuthorization(None)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamRequest {
     pub body: Vec<u8>,
     pub headers: HashMap<String, String>,
     pub path: Option<String>,
     pub target_route_id: Option<String>,
+    /// Caller credential for BYOK auth-passthrough upstreams. Ignored by
+    /// backends that are not configured for passthrough.
+    pub client_authorization: ClientAuthorization,
 }
 
 #[derive(Debug, Clone)]

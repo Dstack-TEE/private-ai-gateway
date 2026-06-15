@@ -473,6 +473,36 @@ async fn call(
     (status, headers, body)
 }
 
+/// Like [`call`] but sets (or omits) an inbound `Authorization` header, so a
+/// test can exercise BYOK auth-passthrough where the caller credential is what
+/// reaches the upstream.
+async fn call_with_auth(
+    app: Router,
+    method: &str,
+    uri: &str,
+    body: impl Into<Vec<u8>>,
+    authorization: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(value) = authorization {
+        builder = builder.header("authorization", value);
+    }
+    let response = app
+        .oneshot(builder.body(Body::from(body.into())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, body)
+}
+
 fn service_for_manager(manager: Arc<UpstreamConfigManager>) -> Arc<AciService> {
     Arc::new(
         AciService::new_with_upstream_verifier(
@@ -638,6 +668,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
+            auth_passthrough: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -707,6 +738,74 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
 }
 
 #[tokio::test]
+async fn byok_auth_passthrough_forwards_caller_credential_not_a_static_token() {
+    let (base_url, provider_calls) = serve_openai_provider_fixture().await;
+    let path = temp_config_path();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
+            .unwrap(),
+    );
+    manager
+        .replace(vec![UpstreamConfig {
+            name: "byok-provider".to_string(),
+            provider: UpstreamProvider::OpenAiCompatible,
+            base_url: base_url.clone(),
+            path: None,
+            models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
+            bearer_token: None,
+            auth_passthrough: true,
+            accepted_workload_ids: None,
+            accepted_image_digests: None,
+            accepted_dstack_kms_root_public_keys: None,
+            pccs_url: None,
+            verifier_cache_seconds: None,
+            connect_timeout_seconds: None,
+            read_timeout_seconds: None,
+            verifier_request_timeout_seconds: None,
+            verification_refresh_seconds: None,
+            session_refresh_seconds: None,
+            chutes_e2ee_api_base: None,
+            chutes_chute_ids: None,
+            chutes_e2ee_discovery_rounds: None,
+            chutes_e2ee_discovery_interval_seconds: None,
+        }])
+        .unwrap();
+    let service = service_for_manager(manager);
+    let app = build_router(service);
+
+    // (a) The caller's own credential — not any static token — reaches upstream.
+    let (status, _, body) = call_with_auth(
+        app.clone(),
+        "POST",
+        "/v1/chat/completions",
+        CHAT_REQUEST,
+        Some("Bearer caller-byok-key"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    // (b) Absent caller credential => no Authorization header forwarded (a
+    // visible upstream decision), never a silent fallback.
+    let (status, _, body) =
+        call_with_auth(app, "POST", "/v1/chat/completions", CHAT_REQUEST, None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let calls = provider_calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].authorization.as_deref(),
+        Some("Bearer caller-byok-key"),
+        "passthrough must forward the caller credential verbatim",
+    );
+    assert_eq!(
+        calls[1].authorization, None,
+        "absent caller credential must not fall back to any token",
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     let (base_url, provider_calls) = serve_openai_provider_fixture().await;
     let path = temp_config_path();
@@ -728,6 +827,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
                 ),
             ]),
             bearer_token: Some("provider-secret".to_string()),
+            auth_passthrough: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -812,6 +912,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
+            auth_passthrough: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -835,6 +936,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             headers: Default::default(),
             path: None,
             target_route_id: None,
+            client_authorization: Default::default(),
         })
         .unwrap();
     let event = UpstreamVerifiedEvent {

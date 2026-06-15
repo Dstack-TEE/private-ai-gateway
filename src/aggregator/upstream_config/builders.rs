@@ -82,6 +82,23 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
     }
 }
 
+/// Whether a provider's backend honours BYOK `auth_passthrough`. Only the
+/// providers served by `OpenAICompatibleBackend` (wired with
+/// `with_auth_passthrough` below) forward the caller credential. Chutes uses a
+/// dedicated E2EE transport that ignores it, so enabling passthrough there
+/// would be a silent no-op — rejected at validation instead. Keep this in sync
+/// with the backend match arms in `build_provider_backend`.
+pub(super) fn provider_supports_auth_passthrough(provider: UpstreamProvider) -> bool {
+    match provider {
+        UpstreamProvider::Chutes => false,
+        UpstreamProvider::OpenAiCompatible
+        | UpstreamProvider::AciDcap
+        | UpstreamProvider::Tinfoil
+        | UpstreamProvider::NearAi
+        | UpstreamProvider::PhalaDirect => true,
+    }
+}
+
 fn build_provider_backend(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
@@ -118,7 +135,8 @@ fn build_provider_backend(
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
+            .with_name(cfg.name.clone())
+            .with_auth_passthrough(cfg.auth_passthrough);
             if let Some(token) = &cfg.bearer_token {
                 backend = backend.with_bearer_token(token.clone());
             }

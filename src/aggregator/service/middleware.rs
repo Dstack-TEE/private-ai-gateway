@@ -144,6 +144,7 @@ impl AciService {
                 body: candidate.body.clone(),
                 path: Some(endpoint_path.to_string()),
                 target_route_id: Some(route_id.clone()),
+                client_authorization: req.client_authorization.clone(),
                 ..Default::default()
             }) {
                 Ok(prepared) => prepared,

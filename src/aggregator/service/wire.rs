@@ -8,6 +8,7 @@ use futures_util::Stream;
 use super::{ReceiptOwner, ServiceError};
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::types::Receipt;
+use crate::aci::upstream::ClientAuthorization;
 use crate::aggregator::metrics::RequestMode;
 
 pub struct E2eeRequestParts<'a> {
@@ -228,6 +229,11 @@ pub struct ChatCompletionRequest<'a> {
     /// receipt that any caller can retrieve.
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
+    /// Caller credential to forward to a BYOK auth-passthrough upstream.
+    /// Empty for non-passthrough upstreams (the static token is used).
+    /// Typed as [`ClientAuthorization`] so the raw secret redacts on `Debug`
+    /// end-to-end, not just at the final hop.
+    pub client_authorization: ClientAuthorization,
 }
 
 #[derive(Debug, Clone, Default)]

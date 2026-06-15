@@ -4,7 +4,9 @@ use crate::aci::receipt::{
     ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent, VerificationResult,
 };
 use crate::aci::types::Receipt;
-use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{
+    ClientAuthorization, PreparedUpstreamRequest, UpstreamError, UpstreamRequest,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, WorkloadIdentityRef,
@@ -55,6 +57,7 @@ impl AciService {
             upstream_verification_event,
             requester: None,
             e2ee: None,
+            client_authorization: ClientAuthorization(None),
         })
         .await
     }
@@ -81,6 +84,7 @@ impl AciService {
             body: backend_input_body,
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
+            client_authorization: req.client_authorization.clone(),
             ..Default::default()
         })?;
         let forwarded_body = prepared.request.body.clone();
@@ -218,6 +222,7 @@ impl AciService {
             body: backend_input_body,
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
+            client_authorization: req.client_authorization.clone(),
             ..Default::default()
         })?;
         let forwarded_body = prepared.request.body.clone();
