@@ -21,6 +21,7 @@ use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
+use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::parse_config_text;
 
 use super::backend::{
@@ -547,11 +548,16 @@ pub(super) async fn aci_list_sessions(
                 .as_ref()
                 .map(|c| c.upstream_names_for_model(model))
                 .unwrap_or_default();
-            names
+            let mut merged = names
                 .iter()
                 .filter(|n| q.provider.as_deref().is_none_or(|p| p == n.as_str()))
                 .flat_map(|n| state.service.list_attested_sessions(Some(n)))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // Each per-upstream list is already sorted, but the fan-out just
+            // concatenates them — re-sort the merge so it matches the ordering of
+            // the single-channel path.
+            sort_sessions_newest_first(&mut merged);
+            merged
         }
         None => state.service.list_attested_sessions(q.provider.as_deref()),
     };

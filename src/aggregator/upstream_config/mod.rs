@@ -496,20 +496,21 @@ impl UpstreamConfigManager {
     }
 
     pub async fn refresh_provider_sessions(&self) -> Vec<UpstreamSessionRefreshResult> {
-        let (config, verifier, sessions) = {
-            let state = self
-                .state
-                .read()
-                .expect("upstream config manager state poisoned")
-                .clone();
-            let Some(verifier) = state.verifier.clone() else {
-                return Vec::new();
-            };
-            (state.config.clone(), verifier, state.sessions.clone())
+        // Clone the `Arc` out of the lock (cheap) and read the config off it —
+        // no need to deep-clone the whole config Vec each refresh tick.
+        let state = self
+            .state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .clone();
+        let Some(verifier) = state.verifier.clone() else {
+            return Vec::new();
         };
+        let sessions = state.sessions.clone();
 
         let mut results = Vec::new();
-        for cfg in config
+        for cfg in state
+            .config
             .iter()
             .filter(|cfg| cfg.provider == UpstreamProvider::Chutes)
             .filter(|cfg| session_refresh_seconds(cfg).is_some())
