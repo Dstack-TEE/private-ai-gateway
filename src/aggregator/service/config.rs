@@ -1,8 +1,13 @@
 use super::ServiceError;
 use crate::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki};
 
-/// Validate ACI §5.2 source-provenance arms.
+/// Validate source provenance before it is serialized in an attestation report.
+/// The binary derives runtime provenance from git-launcher; unknown provenance
+/// is valid and omitted from the wire report.
 pub fn validate_source_provenance(sp: &SourceProvenance) -> Result<(), ServiceError> {
+    if sp.is_unknown() {
+        return Ok(());
+    }
     let has_repo = sp.repo_url.as_deref().is_some_and(|s| !s.is_empty())
         && sp.repo_commit.as_deref().is_some_and(|s| !s.is_empty());
     let has_image = sp.image_digest.as_deref().is_some_and(|s| !s.is_empty());
@@ -31,6 +36,9 @@ pub(super) fn normalize_downstream_domain(raw: &str) -> Option<String> {
 pub struct AciServiceConfig {
     pub vendor: String,
     pub tee_type: String,
+    /// Runtime source provenance. The binary populates this from
+    /// `/etc/git-launcher/gateway.conf`; missing launcher metadata is
+    /// represented by `SourceProvenance::default()`.
     pub source_provenance: SourceProvenance,
     pub keyset_epoch: KeysetEpoch,
     pub identity_subject: Option<String>,

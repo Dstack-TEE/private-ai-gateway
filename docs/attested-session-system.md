@@ -232,8 +232,8 @@ mapping. A `failed` result asserts nothing.
   Absent or unverified GPU evidence leaves it `unknown` (we do not refute on an
   ambiguous negative). The raw `gpu_verified` / `gpu_arch` facts also stay in
   `extra`.
-- "generic" is the static / preverified / DCAP path with no provider identity:
-  it asserts only `tee_attested` (`VerifierDerived`), nothing else.
+- "generic" is a verifier path with no provider-specific identity: it asserts
+  only `tee_attested` (`VerifierDerived`), nothing else.
 
 ## Configuration
 

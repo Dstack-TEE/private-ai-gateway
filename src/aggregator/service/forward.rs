@@ -85,10 +85,12 @@ impl AciService {
         })?;
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
+        let upstream_required =
+            self.upstream_required_for_prepared(&prepared, req.upstream_required);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
-                req.upstream_required,
+                upstream_required,
                 req.upstream_verification_event,
             )
             .await?;
@@ -97,7 +99,7 @@ impl AciService {
             .forward_with_binding_reverify(
                 &prepared,
                 &mut recorded_event,
-                req.upstream_required,
+                upstream_required,
                 caller_supplied_upstream_event,
                 // Single forward: only flush the cache for an event we own.
                 false,
@@ -222,10 +224,12 @@ impl AciService {
         })?;
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
+        let upstream_required =
+            self.upstream_required_for_prepared(&prepared, req.upstream_required);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
-                req.upstream_required,
+                upstream_required,
                 req.upstream_verification_event,
             )
             .await?;
@@ -234,7 +238,7 @@ impl AciService {
             .forward_with_binding_reverify(
                 &prepared,
                 &mut recorded_event,
-                req.upstream_required,
+                upstream_required,
                 caller_supplied_upstream_event,
                 // Single forward: only flush the cache for an event we own.
                 false,
@@ -452,6 +456,18 @@ impl AciService {
         }
     }
 
+    pub(super) fn upstream_required_for_prepared(
+        &self,
+        prepared: &PreparedUpstreamRequest,
+        requested: Option<bool>,
+    ) -> Option<bool> {
+        if prepared.is_tee == Some(false) {
+            Some(false)
+        } else {
+            requested
+        }
+    }
+
     pub(super) async fn refresh_upstream_event(
         &self,
         prepared: &PreparedUpstreamRequest,
@@ -541,11 +557,13 @@ impl AciService {
         )?;
 
         let session_id = session.session_id.clone();
-        if let Err(err) = self.session_store.put_session(session, now) {
-            // Persisting the audit record must not break inference; a missing
-            // session simply resolves to "not found" for relying parties.
-            tracing::warn!(error = %err, session_id = %session_id, "failed to persist attested session");
-        }
+        self.session_store
+            .put_session(session, now)
+            .map_err(|err| {
+                ServiceError::SessionStore(format!(
+                    "failed to persist attested session {session_id}: {err}"
+                ))
+            })?;
         Ok(Some((session_id, claims)))
     }
 

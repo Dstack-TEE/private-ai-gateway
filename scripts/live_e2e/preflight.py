@@ -27,6 +27,7 @@ def preflight(
     providers: list[Provider],
     *,
     port: int,
+    dstack_endpoint: str = DEFAULT_DSTACK_ENDPOINT,
     env_file: Path = DEFAULT_ENV_FILE,
     check_build: bool = True,
 ) -> dict[str, object]:
@@ -58,7 +59,6 @@ def preflight(
         if not (verifier_dir / "__init__.py").exists():
             raise RuntimeError(f"vendored confidential_verifier not found: {verifier_dir}")
 
-    dstack_endpoint = os.getenv("PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT", DEFAULT_DSTACK_ENDPOINT)
     if dstack_endpoint.startswith("unix:"):
         socket_path = Path(dstack_endpoint.removeprefix("unix:"))
         if not socket_path.exists():
@@ -90,6 +90,7 @@ def main() -> None:
     parser.add_argument("--provider", action="append", default=[])
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     parser.add_argument("--port", type=int, default=18086)
+    parser.add_argument("--dstack-endpoint", default=DEFAULT_DSTACK_ENDPOINT)
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
     load_dotenv(args.env_file)
@@ -97,6 +98,7 @@ def main() -> None:
     summary = preflight(
         providers,
         port=args.port,
+        dstack_endpoint=args.dstack_endpoint,
         env_file=args.env_file,
         check_build=not args.no_build,
     )

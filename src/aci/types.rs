@@ -203,6 +203,15 @@ pub struct SourceProvenance {
     pub image_provenance: Option<Value>,
 }
 
+impl SourceProvenance {
+    pub fn is_unknown(&self) -> bool {
+        self.repo_url.is_none()
+            && self.repo_commit.is_none()
+            && self.image_digest.is_none()
+            && self.image_provenance.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Freshness {
     pub fetched_at: u64,
@@ -226,6 +235,7 @@ pub struct AttestationEnvelope {
     #[serde(rename = "report_data")]
     pub report_data_hex: String,
     pub keyset_endorsement: KeysetEndorsement,
+    #[serde(default, skip_serializing_if = "SourceProvenance::is_unknown")]
     pub source_provenance: SourceProvenance,
     pub freshness: Freshness,
     pub evidence: Value,
@@ -326,5 +336,79 @@ impl Receipt {
             "event_log": self.event_log.iter().map(ReceiptEvent::to_canonical_value).collect::<Vec<_>>(),
             "signature": sig,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AttestationEnvelope, Freshness, KeysetEndorsement, KeysetEpoch, PublicKeyMaterial,
+        SourceProvenance, WorkloadIdentity, WorkloadKeyset,
+    };
+    use serde_json::json;
+
+    fn minimal_envelope(source_provenance: SourceProvenance) -> AttestationEnvelope {
+        AttestationEnvelope {
+            vendor: "test".to_string(),
+            tee_type: "tdx".to_string(),
+            workload_keyset: WorkloadKeyset {
+                workload_identity: WorkloadIdentity {
+                    public_key: PublicKeyMaterial {
+                        algo: "test".to_string(),
+                        public_key_hex: "00".to_string(),
+                    },
+                    subject: None,
+                },
+                keyset_epoch: KeysetEpoch {
+                    version: 1,
+                    not_after: u64::MAX,
+                },
+                receipt_signing_keys: Vec::new(),
+                e2ee_public_keys: Vec::new(),
+                tls_public_keys: Vec::new(),
+            },
+            report_data_hex: "00".to_string(),
+            keyset_endorsement: KeysetEndorsement {
+                algo: "test".to_string(),
+                value_hex: "00".to_string(),
+            },
+            source_provenance,
+            freshness: Freshness {
+                fetched_at: 0,
+                stale_after: u64::MAX,
+            },
+            evidence: json!({}),
+        }
+    }
+
+    #[test]
+    fn unknown_source_provenance_is_hidden_on_the_wire() {
+        let value = serde_json::to_value(minimal_envelope(SourceProvenance::default())).unwrap();
+
+        assert!(value.get("source_provenance").is_none());
+    }
+
+    #[test]
+    fn known_source_provenance_is_reported_on_the_wire() {
+        let value = serde_json::to_value(minimal_envelope(SourceProvenance {
+            repo_url: Some("https://github.com/Dstack-TEE/private-ai-gateway.git".to_string()),
+            repo_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            image_digest: None,
+            image_provenance: None,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            value["source_provenance"]["repo_commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+    }
+
+    #[test]
+    fn missing_source_provenance_deserializes_as_unknown() {
+        let value = serde_json::to_value(minimal_envelope(SourceProvenance::default())).unwrap();
+        let envelope: AttestationEnvelope = serde_json::from_value(value).unwrap();
+
+        assert!(envelope.source_provenance.is_unknown());
     }
 }

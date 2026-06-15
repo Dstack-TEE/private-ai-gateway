@@ -4,7 +4,7 @@ use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 
-use super::dcap::CachedAciDcapVerification;
+use super::dcap::{aci_report_tls_channel_bindings, CachedAciDcapVerification};
 use super::dstack::verify_dstack_kms_identity_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
@@ -12,7 +12,8 @@ use crate::aci::keys::ALGO_ECDSA_SECP256K1;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{
     AttestationEnvelope, AttestationReport, Freshness, KeysetEndorsement, KeysetEpoch,
-    PublicKeyMaterial, ServiceCapabilities, SourceProvenance, WorkloadIdentity, WorkloadKeyset,
+    PublicKeyMaterial, ServiceCapabilities, SourceProvenance, TlsSpki, WorkloadIdentity,
+    WorkloadKeyset,
 };
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
@@ -99,6 +100,13 @@ fn declared_scope(provider: &str) -> Option<&'static str> {
         "near-ai" | "tinfoil" => Some("router"),
         _ => None,
     }
+}
+
+fn tls_binding_report(tls_public_keys: Vec<TlsSpki>, evidence: Value) -> AttestationReport {
+    let mut report = custody_report(&signing_key(7), Vec::new());
+    report.attestation.workload_keyset.tls_public_keys = tls_public_keys;
+    report.attestation.evidence = evidence;
+    report
 }
 
 fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<String> {
@@ -705,6 +713,136 @@ fn cached_aci_dcap_verification_preserves_channel_bindings() {
 
     assert_eq!(event.result, VerificationResult::Verified);
     assert_eq!(event.channel_bindings, cached.channel_bindings);
+}
+
+#[test]
+fn aci_report_tls_channel_bindings_preserves_service_wide_pins() {
+    let report = tls_binding_report(
+        vec![
+            TlsSpki {
+                domain: None,
+                spki_sha256_hex: "AA".repeat(32),
+            },
+            TlsSpki {
+                domain: None,
+                spki_sha256_hex: "bb".repeat(32),
+            },
+        ],
+        json!({}),
+    );
+
+    let bindings = aci_report_tls_channel_bindings(&report, "https://gateway.example").unwrap();
+
+    assert_eq!(
+        bindings,
+        vec![
+            ChannelBinding::TlsSpkiSha256 {
+                origin: "https://gateway.example".to_string(),
+                spki_sha256: "aa".repeat(32),
+            },
+            ChannelBinding::TlsSpkiSha256 {
+                origin: "https://gateway.example".to_string(),
+                spki_sha256: "bb".repeat(32),
+            },
+        ]
+    );
+}
+
+#[test]
+fn aci_report_tls_channel_bindings_selects_domain_binding_for_origin_host() {
+    let report = tls_binding_report(
+        vec![
+            TlsSpki {
+                domain: Some("api.example.com".to_string()),
+                spki_sha256_hex: "AA".repeat(32),
+            },
+            TlsSpki {
+                domain: Some("chat.example.com".to_string()),
+                spki_sha256_hex: "bb".repeat(32),
+            },
+        ],
+        json!({
+            "downstream_tls_binding": {
+                "domain": "API.EXAMPLE.COM.",
+                "spki_sha256": "AA".repeat(32),
+            }
+        }),
+    );
+
+    let bindings = aci_report_tls_channel_bindings(&report, "https://api.example.com").unwrap();
+
+    assert_eq!(
+        bindings,
+        vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "https://api.example.com".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }]
+    );
+}
+
+#[test]
+fn aci_report_tls_channel_bindings_rejects_domain_keyset_without_selected_binding() {
+    let report = tls_binding_report(
+        vec![TlsSpki {
+            domain: Some("api.example.com".to_string()),
+            spki_sha256_hex: "aa".repeat(32),
+        }],
+        json!({}),
+    );
+
+    let err = aci_report_tls_channel_bindings(&report, "https://api.example.com").unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("did not select a downstream TLS binding"));
+}
+
+#[test]
+fn aci_report_tls_channel_bindings_rejects_selected_binding_for_other_host() {
+    let report = tls_binding_report(
+        vec![
+            TlsSpki {
+                domain: Some("api.example.com".to_string()),
+                spki_sha256_hex: "aa".repeat(32),
+            },
+            TlsSpki {
+                domain: Some("chat.example.com".to_string()),
+                spki_sha256_hex: "bb".repeat(32),
+            },
+        ],
+        json!({
+            "downstream_tls_binding": {
+                "domain": "chat.example.com",
+                "spki_sha256": "bb".repeat(32),
+            }
+        }),
+    );
+
+    let err = aci_report_tls_channel_bindings(&report, "https://api.example.com").unwrap_err();
+
+    assert!(err.to_string().contains("does not match upstream host"));
+}
+
+#[test]
+fn aci_report_tls_channel_bindings_rejects_selected_binding_outside_keyset() {
+    let report = tls_binding_report(
+        vec![TlsSpki {
+            domain: Some("api.example.com".to_string()),
+            spki_sha256_hex: "aa".repeat(32),
+        }],
+        json!({
+            "downstream_tls_binding": {
+                "domain": "api.example.com",
+                "spki_sha256": "bb".repeat(32),
+            }
+        }),
+    );
+
+    let err = aci_report_tls_channel_bindings(&report, "https://api.example.com").unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("not present in the attested keyset"));
 }
 
 #[test]

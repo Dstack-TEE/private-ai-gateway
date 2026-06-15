@@ -1,0 +1,7 @@
+{
+  "bind": "0.0.0.0:8086",
+  "state_dir": "/var/lib/private-ai-gateway",
+  "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+  "admin_token": "<long-random-admin-token>",
+  "dstack_endpoint": "unix:/var/run/dstack.sock"
+}

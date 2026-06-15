@@ -84,9 +84,9 @@ Remaining:
 The gateway currently assumes one downstream TLS identity. Production deployments
 may need multiple custom domains bound to the same gateway workload.
 
-- Add runtime config for a domain-to-certificate mapping. Implemented through
-  `PRIVATE_AI_GATEWAY_TLS_DOMAIN_CERT_PATHS` and
-  `PRIVATE_AI_GATEWAY_TLS_DOMAIN_SPKI_SHA256`.
+- Add runtime config for a domain-to-certificate mapping. Implemented as
+  `tls.domain_certificates` in the static gateway config loaded from
+  `PRIVATE_AI_GATEWAY_CONFIG_PATH`. Raw SPKI inputs are not supported.
 - Publish all configured domain SPKI bindings in the attested keyset.
   Implemented.
 - Select the configured downstream domain binding from the HTTP `Host` and
@@ -112,7 +112,8 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   request context lookup. Implemented as a separate internal router builder and
   runtime listener when middleware is enabled.
 - Add optional UDS middleware mode with a fixture middleware for tests.
-  Implemented through `PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH`.
+  Implemented through router helpers and tests; not exposed by the static
+  gateway config.
 - Ensure external `X-Private-AI-Gateway-*` headers cannot steer the public
   frontend. Implemented by generating internal context server-side; covered by
   tests.
@@ -236,9 +237,9 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   transport/session binding logic as the gateway backend. The local proxy must
   fail closed when the upstream provider cannot be verified or when the verified
   binding cannot be enforced.
-- Keep the configuration minimal: local bind address, upstream config path, and
-  provider credentials. Avoid adding a separate verifier DSL or local policy
-  system.
+- Keep the configuration minimal: local bind address, provider credentials, and
+  the upstream config as a read-only input. Avoid adding a separate verifier DSL
+  or local policy system.
 - Document the trust model clearly: local proxy mode verifies upstream
   providers for the local user, but it does not claim to provide a TEE-backed
   ACI service identity to downstream clients.

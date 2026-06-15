@@ -49,9 +49,9 @@ futures-util = "0.3"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 
-# HTTP client (upstream forwarding). rustls-tls so we don't depend on
-# a system OpenSSL inside the launcher image.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# HTTP client (upstream forwarding). Rustls with native roots keeps TLS
+# validation normal without linking against system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
 
 # Errors and logging.
 thiserror = "1"

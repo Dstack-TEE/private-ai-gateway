@@ -121,6 +121,10 @@ pub(super) fn upstream_verification_error_response(err: UpstreamVerificationErro
     )
 }
 
+pub(super) fn unknown_downstream_host_response(err: ServiceError) -> Response {
+    error_response(StatusCode::NOT_FOUND, "not_found", err.to_string())
+}
+
 pub(super) fn error_response(
     status: StatusCode,
     error_type: &str,
