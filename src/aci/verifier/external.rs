@@ -31,9 +31,7 @@ pub enum ProviderVerifierConfigError {
 #[derive(Debug, Clone)]
 pub(super) struct ExternalProviderVerifier {
     provider: &'static str,
-    /// The channel boundary this provider attests, resolved once from
-    /// `UpstreamProvider::attestation_scope`. Drives channel-keying and the
-    /// fail-closed scope seam.
+    /// The channel boundary this provider attests (channel-keying + scope seam).
     scope: AttestationScope,
     command: Vec<String>,
     current_dir: Option<PathBuf>,
@@ -135,19 +133,8 @@ impl ExternalProviderVerifier {
         self
     }
 
-    /// Cache / channel-identity key for a verification, derived from the
-    /// provider's [`AttestationScope`]. A per-router provider (e.g. NEAR AI)
-    /// verifies one gateway TEE channel shared by every model behind it, so the
-    /// model is omitted from the key: a request for any model resolves to that
-    /// one verified channel, and the channel-addressed session dedups to one per
-    /// router. Per-model (Phala-direct) and per-instance (Chutes) providers keep
-    /// the model in the key, so each really is its own channel.
-    ///
-    /// A router-cached event is still tagged with the requesting model by
-    /// `CachedExternalProviderEvent::event_for`, so the receipt reports the right
-    /// per-request model. The model itself is never attested by a router channel;
-    /// a request-bound, per-instance model attestation is a roadmap item
-    /// (docs/roadmap.md) and would live on the receipt, not the channel session.
+    /// Cache / channel-identity key. A per-router provider shares one verified
+    /// channel across all its models, so the model is dropped from the key.
     fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
         let mut key = ExternalProviderVerifierCacheKey::from_request(request);
         if self.scope.is_per_router() {
@@ -381,13 +368,9 @@ impl ExternalProviderVerifier {
         })
     }
 
-    /// Fail-closed scope seam: a provider must attest the channel boundary it is
-    /// declared to use ([`AttestationScope`]). A per-router provider that returns
-    /// anything but router-scoped evidence — or declares no scope at all — is
-    /// rejected, so a router's attested session can never be sealed from
-    /// model-scoped evidence (which would split one channel into a session per
-    /// model). The served model is the gateway's request/receipt fact, never a
-    /// channel claim.
+    /// Fail-closed scope seam: a verified result must declare the scope its
+    /// provider attests; a per-router provider that returns model-scoped evidence,
+    /// or none, is rejected.
     fn enforce_attested_scope(&self, declared: Option<&str>) -> Result<(), String> {
         let expected = self.scope;
         match declared {
