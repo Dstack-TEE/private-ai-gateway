@@ -17,6 +17,7 @@ if __package__ in (None, ""):
 
 from live_e2e.common import (  # noqa: E402
     DEFAULT_ARTIFACT_DIR,
+    DEFAULT_DSTACK_ENDPOINT,
     DEFAULT_ENV_FILE,
     ROOT,
     Provider,
@@ -69,6 +70,7 @@ def main() -> None:
     parser.add_argument("--provider", default="chutes")
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     parser.add_argument("--port", type=int, default=18087)
+    parser.add_argument("--dstack-endpoint", default=DEFAULT_DSTACK_ENDPOINT)
     parser.add_argument("--artifacts-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--stage", action="append", type=Stage.parse, default=[])
     parser.add_argument("--warmup", type=int, default=1)
@@ -109,10 +111,16 @@ def main() -> None:
         summary["preflight"] = preflight(
             [provider],
             port=args.port,
+            dstack_endpoint=args.dstack_endpoint,
             env_file=args.env_file,
             check_build=not args.no_build,
         )
-        with AggregatorProcess([provider], port=args.port, artifact_dir=artifact_dir) as agg:
+        with AggregatorProcess(
+            [provider],
+            port=args.port,
+            dstack_endpoint=args.dstack_endpoint,
+            artifact_dir=artifact_dir,
+        ) as agg:
             sequence = 0
             for index in range(args.warmup):
                 sequence += 1

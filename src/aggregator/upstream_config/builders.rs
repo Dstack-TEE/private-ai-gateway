@@ -68,9 +68,9 @@ fn build_model_router(
     Ok(router)
 }
 
-/// Whether a provider performs hardware attestation (TEE). Non-TEE
-/// providers (plain OpenAI-compatible cloud APIs) are forwarded with
-/// TLS endpoint binding only and never fail closed for lack of evidence.
+/// Whether a provider route should participate in the default fail-closed
+/// upstream verification path. Plain OpenAI-compatible cloud APIs are forwarded
+/// with TLS endpoint binding only.
 fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible => false,
