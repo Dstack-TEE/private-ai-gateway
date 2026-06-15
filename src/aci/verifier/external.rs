@@ -20,6 +20,7 @@ use super::{current_unix_secs, decode_hex_32};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
+use crate::aggregator::upstream_config::AttestationScope;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
@@ -30,6 +31,10 @@ pub enum ProviderVerifierConfigError {
 #[derive(Debug, Clone)]
 pub(super) struct ExternalProviderVerifier {
     provider: &'static str,
+    /// The channel boundary this provider attests, resolved once from
+    /// `UpstreamProvider::attestation_scope`. Drives channel-keying and the
+    /// fail-closed scope seam.
+    scope: AttestationScope,
     command: Vec<String>,
     current_dir: Option<PathBuf>,
     env: Vec<(String, String)>,
@@ -44,6 +49,7 @@ pub(super) struct ExternalProviderVerifier {
 impl ExternalProviderVerifier {
     pub(super) fn private_inference(
         provider: &'static str,
+        scope: AttestationScope,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
@@ -59,6 +65,7 @@ impl ExternalProviderVerifier {
         ];
         Self {
             provider,
+            scope,
             command,
             // Run `uv run` in the gateway project so the bridge uses the gateway's
             // own uv environment and the vendored `scripts/confidential_verifier`
@@ -80,6 +87,7 @@ impl ExternalProviderVerifier {
     #[cfg(test)]
     pub(super) fn with_command(
         provider: &'static str,
+        scope: AttestationScope,
         command: Vec<String>,
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
@@ -88,6 +96,7 @@ impl ExternalProviderVerifier {
         }
         Ok(Self {
             provider,
+            scope,
             command,
             current_dir: None,
             env: Vec::new(),
@@ -103,11 +112,12 @@ impl ExternalProviderVerifier {
     #[cfg(test)]
     pub(super) fn with_command_and_cache(
         provider: &'static str,
+        scope: AttestationScope,
         command: Vec<String>,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
-        let mut verifier = Self::with_command(provider, command, timeout_seconds)?;
+        let mut verifier = Self::with_command(provider, scope, command, timeout_seconds)?;
         verifier.cache_ttl_seconds = cache_ttl_seconds;
         Ok(verifier)
     }
@@ -125,11 +135,32 @@ impl ExternalProviderVerifier {
         self
     }
 
+    /// Cache / channel-identity key for a verification, derived from the
+    /// provider's [`AttestationScope`]. A per-router provider (e.g. NEAR AI)
+    /// verifies one gateway TEE channel shared by every model behind it, so the
+    /// model is omitted from the key: a request for any model resolves to that
+    /// one verified channel, and the channel-addressed session dedups to one per
+    /// router. Per-model (Phala-direct) and per-instance (Chutes) providers keep
+    /// the model in the key, so each really is its own channel.
+    ///
+    /// A router-cached event is still tagged with the requesting model by
+    /// `CachedExternalProviderEvent::event_for`, so the receipt reports the right
+    /// per-request model. The model itself is never attested by a router channel;
+    /// a request-bound, per-instance model attestation is a roadmap item
+    /// (docs/roadmap.md) and would live on the receipt, not the channel session.
+    fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
+        let mut key = ExternalProviderVerifierCacheKey::from_request(request);
+        if self.scope.is_per_router() {
+            key.model_id = String::new();
+        }
+        key
+    }
+
     pub(super) async fn verify(
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = ExternalProviderVerifierCacheKey::from_request(&request);
+        let cache_key = self.cache_key(&request);
         if let Some(event) = self.cached_event(&cache_key, &request) {
             return event;
         }
@@ -144,7 +175,7 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = ExternalProviderVerifierCacheKey::from_request(&request);
+        let cache_key = self.cache_key(&request);
         let _verify_guard = self.verify_lock.lock().await;
         self.verify_uncached(request, cache_key).await
     }
@@ -246,10 +277,13 @@ impl ExternalProviderVerifier {
     }
 
     pub(super) fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        // Must use the same key as `verify`/`refresh` (channel-keyed for routers),
+        // otherwise invalidation would target a different entry than the one
+        // cached and a router's verification could never be flushed.
         self.cache
             .write()
             .expect("external provider verifier cache poisoned")
-            .remove(&ExternalProviderVerifierCacheKey::from_request(request));
+            .remove(&self.cache_key(request));
     }
 
     async fn run(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -326,6 +360,9 @@ impl ExternalProviderVerifier {
                     .to_string(),
             );
         }
+        if result == VerificationResult::Verified {
+            self.enforce_attested_scope(output.attested_scope.as_deref())?;
+        }
         Ok(UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
             provider: Some(self.provider.to_string()),
@@ -342,6 +379,37 @@ impl ExternalProviderVerifier {
             channel_bindings,
             provider_claims: output.provider_claims.clone(),
         })
+    }
+
+    /// Fail-closed scope seam: a provider must attest the channel boundary it is
+    /// declared to use ([`AttestationScope`]). A per-router provider that returns
+    /// anything but router-scoped evidence — or declares no scope at all — is
+    /// rejected, so a router's attested session can never be sealed from
+    /// model-scoped evidence (which would split one channel into a session per
+    /// model). The served model is the gateway's request/receipt fact, never a
+    /// channel claim.
+    fn enforce_attested_scope(&self, declared: Option<&str>) -> Result<(), String> {
+        let expected = self.scope;
+        match declared {
+            Some(token) => match AttestationScope::from_declared(token) {
+                Some(scope) if scope == expected => Ok(()),
+                Some(scope) => Err(format!(
+                    "provider verifier attested {} scope but {} is a per-{} provider",
+                    scope.as_declared(),
+                    self.provider,
+                    expected.as_declared(),
+                )),
+                None => Err(format!(
+                    "provider verifier returned an unrecognized attestation scope {token:?}"
+                )),
+            },
+            None if expected.is_per_router() => Err(format!(
+                "router provider {} did not declare its attestation scope; refusing to \
+                 seal a channel session from undeclared evidence",
+                self.provider,
+            )),
+            None => Ok(()),
+        }
     }
 
     fn record_provider_session(
@@ -437,6 +505,10 @@ struct ExternalProviderVerifierOutput {
     channel_bindings: Vec<ExternalChannelBinding>,
     #[serde(default)]
     provider_claims: Option<serde_json::Value>,
+    /// The channel boundary the verifier attests ("router" / "model" /
+    /// "instance"), enforced fail-closed against the provider's expected scope.
+    #[serde(default)]
+    attested_scope: Option<String>,
     #[serde(default)]
     chutes_session: Option<ChutesVerifiedDiscovery>,
 }

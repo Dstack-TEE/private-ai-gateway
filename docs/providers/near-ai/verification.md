@@ -57,9 +57,12 @@ connection before forwarding.
 
 ## Notes
 
-- Only the **gateway** component is verified here; NEAR AI's nested model attestations
-  are recorded as gateway-owned evidence (`model_attestations_sha256`) but not
-  re-verified on the lease path.
+- Only the **gateway** component is verified here, and NEAR AI is treated as a
+  router (`AttestationScope::PerRouter`): its nested per-model TD quotes are
+  **not** fetched or checked. The gateway does not re-verify them and nothing
+  binds them to the instance that served a given request, so the attested session
+  is the gateway *channel* only. A request-bound, per-instance model attestation
+  is a roadmap item, recorded on the receipt rather than in the session.
 - Requires a reachable dstack-verifier at `DSTACK_VERIFIER_URL` (default `:18080`).
 - NVIDIA NRAS JWT-signature hardening is a tracked defense-in-depth follow-up.
 

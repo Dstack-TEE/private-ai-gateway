@@ -66,8 +66,12 @@ connection before forwarding.
   (`<host>/.well-known/tinfoil-attestation`), `kds-proxy.tinfoil.sh` (AMD VCEK),
   the GitHub attestation proxy, and Sigstore's TUF root.
 - Router mode: by default this verifies the **router** enclave
-  (`tinfoilsh/confidential-model-router`); per-model identity within the router is a
-  separate concern. Override the repo via `provider_options.tinfoil_repo`.
+  (`tinfoilsh/confidential-model-router`). Tinfoil is a router
+  (`AttestationScope::PerRouter`): the attested session is that one verified
+  enclave channel, shared by every model behind it, so verification is keyed on
+  the channel and the served model is a receipt-level identifier. Per-model TEE
+  coverage is delegated to the verified router, which attests the model enclaves
+  it fronts. Override the repo via `provider_options.tinfoil_repo`.
 - Pin the dependency deliberately; the SDK is the source of truth for the check set,
   so upgrades should be reviewed.
 

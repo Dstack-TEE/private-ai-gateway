@@ -53,6 +53,32 @@ concept.
 - Keep the implementation small: reuse the existing upstream lease lifecycle
   where possible, and avoid introducing a policy DSL.
 
+### Router Upstreams: Model Attestation and One Session per Channel
+
+An attested session is a verified secure channel, and we never create more than
+one session per channel. The channel boundary a provider attests is a first-class
+property, `UpstreamProvider::attestation_scope()` → `AttestationScope`: per E2EE
+instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
+(NEAR AI) or model router (Tinfoil), where one channel fronts many models. The
+scope is the single source of truth: it drives channel-keyed verification (the
+model is dropped from the verifier cache key for routers, so every model resolves
+to one verified channel and one attested session) and is enforced fail-closed at
+the verifier seam — a verifier must attest the scope its provider is declared to
+use, so a router channel can never be sealed from model-scoped evidence. The
+served model stays a receipt-level fact (see
+[attested-session-system.md](attested-session-system.md)).
+
+Remaining:
+
+- **Request-bound, per-instance model attestation on the receipt.** Today,
+  per-model TEE coverage is delegated to the verified router: the router attests
+  its backend model TEEs, and we verify the router's own integrity and source
+  provenance, so the delegation is sound. What it does not yet establish is which
+  *specific* backend instance served a *given* request. Once an upstream can
+  attest that exact instance, surface it as its own scoped, request-bound model
+  attestation on the receipt — tightening the delegation, never folded into the
+  channel session.
+
 ### P0: Multi-Domain Downstream TLS Binding
 
 The gateway currently assumes one downstream TLS identity. Production deployments

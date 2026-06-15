@@ -40,6 +40,53 @@ fn test_upstream_config(
     }
 }
 
+#[test]
+fn router_provider_verifies_once_per_channel() {
+    // A router (NEAR AI) with several models yields ONE verification target — the
+    // shared gateway channel — so it seals one session per channel, not one per
+    // model. A per-model provider keeps one target per model.
+    let mut router = test_upstream_config("near-router", UpstreamProvider::NearAi, "pub-a", "up-a");
+    router
+        .models
+        .insert("pub-b".to_string(), "up-b".to_string());
+    assert_eq!(
+        super::validation::verification_targets(std::slice::from_ref(&router)).len(),
+        1,
+        "router collapses its models to one channel target"
+    );
+
+    let mut per_model =
+        test_upstream_config("phala", UpstreamProvider::PhalaDirect, "pub-a", "up-a");
+    per_model
+        .models
+        .insert("pub-b".to_string(), "up-b".to_string());
+    assert_eq!(
+        super::validation::verification_targets(std::slice::from_ref(&per_model)).len(),
+        2,
+        "per-model provider verifies every model"
+    );
+}
+
+#[test]
+fn provider_attestation_scopes() {
+    // NEAR AI (gateway TD) and Tinfoil (confidential-model-router) front many
+    // models behind one verified channel, so they are per-router. Phala-direct
+    // verifies a TEE per model; Chutes a key per instance; the rest default to
+    // per-model. Only per-router drops the model from the channel identity.
+    use AttestationScope::*;
+    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
+    assert_eq!(
+        UpstreamProvider::OpenAiCompatible.attestation_scope(),
+        PerModel
+    );
+    assert_eq!(UpstreamProvider::AciDcap.attestation_scope(), PerModel);
+    assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
+    assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
+}
+
 #[async_trait]
 impl UpstreamVerifier for CountingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -153,7 +200,9 @@ async fn prewarm_verification_deduplicates_upstream_models() {
     let invalidations = Arc::new(AtomicUsize::new(0));
     let config = vec![UpstreamConfig {
         name: "provider-a".to_string(),
-        provider: UpstreamProvider::Tinfoil,
+        // Per-model provider (not a router): two public models sharing one
+        // upstream model dedup to one target; a third yields a second.
+        provider: UpstreamProvider::PhalaDirect,
         base_url: "https://provider-a.example/".to_string(),
         path: None,
         models: BTreeMap::from([

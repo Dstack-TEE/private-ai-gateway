@@ -110,14 +110,20 @@ Required behavior:
   the verified workload
 - prevent aliases from bypassing the verified model identity
 
-For gateway providers, a model-scoped probe is preferred over trusting static
-catalog metadata. The NEAR AI rule is the reference example:
+For gateway providers, the verified gateway channel is the authoritative check;
+static catalog metadata is never trusted. NEAR AI is the reference example — it
+is a router, so the verified gateway channel itself is authoritative; the model
+is only the shape of NEAR's `/v1/attestation/report` endpoint, and the gateway
+attestation it returns is the same for every model:
 
 ```text
 verified gateway channel
-+ /v1/attestation/report?model=<canonical-model>
-+ non-empty model_attestations[]
+(workload identity + source provenance + runtime policy + TLS SPKI binding)
 ```
+
+Per-model TEE coverage is delegated to the verified gateway, which attests its
+own backends; the nested `model_attestations[]` are not re-verified here. The
+gateway is trusted because it is itself verified for integrity and provenance.
 
 The review must call out aliasing and actual served weights. If the provider
 cannot prove the exact backend model or quantization, receipts must be honest
@@ -374,6 +380,7 @@ Every provider adapter should return the same class of result to Rust:
   "provider": "near-ai",
   "model_id": "canonical-model",
   "verifier_id": "provider-verifier/version",
+  "attested_scope": "router",
   "evidence": {
     "digest": "sha256:...",
     "data": "data:application/json;base64,<exact-verifier-input-bytes>"
@@ -388,10 +395,10 @@ Every provider adapter should return the same class of result to Rust:
     }
   ],
   "provider_claims": {
-    "trust_boundary": "gateway",
-    "evidence_scope": "model",
+    "trust_boundary": "near-ai-gateway",
     "gateway_verified": true,
-    "model_evidence_present": true
+    "gateway_tls_spki_sha256": "...",
+    "tcb_status": "UpToDate"
   }
 }
 ```
@@ -432,7 +439,7 @@ forward the request, and record the receipt.
 
 | Provider | Trust boundary | Decision | Blocking TODOs |
 | --- | --- | --- | --- |
-| NEAR AI | Verified gateway workload | Acceptable with conditions | Pin accepted gateway provenance/runtime policy; define pre-production measurement publication process; confirm no off-TEE TLS termination; keep model-scoped attestation probe mandatory; finish privacy/log/storage review. |
+| NEAR AI | Verified gateway workload | Acceptable with conditions | Pin accepted gateway provenance/runtime policy; define pre-production measurement publication process; confirm no off-TEE TLS termination; finish privacy/log/storage review. |
 | Tinfoil | Verified confidential router | Acceptable with conditions | Pin audited router compose/image digest; define pre-production measurement publication process; decide runtime config update policy; record selected `Tinfoil-Enclave`; finish strict release pins. |
 | Chutes | Verified E2EE model instances | Accepted for limited traffic | Pin exact `chute_id` or unique slug for production models; resolve nonce-throughput limit before general production; document served-model alias limitations. |
 | SecretAI | Verified single SEV-SNP VM | Acceptable with conditions | Pin reviewed `artifacts_ver` allowlist (`secretvm-verify/.../sev.json`); pin `secret-ai-caddy` compose / image; confirm production journal stays inside the trust boundary; define SCRT pre-production measurement publication; treat TLS-cert renewal as forced lease refresh (binding is to cert SHA-256, not SPKI). |

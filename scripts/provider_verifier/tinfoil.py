@@ -96,10 +96,26 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     used_router = bool(getattr(doc, "selected_router_endpoint", "")) or repo.endswith(
         "confidential-model-router"
     )
+    # Tinfoil is a router upstream: we request the router attestation (the
+    # confidential-model-router enclave) explicitly rather than inferring the
+    # scope from the response. The verified channel is that router enclave,
+    # shared by every model, so the attested session is per router (like NEAR
+    # AI) and the served model is recorded on the receipt, not in the session.
+    # Fail closed if the verification was not router-scoped, so a non-router
+    # deployment can never be treated as one channel for many models.
+    if not used_router:
+        failed(
+            provider,
+            "Tinfoil verification was not router-scoped; expected the "
+            f"confidential-model-router enclave (repo={repo!r})",
+            evidence=evidence,
+        )
+        return
     emit(
         {
             "result": "verified",
             "verifier_id": "tinfoil-verifier/v1",
+            "attested_scope": "router",
             "evidence": evidence,
             "channel_bindings": [
                 {
@@ -109,10 +125,12 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 }
             ],
             "provider_claims": {
-                "trust_boundary": "router" if used_router else "model",
-                "evidence_scope": "router" if used_router else "model",
-                "canonical_model_id": request["model_id"],
-                "used_router": used_router,
+                # Router channel scope — model-independent. The served model is
+                # deliberately NOT folded in: it would split one verified channel
+                # into a session per model, and it is recorded on the receipt.
+                "trust_boundary": "router",
+                "evidence_scope": "router",
+                "used_router": True,
                 "config_repo": doc.config_repo,
                 "release_digest": doc.release_digest,
                 "code_fingerprint": doc.code_fingerprint,

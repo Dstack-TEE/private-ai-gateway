@@ -189,12 +189,14 @@ Provider-specific rules:
   and vendored Tinfoil model/router metadata. The accepted binding is the TLS
   SPKI digest committed in the attestation report data.
 - NEAR AI: request attestation with TLS fingerprint binding, verify the
-  gateway workload through `DSTACK_VERIFIER_URL`, enforce the gateway TLS SPKI,
-  then fetch a model-scoped attestation report over that verified channel and
-  require non-empty `model_attestations[]`. The nested model attestations are
-  hashed and recorded as gateway-owned model evidence; Private AI Gateway does not need to
-  re-verify them in the normal lease path. External-provider models that cannot
-  produce model evidence are skipped unless a test explicitly expects
+  gateway workload through `DSTACK_VERIFIER_URL`, and enforce the gateway TLS
+  SPKI. NEAR AI is a router (`PerRouter`): the attested session is the verified
+  gateway channel, shared by every model. The report is fetched with a model
+  parameter only because that is the shape of NEAR's endpoint; the nested
+  `model_attestations[]` it carries are not required, checked, or recorded —
+  they are not bound to the request's instance — and the served model is a
+  receipt-level identifier. External-provider models that cannot produce
+  gateway-backed evidence are skipped unless a test explicitly expects
   rejection.
 - Chutes: verify the TDX report data binds `nonce || e2e_pubkey`, verify DCAP,
   verify the public measurement profile against a reviewed reference, verify
