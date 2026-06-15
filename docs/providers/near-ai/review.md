@@ -186,8 +186,7 @@ Adapter rule:
 
 ```text
 /v1/model/list flags are advisory.
-The model-scoped attestation report over the verified gateway channel is
-authoritative for lease establishment.
+The verified gateway channel is authoritative for lease establishment.
 ```
 
 ## `model_attestations[]` Semantics
@@ -225,8 +224,10 @@ or pinned:
   should otherwise prove the allowed backend image/compose set.
 - The lease is refreshed often enough that model catalog changes, provider
   refreshes, and backend key rotation do not outlive Private AI Gateway's cached trust.
-- Private AI Gateway treats external providers as not verified unless the verified gateway
-  can produce model-scoped attestation evidence for that model.
+- Receipts claim only what the channel attestation proves: a verified gateway
+  channel with the served model as a bare identifier. Whether a given model is
+  genuinely TEE-backed (vs an external provider behind the gateway) is not proven
+  by the channel attestation, so receipts do not imply per-model TEE protection.
 
 ## Privacy and Operations Caveats
 

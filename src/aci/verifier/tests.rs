@@ -9,13 +9,14 @@ use super::dstack::verify_dstack_kms_identity_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ECDSA_SECP256K1;
-use crate::aci::receipt::{ChannelBinding, VerificationResult};
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{
     AttestationEnvelope, AttestationReport, Freshness, KeysetEndorsement, KeysetEpoch,
     PublicKeyMaterial, ServiceCapabilities, SourceProvenance, WorkloadIdentity, WorkloadKeyset,
 };
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::aggregator::upstream_config::AttestationScope;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
@@ -90,21 +91,20 @@ fn custody_report(identity: &SigningKey, signature_chain: Vec<String>) -> Attest
     }
 }
 
-/// The attestation scope a stub verifier should declare to satisfy the
-/// fail-closed scope seam — mirrors `attestation_scope_for_provider`.
-fn declared_scope(provider: &str) -> &'static str {
+/// The scope token a stub verifier declares. Only routers declare a scope in
+/// production (near.ai / Tinfoil); per-model and per-instance verifiers omit it
+/// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
+fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" => "router",
-        "chutes" => "instance",
-        _ => "model",
+        "near-ai" | "tinfoil" => Some("router"),
+        _ => None,
     }
 }
 
 fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<String> {
-    let output = json!({
+    let mut output = json!({
         "result": "verified",
         "verifier_id": verifier_id,
-        "attested_scope": declared_scope(provider),
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
@@ -114,8 +114,11 @@ fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<Str
             "fixture_provider": provider,
             "model_evidence_present": true,
         },
-    })
-    .to_string();
+    });
+    if let Some(scope) = declared_scope(provider) {
+        output["attested_scope"] = json!(scope);
+    }
+    let output = output.to_string();
     let script = format!(
         r#"payload="$(cat)"
 case "$payload" in
@@ -132,17 +135,19 @@ fn counting_provider_script(
     verifier_id: &str,
     binding: Value,
 ) -> Vec<String> {
-    let output = json!({
+    let mut output = json!({
         "result": "verified",
         "verifier_id": verifier_id,
-        "attested_scope": declared_scope(provider),
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
-    })
-    .to_string();
+    });
+    if let Some(scope) = declared_scope(provider) {
+        output["attested_scope"] = json!(scope);
+    }
+    let output = output.to_string();
     let script = format!(
         r#"payload="$(cat)"
 case "$payload" in
@@ -392,6 +397,7 @@ async fn external_provider_verifier_caches_verified_bindings() {
     let _ = std::fs::remove_file(&counter_path);
     let verifier = ExternalProviderVerifier::with_command_and_cache(
         "tinfoil",
+        AttestationScope::PerRouter,
         counting_provider_script(
             &counter_path,
             "tinfoil",
@@ -447,12 +453,15 @@ async fn router_shares_one_channel_verification_across_models() {
     // model, so verifying a second model reuses the first model's verification
     // (one external run) and event_for re-tags it with the requesting model. A
     // per-model provider must NOT share — each model is its own channel.
-    for (provider, expected_runs) in [("near-ai", "1"), ("phala-direct", "2")] {
-        // Each provider declares its own scope so the fail-closed seam accepts it.
-        let output = json!({
+    for (provider, scope, expected_runs) in [
+        ("near-ai", AttestationScope::PerRouter, "1"),
+        ("phala-direct", AttestationScope::PerModel, "2"),
+    ] {
+        // The stub declares the provider's scope (routers) or omits it (per-model)
+        // just like production, so the fail-closed seam accepts it.
+        let mut output = json!({
             "result": "verified",
             "verifier_id": "router-cache-test/v1",
-            "attested_scope": declared_scope(provider),
             "evidence": {
                 "digest": format!("sha256:{}", "11".repeat(32)),
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
@@ -462,8 +471,11 @@ async fn router_shares_one_channel_verification_across_models() {
                 "origin": "https://router.example",
                 "spki_sha256": "AA".repeat(32),
             }],
-        })
-        .to_string();
+        });
+        if let Some(token) = declared_scope(provider) {
+            output["attested_scope"] = json!(token);
+        }
+        let output = output.to_string();
         // Counts every external run and verifies any model (unlike
         // counting_provider_script, which is pinned to one model_id).
         let script = format!(
@@ -480,6 +492,7 @@ printf '%s' '{output}'"#
         let _ = std::fs::remove_file(&counter_path);
         let verifier = ExternalProviderVerifier::with_command_and_cache(
             provider,
+            scope,
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
@@ -520,6 +533,81 @@ printf '%s' '{output}'"#
 }
 
 #[tokio::test]
+async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
+    // The fail-closed seam: a Verified result must attest the scope its provider
+    // is declared to use. A router that comes back model-scoped, undeclared, or
+    // with a garbage token is rejected before the event is trusted or cached;
+    // a non-router that omits the scope (the production path) is accepted.
+    async fn verify_with_scope(
+        provider: &'static str,
+        scope: AttestationScope,
+        declared: Option<&str>,
+    ) -> UpstreamVerifiedEvent {
+        let mut output = json!({
+            "result": "verified",
+            "verifier_id": "scope-seam-test/v1",
+            "channel_bindings": [{
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }],
+        });
+        if let Some(token) = declared {
+            output["attested_scope"] = json!(token);
+        }
+        let script = format!("cat >/dev/null; printf '%s' '{}'", output);
+        let verifier = ExternalProviderVerifier::with_command(
+            provider,
+            scope,
+            vec!["/bin/sh".to_string(), "-c".to_string(), script],
+            5,
+        )
+        .unwrap();
+        verifier
+            .verify(UpstreamVerificationRequest {
+                upstream_name: "scope-seam-upstream".to_string(),
+                url_origin: Some("https://provider.example".to_string()),
+                model_id: "model-a".to_string(),
+                forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+                required: true,
+            })
+            .await
+    }
+
+    // Router declaring the wrong (model) scope → rejected.
+    let mismatch = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("model")).await;
+    assert_eq!(mismatch.result, VerificationResult::Failed);
+    assert!(mismatch.reason.unwrap().contains("per-router"));
+
+    // Router declaring no scope at all → rejected (it must declare).
+    let missing = verify_with_scope("near-ai", AttestationScope::PerRouter, None).await;
+    assert_eq!(missing.result, VerificationResult::Failed);
+    assert!(missing.reason.unwrap().contains("did not declare"));
+
+    // Any verifier returning a garbage token → rejected.
+    let unknown = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("galaxy")).await;
+    assert_eq!(unknown.result, VerificationResult::Failed);
+    assert!(unknown.reason.unwrap().contains("unrecognized"));
+
+    // Per-instance provider declaring its matching scope → accepted.
+    let instance =
+        verify_with_scope("chutes", AttestationScope::PerInstance, Some("instance")).await;
+    assert_eq!(instance.result, VerificationResult::Verified);
+
+    // Per-instance provider declaring router scope → rejected (mismatch the other
+    // direction, so the seam isn't router-only).
+    let instance_mismatch =
+        verify_with_scope("chutes", AttestationScope::PerInstance, Some("router")).await;
+    assert_eq!(instance_mismatch.result, VerificationResult::Failed);
+    assert!(instance_mismatch.reason.unwrap().contains("per-instance"));
+
+    // Per-model provider that omits the scope → accepted (Phala-direct / Chutes
+    // don't declare one).
+    let omitted = verify_with_scope("phala-direct", AttestationScope::PerModel, None).await;
+    assert_eq!(omitted.result, VerificationResult::Verified);
+}
+
+#[tokio::test]
 async fn external_provider_refresh_keeps_existing_cache_on_failure() {
     let counter_path = std::env::temp_dir().join(format!(
         "private-ai-gateway-provider-refresh-cache-test-{}",
@@ -555,6 +643,7 @@ fi"#
     );
     let verifier = ExternalProviderVerifier::with_command_and_cache(
         "tinfoil",
+        AttestationScope::PerRouter,
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),

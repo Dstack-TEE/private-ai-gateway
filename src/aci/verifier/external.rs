@@ -20,7 +20,7 @@ use super::{current_unix_secs, decode_hex_32};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
-use crate::aggregator::upstream_config::{attestation_scope_for_provider, AttestationScope};
+use crate::aggregator::upstream_config::AttestationScope;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
@@ -31,6 +31,10 @@ pub enum ProviderVerifierConfigError {
 #[derive(Debug, Clone)]
 pub(super) struct ExternalProviderVerifier {
     provider: &'static str,
+    /// The channel boundary this provider attests, resolved once from
+    /// `UpstreamProvider::attestation_scope`. Drives channel-keying and the
+    /// fail-closed scope seam.
+    scope: AttestationScope,
     command: Vec<String>,
     current_dir: Option<PathBuf>,
     env: Vec<(String, String)>,
@@ -45,6 +49,7 @@ pub(super) struct ExternalProviderVerifier {
 impl ExternalProviderVerifier {
     pub(super) fn private_inference(
         provider: &'static str,
+        scope: AttestationScope,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Self {
@@ -60,6 +65,7 @@ impl ExternalProviderVerifier {
         ];
         Self {
             provider,
+            scope,
             command,
             // Run `uv run` in the gateway project so the bridge uses the gateway's
             // own uv environment and the vendored `scripts/confidential_verifier`
@@ -81,6 +87,7 @@ impl ExternalProviderVerifier {
     #[cfg(test)]
     pub(super) fn with_command(
         provider: &'static str,
+        scope: AttestationScope,
         command: Vec<String>,
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
@@ -89,6 +96,7 @@ impl ExternalProviderVerifier {
         }
         Ok(Self {
             provider,
+            scope,
             command,
             current_dir: None,
             env: Vec::new(),
@@ -104,11 +112,12 @@ impl ExternalProviderVerifier {
     #[cfg(test)]
     pub(super) fn with_command_and_cache(
         provider: &'static str,
+        scope: AttestationScope,
         command: Vec<String>,
         timeout_seconds: u64,
         cache_ttl_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
-        let mut verifier = Self::with_command(provider, command, timeout_seconds)?;
+        let mut verifier = Self::with_command(provider, scope, command, timeout_seconds)?;
         verifier.cache_ttl_seconds = cache_ttl_seconds;
         Ok(verifier)
     }
@@ -141,7 +150,7 @@ impl ExternalProviderVerifier {
     /// (docs/roadmap.md) and would live on the receipt, not the channel session.
     fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
         let mut key = ExternalProviderVerifierCacheKey::from_request(request);
-        if attestation_scope_for_provider(self.provider).is_per_router() {
+        if self.scope.is_per_router() {
             key.model_id = String::new();
         }
         key
@@ -380,7 +389,7 @@ impl ExternalProviderVerifier {
     /// model). The served model is the gateway's request/receipt fact, never a
     /// channel claim.
     fn enforce_attested_scope(&self, declared: Option<&str>) -> Result<(), String> {
-        let expected = attestation_scope_for_provider(self.provider);
+        let expected = self.scope;
         match declared {
             Some(token) => match AttestationScope::from_declared(token) {
                 Some(scope) if scope == expected => Ok(()),

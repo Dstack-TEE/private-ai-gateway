@@ -12,6 +12,7 @@ use super::external::ProviderVerifierConfigError;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::aggregator::upstream_config::UpstreamProvider;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {
@@ -27,6 +28,7 @@ impl ChutesProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -41,6 +43,7 @@ impl ChutesProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             )
@@ -88,7 +91,12 @@ impl ChutesProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command("chutes", command, timeout_seconds)?,
+            verifier: ExternalProviderVerifier::with_command(
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
         })
     }
 
@@ -99,8 +107,13 @@ impl ChutesProviderVerifier {
         session_store: Arc<ChutesSessionStore>,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command("chutes", command, timeout_seconds)?
-                .with_chutes_session_store(session_store),
+            verifier: ExternalProviderVerifier::with_command(
+                "chutes",
+                UpstreamProvider::Chutes.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?
+            .with_chutes_session_store(session_store),
         })
     }
 }
@@ -134,6 +147,7 @@ impl TinfoilProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "tinfoil",
+                UpstreamProvider::Tinfoil.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -146,7 +160,12 @@ impl TinfoilProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command("tinfoil", command, timeout_seconds)?,
+            verifier: ExternalProviderVerifier::with_command(
+                "tinfoil",
+                UpstreamProvider::Tinfoil.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
         })
     }
 }
@@ -180,6 +199,7 @@ impl NearAiProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "near-ai",
+                UpstreamProvider::NearAi.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -192,7 +212,12 @@ impl NearAiProviderVerifier {
         timeout_seconds: u64,
     ) -> Result<Self, ProviderVerifierConfigError> {
         Ok(Self {
-            verifier: ExternalProviderVerifier::with_command("near-ai", command, timeout_seconds)?,
+            verifier: ExternalProviderVerifier::with_command(
+                "near-ai",
+                UpstreamProvider::NearAi.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
         })
     }
 }
@@ -235,6 +260,7 @@ impl PhalaDirectProviderVerifier {
         Self {
             verifier: ExternalProviderVerifier::private_inference(
                 "phala-direct",
+                UpstreamProvider::PhalaDirect.attestation_scope(),
                 timeout_seconds,
                 cache_ttl_seconds,
             ),
@@ -258,6 +284,7 @@ impl PhalaDirectProviderVerifier {
         Ok(Self {
             verifier: ExternalProviderVerifier::with_command(
                 "phala-direct",
+                UpstreamProvider::PhalaDirect.attestation_scope(),
                 command,
                 timeout_seconds,
             )?,

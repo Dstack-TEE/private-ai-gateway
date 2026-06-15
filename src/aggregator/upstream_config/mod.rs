@@ -158,22 +158,18 @@ pub enum UpstreamProvider {
 }
 
 impl UpstreamProvider {
-    /// The provider's stable wire string — the kebab name shared by this enum's
-    /// serde and the external verifier's `provider` field.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            UpstreamProvider::OpenAiCompatible => "openai-compatible",
-            UpstreamProvider::AciDcap => "aci-dcap",
-            UpstreamProvider::Chutes => "chutes",
-            UpstreamProvider::Tinfoil => "tinfoil",
-            UpstreamProvider::NearAi => "near-ai",
-            UpstreamProvider::PhalaDirect => "phala-direct",
-        }
-    }
-
-    /// The channel boundary this provider attests; see [`AttestationScope`].
+    /// The channel boundary this provider attests — the single source of truth
+    /// for [`AttestationScope`]. Exhaustive by design: adding a provider is a
+    /// compile error here until it declares a scope, so a new variant can never
+    /// silently inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
-        attestation_scope_for_provider(self.as_str())
+        match self {
+            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
+            UpstreamProvider::Chutes => AttestationScope::PerInstance,
+            UpstreamProvider::OpenAiCompatible
+            | UpstreamProvider::AciDcap
+            | UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+        }
     }
 }
 
@@ -189,7 +185,8 @@ impl UpstreamProvider {
 /// This is the single axis that decides channel-keyed verification (the model
 /// is dropped from the verifier cache key for routers) and is enforced
 /// fail-closed at the verifier seam: a verifier must attest the scope its
-/// provider is declared to use.
+/// provider is declared to use. It is resolved once via
+/// [`UpstreamProvider::attestation_scope`] and carried on the verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestationScope {
     PerRouter,
@@ -221,20 +218,6 @@ impl AttestationScope {
             Self::PerModel => "model",
             Self::PerInstance => "instance",
         }
-    }
-}
-
-/// The attestation scope for a provider's wire string — the single source of
-/// truth, consulted by both [`UpstreamProvider::attestation_scope`] and the
-/// external verifier (for channel-keying and the fail-closed scope seam).
-///
-/// Unrecognized providers default to per-model: never collapse models onto one
-/// channel without a positive reason to.
-pub(crate) fn attestation_scope_for_provider(provider: &str) -> AttestationScope {
-    match provider {
-        "near-ai" | "tinfoil" => AttestationScope::PerRouter,
-        "chutes" => AttestationScope::PerInstance,
-        _ => AttestationScope::PerModel,
     }
 }
 

@@ -77,9 +77,8 @@ Remaining:
   re-verify them and they are not bound to the specific instance that serves a
   request, so they cannot stand as a sound per-model attestation. Once an upstream
   can attest the exact instance that served a request, surface that as its own
-  scoped,
-  request-bound attestation on the receipt — never folded into the channel
-  session.
+  scoped, request-bound attestation on the receipt — never folded into the
+  channel session.
 
 ### P0: Multi-Domain Downstream TLS Binding
 
