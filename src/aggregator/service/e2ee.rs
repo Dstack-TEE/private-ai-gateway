@@ -61,7 +61,14 @@ impl AciService {
         if !key_custody.is_null() {
             evidence["key_custody"] = key_custody;
         }
-        if let Some(binding) = domain.and_then(|domain| self.downstream_tls_binding(domain)) {
+        if self.has_domain_scoped_tls_keys() {
+            let domain = domain.ok_or(ServiceError::DownstreamTlsDomainMissing)?;
+            let binding = self
+                .downstream_tls_binding(domain)
+                .ok_or_else(|| ServiceError::DownstreamTlsDomainUnknown(domain.to_string()))?;
+            evidence["downstream_tls_binding"] = binding;
+        } else if let Some(binding) = domain.and_then(|domain| self.downstream_tls_binding(domain))
+        {
             evidence["downstream_tls_binding"] = binding;
         }
 
@@ -97,6 +104,13 @@ impl AciService {
                     "spki_sha256": key.spki_sha256_hex,
                 })
             })
+    }
+
+    fn has_domain_scoped_tls_keys(&self) -> bool {
+        self.keyset
+            .tls_public_keys
+            .iter()
+            .any(|key| key.domain.is_some())
     }
 
     pub fn prepare_e2ee_v2_request(

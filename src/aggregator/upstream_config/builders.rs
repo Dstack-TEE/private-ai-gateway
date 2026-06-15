@@ -68,9 +68,9 @@ fn build_model_router(
     Ok(router)
 }
 
-/// Whether a provider performs hardware attestation (TEE). Non-TEE
-/// providers (plain OpenAI-compatible cloud APIs) are forwarded with
-/// TLS endpoint binding only and never fail closed for lack of evidence.
+/// Whether a provider route should participate in the default fail-closed
+/// upstream verification path. Plain OpenAI-compatible cloud APIs are forwarded
+/// with TLS endpoint binding only.
 fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible => false,
@@ -335,8 +335,9 @@ fn build_aci_dcap_verifier(
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
         )),
         None => Ok(Arc::new(
-            AciDcapUpstreamVerifier::with_default_pccs_and_timeouts(
+            AciDcapUpstreamVerifier::new_with_timeouts(
                 cfg.base_url.clone(),
+                dcap_qvl::PHALA_PCCS_URL.to_string(),
                 policy,
                 cache_seconds,
                 connect_timeout_seconds,

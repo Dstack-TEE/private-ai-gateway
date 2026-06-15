@@ -73,32 +73,28 @@ impl ServerCertVerifier for SpkiPinVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        let verified = self.inner.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        )?;
-        if !self.accepted_certificates.is_empty() {
-            let digest = hex::encode(Sha256::digest(end_entity.as_ref()));
-            if !self.accepted_certificates.contains(&digest) {
-                return Err(RustlsError::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
-                ));
-            }
+        if self.accepted.is_empty() && self.accepted_certificates.is_empty() {
+            return Err(RustlsError::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ));
         }
+
+        let certificate_digest = hex::encode(Sha256::digest(end_entity.as_ref()));
+        let certificate_matches = self.accepted_certificates.contains(&certificate_digest);
+
         let (_, cert) = parse_x509_certificate(end_entity.as_ref())
             .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
         let digest = Sha256::digest(cert.public_key().raw);
         let digest = hex::encode(digest);
-        if self.accepted.is_empty() || self.accepted.contains(&digest) {
-            Ok(verified)
+        let spki_matches = self.accepted.contains(&digest);
+
+        if certificate_matches || spki_matches {
+            Ok(ServerCertVerified::assertion())
         } else {
             Err(RustlsError::InvalidCertificate(
                 CertificateError::ApplicationVerificationFailure,

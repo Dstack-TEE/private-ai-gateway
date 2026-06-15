@@ -31,12 +31,18 @@ worker and verifies it natively:
 
 ## What binds the session
 
-The TLS SPKIs come from `workload_keyset.tls_public_keys[].spki_sha256_hex`. The
-`WorkloadKeyset.to_canonical_value()` (`src/aci/types.rs`) **includes** `tls_public_keys`,
-so they are covered by `workload_keyset_digest` — which is, in turn, (a) checked against
-the reported digest, (b) folded into `report_data` (and thus into the verified quote),
-and (c) signed by the keyset endorsement. The TLS-SPKI binding is therefore triple-bound
-to the attested workload.
+The TLS SPKIs are attested through `workload_keyset.tls_public_keys[].spki_sha256_hex`.
+The `WorkloadKeyset.to_canonical_value()` (`src/aci/types.rs`) **includes**
+`tls_public_keys`, so they are covered by `workload_keyset_digest` — which is, in turn,
+(a) checked against the reported digest, (b) folded into `report_data` (and thus into the
+verified quote), and (c) signed by the keyset endorsement. The TLS-SPKI binding is
+therefore triple-bound to the attested workload.
+
+For a domain-scoped keyset, the verifier also requires
+`attestation.evidence.downstream_tls_binding` to name the requested origin host and a
+SPKI present in the attested keyset. Only that selected SPKI becomes the enforced
+`tls_spki_sha256` channel binding. Service-wide keysets without per-domain entries keep
+the previous behavior: every service-wide TLS SPKI is accepted for the origin.
 
 ## What a tamper rejects
 
@@ -81,7 +87,7 @@ separate `review.md`):
 
 ## Reproduce
 
-Driven through the gateway's `aci-dcap` upstream verifier mode against a worker that
-exposes `/v1/attestation/report`; see `scripts/phala_multi_upstream_smoke.sh` and
-`scripts/local_multi_upstream_smoke.sh`
-(`PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER: aci-dcap`).
+Driven through upstream entries with `provider: "aci-dcap"` against workers
+that expose `/v1/attestation/report`; see
+`scripts/phala_multi_upstream_smoke.sh` and
+`scripts/local_multi_upstream_smoke.sh`.

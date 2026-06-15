@@ -3,6 +3,9 @@ use crate::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsS
 
 /// Validate ACI §5.2 source-provenance arms.
 pub fn validate_source_provenance(sp: &SourceProvenance) -> Result<(), ServiceError> {
+    if sp.is_unknown() {
+        return Ok(());
+    }
     let has_repo = sp.repo_url.as_deref().is_some_and(|s| !s.is_empty())
         && sp.repo_commit.as_deref().is_some_and(|s| !s.is_empty());
     let has_image = sp.image_digest.as_deref().is_some_and(|s| !s.is_empty());

@@ -11,8 +11,8 @@ pub enum ServiceError {
     )]
     TestKeysInProduction,
     #[error(
-        "ACI §5.2 requires at least one source provenance arm: \
-         (repo_url + repo_commit) or image_digest"
+        "invalid source provenance: set both repo_url and repo_commit, set image_digest, \
+         or leave source provenance unknown"
     )]
     InvalidSourceProvenance,
     #[error("upstream verification failed: {0}")]
@@ -27,10 +27,16 @@ pub enum ServiceError {
     Receipt(#[from] ReceiptError),
     #[error("upstream error: {0}")]
     Upstream(#[from] UpstreamError),
+    #[error("attested session store error: {0}")]
+    SessionStore(String),
     #[error("metrics error: {0}")]
     Metrics(String),
     #[error("missing receipt signing key in keyset")]
     NoReceiptKey,
+    #[error("downstream TLS domain binding is required but request host is missing")]
+    DownstreamTlsDomainMissing,
+    #[error("no downstream TLS binding configured for request host {0:?}")]
+    DownstreamTlsDomainUnknown(String),
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

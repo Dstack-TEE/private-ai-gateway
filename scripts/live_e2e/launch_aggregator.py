@@ -26,23 +26,29 @@ class AggregatorProcess:
         providers: list[Provider],
         *,
         port: int,
+        dstack_endpoint: str = DEFAULT_DSTACK_ENDPOINT,
         env: dict[str, str] | None = None,
         artifact_dir: Path | None = None,
     ) -> None:
         self.providers = providers
         self.port = port
         self.base_url = public_base_url(port)
+        self.dstack_endpoint = dstack_endpoint
         self.env = {**os.environ, **(env or {})}
         self.artifact_dir = artifact_dir
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen[bytes] | None = None
-        self.config_path: Path | None = None
+        self.gateway_config_path: Path | None = None
+        self.upstream_seed_path: Path | None = None
+        self.state_dir: Path | None = None
         self.log_path: Path | None = None
 
     def __enter__(self) -> "AggregatorProcess":
         self._tmp = tempfile.TemporaryDirectory(prefix="private-ai-gateway-live-e2e-")
         tmp_dir = Path(self._tmp.name)
-        self.config_path = tmp_dir / "upstreams.json"
+        self.gateway_config_path = tmp_dir / "gateway.config.json"
+        self.upstream_seed_path = tmp_dir / "upstreams.seed.json"
+        self.state_dir = tmp_dir / "state"
         self.log_path = (
             self.artifact_dir / "aggregator.log"
             if self.artifact_dir
@@ -50,7 +56,17 @@ class AggregatorProcess:
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         config = build_upstream_config(self.providers, self.env)
-        write_json(self.config_path, config, mode=0o600)
+        write_json(self.upstream_seed_path, config, mode=0o600)
+        write_json(
+            self.gateway_config_path,
+            {
+                "bind": f"127.0.0.1:{self.port}",
+                "state_dir": str(self.state_dir),
+                "upstream_config_seed_path": str(self.upstream_seed_path),
+                "dstack_endpoint": self.dstack_endpoint,
+            },
+            mode=0o600,
+        )
         if self.artifact_dir:
             write_json(
                 self.artifact_dir / "aggregator-upstreams.redacted.json",
@@ -58,40 +74,7 @@ class AggregatorProcess:
             )
         child_env = {
             **self.env,
-            "PRIVATE_AI_GATEWAY_BIND": f"127.0.0.1:{self.port}",
-            "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH": str(self.config_path),
-            "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT": self.env.get(
-                "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT",
-                DEFAULT_DSTACK_ENDPOINT,
-            ),
-            "PRIVATE_AI_GATEWAY_REPO_URL": self.env.get(
-                "PRIVATE_AI_GATEWAY_REPO_URL",
-                "https://github.com/Dstack-TEE/private-ai-gateway",
-            ),
-            "PRIVATE_AI_GATEWAY_REPO_COMMIT": self.env.get(
-                "PRIVATE_AI_GATEWAY_REPO_COMMIT",
-                "live-e2e",
-            ),
-            "PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS": self.env.get(
-                "PRIVATE_AI_GATEWAY_BODY_RETENTION_SECONDS",
-                "3600",
-            ),
-            "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS": self.env.get(
-                "PRIVATE_AI_GATEWAY_RECEIPT_TTL_SECONDS",
-                "3600",
-            ),
-            "PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS": self.env.get(
-                "PRIVATE_AI_GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS",
-                "10",
-            ),
-            "PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS": self.env.get(
-                "PRIVATE_AI_GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS",
-                "600",
-            ),
-            "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS": self.env.get(
-                "PRIVATE_AI_GATEWAY_UPSTREAM_VERIFIER_REQUEST_TIMEOUT_SECONDS",
-                "240",
-            ),
+            "PRIVATE_AI_GATEWAY_CONFIG_PATH": str(self.gateway_config_path),
             "RUST_LOG": self.env.get("RUST_LOG", "info"),
         }
         if "DSTACK_VERIFIER_URL" not in child_env:

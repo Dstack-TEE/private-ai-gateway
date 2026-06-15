@@ -104,8 +104,8 @@ impl ProviderClaimMapper for TinfoilClaims {
     }
 }
 
-/// Generic verifier (static / preverified / DCAP test path): we only know it
-/// returned Verified with an enforceable channel binding.
+/// Generic verifier path: we only know it returned Verified with an enforceable
+/// channel binding.
 pub(super) struct GenericClaims;
 impl ProviderClaimMapper for GenericClaims {
     fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {

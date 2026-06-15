@@ -25,18 +25,10 @@ The gateway frontend owns downstream ACI.
 
 ## Runtime Wiring
 
-Enable middleware by setting the middleware Unix socket path on the gateway.
-The gateway connects to this socket when forwarding public requests to
-middleware:
-
-```bash
-PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock
-PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock
-```
-
-`PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH` is the socket the gateway's internal
-backend serves for middleware. It defaults to
-`/run/private-ai-gateway/backend.sock` when unset.
+The middleware router is available through the Rust HTTP router helpers. The
+checked-in gateway binary and static config do not expose middleware socket
+fields. Current deployments run no-middleware mode unless they embed the
+middleware router wiring in a custom binary.
 
 In this mode the gateway has three HTTP surfaces:
 
@@ -311,14 +303,8 @@ Run it locally:
 uvicorn middleware:app --uds /run/private-ai-gateway/executor.sock
 ```
 
-Start the gateway with middleware enabled:
-
-```bash
-PRIVATE_AI_GATEWAY_EXECUTOR_UDS_PATH=/run/private-ai-gateway/executor.sock \
-PRIVATE_AI_GATEWAY_BACKEND_UDS_PATH=/run/private-ai-gateway/backend.sock \
-PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=/path/to/upstreams.json \
-cargo run --bin private-ai-gateway
-```
+The current static gateway config has no middleware fields. Use the integration
+tests as the executable reference for middleware router wiring.
 
 Then call the public gateway as usual:
 

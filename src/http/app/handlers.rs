@@ -29,8 +29,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unsupported_e2ee_response,
-    upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
+    unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::proxy::{
     finalize_middleware_http_response, forward_to_middleware, get_from_middleware,
@@ -175,6 +175,10 @@ pub(super) async fn attestation_report(
                 Err(e) => internal_error_response(e),
             }
         }
+        Err(
+            e @ (ServiceError::DownstreamTlsDomainMissing
+            | ServiceError::DownstreamTlsDomainUnknown(_)),
+        ) => unknown_downstream_host_response(e),
         Err(e) => internal_error_response(e),
     }
 }
@@ -193,6 +197,10 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
+        Err(
+            e @ (ServiceError::DownstreamTlsDomainMissing
+            | ServiceError::DownstreamTlsDomainUnknown(_)),
+        ) => unknown_downstream_host_response(e),
         Err(e) => internal_error_response(e),
     }
 }

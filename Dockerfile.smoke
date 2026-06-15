@@ -4,8 +4,15 @@ COPY . .
 RUN cargo build --release --locked --bin private-ai-gateway
 
 FROM debian:bookworm-slim
+ARG SOURCE_REPO_URL
+ARG SOURCE_COMMIT
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+RUN test -n "$SOURCE_REPO_URL" \
+ && test -n "$SOURCE_COMMIT" \
+ && mkdir -p /etc/git-launcher \
+ && printf 'REPO_URL=%s\nCOMMIT_SHA=%s\nWORK_DIR=/src\n' "$SOURCE_REPO_URL" "$SOURCE_COMMIT" \
+    > /etc/git-launcher/gateway.conf
 COPY --from=builder /src/target/release/private-ai-gateway /usr/local/bin/private-ai-gateway
 ENTRYPOINT ["/usr/local/bin/private-ai-gateway"]

@@ -84,16 +84,11 @@ fn entrypoint_sh_does_not_export_runtime_policy() {
     // Runtime policy lives in audited deployment config, not inside the
     // workload bytes. entrypoint.sh must never bake it in.
     let body = script_text();
-    for needle in &[
-        "PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT=",
-        "export PRIVATE_AI_GATEWAY_DSTACK_ENDPOINT",
-    ] {
-        assert!(
-            !body.contains(needle),
-            "entrypoint.sh must not set runtime deployment policy itself \
-             (found {needle:?}); it belongs in compose environment so a verifier audits it"
-        );
-    }
+    assert!(
+        !body.contains("dstack_endpoint"),
+        "entrypoint.sh must not set runtime deployment policy itself; \
+         dstack_endpoint belongs in the static gateway config"
+    );
 }
 
 #[test]
@@ -105,11 +100,9 @@ fn entrypoint_sh_does_not_bake_upstream_config_policy() {
     for needle in &[
         "PRIVATE_AI_GATEWAY_UPSTREAM_URL=",
         "PRIVATE_AI_GATEWAY_UPSTREAMS_JSON=",
-        "PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH=",
         "PRIVATE_AI_GATEWAY_ADMIN_TOKEN=",
         "export PRIVATE_AI_GATEWAY_UPSTREAM_URL",
         "export PRIVATE_AI_GATEWAY_UPSTREAMS_JSON",
-        "export PRIVATE_AI_GATEWAY_UPSTREAM_CONFIG_PATH",
         "export PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
     ] {
         assert!(
@@ -250,6 +243,11 @@ fn deploy_text(name: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
+fn repo_text(path: &str) -> String {
+    let p = repo_root().join(path);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
 #[test]
 fn launcher_config_uses_only_default_mode_keys() {
     // aggregator.conf is the launcher config. The launcher contract is
@@ -352,12 +350,38 @@ fn deploy_readme_documents_one_command_deploy_and_seed_config() {
         "deploy/README.md must document the one-command compose path"
     );
     assert!(
-        body.contains("UPSTREAM_CONFIG_SEED_PATH"),
+        body.contains("upstream_config_seed_path"),
         "deploy/README.md must document the compose-mounted upstream seed"
     );
     assert!(
         body.contains("does not set `REPO_SUBDIR`"),
         "deploy/README.md must state that the public gateway repo runs from repo root"
+    );
+}
+
+#[test]
+fn docs_include_config_and_env_reference() {
+    let reference = repo_text("docs/configuration-reference.md");
+    for needle in [
+        "Configuration Reference",
+        "Config Fields",
+        "Environment Variables",
+        "`state_dir`",
+        "`PRIVATE_AI_GATEWAY_CONFIG_PATH`",
+    ] {
+        assert!(
+            reference.contains(needle),
+            "configuration reference must document {needle:?}"
+        );
+    }
+
+    assert!(
+        repo_text("README.md").contains("docs/configuration-reference.md"),
+        "README.md must link the configuration reference"
+    );
+    assert!(
+        deploy_text("README.md").contains("../docs/configuration-reference.md"),
+        "deploy/README.md must link the configuration reference"
     );
 }
 
