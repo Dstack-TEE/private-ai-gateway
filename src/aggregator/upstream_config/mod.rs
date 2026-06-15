@@ -166,9 +166,17 @@ impl UpstreamProvider {
         match self {
             UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
-            UpstreamProvider::OpenAiCompatible
-            | UpstreamProvider::AciDcap
-            | UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            // OpenAI-compatible has no verifier (no attestation), and ACI/DCAP
+            // uses its own verifier rather than the channel-keying here — so for
+            // both this scope only affects prewarm probe granularity, never the
+            // cache key or the seam. Per-model is the conservative default: it
+            // verifies every model and never collapses distinct channels. ACI can
+            // be router- or model-based depending on the ACI service; resolving
+            // that dynamically is deferred until ACI is a first-party router.
+            UpstreamProvider::OpenAiCompatible | UpstreamProvider::AciDcap => {
+                AttestationScope::PerModel
+            }
         }
     }
 }

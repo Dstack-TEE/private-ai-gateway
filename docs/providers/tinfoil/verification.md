@@ -69,9 +69,9 @@ connection before forwarding.
   (`tinfoilsh/confidential-model-router`). Tinfoil is a router
   (`AttestationScope::PerRouter`): the attested session is that one verified
   enclave channel, shared by every model behind it, so verification is keyed on
-  the channel and the served model is a receipt-level identifier. Per-model
-  identity within the router is a separate concern. Override the repo via
-  `provider_options.tinfoil_repo`.
+  the channel and the served model is a receipt-level identifier. Per-model TEE
+  coverage is delegated to the verified router, which attests the model enclaves
+  it fronts. Override the repo via `provider_options.tinfoil_repo`.
 - Pin the dependency deliberately; the SDK is the source of truth for the check set,
   so upgrades should be reviewed.
 

@@ -73,15 +73,11 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         )
         return
 
-    # NEAR AI is a router: this verifier attests the gateway TEE channel, which
-    # is the same for every model behind it (attested_scope = "router" below).
-    # The model is only a fetch parameter for the model-scoped report endpoint —
-    # it is recorded on the receipt, never folded into the channel session. We
-    # deliberately do NOT fetch-and-check NEAR AI's per-model TD quotes here: the
-    # gateway does not re-verify them, they are not bound to the instance that
-    # serves a given request, and gating on them would be attestation theater.
-    # A request-bound, per-instance model attestation is a roadmap item
-    # (docs/roadmap.md) and would be its own scoped evidence on the receipt.
+    # NEAR AI is a router: this verifier attests the gateway TEE channel
+    # (attested_scope = "router"), shared by every model. Per-model TEE coverage
+    # is delegated to the verified gateway, which attests its own backends; the
+    # model is only a fetch parameter and is recorded on the receipt as an
+    # identifier.
     #
     # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
     # so the session layer can populate a tri-state `tcb_up_to_date` claim. The

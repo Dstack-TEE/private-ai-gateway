@@ -70,14 +70,13 @@ served model stays a receipt-level fact (see
 
 Remaining:
 
-- **Request-bound, per-instance model attestation on the receipt.** A router
-  attests the channel, not the model that serves a given request. The served
-  model is recorded on the receipt as an identifier. The per-model TD quotes a
-  router exposes are not part of the channel attestation: the gateway does not
-  re-verify them and they are not bound to the specific instance that serves a
-  request, so they cannot stand as a sound per-model attestation. Once an upstream
-  can attest the exact instance that served a request, surface that as its own
-  scoped, request-bound attestation on the receipt — never folded into the
+- **Request-bound, per-instance model attestation on the receipt.** Today,
+  per-model TEE coverage is delegated to the verified router: the router attests
+  its backend model TEEs, and we verify the router's own integrity and source
+  provenance, so the delegation is sound. What it does not yet establish is which
+  *specific* backend instance served a *given* request. Once an upstream can
+  attest that exact instance, surface it as its own scoped, request-bound model
+  attestation on the receipt — tightening the delegation, never folded into the
   channel session.
 
 ### P0: Multi-Domain Downstream TLS Binding

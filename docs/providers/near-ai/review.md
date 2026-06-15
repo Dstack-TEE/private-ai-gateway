@@ -68,9 +68,9 @@ P0 adapter requirements:
 - Treat catalog flags as advisory only.
 - Enforce the verified gateway SPKI on every request.
 - Record compact, channel-scoped provider claims in receipts (e.g.
-  `gateway_verified`, `gateway_tls_spki_sha256`, `tcb_status`). No model
-  attestation: the session is the gateway channel, and the served model is a
-  receipt-level identifier.
+  `gateway_verified`, `gateway_tls_spki_sha256`, `tcb_status`). The attested
+  session is the gateway channel; per-model TEE coverage is delegated to the
+  verified gateway, with the served model recorded as a receipt-level identifier.
 
 P0 TODOs before strict-release inclusion:
 
@@ -224,10 +224,12 @@ or pinned:
   should otherwise prove the allowed backend image/compose set.
 - The lease is refreshed often enough that model catalog changes, provider
   refreshes, and backend key rotation do not outlive Private AI Gateway's cached trust.
-- Receipts claim only what the channel attestation proves: a verified gateway
-  channel with the served model as a bare identifier. Whether a given model is
-  genuinely TEE-backed (vs an external provider behind the gateway) is not proven
-  by the channel attestation, so receipts do not imply per-model TEE protection.
+- Per-model TEE coverage is delegated to the verified gateway: the gateway
+  verifies its backend model TDs and only serves verified backends, and we verify
+  the gateway's own integrity and source provenance — so the gateway is trusted
+  because it is itself verifiable, not blindly. The served model is recorded on
+  the receipt as an identifier; binding the exact backend instance to a specific
+  request is a roadmap refinement.
 
 ## Privacy and Operations Caveats
 
@@ -337,46 +339,36 @@ Live probes during review:
 - Existing gateway live artifact:
   `/tmp/private-ai-gateway-live-e2e/20260518-053819`.
 
-## Required Adapter Changes
+## Adapter Behavior
 
-P0:
+- NEAR verification is a gateway-soundness lease: the gateway identity, source
+  provenance, runtime policy, and TLS SPKI binding are verified. NEAR AI is a
+  router, so the verified gateway channel is the attested session; the
+  model-scoped report is only the shape of NEAR's endpoint.
+- Per-model TEE coverage is delegated to the verified gateway, which verifies its
+  backend model TDs and only serves verified backends; because the gateway is
+  itself verified for integrity and provenance, that delegation is sound. The
+  nested `model_attestations[]` are not re-verified or recorded here, and the
+  served model is a receipt-level identifier.
+- `/v1/model/list` catalog flags are never trusted; the lease is authorized by
+  the verified gateway channel.
 
-- Move NEAR verification to gateway-soundness lease establishment: verify
-  gateway identity/provenance/TLS binding. NEAR AI is a router, so the verified
-  gateway channel is the attested session; the model-scoped report is only the
-  shape of NEAR's endpoint.
-- Do not fetch, verify, or record the nested `model_attestations[]`: the gateway
-  does not re-verify them and nothing binds them to the request's instance
-  (router scope). Rust enforces only the verified gateway lease and channel
-  binding.
-- Treat `/v1/model/list` catalog flags as hints. They may help choose models to
-  probe, but the lease is authorized by the verified gateway channel, not by any
-  per-model claim.
-- Whether a configured model is genuinely TEE-backed (vs an external provider
-  behind the gateway) is not proven by the channel attestation, so do not imply
-  per-model TEE protection in receipts. A request-bound, per-instance model
-  attestation is the roadmap path to surface that distinction.
+## Remaining
 
-P1:
-
-- Surface and pin the gateway compose/image digest in the NEAR verifier result.
-  The allowlist should map audited source/release evidence to accepted
-  deployment digests.
-- Record the served model id on the receipt as an identifier only — no model
-  attestation digest (router scope).
+- Surface and pin the gateway compose/image digest in the NEAR verifier result,
+  mapping audited source/release evidence to accepted deployment digests.
+- Bind the exact backend instance to a specific request (a per-instance,
+  request-bound model attestation on the receipt), tightening today's delegation
+  to the gateway.
 - Decide how to represent the gateway runtime-policy assumptions, especially
   upstream image/compose allowlists, without adding a generic policy DSL.
 - Ask NEAR to expose stable bucket/backend/cache-hit evidence, for example
   `X-NearAI-Bucket`, `X-NearAI-Backend`, and cache-hit metadata.
-
-P2:
-
-- Add a live external-provider sentinel test: choose a known external model if
-  one is public, verify `model_attestations[]` is empty, and assert the
-  gateway refuses to forward it in verified mode.
-- Add an opt-in prefix-cache locality probe using a large stable prompt prefix
-  and a short changing suffix. Treat timing-only evidence as weak unless NEAR
-  exposes backend or cache metadata.
+- Add a sentinel test that the verified gateway refuses to serve a known
+  external (non-TEE) model, confirming the delegation assumption holds.
+- Add an opt-in prefix-cache locality probe (large stable prompt prefix + short
+  changing suffix); treat timing-only evidence as weak unless NEAR exposes
+  backend or cache metadata.
 - Track whether live NEAR enables strict image-hash and TCB freshness policy,
   then fold those expectations into the verifier bridge.
 

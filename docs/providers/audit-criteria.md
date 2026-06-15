@@ -110,10 +110,10 @@ Required behavior:
   the verified workload
 - prevent aliases from bypassing the verified model identity
 
-For gateway providers, verifying the gateway channel is preferred over trusting
-static catalog metadata. NEAR AI is the reference example — it is a router, so
-the authoritative check is the verified gateway channel itself; the model is only
-the shape of NEAR's `/v1/attestation/report` endpoint, and the gateway
+For gateway providers, the verified gateway channel is the authoritative check;
+static catalog metadata is never trusted. NEAR AI is the reference example — it
+is a router, so the verified gateway channel itself is authoritative; the model
+is only the shape of NEAR's `/v1/attestation/report` endpoint, and the gateway
 attestation it returns is the same for every model:
 
 ```text
@@ -121,8 +121,9 @@ verified gateway channel
 (workload identity + source provenance + runtime policy + TLS SPKI binding)
 ```
 
-The nested `model_attestations[]` are not required or checked: a router attests
-the channel, not the model that serves a given request.
+Per-model TEE coverage is delegated to the verified gateway, which attests its
+own backends; the nested `model_attestations[]` are not re-verified here. The
+gateway is trusted because it is itself verified for integrity and provenance.
 
 The review must call out aliasing and actual served weights. If the provider
 cannot prove the exact backend model or quantization, receipts must be honest

@@ -201,13 +201,12 @@ mapping. A `failed` result asserts nothing.
   so its attested session is the gateway *channel*: one session per router, not
   per model, with the served model recorded on the receipt. The verifier attests
   exactly that channel — its `AttestationScope` is `PerRouter`, enforced
-  fail-closed at the binding seam — and does *not* fetch or re-verify the nested
-  per-model TDs: the gateway does not re-verify those quotes and they are not
-  bound to the instance that served a given request, so they cannot stand as a
-  sound per-model attestation and are not part of the channel evidence. So
-  `tee_attested` there means "bound to a verified gateway TEE," not end-to-end to
-  the model TD serving the tokens. A request-bound, per-instance model attestation
-  would be its own scoped evidence on the receipt and is a roadmap item (see
+  fail-closed at the binding seam. Per-model TEE coverage is delegated to the
+  verified gateway, which verifies its backend model TDs before serving them;
+  because the gateway's own integrity and source provenance are verified, that
+  delegation is sound without re-verifying each backend quote here. The remaining
+  roadmap item is finer: binding the exact backend instance to a specific request
+  (a per-instance, request-bound model attestation on the receipt — see
   [roadmap.md](roadmap.md)).
 - ¹ `tcb_up_to_date` is an honest tri-state from the verifier's reported
   `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
