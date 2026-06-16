@@ -16,7 +16,7 @@ function isNetworkConnectionError(error: any): boolean {
  * Iterate an upstream SSE byte stream, split it into events by `splitPattern`,
  * and yield each event — transformed by `transformFunction` when present
  * (which carries mutable `streamState` across chunks), otherwise re-emitted
- * with its delimiter. Ported from the prior gateway's reader.
+ * with its delimiter.
  */
 export async function* readStream(
   reader: ReadableStreamDefaultReader,
@@ -89,8 +89,7 @@ export async function* readStream(
 
 /**
  * Buffered response: run the provider's response transform over the parsed
- * upstream JSON and rebuild the response. Ported/trimmed from the prior
- * gateway's `handleNonStreamingMode` (hooks/cache/RequestContext removed).
+ * upstream JSON and rebuild the response.
  */
 export async function handleNonStreamingMode(
   response: Response,
@@ -116,8 +115,7 @@ export async function handleNonStreamingMode(
 /**
  * Streaming response: transform each upstream SSE event through the provider's
  * stream transform and re-emit it, cancelling the upstream read if the
- * downstream client goes away. Ported/trimmed from the prior gateway's
- * `handleStreamingMode` (Bedrock/JSON-stream/content-type special cases removed).
+ * downstream client goes away.
  */
 export function handleStreamingMode(
   response: Response,
