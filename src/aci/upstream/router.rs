@@ -174,18 +174,24 @@ impl UpstreamBackend for ModelRouterBackend {
         // request format before they reach here, so both must target the
         // upstream's chat path rather than the downstream surface path: a
         // configured per-upstream path when set (e.g. native Anthropic
-        // upstreams use `/v1/messages`), otherwise defer to the backend's own
-        // default (`/v1/chat/completions` for OpenAI-compatible upstreams).
-        // Other surfaces (`/v1/completions`, `/v1/embeddings`, `/v1/responses`)
-        // keep the caller-supplied path so they route to the matching upstream
-        // path.
+        // upstreams use `/v1/messages`), otherwise the OpenAI-compatible
+        // `/v1/chat/completions`. The path is resolved explicitly (rather than
+        // deferred to the backend default) so the forwarded request is
+        // deterministic. Other surfaces (`/v1/completions`, `/v1/embeddings`,
+        // `/v1/responses`) keep the caller-supplied path so they route to the
+        // matching upstream path.
         let on_chat_surface = request
             .path
             .as_deref()
             .map(|path| path == "/v1/chat/completions" || path == "/v1/messages")
             .unwrap_or(true);
         if on_chat_surface {
-            request.path = route.path.clone();
+            request.path = Some(
+                route
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+            );
         }
         Ok(PreparedUpstreamRequest {
             request,
@@ -383,14 +389,20 @@ mod tests {
     }
 
     #[test]
-    fn chat_surfaces_clear_path_for_openai_upstreams() {
+    fn chat_surfaces_resolve_to_chat_completions_for_openai_upstreams() {
         // OpenAI-compatible upstreams configure no per-route path; both chat
-        // surfaces must defer to the backend's own /v1/chat/completions
-        // default rather than forwarding the downstream /v1/messages path
-        // (which the upstream does not serve, causing an empty-body 500).
+        // surfaces must resolve to /v1/chat/completions rather than forwarding
+        // the downstream /v1/messages path (which the upstream does not serve,
+        // causing an empty-body 500).
         let router = single_route_router(None);
-        assert_eq!(prepared_path(&router, "/v1/chat/completions"), None);
-        assert_eq!(prepared_path(&router, "/v1/messages"), None);
+        assert_eq!(
+            prepared_path(&router, "/v1/chat/completions").as_deref(),
+            Some("/v1/chat/completions")
+        );
+        assert_eq!(
+            prepared_path(&router, "/v1/messages").as_deref(),
+            Some("/v1/chat/completions")
+        );
     }
 
     #[test]
