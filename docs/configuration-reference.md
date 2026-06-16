@@ -43,20 +43,19 @@ This is the smallest practical container config.
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `executor` | unset | Optional executor (middleware) section. When present, the gateway forwards public requests to the out-of-process executor; when unset it serves directly. See [Executor Middleware](#executor-middleware). |
+| `executor` | unset | Optional middleware section. When present, the gateway forwards public requests through the middleware; when unset it serves directly. See [Middleware](#middleware). |
 
-## Executor Middleware
+## Middleware
 
-The optional `executor` section connects an out-of-process executor (middleware)
-into the request path. When it is present the gateway dials the executor at
-`uds_path` to forward public requests, and serves an internal backend on
-`backend_uds_path` for the executor to call back. When the section is omitted the
-gateway serves requests directly with no middleware.
+The optional `executor` section wires the out-of-process middleware into the
+request path. When present the gateway forwards public requests to the middleware
+over `uds_path`, and serves an internal backend on `backend_uds_path` for the
+middleware to call back. When the section is omitted the gateway serves directly.
 
 | Field | Use |
 | --- | --- |
-| `executor.uds_path` | Unix socket the executor listens on; the gateway forwards public requests here. |
-| `executor.backend_uds_path` | Unix socket the gateway's internal backend serves for the executor to call back. |
+| `executor.uds_path` | Unix socket the middleware listens on; the gateway forwards public requests here. |
+| `executor.backend_uds_path` | Unix socket the gateway's internal backend serves for the middleware to call back. |
 
 ```json
 {

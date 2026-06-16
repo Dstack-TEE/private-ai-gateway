@@ -124,15 +124,15 @@ headers or claims.
 
 ## Config Sketch
 
-Disabled mode is the current binary behavior. The static gateway config has no
-middleware socket fields, so the frontend calls the backend directly in-process.
+Disabled mode is the default: the frontend calls the backend directly
+in-process.
 
 ```text
-# no middleware variables required
+# middleware disabled (default)
 ```
 
-Middleware mode is a router-helper contract for custom embedding and tests. It
-is not exposed by the checked-in static config.
+Middleware mode is enabled in the static gateway config; see the configuration
+reference.
 
 The pending request-context TTL is 300 seconds. A middleware must call
 `POST /internal/forward` before the context expires.

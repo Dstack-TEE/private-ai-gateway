@@ -18,9 +18,9 @@
 //! attested-session log is `sessions.jsonl` inside that directory.
 //!
 //! When the static config includes an `executor` section, the gateway forwards
-//! public requests to the out-of-process executor over `executor.uds_path` and
-//! serves its internal backend on `executor.backend_uds_path` for the executor
-//! to call back. Without the section the gateway serves directly.
+//! public requests through the out-of-process middleware over `executor.uds_path`
+//! and serves its internal backend on `executor.backend_uds_path` for the
+//! middleware to call back. Without the section the gateway serves directly.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
