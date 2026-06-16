@@ -41,8 +41,10 @@ pub struct UpstreamConfig {
     pub base_url: String,
     /// Per-upstream POST path the generic forwarder targets (e.g.
     /// `/v1/messages` for native Anthropic upstreams), appended to
-    /// `base_url`. When omitted the downstream surface path is used
-    /// verbatim, matching today's OpenAI-compatible behaviour.
+    /// `base_url`. When omitted, chat-shaped surfaces
+    /// (`/v1/chat/completions` and `/v1/messages`) target
+    /// `/v1/chat/completions` (the OpenAI-compatible default) and other
+    /// surfaces use the downstream path verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub models: BTreeMap<String, String>,

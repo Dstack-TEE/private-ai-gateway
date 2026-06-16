@@ -19,7 +19,10 @@ pub struct ModelRoute {
     pub upstream: Arc<dyn UpstreamBackend>,
     pub route_id: String,
     /// Per-upstream POST path (e.g. `/v1/messages` for native Anthropic
-    /// upstreams). `None` keeps the caller-supplied request path unchanged.
+    /// upstreams). `None` resolves chat-shaped surfaces to
+    /// `/v1/chat/completions` and leaves other surfaces on the
+    /// caller-supplied path. See [`ModelRouterBackend::prepare`] for the
+    /// resolution.
     pub path: Option<String>,
     /// Whether this route's provider is an attested (TEE) provider.
     /// `None` means unclassified (routes built directly via
