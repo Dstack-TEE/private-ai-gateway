@@ -1,21 +1,21 @@
-import http from 'node:http';
-import { Readable } from 'node:stream';
+import http from "node:http";
+import { Readable } from "node:stream";
 
-const DEFAULT_BACKEND_SOCKET = '/run/private-ai-gateway/backend.sock';
+const DEFAULT_BACKEND_SOCKET = "/run/private-ai-gateway/backend.sock";
 
 // Per-hop framing/connection headers. They describe the backend->executor
 // hop only; re-emitting them would conflict with the framing the executor's
 // own server computes for the body it streams to the frontend.
 const HOP_BY_HOP_HEADERS = new Set([
-  'connection',
-  'keep-alive',
-  'transfer-encoding',
-  'content-length',
-  'upgrade',
-  'te',
-  'trailer',
-  'proxy-authenticate',
-  'proxy-authorization',
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+  "content-length",
+  "upgrade",
+  "te",
+  "trailer",
+  "proxy-authenticate",
+  "proxy-authorization",
 ]);
 
 function backendSocketPath(): string {
@@ -51,13 +51,13 @@ export function forwardToBackend(args: ForwardArgs): Promise<Response> {
     const req = http.request(
       {
         socketPath: backendSocketPath(),
-        path: '/internal/forward',
-        method: 'POST',
+        path: "/internal/forward",
+        method: "POST",
         headers: {
-          'content-type': 'application/json',
-          'content-length': payload.byteLength,
-          'x-private-ai-gateway-request-id': args.requestId,
-          'x-private-ai-gateway-targets': args.targets.join(','),
+          "content-type": "application/json",
+          "content-length": payload.byteLength,
+          "x-private-ai-gateway-request-id": args.requestId,
+          "x-private-ai-gateway-targets": args.targets.join(","),
         },
       },
       (res) => {
@@ -69,13 +69,16 @@ export function forwardToBackend(args: ForwardArgs): Promise<Response> {
         for (const [name, value] of Object.entries(res.headers)) {
           if (value === undefined) continue;
           if (HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue;
-          headers.set(name, Array.isArray(value) ? value.join(', ') : String(value));
+          headers.set(
+            name,
+            Array.isArray(value) ? value.join(", ") : String(value),
+          );
         }
         const body = Readable.toWeb(res) as ReadableStream<Uint8Array>;
         resolve(new Response(body, { status: res.statusCode ?? 502, headers }));
       },
     );
-    req.on('error', reject);
+    req.on("error", reject);
     req.write(payload);
     req.end();
   });

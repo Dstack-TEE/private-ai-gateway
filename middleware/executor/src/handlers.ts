@@ -1,6 +1,13 @@
-import { Context } from 'hono';
+import { Context } from "hono";
 
-import { forwardToBackend } from './backendForward';
+import {
+  errorResponse,
+  errorType,
+  normalizeUpstreamError,
+  rateLimitResponse,
+  Surface,
+} from "./errors/response";
+import { forwardToBackend } from "./integrations/backend";
 import {
   consultPost,
   consultPre,
@@ -8,68 +15,23 @@ import {
   Format,
   hashApiKey,
   RouteCandidate,
-} from './controlConsult';
-import { meterResponse } from './cost';
-import ProviderConfigs from './providers';
-import { endpointStrings } from './providers/types';
-import transformToProviderRequest from './services/transformToProviderRequest';
-import { handleNonStreamingMode, handleStreamingMode } from './stream';
-import { Params } from './types/requestBody';
+} from "./integrations/control";
+import { meterResponse } from "./cost";
+import ProviderConfigs from "./providers";
+import { endpointStrings } from "./providers/types";
+import transformToProviderRequest from "./services/transformToProviderRequest";
+import { handleNonStreamingMode, handleStreamingMode } from "./stream";
+import { Params } from "./types/requestBody";
 
-// The prior gateway defaults to strict OpenAI compliance unless a client opts
-// out; this executor doesn't expose that opt-out, so it's always strict.
+// This executor does not expose a strict-compliance opt-out, so it is always
+// strict.
 const STRICT_OPENAI_COMPLIANCE = true;
 
-function jsonError(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ error: { type, message } }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
-}
-
-/** A 429 response carrying the standard rate-limit headers. */
-function rateLimitResponse(
-  message: string,
-  limit: number,
-  resetAt: number
-): Response {
-  const retryAfter = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
-  return new Response(
-    JSON.stringify({
-      error: { message, type: 'rate_limit_error', code: 'rate_limit_exceeded' },
-    }),
-    {
-      status: 429,
-      headers: {
-        'content-type': 'application/json',
-        'X-RateLimit-Limit': String(limit),
-        'X-RateLimit-Remaining': '0',
-        'X-RateLimit-Reset': String(resetAt),
-        'Retry-After': String(retryAfter),
-      },
-    }
-  );
-}
-
-/**
- * Error type for a denial, using values valid on both surfaces this executor
- * serves (OpenAI and Anthropic share these four). Clients branch on the type
- * to decide retry behavior, so it's worth being precise rather than generic.
- */
-function denialType(status: number): string {
-  switch (status) {
-    case 401:
-      return 'authentication_error';
-    case 402:
-      return 'insufficient_quota';
-    case 403:
-      return 'permission_error';
-    case 429:
-      return 'rate_limit_error';
-    default:
-      return status >= 500 ? 'server_error' : 'invalid_request_error';
-  }
-}
+// The downstream client surface is fixed by the endpoint: /v1/messages speaks
+// Anthropic, everything else speaks OpenAI. This drives the error envelope so
+// errors match what success responses already do for each surface.
+const surfaceFor = (fn: endpointStrings): Surface =>
+  fn === "messages" ? "anthropic" : "openai";
 
 /**
  * Build the `{ targets, body }` payload for the backend: shape the request for
@@ -80,7 +42,7 @@ function denialType(status: number): string {
 function buildForwardPayload(
   params: Params,
   fn: endpointStrings,
-  candidates: RouteCandidate[]
+  candidates: RouteCandidate[],
 ): { targets: string[]; body: string } {
   const targets = candidates.map((candidate) => candidate.routeId);
   const shaped = candidates.map((candidate) => ({
@@ -98,7 +60,7 @@ function buildForwardPayload(
 function responseTransformerFor(
   format: Format,
   fn: endpointStrings,
-  streaming: boolean
+  streaming: boolean,
 ): Function | undefined {
   const transforms = ProviderConfigs[format]?.responseTransforms;
   if (!transforms) return undefined;
@@ -106,25 +68,35 @@ function responseTransformerFor(
 }
 
 /**
- * Convert the backend response back to the downstream format. The committed
- * candidate's format (from the backend's selected-route attribution header)
- * picks the response transform; buffered vs streaming is decided by the
- * backend response content-type, not the request flag (so an error returned
- * for a stream request is handled as buffered).
+ * Convert a successful backend response back to the downstream format. Non-2xx
+ * responses are sanitized and returned before reaching this transform. The
+ * committed candidate's format (from the backend's selected-route attribution
+ * header) picks the response transform; buffered vs streaming is decided by the
+ * backend response content-type, not the request flag.
  */
 function driveResponse(
   backendResp: Response,
   params: Params,
   fn: endpointStrings,
-  candidates: RouteCandidate[]
+  candidates: RouteCandidate[],
+  surface: Surface,
+  requestId: string,
 ): Response | Promise<Response> {
+  // Non-2xx upstream responses are sanitized into a consistent, surface-shaped
+  // error before reaching the client (upstream status/body/headers are never
+  // relayed verbatim). Short-circuit here so the error body never gets run
+  // through the success-shaped response transform.
+  if (!backendResp.ok) {
+    return normalizeUpstreamError(backendResp, surface, requestId);
+  }
+
   const selectedRoute = backendResp.headers.get(
-    'x-private-ai-gateway-selected-route'
+    "x-private-ai-gateway-selected-route",
   );
   const selected =
     candidates.find((c) => c.routeId === selectedRoute) ?? candidates[0];
   const streaming =
-    backendResp.headers.get('content-type')?.includes('text/event-stream') ??
+    backendResp.headers.get("content-type")?.includes("text/event-stream") ??
     false;
   // Only the `/complete` suffix matters here (it selects the SSE split pattern).
   const requestURL = `/${fn}`;
@@ -136,7 +108,7 @@ function driveResponse(
       responseTransformerFor(selected.format, fn, true),
       requestURL,
       STRICT_OPENAI_COMPLIANCE,
-      params
+      params,
     );
   }
   return handleNonStreamingMode(
@@ -144,18 +116,20 @@ function driveResponse(
     responseTransformerFor(selected.format, fn, false),
     STRICT_OPENAI_COMPLIANCE,
     requestURL,
-    params
+    params,
   );
 }
 
 async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   const start = Date.now();
-  const requestId = c.req.header('x-private-ai-gateway-request-id');
+  const surface = surfaceFor(fn);
+  const requestId = c.req.header("x-private-ai-gateway-request-id");
   if (!requestId) {
-    return jsonError(
+    return errorResponse(
+      surface,
       400,
-      'invalid_request_error',
-      'missing x-private-ai-gateway-request-id'
+      "invalid_request_error",
+      "missing x-private-ai-gateway-request-id",
     );
   }
 
@@ -163,25 +137,43 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   try {
     params = (await c.req.json()) as Params;
   } catch {
-    return jsonError(400, 'invalid_request_error', 'invalid json body');
+    return errorResponse(
+      surface,
+      400,
+      "invalid_request_error",
+      "invalid json body",
+      requestId,
+    );
   }
 
   // Pre-request consult: authorization + pricing. Only the
   // bearer key's hash crosses the seam, never the raw key. A denial (invalid
   // key, exhausted quota, control unavailable) returns here before any
   // forwarding, so no inference happens and no receipt is emitted.
-  const bearer = c.req.header('authorization')?.replace(/^Bearer\s+/i, '');
+  const bearer = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
   const consult = await consultPre(
     params.model,
-    bearer ? hashApiKey(bearer) : undefined
+    bearer ? hashApiKey(bearer) : undefined,
   );
   if (!consult.allow) {
     const status = consult.status ?? 403;
-    const message = consult.message ?? 'forbidden';
+    const message = consult.message ?? "forbidden";
     if (status === 429 && consult.rateLimit) {
-      return rateLimitResponse(message, consult.rateLimit.limit, consult.rateLimit.resetAt);
+      return rateLimitResponse(
+        surface,
+        message,
+        consult.rateLimit.limit,
+        consult.rateLimit.resetAt,
+        requestId,
+      );
     }
-    return jsonError(status, denialType(status), message);
+    return errorResponse(
+      surface,
+      status,
+      errorType(surface, status),
+      message,
+      requestId,
+    );
   }
   const pricing = consult.pricing ?? null;
 
@@ -189,10 +181,12 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   // candidates; an empty list means the model has no active deployment.
   const candidates = consult.candidates ?? [];
   if (candidates.length === 0) {
-    return jsonError(
+    return errorResponse(
+      surface,
       400,
-      'model_not_found',
-      `no route available for model ${params.model ?? '(none)'}`
+      "model_not_found",
+      `no route available for model ${params.model ?? "(none)"}`,
+      requestId,
     );
   }
 
@@ -201,26 +195,35 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   try {
     backendResp = await forwardToBackend({ requestId, targets, body });
   } catch (err) {
-    return jsonError(
+    return errorResponse(
+      surface,
       502,
-      'backend_unreachable',
-      `failed to reach gateway backend: ${(err as Error).message}`
+      "backend_unreachable",
+      `failed to reach gateway backend: ${(err as Error).message}`,
+      requestId,
     );
   }
-  const response = await driveResponse(backendResp, params, fn, candidates);
+  const response = await driveResponse(
+    backendResp,
+    params,
+    fn,
+    candidates,
+    surface,
+    requestId,
+  );
 
   // Post-request consult (billing + request log). Fired once the
   // raw upstream usage is known — immediately for buffered responses, at stream
   // end for SSE — with the route the backend committed to.
   const selectedRouteId = backendResp.headers.get(
-    'x-private-ai-gateway-selected-route'
+    "x-private-ai-gateway-selected-route",
   );
   const attemptIndex = Math.max(
     0,
-    candidates.findIndex((c) => c.routeId === selectedRouteId)
+    candidates.findIndex((c) => c.routeId === selectedRouteId),
   );
   const isStreaming =
-    backendResp.headers.get('content-type')?.includes('text/event-stream') ??
+    backendResp.headers.get("content-type")?.includes("text/event-stream") ??
     false;
   return meterResponse(response, pricing, (usage) => {
     consultPost({
@@ -231,7 +234,7 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
       isStreaming,
       attemptIndex,
       selectedRouteId,
-      requestModel: params.model ?? '',
+      requestModel: params.model ?? "",
       usage,
       pricing,
       spendMode: consult.spendMode,
@@ -241,19 +244,19 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   });
 }
 
-export const chatCompletions = (c: Context) => handle(c, 'chatComplete');
-export const completions = (c: Context) => handle(c, 'complete');
-export const embeddings = (c: Context) => handle(c, 'embed');
-export const messages = (c: Context) => handle(c, 'messages');
+export const chatCompletions = (c: Context) => handle(c, "chatComplete");
+export const completions = (c: Context) => handle(c, "complete");
+export const embeddings = (c: Context) => handle(c, "embed");
+export const messages = (c: Context) => handle(c, "messages");
 // POST /v1/responses — OpenAI Responses API, native passthrough. openai->openai
 // request shaping is identity; no response transform => verbatim relay.
-export const responses = (c: Context) => handle(c, 'createModelResponse');
+export const responses = (c: Context) => handle(c, "createModelResponse");
 
 /** GET /v1/models — relay the catalog from the control plane. */
 export const models = async (): Promise<Response> => {
   const r = await fetchCatalog();
   return new Response(r.body, {
     status: r.status,
-    headers: { 'content-type': 'application/json' },
+    headers: { "content-type": "application/json" },
   });
 };

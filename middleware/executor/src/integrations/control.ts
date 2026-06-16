@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
-import http from 'node:http';
-import https from 'node:https';
+import { createHash } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
 
-import { PricingConfig } from './services/pricing';
+import { PricingConfig } from "../services/pricing";
 
 // The executor reaches the control plane over HTTP(S) at
 // PRIVATE_AI_GATEWAY_CONTROL_URL, authenticated with a bearer token; use TLS in
@@ -12,7 +12,7 @@ const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
 
 // One keep-alive connection so TLS is negotiated once, not per request.
 const agent = CONTROL_URL
-  ? new URL(CONTROL_URL).protocol === 'https:'
+  ? new URL(CONTROL_URL).protocol === "https:"
     ? new https.Agent({ keepAlive: true })
     : new http.Agent({ keepAlive: true })
   : undefined;
@@ -20,15 +20,17 @@ const agent = CONTROL_URL
 function controlRequest(
   method: string,
   path: string,
-  body?: string
+  body?: string,
 ): Promise<{ status: number; body: string }> {
   if (!CONTROL_URL) {
-    return Promise.reject(new Error('PRIVATE_AI_GATEWAY_CONTROL_URL is not set'));
+    return Promise.reject(
+      new Error("PRIVATE_AI_GATEWAY_CONTROL_URL is not set"),
+    );
   }
   const payload = body === undefined ? undefined : Buffer.from(body);
   const url = new URL(CONTROL_URL);
-  url.pathname = url.pathname.replace(/\/$/, '') + path; // path begins with '/'
-  const lib = url.protocol === 'https:' ? https : http;
+  url.pathname = url.pathname.replace(/\/$/, "") + path; // path begins with '/'
+  const lib = url.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
     const req = lib.request(
       url,
@@ -36,26 +38,30 @@ function controlRequest(
         method,
         agent,
         headers: {
-          'content-type': 'application/json',
-          ...(CONTROL_TOKEN ? { authorization: `Bearer ${CONTROL_TOKEN}` } : {}),
-          ...(payload ? { 'content-length': payload.byteLength } : {}),
+          "content-type": "application/json",
+          ...(CONTROL_TOKEN
+            ? { authorization: `Bearer ${CONTROL_TOKEN}` }
+            : {}),
+          ...(payload ? { "content-length": payload.byteLength } : {}),
         },
       },
       (res) => {
-        let b = '';
-        res.on('data', (c) => (b += c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 502, body: b }));
-      }
+        let b = "";
+        res.on("data", (c) => (b += c));
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 502, body: b }),
+        );
+      },
     );
-    req.on('error', reject);
+    req.on("error", reject);
     if (payload) req.write(payload);
     req.end();
   });
 }
 
-export type SpendMode = 'regular' | 'subscription' | 'subscription_overflow';
+export type SpendMode = "regular" | "subscription" | "subscription_overflow";
 
-export type Format = 'openai' | 'anthropic';
+export type Format = "openai" | "anthropic";
 
 /** One ordered failover candidate: a backend route id and the upstream format. */
 export interface RouteCandidate {
@@ -83,7 +89,7 @@ export interface PreConsult {
 
 /** SHA-256 hex of the bearer key — only the hash crosses to the control plane. */
 export function hashApiKey(apiKey: string): string {
-  return createHash('sha256').update(apiKey).digest('hex');
+  return createHash("sha256").update(apiKey).digest("hex");
 }
 
 /**
@@ -93,20 +99,24 @@ export function hashApiKey(apiKey: string): string {
  */
 export async function consultPre(
   model: string | undefined,
-  apiKeyHash: string | undefined
+  apiKeyHash: string | undefined,
 ): Promise<PreConsult> {
   try {
     const res = await controlRequest(
-      'POST',
-      '/consult/pre',
-      JSON.stringify({ apiKeyHash, model })
+      "POST",
+      "/consult/pre",
+      JSON.stringify({ apiKeyHash, model }),
     );
     if (res.status !== 200) {
-      return { allow: false, status: 503, message: 'control plane unavailable' };
+      return {
+        allow: false,
+        status: 503,
+        message: "control plane unavailable",
+      };
     }
     return JSON.parse(res.body) as PreConsult;
   } catch {
-    return { allow: false, status: 503, message: 'control plane unavailable' };
+    return { allow: false, status: 503, message: "control plane unavailable" };
   }
 }
 
@@ -135,12 +145,12 @@ export interface PostReport {
  * a control-plane hiccup must never fail the user's already-served response.
  */
 export function consultPost(report: PostReport): void {
-  controlRequest('POST', '/consult/post', JSON.stringify(report)).catch(() => {
+  controlRequest("POST", "/consult/post", JSON.stringify(report)).catch(() => {
     /* best-effort */
   });
 }
 
 /** Fetch the model catalog (relayed by the executor's GET /v1/models). */
 export function fetchCatalog(): Promise<{ status: number; body: string }> {
-  return controlRequest('GET', '/models');
+  return controlRequest("GET", "/models");
 }
