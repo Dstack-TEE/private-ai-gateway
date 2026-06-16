@@ -19,7 +19,10 @@ pub struct ModelRoute {
     pub upstream: Arc<dyn UpstreamBackend>,
     pub route_id: String,
     /// Per-upstream POST path (e.g. `/v1/messages` for native Anthropic
-    /// upstreams). `None` keeps the caller-supplied request path unchanged.
+    /// upstreams). `None` resolves chat-shaped surfaces to
+    /// `/v1/chat/completions` and leaves other surfaces on the
+    /// caller-supplied path. See [`ModelRouterBackend::prepare`] for the
+    /// resolution.
     pub path: Option<String>,
     /// Whether this route's provider is an attested (TEE) provider.
     /// `None` means unclassified (routes built directly via
@@ -169,19 +172,29 @@ impl UpstreamBackend for ModelRouterBackend {
         };
         let mut request = req;
         request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
-        // A configured per-upstream path overrides the chat-completions
-        // surface only (e.g. native Anthropic `/v1/messages`). Other
-        // surfaces (`/v1/completions`, `/v1/embeddings`) keep the
-        // caller-supplied path so they route to the matching upstream path.
-        if let Some(route_path) = &route.path {
-            let on_chat_surface = request
-                .path
-                .as_deref()
-                .map(|path| path == "/v1/chat/completions")
-                .unwrap_or(true);
-            if on_chat_surface {
-                request.path = Some(route_path.clone());
-            }
+        // The chat-shaped downstream surfaces (`/v1/chat/completions` and the
+        // Anthropic `/v1/messages`) are converted to the upstream's chat
+        // request format before they reach here, so both must target the
+        // upstream's chat path rather than the downstream surface path: a
+        // configured per-upstream path when set (e.g. native Anthropic
+        // upstreams use `/v1/messages`), otherwise the OpenAI-compatible
+        // `/v1/chat/completions`. The path is resolved explicitly (rather than
+        // deferred to the backend default) so the forwarded request is
+        // deterministic. Other surfaces (`/v1/completions`, `/v1/embeddings`,
+        // `/v1/responses`) keep the caller-supplied path so they route to the
+        // matching upstream path.
+        let on_chat_surface = request
+            .path
+            .as_deref()
+            .map(|path| path == "/v1/chat/completions" || path == "/v1/messages")
+            .unwrap_or(true);
+        if on_chat_surface {
+            request.path = Some(
+                route
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| "/v1/chat/completions".to_string()),
+            );
         }
         Ok(PreparedUpstreamRequest {
             request,
@@ -345,6 +358,83 @@ mod tests {
         assert_eq!(
             request_model_id(&targeted_prepared.request.body).as_deref(),
             Some("secret-model")
+        );
+    }
+
+    fn single_route_router(path: Option<String>) -> ModelRouterBackend {
+        let mut router = ModelRouterBackend::new("model-router");
+        router
+            .add_route(
+                ModelRoute::new(
+                    "openai/gpt-4o",
+                    "gpt-4o",
+                    Arc::new(StubBackend { name: "openai" }),
+                    "openai:gpt-4o",
+                )
+                .unwrap()
+                .with_path(path),
+            )
+            .unwrap();
+        router
+    }
+
+    fn prepared_path(router: &ModelRouterBackend, surface: &str) -> Option<String> {
+        let body = br#"{"model":"openai/gpt-4o","messages":[]}"#.to_vec();
+        router
+            .prepare(UpstreamRequest {
+                body,
+                path: Some(surface.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+            .request
+            .path
+    }
+
+    #[test]
+    fn chat_surfaces_resolve_to_chat_completions_for_openai_upstreams() {
+        // OpenAI-compatible upstreams configure no per-route path; both chat
+        // surfaces must resolve to /v1/chat/completions rather than forwarding
+        // the downstream /v1/messages path (which the upstream does not serve,
+        // causing an empty-body 500).
+        let router = single_route_router(None);
+        assert_eq!(
+            prepared_path(&router, "/v1/chat/completions").as_deref(),
+            Some("/v1/chat/completions")
+        );
+        assert_eq!(
+            prepared_path(&router, "/v1/messages").as_deref(),
+            Some("/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn chat_surfaces_use_configured_path_for_native_anthropic() {
+        // Native Anthropic upstreams pin /v1/messages; both chat surfaces map
+        // onto it.
+        let router = single_route_router(Some("/v1/messages".to_string()));
+        assert_eq!(
+            prepared_path(&router, "/v1/chat/completions").as_deref(),
+            Some("/v1/messages")
+        );
+        assert_eq!(
+            prepared_path(&router, "/v1/messages").as_deref(),
+            Some("/v1/messages")
+        );
+    }
+
+    #[test]
+    fn non_chat_surfaces_keep_caller_path() {
+        // Passthrough surfaces are not converted to the chat format, so they
+        // must reach the matching upstream path verbatim.
+        let router = single_route_router(None);
+        assert_eq!(
+            prepared_path(&router, "/v1/embeddings").as_deref(),
+            Some("/v1/embeddings")
+        );
+        assert_eq!(
+            prepared_path(&router, "/v1/responses").as_deref(),
+            Some("/v1/responses")
         );
     }
 }

@@ -112,8 +112,8 @@ Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
   request context lookup. Implemented as a separate internal router builder and
   runtime listener when middleware is enabled.
 - Add optional UDS middleware mode with a fixture middleware for tests.
-  Implemented through router helpers and tests; not exposed by the static
-  gateway config.
+  Implemented through router helpers and tests; enabled in the static gateway
+  config.
 - Ensure external `X-Private-AI-Gateway-*` headers cannot steer the public
   frontend. Implemented by generating internal context server-side; covered by
   tests.

@@ -11,9 +11,8 @@ generic; install, build, run, and ACI policy live in this repo.
 
 The checked-in compose runs in no-middleware mode: the public ACI frontend and
 verified-provider backend are the same process, and traffic is forwarded
-directly from frontend to backend. Middleware router helpers exist for future
-executor integration, but this deploy path does not expose middleware socket
-fields in the static gateway config. See
+directly from frontend to backend. To enable middleware, configure it in the
+static gateway config (this compose leaves it disabled). See
 [`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md)
 and
 [`../docs/middleware-integration.md`](../docs/middleware-integration.md).

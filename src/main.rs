@@ -16,6 +16,11 @@
 //! Gateway-owned writable files are derived from `state_dir` in the static
 //! config. The active upstream database is `upstreams.json` and the
 //! attested-session log is `sessions.jsonl` inside that directory.
+//!
+//! When the static config includes an `executor` section, the gateway forwards
+//! public requests through the out-of-process middleware over `executor.uds_path`
+//! and serves its internal backend on `executor.backend_uds_path` for the
+//! middleware to call back. Without the section the gateway serves directly.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -36,7 +41,10 @@ use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::build_router_with_admin;
+use private_ai_gateway::http::{
+    bind_unix_listener, build_internal_backend_router, build_router_with_admin,
+    build_router_with_admin_and_uds_middleware, serve_unix_listener, GatewayRequestStore,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
@@ -63,6 +71,14 @@ struct GatewayConfigFile {
     admin_token: Option<String>,
     tls: GatewayTlsConfig,
     dstack_endpoint: Option<String>,
+    executor: Option<GatewayExecutorConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayExecutorConfig {
+    uds_path: String,
+    backend_uds_path: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -331,6 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
+    let executor = gateway_config.executor.clone();
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -402,7 +419,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(upstream_config.clone());
 
-    let app = build_router_with_admin(service, upstream_config, admin_token);
+    let app = if let Some(executor) = executor {
+        let request_store = GatewayRequestStore::default();
+        let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
+        let backend_listener = bind_unix_listener(&executor.backend_uds_path)?;
+        tracing::info!(
+            backend_uds_path = %executor.backend_uds_path,
+            executor_uds_path = %executor.uds_path,
+            "private-ai-gateway internal backend listening on Unix socket"
+        );
+        tokio::spawn(async move {
+            if let Err(err) = serve_unix_listener(backend_listener, backend_app).await {
+                tracing::error!(error = %err, "private-ai-gateway internal backend stopped");
+            }
+        });
+        build_router_with_admin_and_uds_middleware(
+            service,
+            upstream_config,
+            admin_token,
+            request_store,
+            executor.uds_path,
+        )
+    } else {
+        build_router_with_admin(service, upstream_config, admin_token)
+    };
 
     tracing::info!(%bind, "private-ai-gateway listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -561,6 +601,30 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
+    fn gateway_config_parses_executor_section() {
+        let config_path = temp_path("gateway-config-executor");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "executor": {
+                    "uds_path": "/run/pag/executor.sock",
+                    "backend_uds_path": "/run/pag/backend.sock"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+
+        // The executor section drives the middleware wiring in `main()`; the
+        // forwarding behavior itself is covered by tests/aggregator_scenarios.rs.
+        let executor = config.executor.expect("executor section must parse");
+        assert_eq!(executor.uds_path, "/run/pag/executor.sock");
+        assert_eq!(executor.backend_uds_path, "/run/pag/backend.sock");
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
     fn gateway_config_rejects_removed_fields() {
         for (name, body) in [
             ("receipt-ttl", r#"{"receipt_ttl_seconds": 3600}"#),
@@ -575,14 +639,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             (
                 "tls-certificate-paths",
                 r#"{"tls": {"certificate_paths": ["/cert.pem"]}}"#,
-            ),
-            (
-                "executor-uds",
-                r#"{"executor_uds_path": "/tmp/executor.sock"}"#,
-            ),
-            (
-                "backend-uds",
-                r#"{"backend_uds_path": "/tmp/backend.sock"}"#,
             ),
         ] {
             let config_path = temp_path(name);

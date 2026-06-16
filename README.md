@@ -383,11 +383,8 @@ Deployment files:
 
 ## Middleware
 
-The current binary deployment runs in no-middleware mode. Middleware router
-helpers exist for future executor integration, but the static gateway config
-does not expose middleware socket fields.
-
-In middleware mode:
+The gateway runs in no-middleware mode unless middleware is configured. In
+middleware mode:
 
 - Public `/v1/models` is forwarded to middleware.
 - Public inference requests are decrypted and normalized by the frontend, then

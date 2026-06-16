@@ -9,9 +9,9 @@ type OnComplete = (usage: Usage | null) => void;
  * Meter the user-visible response: inject `usage.cost` (when pricing is known)
  * and surface the raw upstream usage to `onComplete` for post-request billing.
  * `computeCost` is a pure formula (not commercial IP), so the executor injects
- * locally. Ported from the prior gateway's spend-log pass, which likewise
- * injected cost and reported usage in one traversal: buffered JSON gets
- * `usage = {...usage, cost}`; for SSE, each `data:` chunk carrying usage is
+ * locally. Cost injection and usage reporting happen in one traversal:
+ * buffered JSON gets `usage = {...usage, cost}`; for SSE, each `data:` chunk
+ * carrying usage is
  * re-emitted with cost spliced in and every other chunk passes through
  * byte-for-byte. The usage handed to `onComplete` is always the raw upstream
  * usage (cost is spliced into a copy), so billing records pre-injection counts.
