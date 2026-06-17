@@ -154,6 +154,7 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   const consult = await consultPre(
     params.model,
     bearer ? hashApiKey(bearer) : undefined,
+    params.provider,
   );
   if (!consult.allow) {
     const status = consult.status ?? 403;
