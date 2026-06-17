@@ -70,6 +70,12 @@ export interface RouteCandidate {
   routeId: string;
   /** Which API format shapes the request / parses the response. */
   format: Format;
+  /**
+   * Serving engine of this upstream when it is a self-hosted OpenAI-compatible
+   * server (sglang/vllm). Selects engine-specific request shaping. Absent for
+   * managed third-party APIs.
+   */
+  engine?: 'sglang' | 'vllm';
 }
 
 export interface PreConsult {

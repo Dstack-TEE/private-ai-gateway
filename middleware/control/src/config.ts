@@ -15,6 +15,8 @@ export interface PricingConfig {
 export interface RouteCandidate {
   routeId: string;
   format: Format;
+  /** Self-hosted serving engine (sglang/vllm); absent for managed APIs. */
+  engine?: 'sglang' | 'vllm';
 }
 
 export interface ModelEntry {
