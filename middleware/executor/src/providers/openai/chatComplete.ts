@@ -1,5 +1,5 @@
 import { OPEN_AI } from '../../globals';
-import { ContentBlockChunk } from '../../types/requestBody';
+import { ContentBlockChunk, Params } from '../../types/requestBody';
 import {
   ChatCompletionResponse,
   ErrorResponse,
@@ -131,6 +131,46 @@ export const OpenAIChatCompleteConfig: ProviderConfig = {
     param: 'verbosity',
   },
 };
+
+// sglang's reasoning_effort accepts none|low|medium|high|max and rejects
+// OpenAI-only values (minimal, xhigh) with a 4xx. Normalize those onto the
+// sglang set; values already accepted pass through unchanged. vllm's recent
+// schema is a superset that accepts minimal/xhigh natively, so it needs no
+// remap — only sglang uses this transform.
+const SGLANG_REASONING_EFFORT_MAP: Record<string, string> = {
+  minimal: 'low',
+  xhigh: 'max',
+};
+
+export const mapSglangReasoningEffort = (params: Params) => {
+  const effort = params.reasoning_effort;
+  if (typeof effort !== 'string') return effort;
+  return SGLANG_REASONING_EFFORT_MAP[effort] ?? effort;
+};
+
+/**
+ * Chat-completion config for self-hosted OpenAI-compatible engines (sglang /
+ * vllm). Extends the base OpenAI config with the engines' native sampling
+ * params (forwarded only when the client sends them; the upstream validates
+ * ranges) and, for sglang, the reasoning_effort normalization.
+ */
+export const buildEngineChatCompleteConfig = (
+  engine: 'sglang' | 'vllm'
+): ProviderConfig => ({
+  ...OpenAIChatCompleteConfig,
+  top_k: { param: 'top_k' },
+  min_p: { param: 'min_p' },
+  repetition_penalty: { param: 'repetition_penalty' },
+  chat_template_kwargs: { param: 'chat_template_kwargs' },
+  ...(engine === 'sglang'
+    ? {
+        reasoning_effort: {
+          param: 'reasoning_effort',
+          transform: mapSglangReasoningEffort,
+        },
+      }
+    : {}),
+});
 
 export interface OpenAIChatCompleteResponse extends ChatCompletionResponse {
   system_fingerprint: string;

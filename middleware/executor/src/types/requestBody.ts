@@ -7,6 +7,13 @@
 export interface Options {
   /** Registry key for the provider transform set: "openai" | "anthropic". */
   provider: string;
+  /**
+   * Serving engine of the selected upstream, when it is a self-hosted
+   * OpenAI-compatible server. Selects the engine-specific request shaping
+   * (native sampling params + reasoning_effort vocabulary). Absent for managed
+   * third-party APIs, which keep the plain OpenAI transform.
+   */
+  engine?: 'sglang' | 'vllm';
   /** Bearer/API key, read by the provider api config when building headers. */
   apiKey?: string;
   /** OpenAI-specific request headers. */
@@ -201,6 +208,10 @@ export interface Params {
   context?: string;
   examples?: Examples[];
   top_k?: number;
+  min_p?: number;
+  repetition_penalty?: number;
+  chat_template_kwargs?: Record<string, unknown>;
+  reasoning_effort?: string;
   tools?: Tool[];
   tool_choice?: ToolChoice;
   response_format?: {

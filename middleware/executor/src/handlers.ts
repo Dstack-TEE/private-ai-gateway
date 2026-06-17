@@ -35,9 +35,9 @@ const surfaceFor = (fn: endpointStrings): Surface =>
 
 /**
  * Build the `{ targets, body }` payload for the backend: shape the request for
- * every candidate (downstream format x candidate format), then package it — one
- * shared body when all candidates share a format, otherwise the envelope the
- * backend understands (`{ candidates: [{ target, body }] }`).
+ * every candidate (by its format + engine), then package it — one shared body
+ * when all candidates shape identically, otherwise the envelope the backend
+ * understands (`{ candidates: [{ target, body }] }`).
  */
 function buildForwardPayload(
   params: Params,
@@ -49,10 +49,15 @@ function buildForwardPayload(
     target: candidate.routeId,
     body: transformToProviderRequest(candidate.format, params, fn, {
       provider: candidate.format,
+      engine: candidate.engine,
     }),
   }));
-  const sameFormat = candidates.every((c) => c.format === candidates[0].format);
-  return sameFormat
+  // A shared body is only valid when every candidate shapes the request
+  // identically — same format AND same engine (engine alters the openai shaping).
+  const sameShape = candidates.every(
+    (c) => c.format === candidates[0].format && c.engine === candidates[0].engine
+  );
+  return sameShape
     ? { targets, body: JSON.stringify(shaped[0].body) }
     : { targets, body: JSON.stringify({ candidates: shaped }) };
 }
