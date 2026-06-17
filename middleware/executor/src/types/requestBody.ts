@@ -171,6 +171,14 @@ export interface Tool extends PromptCache {
  */
 export interface Params {
   model?: string;
+  // Provider routing block. Only `only`/`order` are honored by the control
+  // plane (which restricts selection to supported providers); dropped before
+  // forwarding upstream by the whitelist request transform.
+  provider?: {
+    only?: string[];
+    order?: string[];
+    allow_fallbacks?: boolean;
+  };
   prompt?: string | string[];
   messages?: Message[];
   functions?: Function[];

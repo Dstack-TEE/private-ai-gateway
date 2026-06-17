@@ -6,7 +6,8 @@ import { PricingConfig } from "../services/pricing";
 
 // The executor reaches the control plane over HTTP(S) at
 // PRIVATE_AI_GATEWAY_CONTROL_URL, authenticated with a bearer token; use TLS in
-// production. The consult payloads carry only {apiKeyHash, model} and usage counts.
+// production. The consult payloads carry only {apiKeyHash, model, provider} and
+// usage counts — `provider` is a routing hint, not content.
 const CONTROL_URL = process.env.PRIVATE_AI_GATEWAY_CONTROL_URL?.trim();
 const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
 
@@ -92,20 +93,28 @@ export function hashApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex");
 }
 
+/** Provider routing block, forwarded verbatim to control. */
+export interface ProviderRouting {
+  only?: string[];
+  order?: string[];
+  allow_fallbacks?: boolean;
+}
+
 /**
- * Pre-request consult: {apiKeyHash?, model} -> {allow, ...}.
+ * Pre-request consult: {apiKeyHash?, model, provider?} -> {allow, ...}.
  * Because this gates authorization, it fails CLOSED — an unreachable control
  * plane blocks the request (503) rather than letting it through unauthorized.
  */
 export async function consultPre(
   model: string | undefined,
   apiKeyHash: string | undefined,
+  provider?: ProviderRouting,
 ): Promise<PreConsult> {
   try {
     const res = await controlRequest(
       "POST",
       "/consult/pre",
-      JSON.stringify({ apiKeyHash, model }),
+      JSON.stringify({ apiKeyHash, model, provider }),
     );
     if (res.status !== 200) {
       return {
