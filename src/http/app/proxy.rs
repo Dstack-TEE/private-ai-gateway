@@ -44,7 +44,7 @@ pub(super) async fn forward_to_middleware(
     middleware_completion_response(builder.body(body).send().await, stream).await
 }
 
-pub(super) async fn get_from_middleware(middleware: UdsMiddleware, path: &'static str) -> Response {
+pub(super) async fn get_from_middleware(middleware: UdsMiddleware, path: &str) -> Response {
     let url = format!("{}{}", middleware.base_url, path);
     match buffered_middleware_response(middleware.client.get(url).send().await).await {
         Ok(response) => response.into_response(),

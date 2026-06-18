@@ -21,6 +21,10 @@
 //!   E2EE is supported and operates on the `input` request field and
 //!   each `data[].embedding` response field.
 //! * `GET  /v1/models` - proxy the upstream OpenAI-compatible model list.
+//! * `GET  /v1/models/:namespace` - models exposed under a `{namespace}/`
+//!   alias prefix (control-plane middleware only).
+//! * `GET  /v1/embeddings/models` - embedding model catalog (control-plane
+//!   middleware only).
 //! * `GET  /v1/metrics` - expose aggregator-owned Prometheus metrics.
 //! * `GET  /v1/admin/upstreams` - authenticated admin view of the
 //!   current upstream config, with secrets redacted.
@@ -85,7 +89,8 @@ use backend::internal_forward;
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
     admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
-    embeddings, messages, metrics, models, receipt_by_chat_id, responses, root,
+    embeddings, embeddings_models, messages, metrics, models, models_namespace,
+    receipt_by_chat_id, responses, root,
 };
 
 #[derive(Clone)]
@@ -249,6 +254,8 @@ fn build_router_inner(
         .route("/", get(root))
         // OpenAI- and Anthropic-compatible inference surface.
         .route("/v1/models", get(models))
+        .route("/v1/models/:namespace", get(models_namespace))
+        .route("/v1/embeddings/models", get(embeddings_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))

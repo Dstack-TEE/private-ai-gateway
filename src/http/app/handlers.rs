@@ -77,6 +77,35 @@ pub(super) async fn models(State(state): State<AppState>) -> Response {
     }
 }
 
+// Models exposed under a `{namespace}/` alias prefix (e.g. phala/*, openai/*).
+// Only meaningful in the control-plane middleware topology.
+pub(super) async fn models_namespace(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Response {
+    let Some(middleware) = state.middleware.clone() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "namespace model catalog is not available in direct-upstream mode",
+        );
+    };
+    get_from_middleware(middleware, &format!("/v1/models/{namespace}")).await
+}
+
+// Embedding model catalog. Only meaningful in the control-plane middleware
+// topology.
+pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response {
+    let Some(middleware) = state.middleware.clone() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "embedding model catalog is not available in direct-upstream mode",
+        );
+    };
+    get_from_middleware(middleware, "/v1/embeddings/models").await
+}
+
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
     match state.service.metrics() {
         Ok(snapshot) => {
