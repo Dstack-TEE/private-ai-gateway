@@ -266,3 +266,22 @@ export const models = async (): Promise<Response> => {
     headers: { "content-type": "application/json" },
   });
 };
+
+/** GET /v1/models/:namespace — relay a namespace-scoped catalog from control. */
+export const namespaceModels = async (c: Context): Promise<Response> => {
+  const ns = c.req.param("namespace") ?? "";
+  const r = await fetchCatalog(`/models/${encodeURIComponent(ns)}`);
+  return new Response(r.body, {
+    status: r.status,
+    headers: { "content-type": "application/json" },
+  });
+};
+
+/** GET /v1/embeddings/models — relay the embedding catalog from control. */
+export const embeddingModels = async (): Promise<Response> => {
+  const r = await fetchCatalog("/embeddings/models");
+  return new Response(r.body, {
+    status: r.status,
+    headers: { "content-type": "application/json" },
+  });
+};
