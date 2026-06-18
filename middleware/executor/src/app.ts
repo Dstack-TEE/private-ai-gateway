@@ -8,6 +8,7 @@ import {
   messages,
   models,
   namespaceModels,
+  providerModels,
   responses,
 } from './handlers';
 
@@ -23,6 +24,7 @@ export const app = new Hono();
 app.get('/', (c) => c.text('private-ai-gateway middleware executor\n'));
 
 app.get('/v1/models', models);
+app.get('/v1/models/providers/:provider', providerModels);
 app.get('/v1/models/:namespace', namespaceModels);
 app.get('/v1/embeddings/models', embeddingModels);
 app.post('/v1/chat/completions', chatCompletions);

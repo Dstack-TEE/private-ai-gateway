@@ -77,6 +77,37 @@ pub(super) async fn models(State(state): State<AppState>) -> Response {
     }
 }
 
+// Relay every /v1/models/<sub> sub-catalog to the middleware, which owns the
+// real routing (namespace, providers, ...). matchit 0.7.3 forbids a param and
+// a static sibling at the same position, so we relay the whole subtree rather
+// than enumerate routes here. Only meaningful in the middleware topology.
+pub(super) async fn models_subpath(
+    State(state): State<AppState>,
+    Path(rest): Path<String>,
+) -> Response {
+    let Some(middleware) = state.middleware.clone() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "model sub-catalogs are not available in direct-upstream mode",
+        );
+    };
+    get_from_middleware(middleware, &format!("/v1/models/{rest}")).await
+}
+
+// Embedding model catalog. Only meaningful in the control-plane middleware
+// topology.
+pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response {
+    let Some(middleware) = state.middleware.clone() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "embedding model catalog is not available in direct-upstream mode",
+        );
+    };
+    get_from_middleware(middleware, "/v1/embeddings/models").await
+}
+
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
     match state.service.metrics() {
         Ok(snapshot) => {
