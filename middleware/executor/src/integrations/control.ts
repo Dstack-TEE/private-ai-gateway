@@ -165,7 +165,9 @@ export function consultPost(report: PostReport): void {
   });
 }
 
-/** Fetch the model catalog (relayed by the executor's GET /v1/models). */
-export function fetchCatalog(): Promise<{ status: number; body: string }> {
-  return controlRequest("GET", "/models");
+/** Fetch a model catalog (relayed by the executor's GET /v1/models* routes). */
+export function fetchCatalog(
+  path: string = "/models"
+): Promise<{ status: number; body: string }> {
+  return controlRequest("GET", path);
 }

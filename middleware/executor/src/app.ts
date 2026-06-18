@@ -3,9 +3,11 @@ import { Hono } from 'hono';
 import {
   chatCompletions,
   completions,
+  embeddingModels,
   embeddings,
   messages,
   models,
+  namespaceModels,
   responses,
 } from './handlers';
 
@@ -21,6 +23,8 @@ export const app = new Hono();
 app.get('/', (c) => c.text('private-ai-gateway middleware executor\n'));
 
 app.get('/v1/models', models);
+app.get('/v1/models/:namespace', namespaceModels);
+app.get('/v1/embeddings/models', embeddingModels);
 app.post('/v1/chat/completions', chatCompletions);
 app.post('/v1/completions', completions);
 app.post('/v1/embeddings', embeddings);
