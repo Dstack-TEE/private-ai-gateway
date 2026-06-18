@@ -91,8 +91,8 @@ use backend::internal_forward;
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
     admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
-    embeddings, embeddings_models, messages, metrics, models, models_subpath,
-    receipt_by_chat_id, responses, root,
+    embeddings, embeddings_models, messages, metrics, models, models_subpath, receipt_by_chat_id,
+    responses, root,
 };
 
 #[derive(Clone)]
