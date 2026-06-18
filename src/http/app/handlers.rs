@@ -77,20 +77,22 @@ pub(super) async fn models(State(state): State<AppState>) -> Response {
     }
 }
 
-// Models exposed under a `{namespace}/` alias prefix (e.g. phala/*, openai/*).
-// Only meaningful in the control-plane middleware topology.
-pub(super) async fn models_namespace(
+// Relay every /v1/models/<sub> sub-catalog to the middleware, which owns the
+// real routing (namespace, providers, ...). matchit 0.7.3 forbids a param and
+// a static sibling at the same position, so we relay the whole subtree rather
+// than enumerate routes here. Only meaningful in the middleware topology.
+pub(super) async fn models_subpath(
     State(state): State<AppState>,
-    Path(namespace): Path<String>,
+    Path(rest): Path<String>,
 ) -> Response {
     let Some(middleware) = state.middleware.clone() else {
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "namespace model catalog is not available in direct-upstream mode",
+            "model sub-catalogs are not available in direct-upstream mode",
         );
     };
-    get_from_middleware(middleware, &format!("/v1/models/{namespace}")).await
+    get_from_middleware(middleware, &format!("/v1/models/{rest}")).await
 }
 
 // Embedding model catalog. Only meaningful in the control-plane middleware

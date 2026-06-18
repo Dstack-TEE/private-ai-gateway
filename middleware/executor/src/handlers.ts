@@ -277,6 +277,16 @@ export const namespaceModels = async (c: Context): Promise<Response> => {
   });
 };
 
+/** GET /v1/models/providers/:provider — relay a provider-scoped catalog. */
+export const providerModels = async (c: Context): Promise<Response> => {
+  const provider = c.req.param("provider") ?? "";
+  const r = await fetchCatalog(`/models/providers/${encodeURIComponent(provider)}`);
+  return new Response(r.body, {
+    status: r.status,
+    headers: { "content-type": "application/json" },
+  });
+};
+
 /** GET /v1/embeddings/models — relay the embedding catalog from control. */
 export const embeddingModels = async (): Promise<Response> => {
   const r = await fetchCatalog("/embeddings/models");
