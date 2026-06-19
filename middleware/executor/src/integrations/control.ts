@@ -90,6 +90,8 @@ export interface PreConsult {
   userId?: number;
   virtualKeyId?: number;
   spendMode?: SpendMode;
+  // Tier to forward to the upstream as the x-user-tier header.
+  userTier?: string;
   // Set on a 429 denial: drives the X-RateLimit-* / Retry-After headers.
   rateLimit?: { limit: number; resetAt: number };
 }

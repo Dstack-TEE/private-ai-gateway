@@ -235,6 +235,9 @@ pub struct GatewayRequestContext {
     pub request_id: String,
     pub user_model: Option<String>,
     pub target_route_id: Option<String>,
+    /// Optional x-user-tier value to relay to the upstream. None when the
+    /// caller supplied no x-user-tier header.
+    pub user_tier: Option<String>,
 }
 
 /// One ordered failover candidate: a route id to try plus the request

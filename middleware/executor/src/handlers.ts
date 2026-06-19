@@ -199,7 +199,12 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   const { targets, body } = buildForwardPayload(params, fn, candidates);
   let backendResp: Response;
   try {
-    backendResp = await forwardToBackend({ requestId, targets, body });
+    backendResp = await forwardToBackend({
+      requestId,
+      targets,
+      body,
+      userTier: consult.userTier,
+    });
   } catch (err) {
     return errorResponse(
       surface,

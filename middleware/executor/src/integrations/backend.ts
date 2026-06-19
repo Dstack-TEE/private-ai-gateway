@@ -36,6 +36,8 @@ export interface ForwardArgs {
    * target order matches `targets`.
    */
   body: Uint8Array | string;
+  /** Tier value to relay to the gateway as the x-user-tier header. */
+  userTier?: string;
 }
 
 /**
@@ -58,6 +60,7 @@ export function forwardToBackend(args: ForwardArgs): Promise<Response> {
           "content-length": payload.byteLength,
           "x-private-ai-gateway-request-id": args.requestId,
           "x-private-ai-gateway-targets": args.targets.join(","),
+          ...(args.userTier ? { "x-user-tier": args.userTier } : {}),
         },
       },
       (res) => {
