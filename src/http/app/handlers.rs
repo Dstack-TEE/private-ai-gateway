@@ -458,6 +458,8 @@ pub(super) async fn openai_completion_endpoint(
             .and_then(Value::as_str)
             .map(str::to_string),
         target_route_id: None,
+        // Populated from the x-user-tier header on the internal-forward path.
+        user_tier: None,
     };
 
     let stream = !force_buffered

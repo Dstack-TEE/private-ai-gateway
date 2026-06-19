@@ -173,6 +173,7 @@ pub(super) async fn internal_forward(
                     request_id,
                     user_model: stored.user_model,
                     target_route_id: None,
+                    user_tier: header_str(&headers, "x-user-tier").map(str::to_string),
                 },
                 endpoint_path: stored.endpoint_path,
                 received_body: &received_body,

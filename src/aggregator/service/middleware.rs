@@ -22,6 +22,7 @@ use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifie
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
+use std::collections::HashMap;
 
 fn is_retryable_provider_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
@@ -126,6 +127,12 @@ impl AciService {
             candidates.iter().map(|c| c.route_id.clone()).collect();
         let last_index = candidates.len() - 1;
 
+        // Optional x-user-tier passed through to every upstream attempt.
+        let mut upstream_headers: HashMap<String, String> = HashMap::new();
+        if let Some(tier) = req.context.user_tier.as_deref() {
+            upstream_headers.insert("x-user-tier".to_string(), tier.to_string());
+        }
+
         // Highest-priority error across exhausted candidates, returned if
         // no candidate succeeds.
         //
@@ -142,9 +149,9 @@ impl AciService {
 
             let prepared = match self.upstream.prepare(UpstreamRequest {
                 body: candidate.body.clone(),
+                headers: upstream_headers.clone(),
                 path: Some(endpoint_path.to_string()),
                 target_route_id: Some(route_id.clone()),
-                ..Default::default()
             }) {
                 Ok(prepared) => prepared,
                 Err(UpstreamError::Routing(message)) => {
