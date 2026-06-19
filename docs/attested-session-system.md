@@ -274,22 +274,19 @@ request → receipt (x-receipt-id)
         → AttestedSession { claims (+ reasons), channel_binding, evidence }
 ```
 
-## Storage: append-only signed JSONL
+## Storage: compacted JSONL
 
-A tamper-evident log behind a session store trait (sibling to `ReceiptStore`).
-Each line is a typed, gateway-signed record (`{ seq, ts, type, payload, sig }`).
-On startup the log is replayed into an in-memory materialized index (by
-`session_id`, and by `(provider, model_id)`). Properties:
+The durable session store appends typed records
+(`{ seq, ts, type, payload }`) to `sessions.jsonl` and replays them into an
+in-memory index on startup. Record integrity comes from recomputing the
+content-addressed `session_id`; receipt signatures link requests to those
+session ids. At-rest durability and confidentiality remain deployment
+concerns.
 
-- Append-only + per-record signature ⇒ integrity independent of at-rest
-  sealing, and a natural feed for a future public transparency log.
-- TEE sealing of the log file is a deployment concern; the per-record signature
-  gives tamper-evidence regardless.
-- Records are signed by `AciService` with the existing receipt key, keeping the
-  store a pure appender.
-- `InMemoryReceiptStore` stays for tests; the JSONL store is the durable impl.
-- Compaction (snapshot + truncate) is future work; for the preview the log
-  grows with a documented operator rotation step.
+The gateway takes an advisory lock on a separate `sessions.jsonl.lock` file so
+only one process can own the log. On startup and hourly thereafter it rewrites
+the live, non-expired index through a synced temporary file and atomic rename,
+dropping duplicate, expired, malformed, or truncated history.
 
 ## API surface
 
@@ -318,15 +315,13 @@ Canonical (clean shapes):
   session store (see below), so a user can inspect the attested session + claims
   for a model *before* releasing any data.
 
-### One store, one writer
+### One store, one process owner
 
-The in-memory session store is the single source of truth, and the **background
-upstream verification is its single writer**. The gateway already re-attests
-every configured model-endpoint at startup and on a refresh cadence to stay
-ready to serve; that same verification now seals each verified result into a
-session (via an `UpstreamSessionSink` the service implements). So sessions are
-established and kept fresh by the verification that runs anyway — there is no
-separate import pass and no separate refresh loop, and therefore no drift.
+The in-memory session store is the serving source of truth. Background upstream
+verification establishes and refreshes sessions before traffic, while request
+completion persists the session actually served. Both paths write through the
+same store instance; the separate lock file prevents another gateway process
+from concurrently owning the JSONL log.
 
 Sealing a session is **pure attestation**: the verification fetches and checks
 the provider's attestation (the TEE quote, the pinned TLS public key / SPKI, the
@@ -361,18 +356,19 @@ private-ai-gateway paths):
 ## Implementation increments
 
 1. **Immutable session + store.** `AttestedSession` / `SessionClaims` types; a
-   session store trait; an append-only signed JSONL impl with replay; keep
-   in-memory for tests. Rework `record_attested_upstream_session` to seal the
-   immutable session and persist it. Receipts already cite `session_id`.
+   session store trait; a content-addressed JSONL implementation with replay and
+   periodic compaction; keep in-memory for tests. Rework
+   `record_attested_upstream_session` to seal the immutable session and persist
+   it. Receipts already cite `session_id`.
 2. **Typed claims from verifiers.** Each provider adapter populates
    `SessionClaims` (status + source + reason) from its verified evidence —
    including `serving_software_known_good` / `os_known_good` as the
    source-provenance surface.
-3. **One store, one writer (preflight).** *Done.* The background upstream
-   verification seals each verified result into the session store through an
-   `UpstreamSessionSink`, so `/v1/aci/sessions` is a real preflight survey
-   maintained by the verification that already runs for serving — no separate
-   import or refresh loop, no drift. Still open: the per-model `endpoint` object
+3. **One store, one process owner (preflight).** *Done.* Background upstream
+   verification seals each verified result through an `UpstreamSessionSink`,
+   while completion persists the session actually served. Both use the same
+   process-owned store, so `/v1/aci/sessions` is a real preflight survey without
+   a separate import loop. Still open: the per-model `endpoint` object
    config form (today each model maps to a single `upstream_model_id` inheriting
    the provider `base_url`).
 

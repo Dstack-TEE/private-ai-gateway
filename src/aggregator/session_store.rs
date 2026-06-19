@@ -23,7 +23,7 @@
 //! expired records are dropped lazily on read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -172,7 +172,21 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
 
 /// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
 /// index sit behind separate locks, so a read never waits on a write.
+///
+/// The log is append-only on the hot path, so a line is written per served
+/// session even though sessions are content-addressed and collapse to one live
+/// entry per channel in the index. [`JsonlSessionStore::compact`] reclaims that
+/// history by rewriting the file from the live index.
+///
+/// Single-writer is enforced with an advisory lock on a *separate* lock file
+/// (`<log>.lock`) that is never renamed, held for the whole lifetime of the
+/// store. The data log itself is rename-swapped by compaction, so a lock on the
+/// log inode would migrate off the path during the swap and let a racing opener
+/// slip in; the lock file has no such window.
 pub struct JsonlSessionStore {
+    path: PathBuf,
+    /// Held for its side effect: the advisory lock lives as long as this handle.
+    _lock_file: File,
     writer: Mutex<LogWriter>,
     index: Mutex<SessionIndex>,
 }
@@ -182,28 +196,80 @@ struct LogWriter {
     next_seq: u64,
 }
 
+/// Take the advisory exclusive lock that enforces single-writer (see
+/// [`JsonlSessionStore`]). The returned handle must be held for the writer's
+/// lifetime; the lock releases when it is dropped, including on crash.
+fn acquire_exclusive_lock(lock_path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false) // the lock file carries no content; never truncate it
+        .open(lock_path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "another gateway instance holds the session log lock at {}; \
+                 refusing to start to avoid forking the log",
+                lock_path.display()
+            ),
+        )),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// The lock-file path that guards the log at `path` (`<log>.lock`).
+fn lock_path_for(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.lock")
+}
+
 impl JsonlSessionStore {
     /// Open (creating if absent) the log at `path`, replaying existing records
     /// into the in-memory index. Malformed lines are skipped so a partially
-    /// written tail never blocks startup.
+    /// written tail never blocks startup. Startup compaction rewrites the live
+    /// index to canonical JSONL before the gateway begins serving.
+    ///
+    /// Takes an advisory exclusive lock on `<path>.lock` *before* reading the
+    /// log, so only one process ever writes it — failing with
+    /// [`io::ErrorKind::WouldBlock`] if another holds the lock.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path: PathBuf = path.as_ref().to_path_buf();
 
+        // Single-writer lock first, before we read or write the log.
+        let lock_file = acquire_exclusive_lock(&lock_path_for(&path))?;
+
         let mut next_seq = 0u64;
         let mut index = SessionIndex::default();
-        if let Ok(file) = File::open(&path) {
-            for line in BufReader::new(file).lines() {
-                let line = match line {
-                    Ok(line) => line,
-                    Err(_) => break, // truncated tail; stop replay
-                };
-                if line.trim().is_empty() {
+        let replay_file = match File::open(&path) {
+            Ok(file) => Some(file),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(file) = replay_file {
+            let mut reader = BufReader::new(file);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                // Read raw bytes rather than `lines()`: a crash can truncate the
+                // tail mid-multibyte, which `lines()` surfaces as an InvalidData
+                // error. Only a genuine read error should stop startup; corrupt
+                // or non-UTF-8 bytes are skipped and compaction drops them.
+                if reader.read_until(b'\n', &mut buf)? == 0 {
+                    break; // EOF
+                }
+                let trimmed = buf.trim_ascii();
+                if trimmed.is_empty() {
                     continue;
                 }
-                let Ok(record) = serde_json::from_str::<SessionLogRecord>(&line) else {
-                    continue; // skip malformed line
+                let Ok(record) = serde_json::from_slice::<SessionLogRecord>(trimmed) else {
+                    continue; // malformed line; compaction will drop it
                 };
-                next_seq = next_seq.max(record.seq + 1);
+                let Some(seq_after) = record.seq.checked_add(1) else {
+                    continue; // corrupt seq at u64::MAX; skip rather than overflow
+                };
+                next_seq = next_seq.max(seq_after);
                 if record.record_type == RECORD_TYPE_SESSION {
                     if let Ok(session) = serde_json::from_value::<AttestedSession>(record.payload) {
                         // Enforce content-addressing on replay: a record whose
@@ -225,35 +291,93 @@ impl JsonlSessionStore {
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
+            path,
+            _lock_file: lock_file,
             writer: Mutex::new(LogWriter { file, next_seq }),
             index: Mutex::new(index),
         })
+    }
+
+    /// Rewrite the log from the live (non-expired) index, dropping the duplicate
+    /// and expired lines that accumulate because the hot path is append-only.
+    /// After compaction the file holds one record per live channel.
+    ///
+    /// Returns the number of records kept.
+    ///
+    /// Records are written and synced to a temp file before an atomic rename.
+    /// The replacement append handle is opened before the rename, so a successful
+    /// swap never leaves the writer pointing at the old, unlinked file.
+    pub fn compact(&self, now: u64) -> io::Result<usize> {
+        // Hold the writer across the whole rewrite so no append races the swap.
+        // Lock order is writer → index, matching `put_session`, so the two paths
+        // can never deadlock against each other.
+        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+
+        let live: Vec<AttestedSession> = {
+            let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+            index.evict_expired(now);
+            index.by_id.values().cloned().collect()
+        };
+
+        let tmp = self.path.with_extension("jsonl.tmp");
+        {
+            let mut out = File::create(&tmp)?;
+            for (seq, session) in live.iter().enumerate() {
+                let mut line = serde_json::to_string(&SessionLogRecordRef {
+                    seq: seq as u64,
+                    ts: now,
+                    record_type: RECORD_TYPE_SESSION,
+                    payload: session,
+                })
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                line.push('\n');
+                out.write_all(line.as_bytes())?;
+            }
+            out.sync_all()?; // durable temp contents before it becomes the log
+        }
+
+        // Open the replacement append handle before the rename, so the only
+        // fallible step left is the rename — the writer is never left pointing at
+        // the stale inode.
+        let new_file = OpenOptions::new().append(true).open(&tmp)?;
+        std::fs::rename(&tmp, &self.path)?;
+
+        w.file = new_file;
+        w.next_seq = live.len() as u64;
+        Ok(live.len())
     }
 }
 
 impl SessionStore for JsonlSessionStore {
     fn put_session(&self, session: AttestedSession, ts: u64) -> io::Result<u64> {
-        let seq = {
-            let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-            let seq = w.next_seq;
-            let mut line = serde_json::to_string(&SessionLogRecordRef {
-                seq,
-                ts,
-                record_type: RECORD_TYPE_SESSION,
-                payload: &session,
-            })
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            line.push('\n');
-            // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
-            // `file` ever becomes a `BufWriter`, restore a flush or records can sit
-            // unwritten on a crash.
-            w.file.write_all(line.as_bytes())?;
-            w.next_seq = seq + 1;
-            seq
+        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let seq = w.next_seq;
+        // Refuse to write a record we cannot assign a successor to, rather than
+        // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
+        // the gateway's startup compaction renumbers from zero before serving.
+        let Some(next_seq) = seq.checked_add(1) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session log sequence number overflowed u64::MAX",
+            ));
         };
-        // Index under its own lock, so a get/list never waited on the write above.
-        // A crash between the write and this update loses nothing — replay rebuilds
-        // the index from the log.
+        let mut line = serde_json::to_string(&SessionLogRecordRef {
+            seq,
+            ts,
+            record_type: RECORD_TYPE_SESSION,
+            payload: &session,
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        line.push('\n');
+        // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
+        // `file` ever becomes a `BufWriter`, restore a flush or records can sit
+        // unwritten on a crash.
+        w.file.write_all(line.as_bytes())?;
+        w.next_seq = next_seq;
+        // Update the index under the writer lock so the log and index advance
+        // together: `compact` rewrites the log *from* the index, so an index that
+        // lagged a completed append could drop an on-disk record. Reads still
+        // don't wait on the file write — only on this brief index update.
         self.index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -320,6 +444,34 @@ mod tests {
     fn temp_path() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("pag-sess-{}-{}.jsonl", std::process::id(), n))
+    }
+
+    /// Remove the log and the sibling files a store leaves beside it (the lock
+    /// file and any stale compaction temp), so a test does not litter the temp
+    /// directory.
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(lock_path_for(path));
+        let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
+    }
+
+    /// Open a store, retrying briefly on `WouldBlock`. Other tests in this binary
+    /// spawn child processes (the external-verifier tests); during their
+    /// fork→exec window a child transiently inherits this store's advisory-lock
+    /// fd, so a fresh open can momentarily see the lock as held. Production never
+    /// hits this — it holds one lock for its whole life and never re-acquires —
+    /// so the retry belongs only in the test harness.
+    fn open_store(path: &Path) -> JsonlSessionStore {
+        for _ in 0..200 {
+            match JsonlSessionStore::open(path) {
+                Ok(store) => return store,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("opening {} failed: {e}", path.display()),
+            }
+        }
+        panic!("opening {} kept returning WouldBlock", path.display())
     }
 
     // `marker` is folded into the sealed material (via the evidence digest) so
@@ -431,7 +583,7 @@ mod tests {
     #[test]
     fn put_get_and_list_filtering() {
         let path = temp_path();
-        let store = JsonlSessionStore::open(&path).unwrap();
+        let store = open_store(&path);
         let a = session("https://node-7.example.net", "aa", 5_000);
         let b = session("https://node-9.example.net", "bb", 5_000);
         store.put_session(a.clone(), 1_000).unwrap();
@@ -442,20 +594,22 @@ mod tests {
         assert_eq!(store.list_sessions(Some("phala-direct"), 2_000).len(), 2);
         assert!(store.list_sessions(Some("nope"), 2_000).is_empty());
 
-        let _ = std::fs::remove_file(&path);
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]
     fn expired_sessions_are_dropped_on_read() {
         let path = temp_path();
-        let store = JsonlSessionStore::open(&path).unwrap();
+        let store = open_store(&path);
         let s = session("https://node-7.example.net", "aa", 5_000);
         store.put_session(s.clone(), 1_000).unwrap();
 
         assert!(store.get_session(&s.session_id, 5_000).is_none());
         assert!(store.list_sessions(None, 5_000).is_empty());
 
-        let _ = std::fs::remove_file(&path);
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]
@@ -464,21 +618,123 @@ mod tests {
         let a = session("https://node-7.example.net", "aa", 5_000);
         let b = session("https://node-9.example.net", "bb", 5_000);
         {
-            let store = JsonlSessionStore::open(&path).unwrap();
+            let store = open_store(&path);
             let seq_a = store.put_session(a.clone(), 1_000).unwrap();
             let seq_b = store.put_session(b.clone(), 1_001).unwrap();
             assert_eq!((seq_a, seq_b), (0, 1));
         }
 
         // Reopen: index is rebuilt and the sequence continues from where it left.
-        let store = JsonlSessionStore::open(&path).unwrap();
+        let store = open_store(&path);
         assert_eq!(store.get_session(&a.session_id, 2_000), Some(a));
         assert_eq!(store.get_session(&b.session_id, 2_000), Some(b));
         let next = session("https://node-7.example.net", "cc", 5_000);
         let seq_c = store.put_session(next, 1_002).unwrap();
         assert_eq!(seq_c, 2, "seq continues after replay");
 
-        let _ = std::fs::remove_file(&path);
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compact_collapses_history_to_the_live_set() {
+        let path = temp_path();
+
+        // The hot path re-puts the same channel on every request: many lines on
+        // disk, one live entry in the index. Plus a session that has expired by
+        // compaction time, which must not survive the rewrite.
+        let live = session("https://node-7.example.net", "same", 9_000);
+        let expired = session("https://node-9.example.net", "gone", 4_000);
+        let next = session("https://node-7.example.net", "new", 9_000);
+        let now = 5_000; // past `expired`'s deadline, before `live`'s.
+        {
+            let store = open_store(&path);
+            for ts in [1_000, 2_000, 3_000] {
+                store.put_session(live.clone(), ts).unwrap();
+            }
+            store.put_session(expired.clone(), 1_000).unwrap();
+
+            // Four appended lines before compaction.
+            assert_eq!(count_lines(&path), 4);
+
+            let kept = store.compact(now).unwrap();
+            assert_eq!(kept, 1, "only the one live channel is kept");
+
+            // The file shrinks to exactly the live set...
+            assert_eq!(count_lines(&path), 1);
+            // ...the expired session is gone and the live one is still served...
+            assert!(store.get_session(&expired.session_id, now).is_none());
+            assert_eq!(store.get_session(&live.session_id, now), Some(live.clone()));
+
+            // ...and a later append continues the sequence without collision:
+            // after compaction one record (seq 0) exists, so the next is seq 1.
+            assert_eq!(store.put_session(next.clone(), now).unwrap(), 1);
+        }
+
+        // Reopening (after the writer dropped its lock) rebuilds the index from
+        // the compacted log and continues.
+        let reopened = open_store(&path);
+        assert_eq!(reopened.get_session(&live.session_id, now), Some(live));
+        assert_eq!(reopened.get_session(&next.session_id, now), Some(next));
+        assert!(reopened.get_session(&expired.session_id, now).is_none());
+
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn second_open_is_locked_out_while_the_first_writer_lives() {
+        // The advisory lock keeps a second process (or an overlapping rolling
+        // restart) from appending to / compacting the same log behind the first.
+        let path = temp_path();
+        let first = open_store(&path);
+
+        let blocked = JsonlSessionStore::open(&path);
+        assert!(
+            matches!(&blocked, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+            "a second open must fail while the first holds the lock"
+        );
+
+        // Once the first writer is gone the lock is released and open succeeds.
+        drop(first);
+        let reopened = open_store(&path); // panics if it cannot re-acquire
+        drop(reopened);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compaction_rewrites_a_corrupt_tail() {
+        // Replay keeps the good record and skips the malformed tail; compaction
+        // rewrites only the live index and heals the file.
+        let path = temp_path();
+        let good = session("https://node-7.example.net", "aa", 5_000);
+        {
+            let store = open_store(&path);
+            store.put_session(good.clone(), 1_000).unwrap();
+        }
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"this is not a record\n").unwrap();
+        }
+        assert_eq!(count_lines(&path), 2, "good record + garbage tail");
+
+        let store = open_store(&path);
+        let kept = store.compact(2_000).unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(count_lines(&path), 1, "the garbage tail is rewritten away");
+        assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    fn count_lines(path: &Path) -> usize {
+        let file = File::open(path).unwrap();
+        BufReader::new(file)
+            .lines()
+            .filter(|l| l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+            .count()
     }
 
     #[test]
@@ -486,7 +742,7 @@ mod tests {
         let path = temp_path();
         let good = session("https://node-7.example.net", "aa", 5_000);
         {
-            let store = JsonlSessionStore::open(&path).unwrap();
+            let store = open_store(&path);
             store.put_session(good.clone(), 1_000).unwrap();
         }
         // Append a garbage line + a blank line.
@@ -495,11 +751,89 @@ mod tests {
             f.write_all(b"not json at all\n\n").unwrap();
         }
 
-        let store = JsonlSessionStore::open(&path).unwrap();
+        let store = open_store(&path);
         assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
         assert_eq!(store.list_sessions(None, 2_000).len(), 1);
 
-        let _ = std::fs::remove_file(&path);
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn truncated_utf8_tail_does_not_block_open() {
+        // A crash can truncate the last record mid-multibyte. Replay must skip
+        // the invalid bytes, not fail to open (which would wedge a restart).
+        let path = temp_path();
+        let good = session("https://node-7.example.net", "aa", 5_000);
+        {
+            let store = open_store(&path);
+            store.put_session(good.clone(), 1_000).unwrap();
+        }
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&[b'{', 0xff, 0xfe]).unwrap(); // invalid UTF-8, no newline
+        }
+
+        let store = open_store(&path); // must not error on the invalid bytes
+        assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn replay_skips_a_record_with_overflowing_seq() {
+        // A corrupt `seq` of u64::MAX must not overflow `seq + 1` on replay.
+        let path = temp_path();
+        let good = session("https://node-7.example.net", "aa", 5_000);
+        {
+            let store = open_store(&path);
+            store.put_session(good.clone(), 1_000).unwrap();
+        }
+        {
+            let record = SessionLogRecord {
+                seq: u64::MAX,
+                ts: 1_001,
+                record_type: RECORD_TYPE_SESSION.to_string(),
+                payload: serde_json::to_value(&good).unwrap(),
+            };
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(format!("{}\n", serde_json::to_string(&record).unwrap()).as_bytes())
+                .unwrap();
+        }
+
+        let store = open_store(&path); // must not panic on seq + 1
+        assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn put_session_errors_instead_of_overflowing_seq() {
+        // A replayed `seq` of u64::MAX - 1 leaves `next_seq` at u64::MAX; the
+        // next append must return an error rather than overflow `seq + 1`.
+        let path = temp_path();
+        let good = session("https://node-7.example.net", "aa", 9_000);
+        let seeded = SessionLogRecord {
+            seq: u64::MAX - 1,
+            ts: 1_000,
+            record_type: RECORD_TYPE_SESSION.to_string(),
+            payload: serde_json::to_value(&good).unwrap(),
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&seeded).unwrap()),
+        )
+        .unwrap();
+
+        let store = open_store(&path);
+        let next = session("https://node-9.example.net", "bb", 9_000);
+        let err = store.put_session(next, 2_000).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]
@@ -507,7 +841,7 @@ mod tests {
         let path = temp_path();
         let good = session("https://node-7.example.net", "aa", 5_000);
         {
-            let store = JsonlSessionStore::open(&path).unwrap();
+            let store = open_store(&path);
             store.put_session(good.clone(), 1_000).unwrap();
         }
         // Hand-append a record whose contents were altered (provider flipped)
@@ -529,11 +863,12 @@ mod tests {
 
         // The genuine record survives; the tampered one is rejected because its
         // id is not the content hash of its (altered) contents.
-        let store = JsonlSessionStore::open(&path).unwrap();
+        let store = open_store(&path);
         assert_eq!(store.get_session(&good.session_id, 2_000), Some(good));
         assert_eq!(store.list_sessions(None, 2_000).len(), 1);
 
-        let _ = std::fs::remove_file(&path);
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]
@@ -565,15 +900,13 @@ mod tests {
         assert!(!s.evidence.digest_matches_data());
 
         let path = temp_path();
-        JsonlSessionStore::open(&path)
-            .unwrap()
-            .put_session(s.clone(), 1_000)
-            .unwrap();
+        open_store(&path).put_session(s.clone(), 1_000).unwrap();
 
         // On replay the swapped-evidence record is rejected.
-        let reopened = JsonlSessionStore::open(&path).unwrap();
+        let reopened = open_store(&path);
         assert!(reopened.get_session(&s.session_id, 2_000).is_none());
 
-        let _ = std::fs::remove_file(&path);
+        drop(reopened);
+        cleanup(&path);
     }
 }

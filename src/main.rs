@@ -34,7 +34,7 @@ use private_ai_gateway::aci::upstream::{
 };
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
+    AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
@@ -401,14 +401,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         Arc::new(SystemClock),
     )?;
-    let session_store = JsonlSessionStore::open(&session_log_path).map_err(|err| {
+    let session_store = Arc::new(JsonlSessionStore::open(&session_log_path).map_err(|err| {
         invalid_input(format!(
             "failed to open gateway session log {}: {err}",
             session_log_path.display()
         ))
-    })?;
+    })?);
     tracing::info!(session_log = %session_log_path.display(), "persisting attested sessions to JSONL log");
-    let service_inner = service_inner.with_session_store(Arc::new(session_store));
+    // Reclaim the duplicate/expired lines accumulated while the process was down
+    // before serving, then keep the file bounded on a periodic cadence.
+    let kept = compact_session_log(session_store.clone())
+        .await
+        .map_err(|err| {
+            invalid_input(format!(
+                "failed to compact gateway session log {} on startup: {err}",
+                session_log_path.display()
+            ))
+        })?;
+    tracing::info!(
+        session_log = %session_log_path.display(),
+        kept,
+        "compacted attested-session log on startup"
+    );
+    spawn_session_log_compaction(session_store.clone(), session_log_path.clone());
+    let service_inner = service_inner.with_session_store(session_store);
     let service = Arc::new(service_inner);
     // The background upstream verification keeps the attested-session store fresh
     // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
@@ -500,6 +516,38 @@ fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
             }
         }
     });
+}
+
+/// How often the background task rewrites the attested-session log from its live
+/// index. The live set is tiny (one entry per channel), so an hourly rewrite
+/// keeps the file bounded without churning it.
+const SESSION_LOG_COMPACTION_INTERVAL_SECONDS: u64 = 3600;
+
+fn spawn_session_log_compaction(store: Arc<JsonlSessionStore>, session_log_path: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(SESSION_LOG_COMPACTION_INTERVAL_SECONDS)).await;
+            match compact_session_log(store.clone()).await {
+                Ok(kept) => tracing::info!(
+                    session_log = %session_log_path.display(),
+                    kept,
+                    "compacted attested-session log"
+                ),
+                Err(err) => tracing::warn!(
+                    session_log = %session_log_path.display(),
+                    error = %err,
+                    "attested-session log compaction failed"
+                ),
+            }
+        }
+    });
+}
+
+async fn compact_session_log(store: Arc<JsonlSessionStore>) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || store.compact(SystemClock.now_secs()))
+        .await
+        .map_err(|err| format!("compaction task failed: {err}"))?
+        .map_err(|err| err.to_string())
 }
 
 fn log_prewarm_results(
