@@ -18,6 +18,7 @@ use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     MiddlewareForwardResult, ReceiptOwner, ServiceError, StreamingForwardResult,
 };
+use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 
 use super::error_responses::{
     e2ee_error_response, error_response, insert_str_header, internal_error_response,
@@ -351,6 +352,62 @@ pub(super) fn upstream_direct_response_headers(
         resp_headers.insert(header_name, header_value);
     }
     resp_headers
+}
+
+/// Fetch the upstream model node's real `nvidia_payload` GPU evidence, bound to
+/// the client's `nonce`, so a model-scoped attestation report can carry GPU
+/// evidence the gateway (CPU-only) cannot produce itself. Dispatches per
+/// provider; returns `None` on any failure or for providers that do not expose
+/// `nvidia_payload` via `/v1/attestation/report` (caller falls back to an empty
+/// placeholder).
+pub(super) async fn fetch_upstream_nvidia_payload(
+    target: &AttestationUpstreamTarget,
+    nonce: &str,
+) -> Option<Value> {
+    let query = match target.provider {
+        UpstreamProvider::PhalaDirect => format!("signing_algo=ecdsa&nonce={nonce}&version=2"),
+        UpstreamProvider::NearAi => format!(
+            "signing_algo=ecdsa&nonce={nonce}&include_tls_fingerprint=true&model={}",
+            target.upstream_model_id
+        ),
+        // Chutes / Tinfoil expose GPU evidence through other mechanisms.
+        _ => return None,
+    };
+    fetch_report_nvidia_payload(target, &query).await
+}
+
+/// GET `{base_url}/v1/attestation/report?{query}` and return its top-level
+/// `nvidia_payload` field verbatim. `None` on any error.
+async fn fetch_report_nvidia_payload(
+    target: &AttestationUpstreamTarget,
+    query: &str,
+) -> Option<Value> {
+    let url = format!("{}/v1/attestation/report?{query}", target.base_url);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(target.connect_timeout_seconds))
+        .read_timeout(std::time::Duration::from_secs(target.read_timeout_seconds))
+        .build()
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "build attestation client"))
+        .ok()?;
+    let mut req = client.get(&url).header("accept", "application/json");
+    if let Some(token) = &target.bearer_token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "fetch upstream nvidia_payload"))
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!(upstream = %target.upstream_name, status = %resp.status(), "upstream attestation report non-2xx");
+        return None;
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "parse upstream attestation report"))
+        .ok()?;
+    body.get("nvidia_payload").cloned()
 }
 
 pub(super) fn reqwest_response_headers(upstream_headers: &reqwest::header::HeaderMap) -> HeaderMap {

@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -22,11 +23,11 @@ use crate::aggregator::service::{
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
 use crate::aggregator::session_store::sort_sessions_newest_first;
-use crate::aggregator::upstream_config::parse_config_text;
+use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
 use super::backend::{
-    forward_to_backend, generate_request_id, strip_empty_tool_calls, upstream_direct_response,
-    upstream_proxy_error_response, BackendForwardInput,
+    fetch_upstream_nvidia_payload, forward_to_backend, generate_request_id, strip_empty_tool_calls,
+    upstream_direct_response, upstream_proxy_error_response, BackendForwardInput,
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
@@ -46,6 +47,8 @@ use super::{AppState, StoredGatewayRequest};
 pub(super) struct AttestationQuery {
     nonce: Option<String>,
     signing_algo: Option<String>,
+    model: Option<String>,
+    version: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -196,13 +199,65 @@ pub(super) async fn attestation_report(
     Query(q): Query<AttestationQuery>,
 ) -> Response {
     let domain = request_host_domain(&headers);
+    let model = q.model.as_deref().filter(|m| !m.is_empty());
+
+    // Resolve the upstream serving `model` (direct-upstream mode only).
+    let target = model.and_then(|m| {
+        state
+            .upstream_config
+            .as_ref()
+            .and_then(|mgr| mgr.attestation_upstream_target(m))
+    });
+
+    // Chutes serves a self-contained multi-instance report from the upstream,
+    // independent of the gateway's own keyset.
+    if let (Some(model), Some(target)) = (model, target.as_ref()) {
+        if target.provider == UpstreamProvider::Chutes {
+            return match state
+                .service
+                .upstream()
+                .chutes_attestation_report(model)
+                .await
+            {
+                Ok(value) => Json(value).into_response(),
+                Err(e) => upstream_proxy_error_response(e),
+            };
+        }
+    }
+
+    // Otherwise (no model, or a non-Chutes provider): the gateway's own report,
+    // enriched with the upstream model node's real GPU evidence when the provider
+    // exposes it (PhalaDirect / NearAi).
+    //
+    // Effective nonce: the client's, or a freshly generated one when omitted —
+    // matching dstack-vllm-proxy, which binds a fresh nonce rather than leaving
+    // the slot empty. The same nonce is bound into report_data, echoed as
+    // request_nonce, and used to fetch the upstream GPU evidence so all three
+    // agree.
+    let nonce = resolve_report_nonce(q.nonce.as_deref());
     match state
         .service
-        .attestation_report_for_domain(q.nonce, domain.as_deref())
+        .legacy_attestation_report_for_domain(
+            q.signing_algo.as_deref(),
+            q.version.unwrap_or(1),
+            Some(&nonce),
+            domain.as_deref(),
+        )
         .await
     {
         Ok(report) => {
-            match report_with_legacy_attestation_fields(report, q.signing_algo.as_deref()) {
+            let nvidia_payload = match target.as_ref() {
+                Some(target) => fetch_upstream_nvidia_payload(target, &nonce)
+                    .await
+                    .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce))),
+                None => empty_nvidia_payload(Some(&nonce)),
+            };
+            match report_with_legacy_attestation_fields(
+                report,
+                q.signing_algo.as_deref(),
+                Some(&nonce),
+                nvidia_payload,
+            ) {
                 Ok(value) => Json(value).into_response(),
                 Err(e) => internal_error_response(e),
             }
@@ -213,6 +268,34 @@ pub(super) async fn attestation_report(
         ) => unknown_downstream_host_response(e),
         Err(e) => internal_error_response(e),
     }
+}
+
+/// The nonce a legacy report binds: the client's when supplied (and non-empty),
+/// otherwise a freshly generated 32-byte hex nonce — matching dstack-vllm-proxy,
+/// which never leaves the report-data nonce slot empty.
+fn resolve_report_nonce(client_nonce: Option<&str>) -> String {
+    match client_nonce.filter(|n| !n.is_empty()) {
+        Some(nonce) => nonce.to_string(),
+        None => {
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        }
+    }
+}
+
+/// Empty legacy `nvidia_payload` (a JSON string), used when no real upstream GPU
+/// evidence is available. Field shape stays stable for old clients; the empty
+/// `evidence_list` honestly signals "no GPU evidence".
+fn empty_nvidia_payload(nonce: Option<&str>) -> Value {
+    Value::String(
+        json!({
+            "nonce": nonce.unwrap_or_default(),
+            "evidence_list": [],
+            "arch": "HOPPER",
+        })
+        .to_string(),
+    )
 }
 
 /// Canonical ACI attestation report — the bare report, no legacy
@@ -237,9 +320,15 @@ pub(super) async fn aci_attestation_report(
     }
 }
 
+/// Place the legacy dstack-vllm-proxy compatibility fields on a gateway
+/// attestation report. `nvidia_payload` is supplied by the caller — the
+/// handler decides whether it carries real upstream GPU evidence or an empty
+/// placeholder — so this function only shapes/positions the fields.
 pub(super) fn report_with_legacy_attestation_fields(
     report: AttestationReport,
     signing_algo: Option<&str>,
+    request_nonce: Option<&str>,
+    nvidia_payload: Value,
 ) -> Result<Value, ServiceError> {
     let mut value = serde_json::to_value(report)
         .map_err(|e| ServiceError::Key(KeyError::Crypto(format!("serialize report: {e}"))))?;
@@ -314,6 +403,26 @@ pub(super) fn report_with_legacy_attestation_fields(
             );
         }
     }
+
+    // Legacy dstack-vllm-proxy compatibility fields. Old clients read these from
+    // the top level (and from each `all_attestations` entry), so inject them
+    // before the clone below.
+    if let Some(intel_quote) = obj
+        .get("attestation")
+        .and_then(|v| v.get("evidence"))
+        .and_then(|v| v.get("quote"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        obj.insert("intel_quote".to_string(), Value::String(intel_quote));
+    }
+    if let Some(nonce) = request_nonce {
+        obj.insert(
+            "request_nonce".to_string(),
+            Value::String(nonce.to_string()),
+        );
+    }
+    obj.insert("nvidia_payload".to_string(), nvidia_payload);
 
     let mut legacy_attestation = obj.clone();
     legacy_attestation.remove("all_attestations");

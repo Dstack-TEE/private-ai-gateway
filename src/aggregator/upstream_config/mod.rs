@@ -249,6 +249,21 @@ pub struct UpstreamRuntimeOptions {
     pub verifier_request_timeout_seconds: u64,
 }
 
+/// Connection details for fetching a model's attestation report from its
+/// upstream node. Produced by [`UpstreamConfigManager::attestation_upstream_target`].
+#[derive(Debug, Clone)]
+pub struct AttestationUpstreamTarget {
+    pub upstream_name: String,
+    pub provider: UpstreamProvider,
+    /// Base URL with any trailing slash trimmed.
+    pub base_url: String,
+    /// The upstream's own model id (some providers need it as a query param).
+    pub upstream_model_id: String,
+    pub bearer_token: Option<String>,
+    pub connect_timeout_seconds: u64,
+    pub read_timeout_seconds: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UpstreamConfigSnapshot {
     pub config_path: String,
@@ -364,6 +379,37 @@ impl UpstreamConfigManager {
             .filter(|cfg| cfg.models.contains_key(model) || cfg.models.values().any(|v| v == model))
             .map(|cfg| cfg.name.clone())
             .collect()
+    }
+
+    /// Resolve `model` to the first configured upstream that serves it, with the
+    /// connection details needed to fetch its attestation report. Carries the
+    /// bearer token (so it is not derived from the redacted [`snapshot`]).
+    /// Returns `None` when no configured upstream serves `model`.
+    pub fn attestation_upstream_target(&self, model: &str) -> Option<AttestationUpstreamTarget> {
+        let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let cfg = state.config.iter().find(|cfg| {
+            cfg.models.contains_key(model) || cfg.models.values().any(|v| v == model)
+        })?;
+        // `model` is either a public alias (mapped to an upstream id) or already
+        // an upstream model id.
+        let upstream_model_id = cfg
+            .models
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.to_string());
+        Some(AttestationUpstreamTarget {
+            upstream_name: cfg.name.clone(),
+            provider: cfg.provider,
+            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            upstream_model_id,
+            bearer_token: cfg.bearer_token.clone(),
+            connect_timeout_seconds: cfg
+                .connect_timeout_seconds
+                .unwrap_or(self.options.connect_timeout_seconds),
+            read_timeout_seconds: cfg
+                .read_timeout_seconds
+                .unwrap_or(self.options.read_timeout_seconds),
+        })
     }
 
     pub fn snapshot(&self) -> UpstreamConfigSnapshot {

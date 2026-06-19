@@ -281,6 +281,19 @@ impl UpstreamBackend for ModelRouterBackend {
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
         })
     }
+
+    async fn chutes_attestation_report(
+        &self,
+        model: &str,
+    ) -> Result<serde_json::Value, UpstreamError> {
+        let route = self.route_for(model)?;
+        // The backend resolves the chute by its own upstream model id, the same
+        // value the inference path forwards after rewriting the request model.
+        route
+            .upstream
+            .chutes_attestation_report(&route.upstream_model_id)
+            .await
+    }
 }
 
 #[cfg(test)]

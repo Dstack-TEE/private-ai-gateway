@@ -508,16 +508,15 @@ async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
 
+    // The legacy endpoint binds the old dstack-vllm-proxy report_data layout:
+    // signing_address(20) ‖ zeros(12) ‖ nonce(32), with a 32-byte hex nonce
+    // placed verbatim.
+    let nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
     let response = h
         .requester
-        .get("/v1/attestation/report?nonce=client%20nonce")
+        .get(&format!("/v1/attestation/report?nonce={nonce}"))
         .await;
     assert_eq!(response.status, StatusCode::OK);
-    let report = h
-        .service
-        .attestation_report(Some("client nonce".to_string()))
-        .await
-        .unwrap();
     let body = json_body(&response);
 
     assert_eq!(body["api_version"], "aci/1");
@@ -526,13 +525,24 @@ async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
         body["workload_keyset_digest"],
         h.service.workload_keyset_digest()
     );
-    assert_eq!(
-        body["attestation"]["report_data"],
-        report.attestation.report_data_hex
-    );
+
+    let signing_address = body["signing_address"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("0x")
+        .to_string();
+    let report_data_hex = body["attestation"]["report_data"].as_str().unwrap();
+    assert_eq!(&report_data_hex[0..40], signing_address);
+    assert_eq!(&report_data_hex[40..64], &"00".repeat(12));
+    assert_eq!(&report_data_hex[64..128], nonce);
 
     let endorsement_payload = identity::keyset_endorsement_payload(h.service.keyset()).unwrap();
-    let endorsement_sig = hex::decode(&report.attestation.keyset_endorsement.value_hex).unwrap();
+    let endorsement_sig = hex::decode(
+        body["attestation"]["keyset_endorsement"]["value"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(verify_keyset_endorsement(
         &h.service.keyset().workload_identity.public_key,
         &endorsement_payload,
@@ -540,7 +550,7 @@ async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
     ));
 
     let quote = hex::decode(body["attestation"]["evidence"]["quote"].as_str().unwrap()).unwrap();
-    let report_data = hex::decode(body["attestation"]["report_data"].as_str().unwrap()).unwrap();
+    let report_data = hex::decode(report_data_hex).unwrap();
     assert!(
         quote.ends_with(&report_data),
         "stub quote should carry the exact report_data bytes"

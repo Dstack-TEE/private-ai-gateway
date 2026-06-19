@@ -131,6 +131,13 @@ impl UpstreamBackend for DynamicUpstreamBackend {
             .forward_stream_verified_prepared(req, event)
             .await
     }
+
+    async fn chutes_attestation_report(
+        &self,
+        model: &str,
+    ) -> Result<serde_json::Value, UpstreamError> {
+        self.backend().chutes_attestation_report(model).await
+    }
 }
 
 pub(super) struct DynamicUpstreamVerifier {
