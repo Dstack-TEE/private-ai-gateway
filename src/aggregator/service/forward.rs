@@ -587,6 +587,6 @@ impl AciService {
     pub(super) fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {
         let now = self.clock.now_secs();
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        self.receipt_store.put(receipt, requester, expires_at);
+        self.receipt_store.put(receipt, requester, now, expires_at);
     }
 }
