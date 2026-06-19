@@ -247,18 +247,28 @@ impl Default for StubQuoter {
     }
 }
 
-#[async_trait]
-impl Quoter for StubQuoter {
-    async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError> {
-        let mut raw = Vec::with_capacity(self.vendor_label.len() + 1 + 32);
+impl StubQuoter {
+    fn quote_for(&self, report_data: Vec<u8>) -> Quote {
+        let mut raw = Vec::with_capacity(self.vendor_label.len() + 1 + report_data.len());
         raw.extend_from_slice(&self.vendor_label);
         raw.push(b'|');
         raw.extend_from_slice(&report_data);
-        Ok(Quote {
+        Quote {
             raw_quote: raw,
-            report_data: report_data.to_vec(),
+            report_data,
             event_log: serde_json::Value::Null,
             vm_config: serde_json::json!({ "stub": true }),
-        })
+        }
+    }
+}
+
+#[async_trait]
+impl Quoter for StubQuoter {
+    async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError> {
+        Ok(self.quote_for(report_data.to_vec()))
+    }
+
+    async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
+        Ok(self.quote_for(report_data.to_vec()))
     }
 }
