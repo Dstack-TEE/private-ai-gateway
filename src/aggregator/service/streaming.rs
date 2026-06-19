@@ -193,12 +193,10 @@ impl FinalizerShared {
     /// Sign the receipt and store it under the configured retention window.
     fn sign_and_store(&self, builder: ReceiptBuilder) -> Result<(), ServiceError> {
         let receipt = builder.finalize(self.keys.as_ref(), &self.key_id)?;
-        let expires_at = self
-            .clock
-            .now_secs()
-            .saturating_add(self.receipt_ttl_seconds);
+        let now = self.clock.now_secs();
+        let expires_at = now.saturating_add(self.receipt_ttl_seconds);
         self.receipt_store
-            .put(receipt, self.requester.clone(), expires_at);
+            .put(receipt, self.requester.clone(), now, expires_at);
         Ok(())
     }
 }
