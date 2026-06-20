@@ -39,6 +39,11 @@ impl SessionStore for FailingSessionStore {
         None
     }
 
+    fn renew_session(&self, _session_id: &str, _new_expires_at: u64, _now: u64) -> bool {
+        // Always a miss, so the caller falls through to the failing `put_session`.
+        false
+    }
+
     fn list_sessions(&self, _provider: Option<&str>, _now: u64) -> Vec<AttestedSession> {
         Vec::new()
     }

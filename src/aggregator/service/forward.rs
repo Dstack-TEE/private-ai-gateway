@@ -538,6 +538,39 @@ impl AciService {
         }
         let identity = (!identity.is_empty()).then_some(identity);
 
+        // The content-addressed id commits to the evidence *digest*, not its
+        // bytes, so it can be derived from a digest-only seal. When the same
+        // channel is already recorded and live, renew its deadline in the index
+        // rather than re-sealing and re-appending the full evidence per request.
+        let evidence_digest = event
+            .evidence
+            .as_ref()
+            .and_then(|value| value.get("digest").and_then(Value::as_str))
+            .map(str::to_string);
+        let session_id = AttestedSession::seal(
+            event.upstream_name.clone(),
+            event.url_origin.clone(),
+            event.verifier_id.clone(),
+            identity.clone(),
+            event.channel_bindings.clone(),
+            claims.clone(),
+            EvidenceRef {
+                digest: evidence_digest,
+                data_uri: None,
+            },
+            now,
+            expires_at,
+        )?
+        .session_id;
+        if self
+            .session_store
+            .renew_session(&session_id, expires_at, now)
+        {
+            return Ok(Some((session_id, claims)));
+        }
+
+        // First sighting (or the prior record lapsed): seal the full evidence
+        // and persist it once.
         let evidence = event
             .evidence
             .as_ref()
@@ -555,8 +588,11 @@ impl AciService {
             now,
             expires_at,
         )?;
+        debug_assert_eq!(
+            session.session_id, session_id,
+            "digest-only probe must derive the same id as the full seal"
+        );
 
-        let session_id = session.session_id.clone();
         self.session_store
             .put_session(session, now)
             .map_err(|err| {
