@@ -284,6 +284,15 @@ async fn verified_upstream_binding_creates_attested_session() {
     assert_eq!(receipt_claims["tee_attested"]["source"], "verifier_derived");
     assert_eq!(receipt_claims["tcb_up_to_date"]["status"], "unknown");
 
+    // The receipt must NOT inline the (potentially large) evidence: the
+    // content-addressed session_id commits to it, and the session store is its
+    // system of record. Inlining it in every retained receipt is what grew the
+    // in-memory receipt store under load.
+    assert!(
+        uv.fields.get("evidence").is_none(),
+        "verified receipt must reference evidence via session_id, not inline it"
+    );
+
     // Deep audit: the persisted session carries the same verdicts plus evidence.
     let session_claims = serde_json::to_value(&session.claims).unwrap();
     assert_eq!(session_claims["tee_attested"]["status"], "asserted");
