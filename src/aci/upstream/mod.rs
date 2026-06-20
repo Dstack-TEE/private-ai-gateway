@@ -196,4 +196,17 @@ pub trait UpstreamBackend: Send + Sync {
         }
         self.forward_stream_prepared(req).await
     }
+
+    /// Legacy multi-instance attestation report for `model`, in the old
+    /// dstack/chutes shape. Only the Chutes provider supports it; other
+    /// backends fail so callers can fall back to the gateway's own report.
+    async fn chutes_attestation_report(
+        &self,
+        _model: &str,
+    ) -> Result<serde_json::Value, UpstreamError> {
+        Err(UpstreamError::Routing(format!(
+            "backend {} does not produce a chutes attestation report",
+            self.name()
+        )))
+    }
 }

@@ -241,23 +241,24 @@ fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, KeyError> {
     hex::decode(hex_value).map_err(|e| KeyError::Quote(format!("invalid hex in {field}: {e}")))
 }
 
-#[async_trait]
-impl Quoter for DstackAciProvider {
-    async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError> {
-        let dstack_report_data = Self::dstack_report_data(report_data);
+impl DstackAciProvider {
+    /// Request a dstack TDX quote binding exactly the supplied 64-byte
+    /// report-data, returning the verified quote plus its event log and VM
+    /// config evidence.
+    async fn quote_with_report_data(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
         let response = self
             .client
-            .get_quote(dstack_report_data.to_vec())
+            .get_quote(report_data.to_vec())
             .await
             .map_err(|e| KeyError::Quote(format!("dstack get_quote: {e}")))?;
         let raw_quote = response
             .decode_quote()
             .map_err(|e| KeyError::Quote(format!("invalid dstack quote hex: {e}")))?;
         let returned_report_data = decode_hex_field("dstack report_data", &response.report_data)?;
-        if returned_report_data != dstack_report_data {
+        if returned_report_data != report_data {
             return Err(KeyError::Quote(format!(
                 "dstack quote report_data mismatch: expected {}, got {}",
-                hex::encode(dstack_report_data),
+                hex::encode(report_data),
                 hex::encode(returned_report_data)
             )));
         }
@@ -275,6 +276,18 @@ impl Quoter for DstackAciProvider {
             event_log: serde_json::Value::String(event_log),
             vm_config: serde_json::Value::String(response.vm_config),
         })
+    }
+}
+
+#[async_trait]
+impl Quoter for DstackAciProvider {
+    async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError> {
+        self.quote_with_report_data(Self::dstack_report_data(report_data))
+            .await
+    }
+
+    async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
+        self.quote_with_report_data(report_data).await
     }
 }
 

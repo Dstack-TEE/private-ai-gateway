@@ -68,13 +68,19 @@ pub struct Quote {
     pub vm_config: serde_json::Value,
 }
 
-/// Produces a TEE quote whose report-data slot binds 32 bytes.
+/// Produces a TEE quote binding caller-supplied report-data.
 #[async_trait]
 pub trait Quoter: Send + Sync {
-    /// Return a fresh quote whose report-data slot equals
-    /// `report_data` verbatim. The implementation MUST NOT mutate or
-    /// pad the supplied bytes.
+    /// Return a fresh quote whose report-data slot binds the supplied 32
+    /// bytes (the vendor profile decides any padding to the native slot
+    /// width). Used by the canonical ACI report.
     async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError>;
+
+    /// Return a fresh quote whose report-data slot equals the supplied 64
+    /// bytes verbatim. The legacy dstack-vllm-proxy compatibility report
+    /// uses this to bind `signing_address ‖ zeros ‖ nonce` exactly, so the
+    /// implementation MUST NOT mutate or pad the supplied bytes.
+    async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError>;
 }
 
 /// The set of ACI private-key operations the aggregator needs.

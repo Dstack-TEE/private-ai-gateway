@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use ml_kem::ml_kem_768::DecapsulationKey as MlKemDecapsulationKey768;
+use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -316,6 +317,40 @@ impl ChutesProviderBackend {
         let discovery = self.fetch_instances(&chute_id, &api_key).await?;
         self.cache_verified_chutes_nonces(&chute_id, discovery, &accepted)
     }
+
+    /// `GET {api_base}/chutes/{chute_id}/evidence?nonce={nonce}` → per-instance
+    /// TDX quote + GPU evidence.
+    async fn fetch_evidence(
+        &self,
+        chute_id: &str,
+        nonce: &str,
+        api_key: &str,
+    ) -> Result<Vec<ChutesInstanceEvidence>, UpstreamError> {
+        let url = format!("{}/chutes/{chute_id}/evidence", self.e2ee_api_base);
+        let resp = self
+            .client
+            .get(url)
+            .query(&[("nonce", nonce)])
+            .header("authorization", format!("Bearer {api_key}"))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(UpstreamError::Upstream {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+        let parsed: ChutesEvidenceResponse =
+            serde_json::from_slice(&body).map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        Ok(parsed.evidence)
+    }
 }
 
 #[async_trait]
@@ -403,6 +438,46 @@ impl UpstreamBackend for ChutesProviderBackend {
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
         self.inner.models().await
     }
+
+    /// Legacy dstack/chutes-compatible attestation report. The gateway cannot
+    /// produce the per-instance TDX quote + GPU evidence itself, so it generates
+    /// a fresh nonce, fetches the live per-instance evidence and E2EE public keys
+    /// from Chutes, and assembles the old multi-instance shape:
+    /// `{ attestation_type, nonce, all_attestations: [{instance_id, nonce,
+    /// e2e_pubkey, intel_quote, gpu_evidence}] }`. The nonce is server-generated
+    /// (clients verify the GPU evidence against the returned nonce).
+    async fn chutes_attestation_report(&self, model: &str) -> Result<Value, UpstreamError> {
+        let api_key = self.api_key()?;
+        let chute_id = self.resolve_chute_id(model, &api_key).await?;
+        let nonce = random_nonce_hex();
+        let pubkeys: HashMap<String, String> = self
+            .fetch_instances(&chute_id, &api_key)
+            .await?
+            .instances
+            .into_iter()
+            .map(|i| (i.instance_id, i.e2e_pubkey))
+            .collect();
+        let evidence = self.fetch_evidence(&chute_id, &nonce, &api_key).await?;
+
+        let all_attestations: Vec<Value> = evidence
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({
+                    "instance_id": item.instance_id,
+                    "nonce": nonce,
+                    "e2e_pubkey": pubkeys.get(&item.instance_id).cloned(),
+                    "intel_quote": item.quote,
+                    "gpu_evidence": item.gpu_evidence,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "attestation_type": "chutes",
+            "nonce": nonce,
+            "all_attestations": all_attestations,
+        }))
+    }
 }
 
 struct ChutesInvokeResponse {
@@ -435,6 +510,28 @@ struct ChutesInstanceInfo {
     instance_id: String,
     e2e_pubkey: String,
     nonces: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChutesEvidenceResponse {
+    #[serde(default)]
+    evidence: Vec<ChutesInstanceEvidence>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChutesInstanceEvidence {
+    instance_id: String,
+    /// Base64-encoded TDX quote (surfaced as `intel_quote`, verbatim).
+    #[serde(default)]
+    quote: Option<Value>,
+    #[serde(default)]
+    gpu_evidence: Value,
+}
+
+fn random_nonce_hex() -> String {
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    hex::encode(nonce)
 }
 
 #[derive(Debug)]

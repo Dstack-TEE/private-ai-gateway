@@ -47,7 +47,12 @@
 //!
 //! Legacy aliases for dstack-vllm-proxy compatibility:
 //! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`
-//!   compatibility fields.
+//!   compatibility fields. With `?model=X` it also surfaces the upstream model
+//!   node's GPU evidence: PhalaDirect/NearAi upstreams have their real
+//!   `nvidia_payload` (bound to the request nonce) merged into the gateway's own
+//!   report; Chutes returns the self-contained `attestation_type:"chutes"`
+//!   multi-instance report. Without a model (or on upstream failure) the
+//!   gateway's own report is returned with an empty `nvidia_payload` placeholder.
 //! * `GET  /v1/signature/{id}` - the legacy signature wrapper
 //!   (`text`/`signature`/`signing_address`) with the signed ACI receipt
 //!   carried in `receipt`.
