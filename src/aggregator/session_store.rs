@@ -72,6 +72,16 @@ pub trait SessionStore: Send + Sync {
     /// Fetch a session by id if it exists and has not passed `expires_at`.
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession>;
 
+    /// Renew an already-recorded, still-live session's retention deadline to
+    /// `new_expires_at`, updating only the in-memory index — no log append.
+    /// Returns `true` if such a session existed; `false` if the caller must seal
+    /// and [`put_session`](Self::put_session) it fresh.
+    ///
+    /// This pushes a live session's deadline forward without re-appending its
+    /// (evidence-bearing) record on every request; the compaction job persists
+    /// the bumped deadline.
+    fn renew_session(&self, session_id: &str, new_expires_at: u64, now: u64) -> bool;
+
     /// List non-expired sessions, optionally filtered by provider (the upstream
     /// config name). Sessions are per-TEE-channel, so there is no model filter
     /// here; a model→channel lookup (via the upstream config) belongs to the
@@ -90,9 +100,11 @@ struct SessionIndex {
 
 impl SessionIndex {
     /// Insert (or refresh) a session, then evict everything whose retention
-    /// deadline has passed at `ts`. A session is content-addressed but re-put on
-    /// every request with a later `expires_at`; when the deadline moves we drop
-    /// the stale expiry hint so the index never points an id at the wrong bucket.
+    /// deadline has passed at `ts`. A session may be re-put with a later
+    /// `expires_at` (e.g. re-established after its prior record lapsed); when the
+    /// deadline moves we drop the stale expiry hint so the index never points an
+    /// id at the wrong bucket. A live session's deadline is normally pushed
+    /// forward by [`SessionIndex::renew`] instead, which appends nothing.
     fn put_and_evict(&mut self, session: AttestedSession, ts: u64) {
         self.insert(session);
         self.evict_expired(ts);
@@ -146,6 +158,29 @@ impl SessionIndex {
             Some(session) => Some(session.clone()),
             None => None,
         }
+    }
+
+    /// Renew a live session's retention deadline to `new_expires_at`, moving it
+    /// to the matching expiry bucket. The expired tail is evicted first so a
+    /// just-lapsed id is never resurrected. Returns `false` when the id is absent
+    /// (or already expired), signalling the caller to seal and persist it fresh.
+    fn renew(&mut self, session_id: &str, new_expires_at: u64, now: u64) -> bool {
+        self.evict_expired(now);
+        let Some(session) = self.by_id.get_mut(session_id) else {
+            return false;
+        };
+        let old_expires_at = session.expires_at;
+        if old_expires_at == new_expires_at {
+            return true;
+        }
+        session.expires_at = new_expires_at;
+        // The `get_mut` borrow ends above; now repoint the expiry index.
+        self.drop_expiry_hint(session_id, old_expires_at);
+        self.by_expiry
+            .entry(new_expires_at)
+            .or_default()
+            .insert(session_id.to_string());
+        true
     }
 
     fn list(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -392,6 +427,13 @@ impl SessionStore for JsonlSessionStore {
             .get(session_id, now)
     }
 
+    fn renew_session(&self, session_id: &str, new_expires_at: u64, now: u64) -> bool {
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .renew(session_id, new_expires_at, now)
+    }
+
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
         self.index
             .lock()
@@ -425,6 +467,11 @@ impl SessionStore for InMemorySessionStore {
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         guard.index.get(session_id, now)
+    }
+
+    fn renew_session(&self, session_id: &str, new_expires_at: u64, now: u64) -> bool {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.index.renew(session_id, new_expires_at, now)
     }
 
     fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -493,6 +540,34 @@ mod tests {
             expires_at,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn renew_extends_a_live_session_without_a_log_append() {
+        // The hot-path optimization: a repeat request to a live channel keeps the
+        // retention window current by renewing the index entry, not by re-appending
+        // the session. A miss (absent or expired id) tells the caller to seal and
+        // persist instead.
+        let path = temp_path();
+        let store = open_store(&path);
+        let s = session("https://x", "a", 2_000);
+        let id = s.session_id.clone();
+        store.put_session(s, 1_000).unwrap();
+
+        // A live renew extends the deadline and writes nothing new to the log.
+        let before = std::fs::metadata(&path).unwrap().len();
+        assert!(store.renew_session(&id, 9_000, 1_500));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        // Past the original deadline, the session is still resolvable.
+        assert!(store.get_session(&id, 5_000).is_some());
+
+        // An unknown id is a miss.
+        assert!(!store.renew_session("as_missing", 9_000, 5_000));
+        // An expired id is a miss (and gets evicted), so the caller re-seals.
+        assert!(!store.renew_session(&id, 12_000, 10_000));
+        assert!(store.get_session(&id, 10_000).is_none());
+
+        cleanup(&path);
     }
 
     #[test]
