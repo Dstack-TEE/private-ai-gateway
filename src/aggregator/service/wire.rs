@@ -73,10 +73,13 @@ pub struct MiddlewareForwarded {
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
-    /// Which route served the request, how many routes were tried, and the
-    /// attested session id (if any) — returned to the caller as headers.
+    /// Which route served the request and the attested session id (if any) —
+    /// returned to the caller as headers.
     pub selected_route: String,
-    pub attempts: usize,
+    /// Failed-over candidates as (route_id, status), in the order tried. The
+    /// committed route is `selected_route`; these are surfaced so the caller can
+    /// observe every attempt, not just the one that served the response.
+    pub failed_attempts: Vec<(String, u16)>,
     pub session_id: Option<String>,
 }
 
@@ -85,10 +88,13 @@ pub struct MiddlewareStreamingForwarded {
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub body: ServiceResponseStream,
-    /// Which route served the request, how many routes were tried, and the
-    /// attested session id (if any) — returned to the caller as headers.
+    /// Which route served the request and the attested session id (if any) —
+    /// returned to the caller as headers.
     pub selected_route: String,
-    pub attempts: usize,
+    /// Failed-over candidates as (route_id, status), in the order tried. The
+    /// committed route is `selected_route`; these are surfaced so the caller can
+    /// observe every attempt, not just the one that served the response.
+    pub failed_attempts: Vec<(String, u16)>,
     pub session_id: Option<String>,
 }
 

@@ -143,6 +143,13 @@ impl AciService {
         // + upstream.verified + hashes).
         let mut aggregated_err: Option<(u8, ServiceError)> = None;
 
+        // Candidates that failed and were failed over, as (route_id, status),
+        // in the order tried. The committed route is carried separately via
+        // `selected_route`; these are surfaced to the caller so every attempt
+        // is observable, not just the one that served the response. Non-HTTP
+        // failures (prepare/verification/transport) record 502.
+        let mut failed_attempts: Vec<(String, u16)> = Vec::new();
+
         for (index, candidate) in candidates.iter().enumerate() {
             let route_id = candidate.route_id.clone();
             let is_last = index == last_index;
@@ -155,6 +162,7 @@ impl AciService {
             }) {
                 Ok(prepared) => prepared,
                 Err(UpstreamError::Routing(message)) => {
+                    failed_attempts.push((route_id.clone(), 502));
                     upgrade_err(
                         &mut aggregated_err,
                         1,
@@ -163,6 +171,7 @@ impl AciService {
                     continue;
                 }
                 Err(err) => {
+                    failed_attempts.push((route_id.clone(), 502));
                     upgrade_err(&mut aggregated_err, 2, err.into());
                     continue;
                 }
@@ -184,6 +193,7 @@ impl AciService {
             {
                 Ok(event) => event,
                 Err(ServiceError::UpstreamVerification(uv)) => {
+                    failed_attempts.push((route_id.clone(), 502));
                     upgrade_err(
                         &mut aggregated_err,
                         3,
@@ -233,6 +243,7 @@ impl AciService {
                     }
                 };
                 let Some(upstream_response) = upstream_response else {
+                    failed_attempts.push((route_id.clone(), 502));
                     continue;
                 };
 
@@ -245,6 +256,7 @@ impl AciService {
                         None,
                     );
                     if is_retryable_provider_status(status) && !is_last {
+                        failed_attempts.push((route_id.clone(), status));
                         continue;
                     }
                     self.metrics
@@ -297,7 +309,7 @@ impl AciService {
                         upstream_headers,
                         body: Box::pin(body),
                         selected_route: route_id.clone(),
-                        attempts: index + 1,
+                        failed_attempts: std::mem::take(&mut failed_attempts),
                         session_id,
                     },
                 )));
@@ -340,6 +352,7 @@ impl AciService {
                 }
             };
             let Some(upstream_response) = upstream_response else {
+                failed_attempts.push((route_id.clone(), 502));
                 continue;
             };
 
@@ -351,6 +364,7 @@ impl AciService {
                     status,
                     None,
                 );
+                failed_attempts.push((route_id.clone(), status));
                 continue;
             }
 
@@ -400,7 +414,7 @@ impl AciService {
                     upstream_body: upstream_response.body,
                     upstream_headers: upstream_response.headers,
                     selected_route: route_id.clone(),
-                    attempts: index + 1,
+                    failed_attempts: std::mem::take(&mut failed_attempts),
                     session_id,
                 },
             )));

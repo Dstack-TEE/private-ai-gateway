@@ -217,7 +217,7 @@ pub(super) async fn internal_forward(
             insert_attribution_headers(
                 &mut resp_headers,
                 &forward.selected_route,
-                forward.attempts,
+                &forward.failed_attempts,
                 forward.session_id.as_deref(),
             );
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
@@ -242,7 +242,7 @@ pub(super) async fn internal_forward(
             insert_attribution_headers(
                 &mut resp_headers,
                 &forward.selected_route,
-                forward.attempts,
+                &forward.failed_attempts,
                 forward.session_id.as_deref(),
             );
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
