@@ -138,6 +138,13 @@ impl TransparencyEventKind {
 
 impl UpstreamVerifiedEvent {
     fn to_fields(&self) -> Value {
+        // `evidence` is never inlined in a receipt. It can be large, and the
+        // receipt store keeps every receipt for the receipt TTL, so inlining it
+        // would let that store grow with traffic. Its system of record is the
+        // attested session: a verified receipt commits to the evidence through
+        // the content-addressed `session_id` (a deep audit re-fetches it from the
+        // session store). A failed or unbound verification has no session, so its
+        // evidence is not retained here either — `reason` records why it failed.
         serde_json::json!({
             "upstream_name": self.upstream_name,
             "provider": self.provider,
@@ -147,7 +154,6 @@ impl UpstreamVerifiedEvent {
             "result": self.result.as_str(),
             "required": self.required,
             "reason": self.reason,
-            "evidence": self.evidence.clone(),
             "channel_bindings": self.channel_bindings,
             "provider_claims": self.provider_claims.clone(),
         })
