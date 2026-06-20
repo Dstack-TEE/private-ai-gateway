@@ -2,8 +2,12 @@ import { computeCost, PricingConfig } from './services/pricing';
 
 type Usage = Record<string, unknown>;
 
-/** Called once with the raw upstream usage (before cost injection), or null. */
-type OnComplete = (usage: Usage | null) => void;
+/**
+ * Called once with the raw upstream usage (before cost injection), or null.
+ * `ttftMs` is the time-to-first-token for streaming responses (undefined for
+ * buffered responses, which have no meaningful TTFT).
+ */
+type OnComplete = (usage: Usage | null, ttftMs?: number) => void;
 
 /**
  * Meter the user-visible response: inject `usage.cost` (when pricing is known)
@@ -19,6 +23,7 @@ type OnComplete = (usage: Usage | null) => void;
 export function meterResponse(
   response: Response,
   pricing: PricingConfig | null,
+  start: number,
   onComplete: OnComplete
 ): Response | Promise<Response> {
   const inject = pricing !== null;
@@ -32,8 +37,11 @@ export function meterResponse(
     const textDecoder = new TextDecoder();
     const textEncoder = new TextEncoder();
     let lastUsage: Usage | null = null;
+    // First chunk out of the upstream stream marks time-to-first-token.
+    let ttftMs: number | undefined;
     const transform = new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
+        if (ttftMs === undefined) ttftMs = Date.now() - start;
         const lines = textDecoder.decode(chunk).split('\n');
         let rewritten = false;
         const outLines = lines.map((line) => {
@@ -79,7 +87,7 @@ export function meterResponse(
         );
       },
       flush() {
-        onComplete(lastUsage);
+        onComplete(lastUsage, ttftMs);
       },
     });
     return new Response(response.body.pipeThrough(transform), response);

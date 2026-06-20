@@ -23,6 +23,7 @@ describe('/v1/responses — meterResponse usage/cost', () => {
         headers: { 'content-type': 'application/json' },
       }),
       PRICING,
+      0,
       (u) => (reported = u)
     );
     const out = (await res.json()) as { usage: { cost: number } };
@@ -38,10 +39,15 @@ describe('/v1/responses — meterResponse usage/cost', () => {
       'event: response.completed\n' +
       'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":40,"output_tokens":24,"total_tokens":64}}}\n\n';
     let reported: unknown = undefined;
+    let reportedTtft: number | undefined = undefined;
     const res = await meterResponse(
       new Response(sse, { headers: { 'content-type': 'text/event-stream' } }),
       PRICING,
-      (u) => (reported = u)
+      0,
+      (u, t) => {
+        reported = u;
+        reportedTtft = t;
+      }
     );
     const text = await res.text();
     // cost spliced into the nested response.usage of the completed event
@@ -51,6 +57,9 @@ describe('/v1/responses — meterResponse usage/cost', () => {
     const parsed = JSON.parse(completed.slice(6));
     expect(parsed.response.usage.cost).toBeCloseTo(EXPECTED_COST, 10);
     expect(reported).toMatchObject({ input_tokens: 40, output_tokens: 24 });
+    // streaming reports time-to-first-token (measured from the passed start)
+    expect(typeof reportedTtft).toBe('number');
+    expect(reportedTtft as unknown as number).toBeGreaterThanOrEqual(0);
     // non-usage events pass through untouched
     expect(text).toContain('"type":"response.created"');
   });
@@ -63,6 +72,7 @@ describe('/v1/responses — meterResponse usage/cost', () => {
         headers: { 'content-type': 'application/json' },
       }),
       null,
+      0,
       (u) => (reported = u)
     );
     const out = (await res.json()) as { usage: Record<string, unknown> };

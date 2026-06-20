@@ -236,12 +236,47 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   const isStreaming =
     backendResp.headers.get("content-type")?.includes("text/event-stream") ??
     false;
-  return meterResponse(response, pricing, (usage) => {
+
+  // Report each failed-over attempt (header value is `route_id=status`,
+  // comma-separated in the order tried) to the control plane as its own usage
+  // report, carrying no usage since the attempt produced no response body.
+  const failedAttempts = backendResp.headers.get(
+    "x-private-ai-gateway-failed-attempts",
+  );
+  if (failedAttempts) {
+    const endpoint = new URL(c.req.url).pathname;
+    failedAttempts.split(",").forEach((entry, i) => {
+      const eq = entry.lastIndexOf("=");
+      if (eq <= 0) return;
+      const failedStatus = Number(entry.slice(eq + 1));
+      // `Number("")` is 0, not NaN — reject non-positive so a malformed
+      // `route=` entry can't post a bogus status-0 row.
+      if (!Number.isInteger(failedStatus) || failedStatus <= 0) return;
+      consultPost({
+        requestId,
+        endpoint,
+        status: failedStatus,
+        durationMs: 0,
+        isStreaming,
+        attemptIndex: i,
+        selectedRouteId: entry.slice(0, eq),
+        requestModel: params.model ?? "",
+        usage: null,
+        pricing,
+        spendMode: consult.spendMode,
+        userId: consult.userId,
+        virtualKeyId: consult.virtualKeyId,
+      });
+    });
+  }
+
+  return meterResponse(response, pricing, start, (usage, ttftMs) => {
     consultPost({
       requestId,
       endpoint: new URL(c.req.url).pathname,
       status: backendResp.status,
       durationMs: Date.now() - start,
+      ttftMs,
       isStreaming,
       attemptIndex,
       selectedRouteId,

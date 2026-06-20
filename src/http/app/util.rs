@@ -157,7 +157,7 @@ pub(super) fn build_forward_candidates(
 pub(super) fn insert_attribution_headers(
     headers: &mut HeaderMap,
     selected_route: &str,
-    attempts: usize,
+    failed_attempts: &[(String, u16)],
     session_id: Option<&str>,
 ) {
     if let Ok(value) = HeaderValue::from_str(selected_route) {
@@ -166,11 +166,20 @@ pub(super) fn insert_attribution_headers(
             value,
         );
     }
-    if let Ok(value) = HeaderValue::from_str(&attempts.to_string()) {
-        headers.insert(
-            HeaderName::from_static("x-private-ai-gateway-attempts"),
-            value,
-        );
+    // Failed-over candidates as `route_id=status`, comma-separated in the order
+    // tried. Route ids and statuses are ASCII; `,`/`=` are valid header bytes.
+    if !failed_attempts.is_empty() {
+        let encoded = failed_attempts
+            .iter()
+            .map(|(route, status)| format!("{route}={status}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        if let Ok(value) = HeaderValue::from_str(&encoded) {
+            headers.insert(
+                HeaderName::from_static("x-private-ai-gateway-failed-attempts"),
+                value,
+            );
+        }
     }
     if let Some(session_id) = session_id {
         if let Ok(value) = HeaderValue::from_str(session_id) {

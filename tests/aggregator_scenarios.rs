@@ -1811,9 +1811,12 @@ async fn failover_advances_to_next_candidate_on_provider_error() {
         header_str(&response.headers, "x-private-ai-gateway-selected-route"),
         "upstream-b:public-b"
     );
+    // The failed-over candidate is surfaced (route=status) so the caller can
+    // record a per-attempt request_log for deployment health metrics. Its
+    // presence (one entry) also conveys that two routes were tried.
     assert_eq!(
-        header_str(&response.headers, "x-private-ai-gateway-attempts"),
-        "2"
+        header_str(&response.headers, "x-private-ai-gateway-failed-attempts"),
+        "upstream-a:public-a=503"
     );
 
     let draft = journal.take().expect("receipt draft");
