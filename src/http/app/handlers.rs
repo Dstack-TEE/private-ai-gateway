@@ -255,7 +255,6 @@ pub(super) async fn attestation_report(
             match report_with_legacy_attestation_fields(
                 report,
                 q.signing_algo.as_deref(),
-                Some(&nonce),
                 nvidia_payload,
             ) {
                 Ok(value) => Json(value).into_response(),
@@ -327,7 +326,6 @@ pub(super) async fn aci_attestation_report(
 pub(super) fn report_with_legacy_attestation_fields(
     report: AttestationReport,
     signing_algo: Option<&str>,
-    request_nonce: Option<&str>,
     nvidia_payload: Value,
 ) -> Result<Value, ServiceError> {
     let mut value = serde_json::to_value(report)
@@ -415,12 +413,6 @@ pub(super) fn report_with_legacy_attestation_fields(
         .map(str::to_string)
     {
         obj.insert("intel_quote".to_string(), Value::String(intel_quote));
-    }
-    if let Some(nonce) = request_nonce {
-        obj.insert(
-            "request_nonce".to_string(),
-            Value::String(nonce.to_string()),
-        );
     }
     obj.insert("nvidia_payload".to_string(), nvidia_payload);
 

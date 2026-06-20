@@ -181,7 +181,6 @@ async fn attestation_report_endpoint_shape() {
     // level (and mirrored into each all_attestations entry).
     let quote = body["attestation"]["evidence"]["quote"].as_str().unwrap();
     assert_eq!(body["intel_quote"].as_str().unwrap(), quote);
-    assert_eq!(body["request_nonce"].as_str().unwrap(), nonce);
     let nvidia_payload: serde_json::Value =
         serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
     assert_eq!(nvidia_payload["nonce"], nonce);
@@ -190,7 +189,6 @@ async fn attestation_report_endpoint_shape() {
     assert_eq!(nvidia_payload["evidence_list"], serde_json::json!([]));
     let first = &body["all_attestations"][0];
     assert_eq!(first["intel_quote"].as_str().unwrap(), quote);
-    assert_eq!(first["request_nonce"].as_str().unwrap(), nonce);
 
     // The quote binds the legacy report_data layout the old verifier parses:
     // signing_address(20) ‖ zeros(12) ‖ nonce(32). With a 32-byte hex nonce the
@@ -921,16 +919,14 @@ async fn attestation_report_generates_nonce_and_merges_when_client_omits_nonce()
 
     // Real evidence merged (not the empty placeholder).
     assert_eq!(body["nvidia_payload"].as_str().unwrap(), nvidia_payload);
-    // A 32-byte hex nonce was generated and echoed.
-    let request_nonce = body["request_nonce"].as_str().unwrap();
-    assert_eq!(request_nonce.len(), 64);
-    assert!(request_nonce.chars().all(|c| c.is_ascii_hexdigit()));
-    // The upstream was queried with that generated nonce.
+    // The gateway generated a 32-byte hex nonce and queried the upstream with it.
     let (query, _auth) = captured.lock().unwrap().clone().unwrap();
-    assert!(
-        query.contains(&format!("nonce={request_nonce}")),
-        "query: {query}"
-    );
+    let generated = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("nonce="))
+        .expect("upstream query carries a nonce");
+    assert_eq!(generated.len(), 64);
+    assert!(generated.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 #[tokio::test]
