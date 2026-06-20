@@ -65,6 +65,14 @@ async-trait = "0.1"
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 
+# Global allocator. The gateway churns large attestation-evidence allocations
+# across every worker thread; glibc malloc grows per-arena 64 MiB sub-heaps and
+# holds them resident instead of returning freed pages, so RSS climbs without
+# bound. jemalloc returns memory to the OS and resists that fragmentation.
+# Skipped only on MSVC (no jemalloc); the binary's targets are unix.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"

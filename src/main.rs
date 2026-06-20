@@ -27,6 +27,43 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+// Run on jemalloc instead of glibc malloc: the gateway churns large
+// attestation-evidence buffers across every worker thread, and glibc grows
+// per-arena 64 MiB sub-heaps and holds them resident, so RSS climbs without
+// bound while the live set stays small. jemalloc returns freed pages to the OS
+// and fragments far less. Every unix target has it; only MSVC lacks it.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// Run a background purge thread so even idle arenas return freed pages to the
+// OS on jemalloc's default decay schedule. Decay windows are left at the
+// defaults: the goal is to return memory, not to churn it — short windows would
+// purge then re-fault the gateway's repeated large allocations. Production
+// glibc-Linux only; the background thread is unavailable on musl, and other
+// targets keep jemalloc's defaults (which return memory, just without a
+// dedicated purge thread).
+//
+// The symbol is jemalloc's `const char *_rjem_malloc_conf`, so it must be a thin
+// pointer to a NUL-terminated string: `&b"…\0"[0]` is that `&'static u8`, and the
+// union reinterprets it as `&c_char`. A plain `&[u8]` is a fat pointer — wrong ABI.
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+union MallocConfPtr {
+    bytes: &'static u8,
+    c_char: &'static core::ffi::c_char,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+#[used]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: Option<&'static core::ffi::c_char> = Some(unsafe {
+    MallocConfPtr {
+        bytes: &b"background_thread:true\0"[0],
+    }
+    .c_char
+});
+
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
 use private_ai_gateway::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
