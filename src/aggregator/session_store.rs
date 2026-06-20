@@ -208,10 +208,11 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
 /// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
 /// index sit behind separate locks, so a read never waits on a write.
 ///
-/// The log is append-only on the hot path, so a line is written per served
-/// session even though sessions are content-addressed and collapse to one live
-/// entry per channel in the index. [`JsonlSessionStore::compact`] reclaims that
-/// history by rewriting the file from the live index.
+/// The hot path appends a line only when a *new* channel is first sealed; a
+/// repeat request renews the existing session's deadline in the index without
+/// writing (see [`SessionStore::renew_session`]). [`JsonlSessionStore::compact`]
+/// then rewrites the file from the live index, dropping expired records and
+/// persisting the renewed deadlines.
 ///
 /// Single-writer is enforced with an advisory lock on a *separate* lock file
 /// (`<log>.lock`) that is never renamed, held for the whole lifetime of the
@@ -333,9 +334,10 @@ impl JsonlSessionStore {
         })
     }
 
-    /// Rewrite the log from the live (non-expired) index, dropping the duplicate
-    /// and expired lines that accumulate because the hot path is append-only.
-    /// After compaction the file holds one record per live channel.
+    /// Rewrite the log from the live (non-expired) index: drop expired records,
+    /// collapse any duplicates, and persist each live session's current retention
+    /// deadline (which the hot path renews in the index without appending). After
+    /// compaction the file holds one record per live channel.
     ///
     /// Returns the number of records kept.
     ///
