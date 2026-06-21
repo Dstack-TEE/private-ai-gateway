@@ -407,7 +407,32 @@ async fn fetch_report_nvidia_payload(
         .await
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "parse upstream attestation report"))
         .ok()?;
-    body.get("nvidia_payload").cloned()
+    match target.provider {
+        UpstreamProvider::NearAi => nearai_nvidia_payload(&body, target),
+        _ => body.get("nvidia_payload").cloned(),
+    }
+}
+
+/// near-ai nests GPU evidence under `model_attestations[]`, one entry per model.
+/// Return the entry whose `model_name` matches the requested model; `None` (not
+/// the first entry) when none matches, so a substituted model's evidence is never
+/// attached.
+fn nearai_nvidia_payload(body: &Value, target: &AttestationUpstreamTarget) -> Option<Value> {
+    let entries = body.get("model_attestations").and_then(Value::as_array)?;
+    let matched = entries.iter().find(|entry| {
+        entry.get("model_name").and_then(Value::as_str) == Some(target.upstream_model_id.as_str())
+    });
+    match matched {
+        Some(entry) => entry.get("nvidia_payload").cloned(),
+        None => {
+            tracing::warn!(
+                upstream = %target.upstream_name,
+                model = %target.upstream_model_id,
+                "near-ai report has no model_attestations entry for the requested model"
+            );
+            None
+        }
+    }
 }
 
 pub(super) fn reqwest_response_headers(upstream_headers: &reqwest::header::HeaderMap) -> HeaderMap {
