@@ -125,6 +125,25 @@ async fn body_bytes(b: Body) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn health_endpoint_reports_ok() {
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(body, serde_json::json!({ "status": "ok" }));
+}
+
+#[tokio::test]
 async fn attestation_report_endpoint_shape() {
     let h = make_harness();
     let app = build_router(h.service.clone());
