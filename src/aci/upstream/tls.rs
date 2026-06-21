@@ -47,6 +47,13 @@ pub(super) fn pinned_spki_client(
         .connect_timeout(Duration::from_secs(connect_timeout_seconds))
         .read_timeout(Duration::from_secs(read_timeout_seconds))
         .use_preconfigured_tls(tls)
+        // This client is rebuilt per verified request (the SPKI pin comes from
+        // the request's channel binding) and used once. Disable idle keep-alive:
+        // otherwise the single-use connection is parked in this short-lived
+        // client's pool and then orphaned when the client drops at end of
+        // request, lingering in CLOSE_WAIT once the upstream closes it. With no
+        // idle pool the connection is closed as soon as the response completes.
+        .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| UpstreamError::Transport(e.to_string()))
 }
