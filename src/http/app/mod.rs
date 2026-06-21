@@ -80,6 +80,7 @@ use hyper::server::conn::http1::Builder as HyperHttp1Builder;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use tokio::net::UnixListener;
 use tower::ServiceExt as _;
+use tower_http::cors::CorsLayer;
 
 use crate::aggregator::service::{
     AciService, E2eeRequestContext, MiddlewareReceiptJournal, ReceiptOwner,
@@ -287,6 +288,10 @@ fn build_router_inner(
             state.clone(),
             aci_headers_middleware,
         ))
+        // Permissive CORS so browser clients can call the gateway directly.
+        // Outermost layer: it answers preflight OPTIONS before routing, which
+        // otherwise 405s since the routes only declare GET/POST/PUT.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
