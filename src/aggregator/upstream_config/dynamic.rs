@@ -132,11 +132,12 @@ impl UpstreamBackend for DynamicUpstreamBackend {
             .await
     }
 
-    async fn chutes_attestation_report(
+    async fn chutes_nvidia_payload(
         &self,
         model: &str,
+        nonce: &str,
     ) -> Result<serde_json::Value, UpstreamError> {
-        self.backend().chutes_attestation_report(model).await
+        self.backend().chutes_nvidia_payload(model, nonce).await
     }
 }
 
