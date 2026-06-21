@@ -92,6 +92,7 @@ mod error_responses;
 mod handlers;
 mod proxy;
 mod util;
+mod write_idle_timeout;
 
 use backend::internal_forward;
 use handlers::{
@@ -359,8 +360,15 @@ pub async fn serve_unix_listener(
             .map_request(|request: hyper::Request<Incoming>| request.map(Body::new));
         tokio::spawn(async move {
             let hyper_service = TowerToHyperService::new(service);
+            // Wrap the connection so a downstream that stalls without closing
+            // (and would otherwise pin a streaming forward's upstream connection
+            // open forever) is reaped after a long no-write-progress window.
+            let io = TokioIo::new(write_idle_timeout::WriteIdleTimeout::new(
+                stream,
+                write_idle_timeout::DOWNSTREAM_WRITE_IDLE_TIMEOUT,
+            ));
             if let Err(err) = HyperHttp1Builder::new()
-                .serve_connection(TokioIo::new(stream), hyper_service)
+                .serve_connection(io, hyper_service)
                 .await
             {
                 tracing::debug!(error = %err, "Unix-socket HTTP connection closed");
