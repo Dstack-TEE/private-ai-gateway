@@ -27,6 +27,8 @@
 //!   middleware only.
 //! * `GET  /v1/embeddings/models` - embedding model catalog (control-plane
 //!   middleware only).
+//! * `GET  /health` - unauthenticated liveness probe for load balancers and
+//!   orchestrators; reports only that the process is serving requests.
 //! * `GET  /v1/metrics` - expose aggregator-owned Prometheus metrics.
 //! * `GET  /v1/admin/upstreams` - authenticated admin view of the
 //!   current upstream config, with secrets redacted.
@@ -98,8 +100,8 @@ use backend::internal_forward;
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
     admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
-    embeddings, embeddings_models, messages, metrics, models, models_subpath, receipt_by_chat_id,
-    responses, root,
+    embeddings, embeddings_models, health, messages, metrics, models, models_subpath,
+    receipt_by_chat_id, responses, root,
 };
 
 #[derive(Clone)]
@@ -261,6 +263,7 @@ fn build_router_inner(
     };
     Router::new()
         .route("/", get(root))
+        .route("/health", get(health))
         // OpenAI- and Anthropic-compatible inference surface.
         .route("/v1/models", get(models))
         .route("/v1/models/*rest", get(models_subpath))

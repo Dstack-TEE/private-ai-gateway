@@ -62,6 +62,12 @@ pub(super) struct SessionListQuery {
     model: Option<String>,
 }
 
+// Liveness probe for load balancers and orchestrators. Unauthenticated and
+// version-independent: it reports only that the process is serving requests.
+pub(super) async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok" }))
+}
+
 pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "api_version": "aci/1",
