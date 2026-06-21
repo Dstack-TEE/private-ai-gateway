@@ -215,25 +215,10 @@ pub(super) async fn attestation_report(
             .and_then(|mgr| mgr.attestation_upstream_target(m))
     });
 
-    // Chutes serves a self-contained multi-instance report from the upstream,
-    // independent of the gateway's own keyset.
-    if let (Some(model), Some(target)) = (model, target.as_ref()) {
-        if target.provider == UpstreamProvider::Chutes {
-            return match state
-                .service
-                .upstream()
-                .chutes_attestation_report(model)
-                .await
-            {
-                Ok(value) => Json(value).into_response(),
-                Err(e) => upstream_proxy_error_response(e),
-            };
-        }
-    }
-
-    // Otherwise (no model, or a non-Chutes provider): the gateway's own report,
-    // enriched with the upstream model node's real GPU evidence when the provider
-    // exposes it (PhalaDirect / NearAi).
+    // Every provider returns the gateway's own report (the gateway terminates
+    // E2EE with its own keys for all of them), enriched with the upstream's real
+    // GPU evidence as nvidia_payload when available — PhalaDirect/NearAi expose it
+    // via their attestation report, Chutes via its per-instance GPU evidence.
     //
     // Effective nonce: the client's, or a freshly generated one when omitted —
     // matching dstack-vllm-proxy, which binds a fresh nonce rather than leaving
@@ -252,12 +237,28 @@ pub(super) async fn attestation_report(
         .await
     {
         Ok(report) => {
-            let nvidia_payload = match target.as_ref() {
-                Some(target) => fetch_upstream_nvidia_payload(target, &nonce)
+            let fetched = match (model, target.as_ref()) {
+                (Some(model), Some(t)) if t.provider == UpstreamProvider::Chutes => match state
+                    .service
+                    .upstream()
+                    .chutes_nvidia_payload(model, &nonce)
                     .await
-                    .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce))),
-                None => empty_nvidia_payload(Some(&nonce)),
+                {
+                    Ok(value) => Some(value),
+                    Err(e) => {
+                        tracing::warn!(
+                            model = %model,
+                            upstream = %t.upstream_name,
+                            error = %e,
+                            "chutes GPU evidence fetch failed; returning report without it"
+                        );
+                        None
+                    }
+                },
+                (_, Some(t)) => fetch_upstream_nvidia_payload(t, &nonce).await,
+                _ => None,
             };
+            let nvidia_payload = fetched.unwrap_or_else(|| empty_nvidia_payload(Some(&nonce)));
             match report_with_legacy_attestation_fields(
                 report,
                 q.signing_algo.as_deref(),
