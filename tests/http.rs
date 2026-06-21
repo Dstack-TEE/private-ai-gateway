@@ -862,6 +862,58 @@ async fn serve_phala_stub(nvidia_payload: Option<String>) -> (String, CapturedRe
 
 const TEST_NONCE: &str = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
 
+// Decoy entry first, so the test proves matching by model_name (not the first
+// entry, not a top-level field).
+async fn nearai_attest_handler() -> Response {
+    Json(serde_json::json!({
+        "gateway_attestation": {},
+        "model_attestations": [
+            {"model_name": "zai-org/DECOY", "nvidia_payload": "{\"evidence_list\":[\"wrong\"]}"},
+            {
+                "model_name": "zai-org/GLM-X",
+                "nvidia_payload":
+                    r#"{"nonce":"x","evidence_list":[{"certificate":"c","evidence":"e"}],"arch":"HOPPER"}"#,
+            },
+        ],
+    }))
+    .into_response()
+}
+
+#[tokio::test]
+async fn attestation_report_extracts_nearai_nvidia_payload_by_model_name() {
+    let base = {
+        let app = Router::new().route("/v1/attestation/report", get(nearai_attest_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    };
+    let config = format!(
+        r#"[{{"name":"nearai-a","provider":"near-ai","base_url":"{base}","models":{{"near/glm":"zai-org/GLM-X"}},"bearer_token":"tok"}}]"#
+    );
+    let (_svc, app) = setup_with_config(&config);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/attestation/report?model=near/glm&nonce={TEST_NONCE}&signing_algo=ecdsa"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    // The matching model's nested nvidia_payload is merged at the top level — not
+    // the decoy that comes first.
+    let nv: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        nv["evidence_list"],
+        serde_json::json!([{"certificate": "c", "evidence": "e"}])
+    );
+}
+
 #[tokio::test]
 async fn attestation_report_merges_upstream_nvidia_payload() {
     let nvidia_payload =
