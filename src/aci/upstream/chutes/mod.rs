@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use ml_kem::ml_kem_768::DecapsulationKey as MlKemDecapsulationKey768;
+use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -438,45 +439,44 @@ impl UpstreamBackend for ChutesProviderBackend {
         self.inner.models().await
     }
 
-    /// Fetch the Chutes GPU evidence bound to `nonce` and shape it as the legacy
-    /// `nvidia_payload` so the gateway can merge it into its own attestation
-    /// report (same shape as every other provider).
-    async fn chutes_nvidia_payload(
-        &self,
-        model: &str,
-        nonce: &str,
-    ) -> Result<Value, UpstreamError> {
+    /// Legacy dstack/chutes-compatible attestation report. The gateway cannot
+    /// produce the per-instance TDX quote + GPU evidence itself, so it generates
+    /// a fresh nonce, fetches the live per-instance evidence and E2EE public keys
+    /// from Chutes, and assembles the old multi-instance shape:
+    /// `{ attestation_type, nonce, all_attestations: [{instance_id, nonce,
+    /// e2e_pubkey, intel_quote, gpu_evidence}] }`. The nonce is server-generated
+    /// (clients verify the GPU evidence against the returned nonce).
+    async fn chutes_attestation_report(&self, model: &str) -> Result<Value, UpstreamError> {
         let api_key = self.api_key()?;
         let chute_id = self.resolve_chute_id(model, &api_key).await?;
-        let evidence = self.fetch_evidence(&chute_id, nonce, &api_key).await?;
-        // Chutes returns per-instance GPU evidence; the nvidia_payload carries a
-        // single instance's evidence_list (one NRAS verification), matching the
-        // {nonce, evidence_list, arch} shape used by the other providers. Pick the
-        // first instance whose evidence is a non-empty list with a usable arch —
-        // an instance can report empty/malformed evidence, so don't blindly take
-        // the first, and never fabricate a default arch.
-        let (evidence_list, arch) = evidence
+        let nonce = random_nonce_hex();
+        let pubkeys: HashMap<String, String> = self
+            .fetch_instances(&chute_id, &api_key)
+            .await?
+            .instances
             .into_iter()
-            .find_map(|item| {
-                let arch = item
-                    .gpu_evidence
-                    .as_array()
-                    .and_then(|list| list.first())
-                    .and_then(|e| e.get("arch"))
-                    .and_then(Value::as_str)
-                    .filter(|arch| !arch.is_empty())?
-                    .to_string();
-                Some((item.gpu_evidence, arch))
+            .map(|i| (i.instance_id, i.e2e_pubkey))
+            .collect();
+        let evidence = self.fetch_evidence(&chute_id, &nonce, &api_key).await?;
+
+        let all_attestations: Vec<Value> = evidence
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({
+                    "instance_id": item.instance_id,
+                    "nonce": nonce,
+                    "e2e_pubkey": pubkeys.get(&item.instance_id).cloned(),
+                    "intel_quote": item.quote,
+                    "gpu_evidence": item.gpu_evidence,
+                })
             })
-            .ok_or_else(|| {
-                UpstreamError::Routing("chutes returned no usable GPU evidence".to_string())
-            })?;
-        let payload = serde_json::json!({
+            .collect();
+
+        Ok(serde_json::json!({
+            "attestation_type": "chutes",
             "nonce": nonce,
-            "evidence_list": evidence_list,
-            "arch": arch,
-        });
-        Ok(Value::String(payload.to_string()))
+            "all_attestations": all_attestations,
+        }))
     }
 }
 
@@ -520,8 +520,18 @@ struct ChutesEvidenceResponse {
 
 #[derive(Debug, Deserialize)]
 struct ChutesInstanceEvidence {
+    instance_id: String,
+    /// Base64-encoded TDX quote (surfaced as `intel_quote`, verbatim).
+    #[serde(default)]
+    quote: Option<Value>,
     #[serde(default)]
     gpu_evidence: Value,
+}
+
+fn random_nonce_hex() -> String {
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    hex::encode(nonce)
 }
 
 #[derive(Debug)]
