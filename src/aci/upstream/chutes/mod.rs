@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::StreamExt;
 use ml_kem::ml_kem_768::DecapsulationKey as MlKemDecapsulationKey768;
 use serde::Deserialize;
@@ -471,8 +472,16 @@ impl UpstreamBackend for ChutesProviderBackend {
             .ok_or_else(|| {
                 UpstreamError::Routing("chutes returned no usable GPU evidence".to_string())
             })?;
+        // Chutes does not sign the raw request nonce into the GPU report: it binds
+        // the report to a value derived from the request nonce and the instance
+        // E2EE key. NRAS checks the nonce the client submits against the one
+        // actually inside the report, so echo the attested nonce read from the
+        // evidence (not the raw request nonce); otherwise the client's standard
+        // NRAS check fails with "nonce missing in JWT". Report freshness is still
+        // anchored by the gateway quote, which binds the raw request nonce.
+        let report_nonce = gpu_report_nonce(&evidence_list).unwrap_or_else(|| nonce.to_string());
         let payload = serde_json::json!({
-            "nonce": nonce,
+            "nonce": report_nonce,
             "evidence_list": evidence_list,
             "arch": arch,
         });
@@ -522,6 +531,22 @@ struct ChutesEvidenceResponse {
 struct ChutesInstanceEvidence {
     #[serde(default)]
     gpu_evidence: Value,
+}
+
+/// The 32-byte nonce the GPU actually signed into its attestation report, read
+/// straight from the report. NVIDIA's GPU evidence begins with a 4-byte header
+/// followed by the 32-byte nonce (verified against both Hopper and Blackwell
+/// reports); the gateway echoes this exact value so the client's NRAS check
+/// matches, without needing to know how Chutes derived it. Returns `None` if the
+/// evidence is missing or too short to hold the field.
+fn gpu_report_nonce(evidence_list: &Value) -> Option<String> {
+    let evidence = evidence_list
+        .as_array()?
+        .first()?
+        .get("evidence")?
+        .as_str()?;
+    let raw = BASE64.decode(evidence).ok()?;
+    raw.get(4..36).map(hex::encode)
 }
 
 #[derive(Debug)]

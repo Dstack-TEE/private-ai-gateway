@@ -974,13 +974,23 @@ async fn attestation_report_degrades_to_empty_nvidia_on_upstream_error() {
     assert_eq!(nvidia["nonce"], TEST_NONCE);
 }
 
+// `evidence` = base64 of [4-byte NVIDIA header][32-byte attested nonce = 0xAB*32]
+// [trailing]. The nonce the GPU signed lives at byte offset 4; Chutes derives it
+// from the request nonce, so it differs from what the client sent. nvidia_payload
+// must echo this attested nonce (not the request nonce) for the client's NRAS.
+const CHUTES_GPU_EVIDENCE_B64: &str = "EeAB/6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urABE=";
+const CHUTES_GPU_REPORT_NONCE: &str =
+    "abababababababababababababababababababababababababababababababab";
+
 async fn chutes_evidence_handler() -> Json<Value> {
     // First instance has empty GPU evidence; the report must skip it and use the
     // first instance with a usable evidence list + arch.
     Json(serde_json::json!({
         "evidence": [
             {"instance_id": "inst-0", "gpu_evidence": []},
-            {"instance_id": "inst-1", "gpu_evidence": [{"arch": "HOPPER", "certificate": "c", "evidence": "e"}]},
+            {"instance_id": "inst-1", "gpu_evidence": [
+                {"arch": "HOPPER", "certificate": "c", "evidence": CHUTES_GPU_EVIDENCE_B64}
+            ]},
         ]
     }))
 }
@@ -1025,17 +1035,23 @@ async fn attestation_report_chutes_returns_gateway_report_with_gpu_evidence() {
     assert!(body["signing_address"].is_string());
 
     // nvidia_payload carries the first usable instance's GPU evidence (the empty
-    // inst-0 is skipped), bound to the report nonce.
+    // inst-0 is skipped).
     let nv: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
     assert_eq!(
         nv["evidence_list"],
-        serde_json::json!([{"arch": "HOPPER", "certificate": "c", "evidence": "e"}])
+        serde_json::json!([
+            {"arch": "HOPPER", "certificate": "c", "evidence": CHUTES_GPU_EVIDENCE_B64}
+        ])
     );
     assert_eq!(nv["arch"], "HOPPER");
+    // nonce echoes the value the GPU actually signed (read from the evidence), not
+    // the raw request nonce — that is what the client's NRAS check matches.
+    assert_eq!(nv["nonce"].as_str().unwrap(), CHUTES_GPU_REPORT_NONCE);
     let report_data = body["attestation"]["evidence"]["quote_report_data"]
         .as_str()
         .unwrap();
-    assert_eq!(nv["nonce"].as_str().unwrap(), &report_data[64..128]);
+    // The gateway quote still binds the raw request nonce (anchors freshness).
+    assert_ne!(nv["nonce"].as_str().unwrap(), &report_data[64..128]);
 }
 
 #[test]
