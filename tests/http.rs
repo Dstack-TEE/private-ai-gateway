@@ -1014,3 +1014,49 @@ async fn attestation_report_chutes_multi_instance_shape() {
     assert_eq!(entries[0]["intel_quote"], "cXVvdGUtYjY0");
     assert!(entries[0]["gpu_evidence"].is_array());
 }
+
+#[test]
+fn legacy_ecdsa_signature_uses_the_e2ee_signing_address() {
+    // Regression: the legacy ECDSA signature must actually be produced by the
+    // E2EE key (the attestation signing_address), not the receipt key. We
+    // recover the signer from the signature itself — asserting only the
+    // returned signing_address field would still pass if the code signed with
+    // the wrong key and merely relabeled the field.
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM;
+    use private_ai_gateway::aci::keys::{
+        ethereum_address_from_uncompressed_public_key, LEGACY_ALGO_ECDSA,
+    };
+    use sha3::{Digest, Keccak256};
+
+    let keys = StaticKeyProvider::default();
+    let e2ee = keys
+        .e2ee_keys()
+        .into_iter()
+        .find(|k| k.algo == E2EE_ALGO_SECP256K1_AESGCM)
+        .expect("secp256k1 e2ee key");
+    let expected = ethereum_address_from_uncompressed_public_key(&e2ee.public_key_hex).unwrap();
+
+    let text = "hello";
+    let sig = keys.sign_legacy_message(LEGACY_ALGO_ECDSA, text).unwrap();
+    assert_eq!(sig.signing_address.to_lowercase(), expected.to_lowercase());
+
+    // Recover the actual signer from `signature` over the Ethereum
+    // personal-message hash and confirm it is the E2EE key.
+    let sig_bytes = hex::decode(sig.signature.trim_start_matches("0x")).unwrap();
+    assert_eq!(sig_bytes.len(), 65, "r || s || v");
+    let recid = RecoveryId::from_byte(sig_bytes[64] - 27).expect("recovery id");
+    let signature = Signature::from_slice(&sig_bytes[..64]).unwrap();
+    let prehash =
+        Keccak256::digest(format!("\x19Ethereum Signed Message:\n{}{text}", text.len()).as_bytes());
+    let recovered = VerifyingKey::recover_from_prehash(&prehash, &signature, recid).unwrap();
+    let recovered_addr = ethereum_address_from_uncompressed_public_key(&hex::encode(
+        recovered.to_encoded_point(false).as_bytes(),
+    ))
+    .unwrap();
+    assert_eq!(
+        recovered_addr.to_lowercase(),
+        expected.to_lowercase(),
+        "legacy ecdsa signature must recover to the E2EE signing_address"
+    );
+}

@@ -388,9 +388,12 @@ impl KeyProvider for DstackAciProvider {
     ) -> Result<LegacySignature, KeyError> {
         match signing_algo {
             LEGACY_ALGO_ECDSA => {
+                // Legacy clients use one secp256k1 key (the E2EE key) for both
+                // encryption and response signing, and verify against the
+                // attestation `signing_address` (also the E2EE key) — sign with it.
+                let signing_key = K256SigningKey::from(&self.e2ee);
                 let prehash = ethereum_personal_message_hash(text);
-                let (sig, recid): (K256Signature, RecoveryId) = self
-                    .receipt
+                let (sig, recid): (K256Signature, RecoveryId) = signing_key
                     .sign_prehash_recoverable(&prehash)
                     .map_err(|e| KeyError::Crypto(format!("k256 legacy sign_prehash: {e}")))?;
                 let mut out = Vec::with_capacity(65);
@@ -399,7 +402,7 @@ impl KeyProvider for DstackAciProvider {
                 Ok(LegacySignature {
                     signing_algo: LEGACY_ALGO_ECDSA.to_string(),
                     signing_address: ethereum_address_from_uncompressed_public_key(
-                        &public_key_hex(&self.receipt),
+                        &public_key_from_secret(&self.e2ee),
                     )?,
                     signature: format!("0x{}", hex::encode(out)),
                 })

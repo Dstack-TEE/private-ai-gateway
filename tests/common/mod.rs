@@ -193,9 +193,10 @@ impl KeyProvider for StaticKeyProvider {
     ) -> Result<LegacySignature, KeyError> {
         match signing_algo {
             LEGACY_ALGO_ECDSA => {
+                // Mirror production: legacy ECDSA signs with the E2EE key.
+                let signing_key = K256SigningKey::from(&self.e2ee);
                 let prehash = ethereum_personal_message_hash(text);
-                let (sig, recid): (K256Signature, RecoveryId) = self
-                    .receipt
+                let (sig, recid): (K256Signature, RecoveryId) = signing_key
                     .sign_prehash_recoverable(&prehash)
                     .map_err(|e| KeyError::Crypto(format!("k256 legacy sign_prehash: {e}")))?;
                 let mut out = Vec::with_capacity(65);
@@ -204,7 +205,7 @@ impl KeyProvider for StaticKeyProvider {
                 Ok(LegacySignature {
                     signing_algo: LEGACY_ALGO_ECDSA.to_string(),
                     signing_address: ethereum_address_from_uncompressed_public_key(
-                        &public_key_hex(&self.receipt),
+                        &public_key_from_secret(&self.e2ee),
                     )?,
                     signature: format!("0x{}", hex::encode(out)),
                 })
