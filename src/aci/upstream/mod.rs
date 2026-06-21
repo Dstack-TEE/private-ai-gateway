@@ -200,17 +200,12 @@ pub trait UpstreamBackend: Send + Sync {
     /// Legacy multi-instance attestation report for `model`, in the old
     /// dstack/chutes shape. Only the Chutes provider supports it; other
     /// backends fail so callers can fall back to the gateway's own report.
-    /// The legacy `nvidia_payload` (a JSON string) for `model`, sourced from the
-    /// Chutes GPU evidence bound to `nonce`. Only the Chutes provider implements
-    /// it; the gateway merges the result into its own attestation report so
-    /// Chutes returns the same shape as the other providers.
-    async fn chutes_nvidia_payload(
+    async fn chutes_attestation_report(
         &self,
         _model: &str,
-        _nonce: &str,
     ) -> Result<serde_json::Value, UpstreamError> {
         Err(UpstreamError::Routing(format!(
-            "backend {} does not produce chutes GPU evidence",
+            "backend {} does not produce a chutes attestation report",
             self.name()
         )))
     }

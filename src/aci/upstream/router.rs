@@ -282,17 +282,16 @@ impl UpstreamBackend for ModelRouterBackend {
         })
     }
 
-    async fn chutes_nvidia_payload(
+    async fn chutes_attestation_report(
         &self,
         model: &str,
-        nonce: &str,
     ) -> Result<serde_json::Value, UpstreamError> {
         let route = self.route_for(model)?;
         // The backend resolves the chute by its own upstream model id, the same
         // value the inference path forwards after rewriting the request model.
         route
             .upstream
-            .chutes_nvidia_payload(&route.upstream_model_id, nonce)
+            .chutes_attestation_report(&route.upstream_model_id)
             .await
     }
 }

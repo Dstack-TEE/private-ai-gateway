@@ -974,19 +974,27 @@ async fn attestation_report_degrades_to_empty_nvidia_on_upstream_error() {
     assert_eq!(nvidia["nonce"], TEST_NONCE);
 }
 
-async fn chutes_evidence_handler() -> Json<Value> {
-    // First instance has empty GPU evidence; the report must skip it and use the
-    // first instance with a usable evidence list + arch.
+async fn chutes_instances_handler() -> Json<Value> {
     Json(serde_json::json!({
-        "evidence": [
-            {"instance_id": "inst-0", "gpu_evidence": []},
-            {"instance_id": "inst-1", "gpu_evidence": [{"arch": "HOPPER", "certificate": "c", "evidence": "e"}]},
-        ]
+        "instances": [{"instance_id": "inst-1", "e2e_pubkey": "pk-1", "nonces": ["n1"]}],
+        "nonce_expires_in": 60,
+    }))
+}
+
+async fn chutes_evidence_handler() -> Json<Value> {
+    Json(serde_json::json!({
+        "evidence": [{
+            "instance_id": "inst-1",
+            "quote": "cXVvdGUtYjY0",
+            "gpu_evidence": [{"arch": "HOPPER"}],
+        }]
     }))
 }
 
 async fn serve_chutes_stub() -> String {
-    let app = Router::new().route("/chutes/:chute_id/evidence", get(chutes_evidence_handler));
+    let app = Router::new()
+        .route("/e2e/instances/:chute_id", get(chutes_instances_handler))
+        .route("/chutes/:chute_id/evidence", get(chutes_evidence_handler));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -996,10 +1004,7 @@ async fn serve_chutes_stub() -> String {
 }
 
 #[tokio::test]
-async fn attestation_report_chutes_returns_gateway_report_with_gpu_evidence() {
-    // Chutes returns the same shape as every other provider — the gateway's own
-    // report with the Chutes GPU evidence merged into nvidia_payload — not a
-    // bespoke attestation_type:"chutes" envelope.
+async fn attestation_report_chutes_multi_instance_shape() {
     let base = serve_chutes_stub().await;
     let config = format!(
         r#"[{{"name":"chutes-a","provider":"chutes","base_url":"{base}","models":{{"chutes/m":"m-up"}},"bearer_token":"tok","chutes_e2ee_api_base":"{base}","chutes_chute_ids":{{"m-up":"00000000-0000-0000-0000-0000000c1234"}}}}]"#
@@ -1009,7 +1014,7 @@ async fn attestation_report_chutes_returns_gateway_report_with_gpu_evidence() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/attestation/report?model=chutes/m&signing_algo=ecdsa")
+                .uri("/v1/attestation/report?model=chutes/m")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1018,24 +1023,15 @@ async fn attestation_report_chutes_returns_gateway_report_with_gpu_evidence() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
 
-    // Standard gateway report shape (consistent with PhalaDirect/NearAi).
-    assert_eq!(body["api_version"], "aci/1");
-    assert!(body.get("attestation_type").is_none());
-    assert!(body["intel_quote"].is_string());
-    assert!(body["signing_address"].is_string());
-
-    // nvidia_payload carries the first usable instance's GPU evidence (the empty
-    // inst-0 is skipped), bound to the report nonce.
-    let nv: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        nv["evidence_list"],
-        serde_json::json!([{"arch": "HOPPER", "certificate": "c", "evidence": "e"}])
-    );
-    assert_eq!(nv["arch"], "HOPPER");
-    let report_data = body["attestation"]["evidence"]["quote_report_data"]
-        .as_str()
-        .unwrap();
-    assert_eq!(nv["nonce"].as_str().unwrap(), &report_data[64..128]);
+    assert_eq!(body["attestation_type"], "chutes");
+    let nonce = body["nonce"].as_str().unwrap();
+    let entries = body["all_attestations"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["instance_id"], "inst-1");
+    assert_eq!(entries[0]["e2e_pubkey"], "pk-1");
+    assert_eq!(entries[0]["nonce"].as_str().unwrap(), nonce);
+    assert_eq!(entries[0]["intel_quote"], "cXVvdGUtYjY0");
+    assert!(entries[0]["gpu_evidence"].is_array());
 }
 
 #[test]
