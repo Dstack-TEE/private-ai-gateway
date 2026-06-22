@@ -120,6 +120,7 @@ impl MismatchingBackend {
             status_code: 200,
             body: br#"{"id":"chat-ok","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_vec(),
             headers: std::collections::HashMap::new(),
+            served_instance_id: None,
         }
     }
 }
@@ -171,6 +172,7 @@ impl UpstreamBackend for MismatchingBackend {
             status_code: response.status_code,
             headers: response.headers,
             body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
+            served_instance_id: None,
         })
     }
 }

@@ -44,6 +44,7 @@ impl UpstreamBackend for StubUpstream {
             status_code: 200,
             body: CHAT_RESPONSE.to_vec(),
             headers,
+            served_instance_id: None,
         })
     }
 }

@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 use crate::aci::receipt::{
-    ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent, VerificationResult,
+    ChannelBinding, ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent,
+    VerificationResult,
 };
 use crate::aci::types::Receipt;
 use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
@@ -10,7 +11,7 @@ use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, WorkloadIdentityRef,
 };
 
-use super::claims::session_claims_for_event;
+use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
@@ -36,6 +37,33 @@ pub(super) enum ReverifyOutcome<R> {
     /// error. Both map to the caller's failure path; the helper has already
     /// applied any mismatch invalidation.
     Failed(UpstreamError),
+}
+
+/// A session sealed for one verified channel binding (one per Chutes instance).
+pub(super) struct SealedSession {
+    /// The per-instance key (Chutes instance id) for a multi-instance backend;
+    /// `None` for a single-channel backend.
+    instance_key: Option<String>,
+    session_id: String,
+    claims: SessionClaims,
+}
+
+/// Pick which sealed session the receipt cites. For a backend that fronts
+/// several instances (Chutes), cite the one that actually served; a
+/// single-channel backend reports no served instance, so its one session is
+/// used. A served instance with no matching sealed session (e.g. it dropped out
+/// of this verification) cites nothing — never the wrong instance.
+pub(super) fn cite_served_session(
+    sealed: &[SealedSession],
+    served_instance_id: Option<&str>,
+) -> Option<(String, SessionClaims)> {
+    let chosen = match served_instance_id {
+        Some(id) => sealed
+            .iter()
+            .find(|s| s.instance_key.as_deref() == Some(id)),
+        None => sealed.first(),
+    };
+    chosen.map(|s| (s.session_id.clone(), s.claims.clone()))
 }
 
 impl AciService {
@@ -161,7 +189,11 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        let sealed = self.record_attested_upstream_session(&recorded_event)?;
+        // When the backend fronts several instances (Chutes), cite the session of
+        // the instance that actually served this request.
+        let recorded =
+            cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
         Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
         // The session is keyed on the requested (routed) model; record the exact
         // upstream-served model in the receipt's upstream.verified event.
@@ -302,7 +334,11 @@ impl AciService {
         if received_body != forwarded_body.as_slice() {
             builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
         }
-        let recorded = self.record_attested_upstream_session(&recorded_event)?;
+        let sealed = self.record_attested_upstream_session(&recorded_event)?;
+        // When the backend fronts several instances (Chutes), cite the session of
+        // the instance that actually served this request.
+        let recorded =
+            cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
         Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
 
         let e2ee_response = req.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
@@ -506,16 +542,16 @@ impl AciService {
         }
     }
 
-    /// Seal + persist the attested session for a verified event, and return its
-    /// `(session_id, claim-verdicts)`. The verdicts are surfaced inline in the
-    /// receipt's `upstream.verified` (shallow audit), while the persisted session
-    /// also carries the evidence + reasons (deep audit).
+    /// Seal + persist one attested session per verified channel binding, and
+    /// return them. A single-TEE provider yields one; Chutes yields one per
+    /// instance. The receipt cites one of these (see [`cite_served_session`]);
+    /// each persisted session also carries the evidence + reasons (deep audit).
     pub(super) fn record_attested_upstream_session(
         &self,
         event: &UpstreamVerifiedEvent,
-    ) -> Result<Option<(String, SessionClaims)>, ServiceError> {
-        if event.result != VerificationResult::Verified || event.channel_bindings.is_empty() {
-            return Ok(None);
+    ) -> Result<Vec<SealedSession>, ServiceError> {
+        if event.result != VerificationResult::Verified {
+            return Ok(Vec::new());
         }
 
         let now = self.clock.now_secs();
@@ -527,35 +563,75 @@ impl AciService {
         // validity one (the forwarding path only ever uses a fresh lease).
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
 
-        let claims = session_claims_for_event(event);
-
-        // Lift the response-signing address into the verified identity when present.
-        let mut identity = WorkloadIdentityRef::default();
-        if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
-            if let Some(addr) = map.get("signing_address").and_then(Value::as_str) {
-                identity.signing_address = Some(addr.to_string());
-            }
+        // One content-addressed session per channel binding: a single-TEE
+        // provider has one binding (its channel); Chutes has one per instance, so
+        // each instance becomes its own session. This relies on every
+        // non-instance provider verifying a single channel with exactly one
+        // binding; a channel that emitted several bindings would be split into
+        // separate sessions here, which would be wrong for one logical channel.
+        let identity = Self::identity_from_provider_claims(event.provider_claims.as_ref());
+        let mut sealed = Vec::with_capacity(event.channel_bindings.len());
+        for binding in &event.channel_bindings {
+            let instance = chutes_instance_id(event, binding);
+            let claims = match instance {
+                Some(instance_id) => per_instance_session_claims(event, instance_id),
+                None => session_claims_for_event(event),
+            };
+            // A per-instance (Chutes) binding excludes the shared, nonce-bound raw
+            // evidence so re-verifying the same instance is a no-op; a single
+            // channel keeps the event's evidence.
+            let evidence = if instance.is_some() {
+                EvidenceRef::default()
+            } else {
+                event
+                    .evidence
+                    .as_ref()
+                    .map(EvidenceRef::from_value)
+                    .unwrap_or_default()
+            };
+            let session_id = self.seal_attested_session(
+                event,
+                identity.clone(),
+                vec![binding.clone()],
+                claims.clone(),
+                evidence,
+                now,
+                expires_at,
+            )?;
+            sealed.push(SealedSession {
+                instance_key: instance.map(str::to_string),
+                session_id,
+                claims,
+            });
         }
-        let identity = (!identity.is_empty()).then_some(identity);
+        Ok(sealed)
+    }
 
-        // The content-addressed id commits to the evidence *digest*, not its
-        // bytes, so it can be derived from a digest-only seal. When the same
-        // channel is already recorded and live, renew its deadline in the index
-        // rather than re-sealing and re-appending the full evidence per request.
-        let evidence_digest = event
-            .evidence
-            .as_ref()
-            .and_then(|value| value.get("digest").and_then(Value::as_str))
-            .map(str::to_string);
+    /// Seal (or renew) one session for a verified channel binding and return its
+    /// content-addressed id. The id commits to the evidence *digest*, not its
+    /// bytes, so a digest-only seal derives the same id: if the session is
+    /// already recorded and live, renew its deadline rather than re-sealing and
+    /// re-appending its evidence each request.
+    #[allow(clippy::too_many_arguments)]
+    fn seal_attested_session(
+        &self,
+        event: &UpstreamVerifiedEvent,
+        identity: Option<WorkloadIdentityRef>,
+        channel_bindings: Vec<ChannelBinding>,
+        claims: SessionClaims,
+        evidence: EvidenceRef,
+        now: u64,
+        expires_at: u64,
+    ) -> Result<String, ServiceError> {
         let session_id = AttestedSession::seal(
             event.upstream_name.clone(),
             event.url_origin.clone(),
             event.verifier_id.clone(),
             identity.clone(),
-            event.channel_bindings.clone(),
+            channel_bindings.clone(),
             claims.clone(),
             EvidenceRef {
-                digest: evidence_digest,
+                digest: evidence.digest.clone(),
                 data_uri: None,
             },
             now,
@@ -566,24 +642,18 @@ impl AciService {
             .session_store
             .renew_session(&session_id, expires_at, now)
         {
-            return Ok(Some((session_id, claims)));
+            return Ok(session_id);
         }
 
         // First sighting (or the prior record lapsed): seal the full evidence
         // and persist it once.
-        let evidence = event
-            .evidence
-            .as_ref()
-            .map(EvidenceRef::from_value)
-            .unwrap_or_default();
-
         let session = AttestedSession::seal(
             event.upstream_name.clone(),
             event.url_origin.clone(),
             event.verifier_id.clone(),
             identity,
-            event.channel_bindings.clone(),
-            claims.clone(),
+            channel_bindings,
+            claims,
             evidence,
             now,
             expires_at,
@@ -592,7 +662,6 @@ impl AciService {
             session.session_id, session_id,
             "digest-only probe must derive the same id as the full seal"
         );
-
         self.session_store
             .put_session(session, now)
             .map_err(|err| {
@@ -600,7 +669,21 @@ impl AciService {
                     "failed to persist attested session {session_id}: {err}"
                 ))
             })?;
-        Ok(Some((session_id, claims)))
+        Ok(session_id)
+    }
+
+    /// Lift the response-signing address out of provider claims into a verified
+    /// identity, when present.
+    fn identity_from_provider_claims(
+        provider_claims: Option<&Value>,
+    ) -> Option<WorkloadIdentityRef> {
+        let mut identity = WorkloadIdentityRef::default();
+        if let Some(Value::Object(map)) = provider_claims {
+            if let Some(addr) = map.get("signing_address").and_then(Value::as_str) {
+                identity.signing_address = Some(addr.to_string());
+            }
+        }
+        (!identity.is_empty()).then_some(identity)
     }
 
     /// Append the `upstream.verified` receipt event, attaching the session id and
@@ -624,5 +707,45 @@ impl AciService {
         let now = self.clock.now_secs();
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
         self.receipt_store.put(receipt, requester, now, expires_at);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cite_served_session, SealedSession};
+    use crate::aggregator::session::SessionClaims;
+
+    fn sealed(instance_key: Option<&str>, session_id: &str) -> SealedSession {
+        SealedSession {
+            instance_key: instance_key.map(str::to_string),
+            session_id: session_id.to_string(),
+            claims: SessionClaims::default(),
+        }
+    }
+
+    #[test]
+    fn cite_picks_the_serving_instances_session() {
+        let sessions = vec![
+            sealed(Some("inst-a"), "as_a"),
+            sealed(Some("inst-b"), "as_b"),
+        ];
+        assert_eq!(
+            cite_served_session(&sessions, Some("inst-b")).map(|(id, _)| id),
+            Some("as_b".to_string()),
+        );
+        // A served instance with no sealed session cites nothing, not the wrong one.
+        assert!(cite_served_session(&sessions, Some("inst-z")).is_none());
+    }
+
+    #[test]
+    fn cite_uses_the_single_session_for_a_single_channel() {
+        let sessions = vec![sealed(None, "as_one")];
+        // No served instance (single-channel backend) -> the one sealed session.
+        assert_eq!(
+            cite_served_session(&sessions, None).map(|(id, _)| id),
+            Some("as_one".to_string()),
+        );
+        // Nothing sealed -> nothing cited.
+        assert!(cite_served_session(&[], None).is_none());
     }
 }

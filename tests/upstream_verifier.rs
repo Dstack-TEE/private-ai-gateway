@@ -32,6 +32,7 @@ impl UpstreamBackend for NoopUpstream {
             status_code: 200,
             body: b"{}".to_vec(),
             headers: HashMap::new(),
+            served_instance_id: None,
         })
     }
 }

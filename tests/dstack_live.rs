@@ -79,6 +79,7 @@ impl UpstreamBackend for LiveStubUpstream {
             status_code: 200,
             body: CHAT_RESPONSE.to_vec(),
             headers,
+            served_instance_id: None,
         })
     }
 }

@@ -76,6 +76,7 @@ impl UpstreamBackend for StubUpstream {
             status_code: 200,
             body: self.body.clone(),
             headers: Default::default(),
+            served_instance_id: None,
         })
     }
 
