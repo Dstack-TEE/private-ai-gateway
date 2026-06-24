@@ -9,6 +9,7 @@ describe("control — remote dial", () => {
   let serverClosed = false;
   let received: { auth?: string; path?: string; body?: string }[] = [];
   let nextResponse = { status: 200, body: "{}" };
+  let hang = false;
   let consultPre: typeof import("../control").consultPre;
 
   beforeAll(async () => {
@@ -21,6 +22,7 @@ describe("control — remote dial", () => {
           path: req.url,
           body: b,
         });
+        if (hang) return; // never respond — exercises the consultPre timeout
         res.writeHead(nextResponse.status, {
           "content-type": "application/json",
         });
@@ -31,6 +33,8 @@ describe("control — remote dial", () => {
     const port = (server.address() as AddressInfo).port;
     process.env.PRIVATE_AI_GATEWAY_CONTROL_URL = `http://127.0.0.1:${port}`;
     process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN = "test-token";
+    // Short timeout so the hang test is fast; read at module load below.
+    process.env.PRIVATE_AI_GATEWAY_CONTROL_TIMEOUT_MS = "300";
     ({ consultPre } = await import("../control"));
   });
 
@@ -41,6 +45,7 @@ describe("control — remote dial", () => {
   beforeEach(() => {
     received = [];
     nextResponse = { status: 200, body: "{}" };
+    hang = false;
   });
 
   it("sends the Bearer token + {apiKeyHash, model} body to /consult/pre and parses the result", async () => {
@@ -61,6 +66,18 @@ describe("control — remote dial", () => {
 
   it("fails closed (503) on a non-200 control response", async () => {
     nextResponse = { status: 500, body: "boom" };
+    const res = await consultPre("gpt-4o", "abc");
+    expect(res).toEqual({
+      allow: false,
+      status: 503,
+      message: "control plane unavailable",
+    });
+  });
+
+  it("fails closed (503) when the control plane hangs (request timeout)", async () => {
+    // Server accepts but never responds; only the request timeout can resolve
+    // this — if the timeout regressed, consultPre would hang and the test fail.
+    hang = true;
     const res = await consultPre("gpt-4o", "abc");
     expect(res).toEqual({
       allow: false,

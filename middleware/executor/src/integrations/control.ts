@@ -22,6 +22,7 @@ function controlRequest(
   method: string,
   path: string,
   body?: string,
+  signal?: AbortSignal,
 ): Promise<{ status: number; body: string }> {
   if (!CONTROL_URL) {
     return Promise.reject(
@@ -38,6 +39,7 @@ function controlRequest(
       {
         method,
         agent,
+        signal,
         headers: {
           "content-type": "application/json",
           ...(CONTROL_TOKEN
@@ -108,6 +110,16 @@ export interface ProviderRouting {
   allow_fallbacks?: boolean;
 }
 
+// Timeout for control-plane HTTP requests — never make an unbounded control call.
+// Wired to `consultPre` here (it is on the request's critical path and fails
+// closed, so a degraded control plane fails the request fast instead of leaving
+// requests hanging and piling up). `consultPost` will adopt the same timeout per
+// attempt once its retry queue lands. Generous by default — it only guards
+// against an indefinite hang, not normal latency; tune via the env var.
+const CONTROL_TIMEOUT_MS = Number(
+  process.env.PRIVATE_AI_GATEWAY_CONTROL_TIMEOUT_MS?.trim() || 60_000,
+);
+
 /**
  * Pre-request consult: {apiKeyHash?, model, provider?} -> {allow, ...}.
  * Because this gates authorization, it fails CLOSED — an unreachable control
@@ -123,6 +135,7 @@ export async function consultPre(
       "POST",
       "/consult/pre",
       JSON.stringify({ apiKeyHash, model, provider }),
+      AbortSignal.timeout(CONTROL_TIMEOUT_MS),
     );
     if (res.status !== 200) {
       return {
