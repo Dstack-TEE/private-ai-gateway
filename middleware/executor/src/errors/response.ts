@@ -114,9 +114,19 @@ async function tryParseJsonBody(
   response: Response,
 ): Promise<Record<string, any> | null> {
   try {
-    return await response.clone().json();
+    return await response.json();
   } catch {
     return null;
+  }
+}
+
+async function discardBody(response: Response): Promise<void> {
+  try {
+    // Cancel rather than drain: we don't read this body, and cancelling closes
+    // the backend hop immediately instead of waiting out a stalled body.
+    await response.body?.cancel();
+  } catch {
+    // Best effort: closing the hop is what matters.
   }
 }
 
@@ -221,6 +231,8 @@ export async function normalizeUpstreamError(
         requestId,
       );
     }
+  } else {
+    await discardBody(response);
   }
 
   const status = mapUpstreamStatus(upstreamStatus);

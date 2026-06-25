@@ -25,6 +25,10 @@ function backendSocketPath(): string {
   );
 }
 
+const BACKEND_IDLE_TIMEOUT_MS = Number(
+  process.env.PRIVATE_AI_GATEWAY_BACKEND_IDLE_TIMEOUT_MS?.trim() || 600_000,
+);
+
 export interface ForwardArgs {
   /** Request id minted by the frontend; the backend looks up the stored request by it. */
   requestId: string;
@@ -38,6 +42,8 @@ export interface ForwardArgs {
   body: Uint8Array | string;
   /** Tier value to relay to the gateway as the x-user-tier header. */
   userTier?: string;
+  /** Aborts the backend hop when the caller's request/response is abandoned. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -50,6 +56,17 @@ export interface ForwardArgs {
 export function forwardToBackend(args: ForwardArgs): Promise<Response> {
   const payload = Buffer.from(args.body);
   return new Promise((resolve, reject) => {
+    if (args.signal?.aborted) {
+      reject(new Error("gateway backend request aborted"));
+      return;
+    }
+
+    let settled = false;
+    let completed = false;
+    let destroyed = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let backendResponse: http.IncomingMessage | undefined;
+
     const req = http.request(
       {
         socketPath: backendSocketPath(),
@@ -64,6 +81,7 @@ export function forwardToBackend(args: ForwardArgs): Promise<Response> {
         },
       },
       (res) => {
+        backendResponse = res;
         // Relay semantic headers (content-type, x-receipt-id, the
         // x-private-ai-gateway-* attribution headers, cache-control,
         // x-accel-buffering, ...); drop per-hop framing headers and let the
@@ -77,11 +95,96 @@ export function forwardToBackend(args: ForwardArgs): Promise<Response> {
             Array.isArray(value) ? value.join(", ") : String(value),
           );
         }
-        const body = Readable.toWeb(res) as ReadableStream<Uint8Array>;
+        const upstream = Readable.toWeb(res) as ReadableStream<Uint8Array>;
+        const reader = upstream.getReader();
+        const finish = () => {
+          completed = true;
+          cleanup();
+        };
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            resetIdleTimer();
+            try {
+              const { done, value } = await reader.read();
+              if (done) {
+                finish();
+                controller.close();
+                return;
+              }
+              resetIdleTimer();
+              controller.enqueue(value);
+            } catch (error) {
+              cleanup();
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            destroyBackend(reason);
+            try {
+              await reader.cancel(reason);
+            } catch {
+              // The destroy above may already have torn down the node stream.
+            }
+          },
+        });
+        resetIdleTimer();
+        settled = true;
         resolve(new Response(body, { status: res.statusCode ?? 502, headers }));
       },
     );
-    req.on("error", reject);
+
+    const cleanup = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      args.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const fail = (error: Error) => {
+      cleanup();
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+
+    const destroyBackend = (reason?: unknown) => {
+      if (completed || destroyed) return;
+      destroyed = true;
+      cleanup();
+      const error =
+        reason instanceof Error
+          ? reason
+          : new Error(
+              typeof reason === "string"
+                ? reason
+                : "gateway backend response was abandoned",
+            );
+      backendResponse?.destroy(error);
+      req.destroy(error);
+      fail(error);
+    };
+
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        destroyBackend(
+          new Error(
+            `gateway backend idle timeout after ${BACKEND_IDLE_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, BACKEND_IDLE_TIMEOUT_MS);
+      idleTimer.unref?.();
+    };
+
+    const onAbort = () => {
+      destroyBackend(new Error("gateway backend request aborted"));
+    };
+
+    args.signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("socket", resetIdleTimer);
+    req.on("error", fail);
     req.write(payload);
     req.end();
   });

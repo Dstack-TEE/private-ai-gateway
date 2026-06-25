@@ -15,11 +15,12 @@ describe("normalizeUpstreamError — OpenAI surface", () => {
   const surface: Surface = "openai";
 
   it("maps upstream 402 to 502 (no leak of provider 402)", async () => {
-    const res = await normalizeUpstreamError(
-      jsonResponse(402, { error: { message: "provider out of credits" } }),
-      surface,
-    );
+    const upstream = jsonResponse(402, {
+      error: { message: "provider out of credits" },
+    });
+    const res = await normalizeUpstreamError(upstream, surface);
     expect(res.status).toBe(502);
+    expect(upstream.bodyUsed).toBe(true);
     const body = (await res.json()) as {
       error: { message: string; type: string };
     };
@@ -70,6 +71,7 @@ describe("normalizeUpstreamError — OpenAI surface", () => {
       );
       const res = await normalizeUpstreamError(upstream, surface);
       expect(res.status).toBe(status);
+      expect(upstream.bodyUsed).toBe(true);
       // upstream message is surfaced, but the type is ours and the upstream
       // header never reaches the client.
       expect(await res.json()).toEqual({

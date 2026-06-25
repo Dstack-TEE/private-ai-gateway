@@ -55,7 +55,8 @@ function buildForwardPayload(
   // A shared body is only valid when every candidate shapes the request
   // identically — same format AND same engine (engine alters the openai shaping).
   const sameShape = candidates.every(
-    (c) => c.format === candidates[0].format && c.engine === candidates[0].engine
+    (c) =>
+      c.format === candidates[0].format && c.engine === candidates[0].engine,
   );
   return sameShape
     ? { targets, body: JSON.stringify(shaped[0].body) }
@@ -204,6 +205,7 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
       targets,
       body,
       userTier: consult.userTier,
+      signal: c.req.raw.signal,
     });
   } catch (err) {
     return errorResponse(
@@ -320,7 +322,9 @@ export const namespaceModels = async (c: Context): Promise<Response> => {
 /** GET /v1/models/providers/:provider — relay a provider-scoped catalog. */
 export const providerModels = async (c: Context): Promise<Response> => {
   const provider = c.req.param("provider") ?? "";
-  const r = await fetchCatalog(`/models/providers/${encodeURIComponent(provider)}`);
+  const r = await fetchCatalog(
+    `/models/providers/${encodeURIComponent(provider)}`,
+  );
   return new Response(r.body, {
     status: r.status,
     headers: { "content-type": "application/json" },
