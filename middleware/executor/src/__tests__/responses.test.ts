@@ -1,4 +1,6 @@
 import { meterResponse } from '../cost';
+import { handleStreamingMode } from '../stream';
+import { OpenAIToAnthropicMessagesStreamTransform } from '../providers/openai-to-anthropic/messagesStreamTransform';
 import transformToProviderRequest from '../services/transformToProviderRequest';
 import { PricingConfig } from '../services/pricing';
 import { Params } from '../types/requestBody';
@@ -64,6 +66,40 @@ describe('/v1/responses — meterResponse usage/cost', () => {
     expect(text).toContain('"type":"response.created"');
   });
 
+  it('streaming: reports client_closed when the client disconnects mid-stream', async () => {
+    // A source that yields one chunk then stays open, so the stream is still
+    // live when the consumer cancels — mimicking a client disconnect before
+    // the upstream stream (and its usage chunk) completes.
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"type":"response.created"}\n\n')
+        );
+        // never close — leave the stream open
+      },
+    });
+    let reported: unknown = 'unset';
+    let reportedOutcome: string | undefined;
+    const res = (await meterResponse(
+      new Response(source, { headers: { 'content-type': 'text/event-stream' } }),
+      PRICING,
+      0,
+      (u, _t, outcome) => {
+        reported = u;
+        reportedOutcome = outcome;
+      }
+    )) as Response;
+
+    const reader = res.body!.getReader();
+    await reader.read(); // pull the first chunk through
+    await reader.cancel('client gone'); // client disconnects mid-stream
+
+    expect(reportedOutcome).toBe('client_closed');
+    // No usage chunk was ever seen, so usage is reported as null.
+    expect(reported).toBeNull();
+  });
+
   it('no pricing: passes through unchanged but still reports usage', async () => {
     const body = { usage: { input_tokens: 10, output_tokens: 5 } };
     let reported: unknown = undefined;
@@ -78,6 +114,163 @@ describe('/v1/responses — meterResponse usage/cost', () => {
     const out = (await res.json()) as { usage: Record<string, unknown> };
     expect(out.usage.cost).toBeUndefined();
     expect(reported).toMatchObject({ input_tokens: 10, output_tokens: 5 });
+  });
+});
+
+describe('meterResponse — stream outcome classification', () => {
+  // Drive a metered SSE stream to completion and return the reported outcome.
+  const drive = async (sse: string): Promise<string | undefined> => {
+    let outcome: string | undefined;
+    const res = (await meterResponse(
+      new Response(sse, { headers: { 'content-type': 'text/event-stream' } }),
+      PRICING,
+      0,
+      (_u, _t, o) => {
+        outcome = o;
+      }
+    )) as Response;
+    await res.text(); // consume to end → triggers the done-branch classification
+    return outcome;
+  };
+
+  it('normal stream (finish_reason=stop + [DONE]) → completed', async () => {
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+      'data: [DONE]\n\n';
+    expect(await drive(sse)).toBe('completed');
+  });
+
+  it('error finish_reason (bare `error`, anthropic `*_error`, or on a later choice) → failed', async () => {
+    // `error` is the vLLM/chutes value; `*_error` is what the anthropic
+    // chat-stream transform writes (e.g. overloaded_error); n>1 splits finish
+    // across choices[], so an error on a later choice must not be masked.
+    const cases = [
+      'data: {"choices":[{"delta":{},"finish_reason":"error"}]}\n\ndata: [DONE]\n\n',
+      'data: {"choices":[{"finish_reason":"overloaded_error","delta":{}}]}\n\ndata: [DONE]\n\n',
+      'data: {"choices":[{"finish_reason":"stop"},{"finish_reason":"error"}]}\n\ndata: [DONE]\n\n',
+    ];
+    for (const sse of cases) expect(await drive(sse)).toBe('failed');
+  });
+
+  it('unrecognized-but-valid finish_reason → completed (deny-list, not allow-list)', async () => {
+    // e.g. Anthropic `pause_turn` / `refusal` or any future value: a finish
+    // reason we do not specifically know to be an error must NOT be flagged.
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"pause_turn"}]}\n\n' +
+      'data: [DONE]\n\n';
+    expect(await drive(sse)).toBe('completed');
+  });
+
+  it('in-band error object → failed', async () => {
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"error":{"message":"upstream exploded","type":"server_error"}}\n\n';
+    expect(await drive(sse)).toBe('failed');
+  });
+
+  it('stream ends without a terminal marker → failed (cut short)', async () => {
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":" there"}}]}\n\n';
+    expect(await drive(sse)).toBe('failed');
+  });
+
+  it('Responses response.incomplete (e.g. max_output_tokens) → completed', async () => {
+    // A normal early terminal (the Responses analog of finish_reason 'length'),
+    // not a failure — must not be logged as failed/502.
+    const sse =
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":40,"output_tokens":24}}}\n\n';
+    expect(await drive(sse)).toBe('completed');
+  });
+
+  it('Responses response.failed (nested response.error) → failed', async () => {
+    const sse =
+      'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}\n\n';
+    expect(await drive(sse)).toBe('failed');
+  });
+
+  it('SSE event split mid-JSON across source reads → completed + usage (readStream reframes before metering)', async () => {
+    // meterResponse intentionally does not buffer across reads — event-boundary
+    // framing is handleStreamingMode/readStream's job, for every streaming path
+    // including /v1/responses (no provider transform). Prove the real pipeline
+    // reassembles a response.completed event split mid-JSON across two reads, so
+    // it is classified completed and its usage is extracted (not failed/502).
+    const enc = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          enc.encode(
+            'event: response.completed\n' +
+              'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":40,'
+          )
+        );
+        controller.enqueue(enc.encode('"output_tokens":24,"total_tokens":64}}}\n\n'));
+        controller.close();
+      },
+    });
+    const framed = handleStreamingMode(
+      new Response(source, { headers: { 'content-type': 'text/event-stream' } }),
+      'openai',
+      undefined, // native passthrough — no response transform, as for /v1/responses
+      '/createModelResponse',
+      true,
+      {} as Params
+    );
+
+    let outcome: string | undefined;
+    let reported: unknown = undefined;
+    const res = (await meterResponse(framed, PRICING, 0, (u, _t, o) => {
+      reported = u;
+      outcome = o;
+    })) as Response;
+    await res.text();
+
+    expect(outcome).toBe('completed');
+    expect(reported).toMatchObject({ input_tokens: 40, output_tokens: 24 });
+  });
+
+  it('/v1/messages over openai upstream: error finish_reason → anthropic error event → failed', async () => {
+    // The openai→anthropic messages transform maps finish_reason to an Anthropic
+    // stop_reason and would flatten an upstream `error` to a normal end_turn.
+    // It now emits an Anthropic `error` event instead, which both matches the
+    // Anthropic client contract on failure and lets metering record it failed.
+    const enc = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          enc.encode('data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n')
+        );
+        controller.enqueue(
+          enc.encode(
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"error"}]}\n\n'
+          )
+        );
+        controller.enqueue(enc.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    const framed = handleStreamingMode(
+      new Response(source, { headers: { 'content-type': 'text/event-stream' } }),
+      'openai',
+      OpenAIToAnthropicMessagesStreamTransform,
+      '/messages',
+      true,
+      {} as Params
+    );
+
+    let outcome: string | undefined;
+    const res = (await meterResponse(framed, PRICING, 0, (_u, _t, o) => {
+      outcome = o;
+    })) as Response;
+    const text = await res.text();
+
+    expect(outcome).toBe('failed');
+    // Client receives a real Anthropic error event, not a fake end_turn.
+    expect(text).toContain('event: error');
+    expect(text).toContain('"type":"error"');
+    expect(text).not.toContain('"stop_reason":"end_turn"');
   });
 });
 
