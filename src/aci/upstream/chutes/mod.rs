@@ -183,6 +183,7 @@ impl ChutesProviderBackend {
             headers,
             response_sk: encrypted.response_sk,
             response: resp,
+            instance_id: selected.instance_id,
         })
     }
 
@@ -379,6 +380,7 @@ impl UpstreamBackend for ChutesProviderBackend {
         let invoke = self.invoke_verified(req, event, false).await?;
         let status_code = invoke.status_code;
         let headers = invoke.headers;
+        let served_instance_id = Some(invoke.instance_id);
         let body = invoke
             .response
             .bytes()
@@ -390,6 +392,7 @@ impl UpstreamBackend for ChutesProviderBackend {
                 status_code,
                 body,
                 headers,
+                served_instance_id,
             });
         }
         let body = decrypt_chutes_response(&body, &invoke.response_sk)?;
@@ -397,6 +400,7 @@ impl UpstreamBackend for ChutesProviderBackend {
             status_code,
             body,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
+            served_instance_id,
         })
     }
 
@@ -415,6 +419,7 @@ impl UpstreamBackend for ChutesProviderBackend {
         let invoke = self.invoke_verified(req, event, true).await?;
         let status_code = invoke.status_code;
         let mut headers = invoke.headers;
+        let served_instance_id = Some(invoke.instance_id);
         let raw_body = invoke
             .response
             .bytes_stream()
@@ -432,6 +437,7 @@ impl UpstreamBackend for ChutesProviderBackend {
             status_code,
             headers,
             body,
+            served_instance_id,
         })
     }
 
@@ -485,6 +491,9 @@ struct ChutesInvokeResponse {
     headers: HashMap<String, String>,
     response_sk: MlKemDecapsulationKey768,
     response: reqwest::Response,
+    /// The instance that served this request — cited by the receipt as the
+    /// attested session it used.
+    instance_id: String,
 }
 
 #[derive(Debug, Deserialize)]

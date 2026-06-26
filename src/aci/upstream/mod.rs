@@ -68,11 +68,15 @@ pub struct PreparedUpstreamRequest {
     pub is_tee: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UpstreamResponse {
     pub status_code: u16,
     pub body: Vec<u8>,
     pub headers: HashMap<String, String>,
+    /// The instance that actually served this request, when the backend fronts
+    /// several (Chutes: the serving instance id). Lets the receipt cite that
+    /// instance's attested session; `None` for single-channel backends.
+    pub served_instance_id: Option<String>,
 }
 
 pub type UpstreamBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;
@@ -81,6 +85,8 @@ pub struct UpstreamStreamResponse {
     pub status_code: u16,
     pub headers: HashMap<String, String>,
     pub body: UpstreamBodyStream,
+    /// See [`UpstreamResponse::served_instance_id`].
+    pub served_instance_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +176,7 @@ pub trait UpstreamBackend: Send + Sync {
             status_code: response.status_code,
             headers: response.headers,
             body: Box::pin(stream::once(async move { Ok(body) })),
+            served_instance_id: response.served_instance_id,
         })
     }
 

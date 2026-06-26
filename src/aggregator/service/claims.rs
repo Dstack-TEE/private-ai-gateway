@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::AciService;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
 use crate::aggregator::upstream_config::UpstreamSessionSink;
 
@@ -49,6 +49,98 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
         }
     }
     claims
+}
+
+/// The Chutes instance id a binding attests, if this is a per-instance Chutes
+/// channel. Chutes seals one session per instance; every other provider has a
+/// single channel (None), so its claims/evidence apply to the event as a whole.
+pub(super) fn chutes_instance_id<'a>(
+    event: &UpstreamVerifiedEvent,
+    binding: &'a ChannelBinding,
+) -> Option<&'a str> {
+    if event.provider.as_deref() != Some("chutes") {
+        return None;
+    }
+    match binding {
+        ChannelBinding::E2eePublicKeySha256 {
+            key_id: Some(id), ..
+        } => Some(id.as_str()),
+        _ => None,
+    }
+}
+
+/// Typed claims for one Chutes instance: the verifier's facts for that instance
+/// only, so its session is content-addressed on its own data and survives fleet
+/// churn (a sibling instance joining or failing does not change it).
+pub(super) fn per_instance_session_claims(
+    event: &UpstreamVerifiedEvent,
+    instance_id: &str,
+) -> SessionClaims {
+    let instance_event = UpstreamVerifiedEvent {
+        provider: event.provider.clone(),
+        verifier_id: event.verifier_id.clone(),
+        result: event.result,
+        provider_claims: Some(per_instance_provider_claims(
+            event.provider_claims.as_ref(),
+            instance_id,
+        )),
+        ..Default::default()
+    };
+    session_claims_for_event(&instance_event)
+}
+
+/// One instance's slice of the Chutes `provider_claims` — that instance's own
+/// attestation facts, so its session binds its CPU and GPU evidence while staying
+/// stable under fleet churn. Everything fleet-shaped is dropped (the lists, the
+/// per-instance maps, and the *fleet-aggregate* GPU scalars — `all`/`any` over
+/// instances). What is kept is per-instance and nonce-free: the matched CPU
+/// measurement profile, this instance's TCB status, and this instance's GPU
+/// verification outcome (verified / arch). The raw nonce-bound quotes stay out.
+fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Value {
+    let mut pc = serde_json::Map::new();
+    let Some(Value::Object(map)) = full else {
+        return Value::Object(pc);
+    };
+    for key in [
+        "trust_boundary",
+        "evidence_scope",
+        "chute_id",
+        "canonical_model_id",
+    ] {
+        if let Some(value) = map.get(key) {
+            pc.insert(key.to_string(), value.clone());
+        }
+    }
+    pc.insert(
+        "instance_id".to_string(),
+        Value::String(instance_id.to_string()),
+    );
+    if let Some(status) = map
+        .get("instance_tcb_statuses")
+        .and_then(|statuses| statuses.get(instance_id))
+    {
+        pc.insert("tcb_status".to_string(), status.clone());
+    }
+    if let Some(measurement) = map
+        .get("instance_measurements")
+        .and_then(|measurements| measurements.get(instance_id))
+    {
+        pc.insert("measurement".to_string(), measurement.clone());
+    }
+    // This instance's own GPU outcome (NOT the fleet aggregate), lifted to the
+    // top of the slice so `gpu_attested` reflects this instance and the slice
+    // stays stable when a sibling instance's GPU does not.
+    if let Some(Value::Object(gpu)) = map
+        .get("instance_gpu")
+        .and_then(|instances| instances.get(instance_id))
+    {
+        for key in ["gpu_verified", "gpu_arch", "gpu_evidence_present"] {
+            if let Some(value) = gpu.get(key) {
+                pc.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(pc)
 }
 
 /// `tee_attested` rooted in a verified hardware quote with the request channel
@@ -490,5 +582,82 @@ mod claim_mapping_tests {
         );
         // Raw claims are still recorded for the audit trail.
         assert!(claims.extra.contains_key("config_repo"));
+    }
+
+    #[test]
+    fn chutes_instance_id_only_for_chutes_e2ee_bindings() {
+        use super::chutes_instance_id;
+        let e2ee = ChannelBinding::E2eePublicKeySha256 {
+            provider: "chutes".to_string(),
+            key_id: Some("inst-1".to_string()),
+            algorithm: "chutes-ml-kem-768".to_string(),
+            public_key_sha256: "aa".repeat(32),
+        };
+        let tls = ChannelBinding::TlsSpkiSha256 {
+            origin: "https://up".to_string(),
+            spki_sha256: "aa".repeat(32),
+        };
+        let chutes = event(Some("chutes"), VerificationResult::Verified, None);
+        let near = event(Some("near-ai"), VerificationResult::Verified, None);
+        assert_eq!(chutes_instance_id(&chutes, &e2ee), Some("inst-1"));
+        assert_eq!(chutes_instance_id(&chutes, &tls), None); // not an e2ee instance
+        assert_eq!(chutes_instance_id(&near, &e2ee), None); // not Chutes
+    }
+
+    #[test]
+    fn per_instance_claims_pick_the_instance_and_drop_fleet_data() {
+        use super::per_instance_session_claims;
+        // Fleet TCB + GPU are aggregates (inst-2 is bad on both); per-instance
+        // maps carry each instance's own facts. A slice must bind the instance's
+        // own facts and ignore the fleet, so it survives sibling churn.
+        let pc = json!({
+            "trust_boundary": "model_instance",
+            "chute_id": "chute-x",
+            "tcb_status": "OutOfDate",
+            "gpu_verified": false,
+            "verified_instance_ids": ["inst-1", "inst-2"],
+            "instance_tcb_statuses": { "inst-1": "UpToDate", "inst-2": "OutOfDate" },
+            "instance_measurements": { "inst-1": "profile-x", "inst-2": "profile-y" },
+            "instance_gpu": {
+                "inst-1": { "gpu_verified": true, "gpu_arch": "hopper", "gpu_evidence_present": true },
+                "inst-2": { "gpu_verified": false }
+            },
+        });
+        let ev = event(Some("chutes"), VerificationResult::Verified, Some(pc));
+
+        // inst-1's session binds inst-1's own TCB, measurement, and GPU — even
+        // though the fleet TCB is OutOfDate and the fleet gpu_verified is false.
+        let c1 = per_instance_session_claims(&ev, "inst-1");
+        assert_eq!(c1.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(c1.tcb_up_to_date.source, Some(ClaimSource::HardwareProven));
+        assert_eq!(c1.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            c1.extra.get("instance_id").and_then(Value::as_str),
+            Some("inst-1")
+        );
+        assert_eq!(
+            c1.extra.get("tcb_status").and_then(Value::as_str),
+            Some("UpToDate")
+        );
+        assert_eq!(
+            c1.extra.get("measurement").and_then(Value::as_str),
+            Some("profile-x")
+        );
+        assert_eq!(
+            c1.extra.get("gpu_verified").and_then(Value::as_bool),
+            Some(true)
+        );
+        // Fleet-wide fields are dropped, so the slice (and the session content id)
+        // does not change when a sibling instance does (per-instance idempotency).
+        assert!(!c1.extra.contains_key("verified_instance_ids"));
+        assert!(!c1.extra.contains_key("instance_tcb_statuses"));
+        assert!(!c1.extra.contains_key("instance_measurements"));
+        assert!(!c1.extra.contains_key("instance_gpu"));
+
+        // inst-2 differs (its own TCB refuted, its own GPU not asserted), so its
+        // session id will too.
+        let c2 = per_instance_session_claims(&ev, "inst-2");
+        assert_eq!(c2.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(c2.gpu_attested.status, ClaimStatus::Unknown);
     }
 }

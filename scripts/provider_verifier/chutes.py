@@ -445,6 +445,9 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     # deep audit sees the outcome; the typed gpu_attested claim stays Unknown.
     instance_gpu = {item["instance_id"]: item.get("gpu") for item in verified}
     gpus = [g for g in instance_gpu.values() if isinstance(g, dict)]
+    # Per-instance measurement profile (stable hardware identity, no nonce) so a
+    # single instance's session can bind its own CPU evidence.
+    instance_measurements = {item["instance_id"]: item["measurement"] for item in verified}
     provider_claims = {
         "trust_boundary": "model_instance",
         "evidence_scope": "model_instance",
@@ -455,6 +458,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         "verified_public_key_sha256": [item["public_key_sha256"] for item in verified],
         "tcb_status": fleet_tcb_status,
         "instance_tcb_statuses": instance_tcb_statuses,
+        "instance_measurements": instance_measurements,
         "gpu_verified": bool(gpus) and all(g.get("gpu_verified") for g in gpus),
         "gpu_evidence_present": any(g.get("gpu_evidence_present") for g in gpus),
         "instance_gpu": instance_gpu,

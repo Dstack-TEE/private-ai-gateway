@@ -147,6 +147,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             status_code: status,
             body,
             headers,
+            served_instance_id: None,
         })
     }
 
@@ -169,6 +170,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             status_code: status,
             headers,
             body: Box::pin(body),
+            served_instance_id: None,
         })
     }
 
@@ -199,6 +201,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             status_code: status,
             body,
             headers,
+            served_instance_id: None,
         })
     }
 
@@ -223,6 +226,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             status_code: status,
             headers,
             body: Box::pin(body),
+            served_instance_id: None,
         })
     }
 }
@@ -307,6 +311,7 @@ impl OpenAICompatibleBackend {
             status_code: status,
             body,
             headers,
+            served_instance_id: None,
         })
     }
 

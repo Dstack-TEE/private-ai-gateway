@@ -3,7 +3,7 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
-use super::forward::ReverifyOutcome;
+use super::forward::{cite_served_session, ReverifyOutcome};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -276,7 +276,9 @@ impl AciService {
                 let upstream_headers = upstream_response.headers;
                 let receipt_id = generate_receipt_id();
                 let served_at = self.clock.now_secs();
-                let recorded = self.record_attested_upstream_session(&recorded_event)?;
+                let sealed = self.record_attested_upstream_session(&recorded_event)?;
+                let recorded =
+                    cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
                 let session_id = recorded.as_ref().map(|(id, _)| id.clone());
                 let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                     receipt_id: &receipt_id,
@@ -380,7 +382,9 @@ impl AciService {
             let receipt_id = generate_receipt_id();
             let served_at = self.clock.now_secs();
             let chat_id = extract_chat_id(&upstream_response.body);
-            let recorded = self.record_attested_upstream_session(&recorded_event)?;
+            let sealed = self.record_attested_upstream_session(&recorded_event)?;
+            let recorded =
+                cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
             let session_id = recorded.as_ref().map(|(id, _)| id.clone());
             let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                 receipt_id: &receipt_id,

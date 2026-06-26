@@ -104,6 +104,7 @@ impl MockUpstream {
                     status_code,
                     body: body.to_vec(),
                     headers,
+                    served_instance_id: None,
                 }),
                 models_response: Mutex::new(UpstreamResponse {
                     status_code: 200,
@@ -112,6 +113,7 @@ impl MockUpstream {
                         "content-type".to_string(),
                         "application/json".to_string(),
                     )]),
+                    served_instance_id: None,
                 }),
                 calls: calls.clone(),
             },

@@ -179,6 +179,7 @@ impl UpstreamBackend for RecordingUpstream {
             status_code: 200,
             body: self.response_body.clone(),
             headers,
+            served_instance_id: None,
         })
     }
 
@@ -191,6 +192,7 @@ impl UpstreamBackend for RecordingUpstream {
             status_code: self.stream_status,
             headers: self.stream_headers.clone(),
             body: Box::pin(stream::iter(self.stream_chunks.clone().into_iter().map(Ok))),
+            served_instance_id: None,
         })
     }
 }
