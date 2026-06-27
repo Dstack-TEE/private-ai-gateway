@@ -16,7 +16,7 @@ import {
   hashApiKey,
   RouteCandidate,
 } from "./integrations/control";
-import { meterResponse } from "./cost";
+import { meterResponse, StreamOutcome } from "./cost";
 import ProviderConfigs from "./providers";
 import { endpointStrings } from "./providers/types";
 import transformToProviderRequest from "./services/transformToProviderRequest";
@@ -61,6 +61,33 @@ function buildForwardPayload(
   return sameShape
     ? { targets, body: JSON.stringify(shaped[0].body) }
     : { targets, body: JSON.stringify({ candidates: shaped }) };
+}
+
+/**
+ * The status to record for a request. We log the RAW upstream status (so a 402,
+ * 401, 500, ... is observable as itself, not flattened) — the client-facing
+ * status is mapped separately by `normalizeUpstreamError` and is intentionally
+ * not what we record. For streaming, the HTTP status commits (200) when the
+ * headers flush, before the body is produced, so a failure after that point
+ * can't change it; the stream `outcome` then overrides the recorded status so
+ * these post-headers failures don't sit in the "200 success" bucket.
+ *
+ * 502 for a genuine stream failure (broke, carried an in-band/finish_reason
+ * error, or was truncated). 499 (a 4xx, excluded from uptime) for a client
+ * disconnect — not a server fault. Otherwise the raw upstream status stands.
+ */
+function meteredStatus(
+  outcome: StreamOutcome | undefined,
+  upstreamStatus: number,
+): number {
+  switch (outcome) {
+    case "client_closed":
+      return 499;
+    case "failed":
+      return 502;
+    default:
+      return upstreamStatus;
+  }
 }
 
 function responseTransformerFor(
@@ -272,11 +299,15 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     });
   }
 
-  return meterResponse(response, pricing, start, (usage, ttftMs) => {
+  return meterResponse(response, pricing, start, (usage, ttftMs, outcome) => {
     consultPost({
       requestId,
       endpoint: new URL(c.req.url).pathname,
-      status: backendResp.status,
+      // Record the raw upstream status (`backendResp.status`) so upstream errors
+      // like 402/401/500 are observable as themselves. The client still receives
+      // the mapped status from `normalizeUpstreamError` (e.g. 402 -> generic 502);
+      // we deliberately do not record that mapped value.
+      status: meteredStatus(outcome, backendResp.status),
       durationMs: Date.now() - start,
       ttftMs,
       isStreaming,

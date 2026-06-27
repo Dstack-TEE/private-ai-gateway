@@ -274,6 +274,28 @@ export function OpenAIToAnthropicMessagesStreamTransform(
       }
     }
 
+    // An upstream error finish_reason has no valid Anthropic stop_reason, and
+    // mapFinishReason would otherwise flatten it to a normal `end_turn`. Surface
+    // it as an Anthropic `error` event instead — what an Anthropic client expects
+    // on failure, and what the metering layer recognizes as a failed stream
+    // rather than a 200. `error` is the vLLM/chutes value; the `_error` suffix
+    // covers Anthropic error types passed through (e.g. overloaded_error).
+    const fr = streamState.finishReason;
+    const isErrorFinish =
+      fr === 'error' || (typeof fr === 'string' && fr.endsWith('_error'));
+    if (isErrorFinish) {
+      const errorType =
+        typeof fr === 'string' && fr.endsWith('_error') ? fr : 'api_error';
+      output += `event: error\ndata: ${JSON.stringify({
+        type: 'error',
+        error: {
+          type: errorType,
+          message: 'The upstream provider returned an error',
+        },
+      })}\n\n`;
+      return output;
+    }
+
     // Send message_delta with final usage
     output += generateMessageDeltaEvent(
       mapFinishReason(streamState.finishReason),
