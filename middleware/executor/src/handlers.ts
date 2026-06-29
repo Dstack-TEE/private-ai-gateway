@@ -14,6 +14,8 @@ import {
   fetchCatalog,
   Format,
   hashApiKey,
+  PostReport,
+  PreConsult,
   RouteCandidate,
 } from "./integrations/control";
 import { meterResponse, StreamOutcome } from "./cost";
@@ -88,6 +90,46 @@ function meteredStatus(
     default:
       return upstreamStatus;
   }
+}
+
+function safeErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 500);
+}
+
+function reportGatewayFailure(args: {
+  c: Context;
+  requestId: string;
+  params: Params;
+  status: number;
+  start: number;
+  source: PostReport["errorSource"];
+  message: string;
+  consult?: PreConsult;
+  pricing?: PostReport["pricing"];
+  // Defaults to 0. Paths that fail after the backend already reported failed
+  // failover attempts must pass a value above those attempts' indices, so this
+  // gateway-generated row wins `argMax(status_code, attempt_index)` as the final
+  // status instead of being shadowed by an earlier failed attempt.
+  attemptIndex?: number;
+}): void {
+  consultPost({
+    requestId: args.requestId,
+    endpoint: new URL(args.c.req.url).pathname,
+    status: args.status,
+    durationMs: Date.now() - args.start,
+    isStreaming: Boolean(args.params.stream),
+    attemptIndex: args.attemptIndex ?? 0,
+    selectedRouteId: null,
+    requestModel: args.params.model ?? "",
+    usage: null,
+    pricing: args.pricing ?? args.consult?.pricing ?? null,
+    spendMode: args.consult?.spendMode,
+    userId: args.consult?.userId,
+    virtualKeyId: args.consult?.virtualKeyId,
+    errorSource: args.source,
+    errorMessage: args.message.slice(0, 500),
+  });
 }
 
 function responseTransformerFor(
@@ -192,6 +234,30 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
   if (!consult.allow) {
     const status = consult.status ?? 403;
     const message = consult.message ?? "forbidden";
+    // Record a gateway failure only when OUR infrastructure failed (5xx). The
+    // other denial statuses are attributable to the user's request, not our
+    // availability, so — like 400/403/413/429 — they are not recorded:
+    //   401  invalid user API key
+    //   402  user out of budget/credits
+    //   404  user pinned a provider that has no node for the model
+    // Real upstream 401/402/etc. (the provider's key/billing failed) are a
+    // different thing and still count — recorded from the metered/failed-attempt
+    // paths below. (Caveat: the Rust backend does not set attribution headers on
+    // a FINAL upstream error, so such rows currently land with selectedRouteId
+    // null and no provider/deployment attribution — a separate, pre-existing
+    // backend gap.)
+    if (status >= 500) {
+      reportGatewayFailure({
+        c,
+        requestId,
+        params,
+        status,
+        start,
+        source: "control",
+        message,
+        consult,
+      });
+    }
     if (status === 429 && consult.rateLimit) {
       return rateLimitResponse(
         surface,
@@ -224,7 +290,31 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     );
   }
 
-  const { targets, body } = buildForwardPayload(params, fn, candidates);
+  let targets: string[];
+  let body: string;
+  try {
+    ({ targets, body } = buildForwardPayload(params, fn, candidates));
+  } catch (err) {
+    const message = `failed to shape provider request: ${safeErrorMessage(err)}`;
+    reportGatewayFailure({
+      c,
+      requestId,
+      params,
+      status: 500,
+      start,
+      source: "executor",
+      message,
+      consult,
+      pricing,
+    });
+    return errorResponse(
+      surface,
+      500,
+      errorType(surface, 500),
+      message,
+      requestId,
+    );
+  }
   let backendResp: Response;
   try {
     backendResp = await forwardToBackend({
@@ -235,22 +325,76 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
       signal: c.req.raw.signal,
     });
   } catch (err) {
+    // The client's request signal is wired into forwardToBackend, so a client
+    // disconnect before the backend responds also rejects here. That's a client
+    // abort (499), not our failure — don't record it as a gateway/backend 502.
+    if (c.req.raw.signal?.aborted) {
+      return errorResponse(
+        surface,
+        499,
+        errorType(surface, 499),
+        "client closed request before the backend responded",
+        requestId,
+      );
+    }
+    const message = `failed to reach gateway backend: ${(err as Error).message}`;
+    reportGatewayFailure({
+      c,
+      requestId,
+      params,
+      status: 502,
+      start,
+      source: "backend",
+      message,
+      consult,
+      pricing,
+    });
     return errorResponse(
       surface,
       502,
       "backend_unreachable",
-      `failed to reach gateway backend: ${(err as Error).message}`,
+      message,
       requestId,
     );
   }
-  const response = await driveResponse(
-    backendResp,
-    params,
-    fn,
-    candidates,
-    surface,
-    requestId,
-  );
+  let response: Response;
+  try {
+    response = await driveResponse(
+      backendResp,
+      params,
+      fn,
+      candidates,
+      surface,
+      requestId,
+    );
+  } catch (err) {
+    // This catches the whole response pipeline, not just executor code bugs: a
+    // selected upstream returning a malformed/non-JSON 200 (or transform-
+    // incompatible data) also throws here. We attribute ALL of it to the executor
+    // (selectedRouteId null → deployment 0), i.e. a provider that emits malformed
+    // 200s is NOT penalized in deployment/routing health. Accepted tradeoff — at
+    // this point we can't cleanly separate a provider-data fault from an executor
+    // bug; the request is still correctly counted as a 502 failure either way.
+    const message = `failed to transform upstream response: ${safeErrorMessage(err)}`;
+    reportGatewayFailure({
+      c,
+      requestId,
+      params,
+      status: 502,
+      start,
+      source: "executor",
+      message,
+      consult,
+      pricing,
+    });
+    return errorResponse(
+      surface,
+      502,
+      errorType(surface, 502),
+      message,
+      requestId,
+    );
+  }
 
   // Post-request consult (billing + request log). Fired once the
   // raw upstream usage is known — immediately for buffered responses, at stream
@@ -299,28 +443,59 @@ async function handle(c: Context, fn: endpointStrings): Promise<Response> {
     });
   }
 
-  return meterResponse(response, pricing, start, (usage, ttftMs, outcome) => {
-    consultPost({
-      requestId,
-      endpoint: new URL(c.req.url).pathname,
-      // Record the raw upstream status (`backendResp.status`) so upstream errors
-      // like 402/401/500 are observable as themselves. The client still receives
-      // the mapped status from `normalizeUpstreamError` (e.g. 402 -> generic 502);
-      // we deliberately do not record that mapped value.
-      status: meteredStatus(outcome, backendResp.status),
-      durationMs: Date.now() - start,
-      ttftMs,
-      isStreaming,
-      attemptIndex,
-      selectedRouteId,
-      requestModel: params.model ?? "",
-      usage,
+  try {
+    return await meterResponse(
+      response,
       pricing,
-      spendMode: consult.spendMode,
-      userId: consult.userId,
-      virtualKeyId: consult.virtualKeyId,
+      start,
+      (usage, ttftMs, outcome) => {
+        consultPost({
+          requestId,
+          endpoint: new URL(c.req.url).pathname,
+          // Record the raw upstream status (`backendResp.status`) so upstream errors
+          // like 402/401/500 are observable as themselves. The client still receives
+          // the mapped status from `normalizeUpstreamError` (e.g. 402 -> generic 502);
+          // we deliberately do not record that mapped value.
+          status: meteredStatus(outcome, backendResp.status),
+          durationMs: Date.now() - start,
+          ttftMs,
+          isStreaming,
+          attemptIndex,
+          selectedRouteId,
+          requestModel: params.model ?? "",
+          usage,
+          pricing,
+          spendMode: consult.spendMode,
+          userId: consult.userId,
+          virtualKeyId: consult.virtualKeyId,
+        });
+      },
+    );
+  } catch (err) {
+    const message = `failed to meter upstream response: ${safeErrorMessage(err)}`;
+    reportGatewayFailure({
+      c,
+      requestId,
+      params,
+      status: 502,
+      start,
+      source: "executor",
+      message,
+      consult,
+      pricing,
+      // This failure happens after any failed failover attempts were reported
+      // (each at its own attempt_index); sit one past the committed attempt so
+      // this 502 is the final status, not an earlier attempt's code.
+      attemptIndex: attemptIndex + 1,
     });
-  });
+    return errorResponse(
+      surface,
+      502,
+      errorType(surface, 502),
+      message,
+      requestId,
+    );
+  }
 }
 
 export const chatCompletions = (c: Context) => handle(c, "chatComplete");

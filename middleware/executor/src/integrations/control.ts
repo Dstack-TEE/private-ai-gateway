@@ -113,11 +113,18 @@ export interface ProviderRouting {
 // Timeout for control-plane HTTP requests — never make an unbounded control call.
 // Wired to `consultPre` here (it is on the request's critical path and fails
 // closed, so a degraded control plane fails the request fast instead of leaving
-// requests hanging and piling up). `consultPost` will adopt the same timeout per
-// attempt once its retry queue lands. Generous by default — it only guards
-// against an indefinite hang, not normal latency; tune via the env var.
+// requests hanging and piling up). Generous by default — it only guards against
+// an indefinite hang, not normal latency; tune via the env var.
 const CONTROL_TIMEOUT_MS = Number(
   process.env.PRIVATE_AI_GATEWAY_CONTROL_TIMEOUT_MS?.trim() || 60_000,
+);
+// `consultPost` is fire-and-forget (off the critical path), so it gets a much
+// shorter timeout: it only bounds a hung control plane so abandoned posts don't
+// pile up sockets/promises under load. Still NO retry — a stalled post is dropped
+// (best-effort), never resent (re-sending a report the control plane may have
+// already processed would record it twice; the report is not idempotent).
+const CONTROL_POST_TIMEOUT_MS = Number(
+  process.env.PRIVATE_AI_GATEWAY_CONTROL_POST_TIMEOUT_MS?.trim() || 10_000,
 );
 
 /**
@@ -168,14 +175,27 @@ export interface PostReport {
   spendMode?: SpendMode;
   userId?: number;
   virtualKeyId?: number;
+  // Set only on a gateway-synthesized failure (no real upstream attempt): which
+  // component produced it. Empty/absent for real upstream attempts. Drives the
+  // control plane's `error_source` column.
+  errorSource?: "control" | "backend" | "executor";
+  errorMessage?: string;
 }
 
 /**
- * Post-request consult: fire-and-forget usage report. Billing is best-effort —
- * a control-plane hiccup must never fail the user's already-served response.
+ * Post-request consult: fire-and-forget usage report. Delivery is best-effort — a
+ * control-plane hiccup must never fail the user's already-served response, and we
+ * never retry: re-sending a report the control plane already processed would
+ * record it twice (the report is not idempotent). Bounded by a short timeout so a
+ * hung control plane can't accumulate sockets/promises.
  */
 export function consultPost(report: PostReport): void {
-  controlRequest("POST", "/consult/post", JSON.stringify(report)).catch(() => {
+  controlRequest(
+    "POST",
+    "/consult/post",
+    JSON.stringify(report),
+    AbortSignal.timeout(CONTROL_POST_TIMEOUT_MS),
+  ).catch(() => {
     /* best-effort */
   });
 }
