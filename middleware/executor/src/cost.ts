@@ -89,8 +89,18 @@ export function meterResponse(
             controller.close();
             return;
           }
-          if (ttftMs === undefined) ttftMs = Date.now() - start;
           const lines = textDecoder.decode(value).split('\n');
+          // A comment-only chunk (an SSE keep-alive `: ...` line, ours or an
+          // upstream's) is not model output. Don't let it set TTFT, or a slow
+          // first token gets mis-recorded as the heartbeat interval. Set TTFT on
+          // the first chunk that carries a real SSE line (not a `:` comment or
+          // blank).
+          if (
+            ttftMs === undefined &&
+            lines.some((l) => l.trim() !== '' && !l.startsWith(':'))
+          ) {
+            ttftMs = Date.now() - start;
+          }
           let rewritten = false;
           const outLines = lines.map((line) => {
             if (!line.startsWith('data: ')) return line;

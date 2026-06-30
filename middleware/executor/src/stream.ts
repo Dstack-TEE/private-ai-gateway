@@ -142,6 +142,26 @@ export function handleStreamingMode(
   let upstreamCancelled = false;
   let upstreamCompleted = false;
 
+  // SSE keep-alive. While a slow upstream withholds the first token (long TTFT)
+  // or pauses mid-stream (reasoning models gap between tokens), an idle SSE
+  // connection can trip the consumer's fetch timeout, getting the request
+  // cancelled and re-routed to another provider. Periodically emit an SSE
+  // comment line — any line starting with ':' is a comment, ignored by
+  // spec-compliant clients — so the consumer sees we are still working. Tunable
+  // via env; <= 0 (or a non-number) disables.
+  const keepAliveMs = Number(
+    process.env.PRIVATE_AI_GATEWAY_SSE_KEEPALIVE_MS ?? 10000
+  );
+  const keepAliveComment = encoder.encode(': PROCESSING\n\n');
+  let lastWriteAt = Date.now();
+  let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
+  const stopKeepAlive = () => {
+    if (keepAliveTimer !== undefined) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = undefined;
+    }
+  };
+
   const cancelUpstreamReader = async (reason?: unknown) => {
     if (upstreamCancelled) {
       return;
@@ -163,6 +183,7 @@ export function handleStreamingMode(
 
   writer.closed.catch((error) => {
     downstreamClosed = true;
+    stopKeepAlive();
     if (!upstreamCompleted) {
       cancelUpstreamReader(error).catch((cancelError: any) => {
         if (
@@ -187,6 +208,7 @@ export function handleStreamingMode(
     const payload = chunk instanceof Uint8Array ? chunk : encoder.encode(chunk);
     try {
       await writer.write(payload);
+      lastWriteAt = Date.now();
     } catch (error) {
       downstreamClosed = true;
       if (!upstreamCompleted) {
@@ -195,6 +217,26 @@ export function handleStreamingMode(
       throw error;
     }
   };
+
+  if (keepAliveMs > 0) {
+    keepAliveTimer = setInterval(() => {
+      if (downstreamClosed || upstreamCompleted) {
+        return;
+      }
+      if (Date.now() - lastWriteAt < keepAliveMs) {
+        return;
+      }
+      // Best-effort heartbeat: stamp first so a real write in flight doesn't
+      // double up, and never cancel the upstream or throw from here — teardown
+      // is the main path's job (writer.closed / writeChunk).
+      lastWriteAt = Date.now();
+      writer.write(keepAliveComment).catch(() => {
+        downstreamClosed = true;
+      });
+    }, keepAliveMs);
+    // A pending heartbeat must not keep the process alive on its own.
+    (keepAliveTimer as { unref?: () => void }).unref?.();
+  }
 
   void (async () => {
     try {
@@ -215,6 +257,7 @@ export function handleStreamingMode(
         console.error('Error during stream processing:', proxyProvider, error);
       }
     } finally {
+      stopKeepAlive();
       if (!downstreamClosed) {
         try {
           await writer.close();

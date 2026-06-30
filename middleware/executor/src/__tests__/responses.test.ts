@@ -115,6 +115,51 @@ describe('/v1/responses — meterResponse usage/cost', () => {
     expect(out.usage.cost).toBeUndefined();
     expect(reported).toMatchObject({ input_tokens: 10, output_tokens: 5 });
   });
+
+  it('streaming: an SSE keep-alive comment before the first token does not set TTFT', async () => {
+    // Regression: a `: PROCESSING` heartbeat written before the model's first
+    // token used to be metered as the first chunk, collapsing TTFT to the
+    // heartbeat interval (~0ms). TTFT must track the first real SSE data line;
+    // the comment still passes through to the client untouched.
+    const encoder = new TextEncoder();
+    const FIRST_TOKEN_DELAY_MS = 50;
+    const source = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(': PROCESSING\n\n')); // heartbeat at ~0ms
+        await new Promise((r) => setTimeout(r, FIRST_TOKEN_DELAY_MS));
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+          )
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    let reportedTtft: number | undefined;
+    let reportedOutcome: string | undefined;
+    const res = (await meterResponse(
+      new Response(source, { headers: { 'content-type': 'text/event-stream' } }),
+      null,
+      Date.now(),
+      (_u, t, outcome) => {
+        reportedTtft = t;
+        reportedOutcome = outcome;
+      }
+    )) as Response;
+
+    const text = await res.text();
+    // the heartbeat still reaches the client untouched
+    expect(text).toContain(': PROCESSING');
+    expect(reportedOutcome).toBe('completed');
+    // TTFT reflects the real first token, not the ~0ms heartbeat
+    expect(reportedTtft as number).toBeGreaterThan(20);
+  });
 });
 
 describe('meterResponse — stream outcome classification', () => {
