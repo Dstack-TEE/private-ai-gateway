@@ -11,13 +11,6 @@ import { PricingConfig } from "../services/pricing";
 const CONTROL_URL = process.env.PRIVATE_AI_GATEWAY_CONTROL_URL?.trim();
 const CONTROL_TOKEN = process.env.PRIVATE_AI_GATEWAY_CONTROL_TOKEN?.trim();
 
-// One keep-alive connection so TLS is negotiated once, not per request.
-const agent = CONTROL_URL
-  ? new URL(CONTROL_URL).protocol === "https:"
-    ? new https.Agent({ keepAlive: true })
-    : new http.Agent({ keepAlive: true })
-  : undefined;
-
 function controlRequest(
   method: string,
   path: string,
@@ -38,7 +31,10 @@ function controlRequest(
       url,
       {
         method,
-        agent,
+        // No connection pooling: a fresh socket per request avoids reusing a
+        // keep-alive connection the control plane / LB may have already closed
+        // (Node's globalAgent would otherwise pool it).
+        agent: false,
         signal,
         headers: {
           "content-type": "application/json",
@@ -51,6 +47,17 @@ function controlRequest(
       (res) => {
         let b = "";
         res.on("data", (c) => (b += c));
+        res.on("aborted", () =>
+          reject(new Error(`control response aborted: ${method} ${path}`)),
+        );
+        res.on("error", reject);
+        res.on("close", () => {
+          if (!res.complete) {
+            reject(
+              new Error(`control response closed early: ${method} ${path}`),
+            );
+          }
+        });
         res.on("end", () =>
           resolve({ status: res.statusCode ?? 502, body: b }),
         );
@@ -77,7 +84,7 @@ export interface RouteCandidate {
    * server (sglang/vllm). Selects engine-specific request shaping. Absent for
    * managed third-party APIs.
    */
-  engine?: 'sglang' | 'vllm';
+  engine?: "sglang" | "vllm";
 }
 
 export interface PreConsult {
@@ -145,14 +152,29 @@ export async function consultPre(
       AbortSignal.timeout(CONTROL_TIMEOUT_MS),
     );
     if (res.status !== 200) {
+      console.error(
+        `[control] /consult/pre returned HTTP ${res.status}: ${res.body.slice(0, 300)}`,
+      );
       return {
         allow: false,
         status: 503,
         message: "control plane unavailable",
       };
     }
-    return JSON.parse(res.body) as PreConsult;
-  } catch {
+    try {
+      return JSON.parse(res.body) as PreConsult;
+    } catch (err) {
+      console.error(
+        `[control] /consult/pre returned invalid JSON: ${String(err)}; body=${res.body.slice(0, 300)}`,
+      );
+      return {
+        allow: false,
+        status: 503,
+        message: "control plane unavailable",
+      };
+    }
+  } catch (err) {
+    console.error(`[control] /consult/pre request failed: ${String(err)}`);
     return { allow: false, status: 503, message: "control plane unavailable" };
   }
 }
@@ -195,14 +217,14 @@ export function consultPost(report: PostReport): void {
     "/consult/post",
     JSON.stringify(report),
     AbortSignal.timeout(CONTROL_POST_TIMEOUT_MS),
-  ).catch(() => {
-    /* best-effort */
+  ).catch((err) => {
+    console.error(`[control] /consult/post request failed: ${String(err)}`);
   });
 }
 
 /** Fetch a model catalog (relayed by the executor's GET /v1/models* routes). */
 export function fetchCatalog(
-  path: string = "/models"
+  path: string = "/models",
 ): Promise<{ status: number; body: string }> {
   return controlRequest("GET", path);
 }
