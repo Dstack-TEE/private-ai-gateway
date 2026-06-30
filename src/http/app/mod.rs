@@ -237,8 +237,14 @@ pub fn build_router_with_uds_middleware(
 
 fn uds_middleware(middleware_socket_path: impl Into<PathBuf>) -> UdsMiddleware {
     let path = middleware_socket_path.into();
+    // Do not pool connections to the middleware. The hop is a local Unix socket
+    // (connecting is cheap, no TLS), and the middleware is a Node server that
+    // closes idle keep-alive sockets after ~5s; a pooled connection we reuse
+    // after that is already dead, which surfaces to the client as a
+    // `middleware_error`. One connection per request avoids the stale reuse.
     let client = reqwest::Client::builder()
         .unix_socket(path)
+        .pool_max_idle_per_host(0)
         .build()
         .expect("failed to construct Unix-socket middleware HTTP client");
     UdsMiddleware {
