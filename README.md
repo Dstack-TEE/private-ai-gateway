@@ -540,8 +540,9 @@ src/aci/                       ACI wire types, canonical JSON, keys, receipts, u
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
-docs/                          design notes, provider reviews, middleware guide
+docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples
+examples/                      cargo example binaries + a reference control plane (control-plane/)
 scripts/                       local and Phala smoke tests
 tests/                         unit and integration coverage
 ```
