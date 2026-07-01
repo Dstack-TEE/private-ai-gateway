@@ -11,3 +11,4 @@ pub mod aci;
 pub mod aggregator;
 pub mod dstack;
 pub mod http;
+pub mod middleware;

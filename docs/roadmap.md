@@ -21,7 +21,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI/DCAP upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
-| Frontend/middleware/backend framework | In progress | Internal request context with expiry, out-of-band target route selection, internal backend endpoint, runtime UDS middleware mode, middleware `/v1/models` pass-through, and stream-preserving middleware transport are implemented. Production compose is still pending. |
+| Frontend/middleware/backend framework | Shipped | Frontend/backend split with an optional middleware that consults the control plane to route, transform, cost-inject, and report usage; the middleware-disabled path stays behavior-compatible. |
 | Multi-domain downstream TLS binding | In progress | Domain-tagged TLS SPKIs can be configured, published in the keyset, and selected in report evidence from the HTTP `Host`. Downstream session ids are still pending. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
@@ -99,41 +99,17 @@ may need multiple custom domains bound to the same gateway workload.
 
 ### P0: Frontend / Middleware / Backend Refactor
 
-Source design: [frontend-middleware-backend.md](frontend-middleware-backend.md).
-
-- Introduce internal request context keyed by `request_id`, with expiry for
-  pending middleware requests. Implemented.
-- Split the current request path into frontend preparation, backend
-  verification/forwarding, and frontend response finalization. Implemented for
-  the current UDS middleware path, including streaming response finalization.
-- Keep middleware-disabled mode as the default and prove it preserves current
-  behavior. Implemented and covered by the full test suite.
-- Add a local backend endpoint or in-process backend callable guarded by
-  request context lookup. Implemented as a separate internal router builder and
-  runtime listener when middleware is enabled.
-- Add optional UDS middleware mode with a fixture middleware for tests.
-  Implemented through router helpers and tests; enabled in the static gateway
-  config.
-- Ensure external `X-Private-AI-Gateway-*` headers cannot steer the public
-  frontend. Implemented by generating internal context server-side; covered by
-  tests.
-- Make backend validate target route ids and reject arbitrary upstream URLs.
-  Implemented for in-process route selection.
-- Record route/backend receipt facts from backend observations, not middleware
-  claims. Implemented with `middleware.forwarded`, `route.selected`, and final
-  `request.forwarded` events.
-- Finalize middleware-mode receipts in the frontend after middleware returns,
-  with backend-owned `response.received` and frontend-owned
-  `response.returned`. Implemented.
-- Add E2EE tests proving ACI v2 response AAD uses the frontend-observed user
-  model when middleware selects a separate target route. Implemented for the
-  current UDS middleware path.
-- Update deploy docs after the middleware mode has a concrete production compose
-  shape.
-- Add production compose wiring for a middleware container.
-- Keep the middleware developer contract current in
-  [middleware-integration.md](middleware-integration.md). Initial guide is
-  written.
+Shipped. The gateway is split into a frontend (public ACI endpoints, downstream
+E2EE, request-context creation, receipt signing), a backend (target-route
+validation, provider verification, upstream binding, backend-authored receipt
+facts), and an optional middleware between them. The middleware runs
+**in-process**: it consults the control plane to authorize and route each
+request, shapes the provider request, transforms and cost-injects the response,
+and reports usage — with no out-of-process hop. The middleware-disabled path
+stays behavior-compatible with the direct request path and is covered by the
+full test suite. Verification facts always come from backend observations, never
+middleware claims (`middleware.forwarded`, `route.selected`, `request.forwarded`,
+backend-owned `response.received`, frontend-owned `response.returned`).
 
 ### P0: Provider Soundness and Strict Pins
 
@@ -276,7 +252,6 @@ it does not expose arbitrary verifier commands or policy DSLs.
 
 - [README.md](../README.md)
 - [live-e2e-test-suite.md](live-e2e-test-suite.md)
-- [frontend-middleware-backend.md](frontend-middleware-backend.md)
-- [middleware-integration.md](middleware-integration.md)
+- [configuration-reference.md](configuration-reference.md)
 - [upstream-verification-lifecycle.md](upstream-verification-lifecycle.md)
 - [router-mode-provider-review.md](router-mode-provider-review.md)

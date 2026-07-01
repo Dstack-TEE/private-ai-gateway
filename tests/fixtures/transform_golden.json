@@ -1,0 +1,655 @@
+[
+  {
+    "name": "openai_chat_identity",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "gpt-4o",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "temperature": 0.5,
+      "max_tokens": 64
+    },
+    "output": {
+      "model": "gpt-4o",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 64,
+      "temperature": 0.5
+    }
+  },
+  {
+    "name": "openai_chat_clamp",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "gpt-4o",
+      "messages": [],
+      "temperature": 5,
+      "top_p": -1,
+      "frequency_penalty": 9
+    },
+    "output": {
+      "model": "gpt-4o",
+      "messages": [],
+      "temperature": 2,
+      "top_p": 0,
+      "frequency_penalty": 2
+    }
+  },
+  {
+    "name": "openai_chat_stream_options_injected",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "gpt-4o",
+      "messages": [],
+      "stream": true
+    },
+    "output": {
+      "model": "gpt-4o",
+      "messages": [],
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    }
+  },
+  {
+    "name": "openai_chat_gateway_default_sentinel",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "gpt-4o",
+      "messages": [],
+      "temperature": "gateway-default"
+    },
+    "output": {
+      "model": "gpt-4o",
+      "messages": [],
+      "temperature": 1
+    }
+  },
+  {
+    "name": "openai_chat_sglang_reasoning_minimal",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": "sglang",
+    "input": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "minimal",
+      "top_k": 5,
+      "min_p": 0.1
+    },
+    "output": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "low",
+      "top_k": 5,
+      "min_p": 0.1
+    }
+  },
+  {
+    "name": "openai_chat_sglang_reasoning_xhigh",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": "sglang",
+    "input": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "xhigh"
+    },
+    "output": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "max"
+    }
+  },
+  {
+    "name": "openai_chat_vllm_reasoning_passthrough",
+    "format": "openai",
+    "fn": "chatComplete",
+    "engine": "vllm",
+    "input": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "minimal",
+      "repetition_penalty": 1.1
+    },
+    "output": {
+      "model": "m",
+      "messages": [],
+      "reasoning_effort": "minimal",
+      "repetition_penalty": 1.1
+    }
+  },
+  {
+    "name": "openai_complete_basic",
+    "format": "openai",
+    "fn": "complete",
+    "engine": null,
+    "input": {
+      "model": "gpt-3.5-turbo-instruct",
+      "prompt": "hello",
+      "temperature": 9
+    },
+    "output": {
+      "model": "gpt-3.5-turbo-instruct",
+      "prompt": "hello",
+      "temperature": 2
+    }
+  },
+  {
+    "name": "openai_embed_basic",
+    "format": "openai",
+    "fn": "embed",
+    "engine": null,
+    "input": {
+      "model": "text-embedding-3-small",
+      "input": "hello",
+      "dimensions": 256
+    },
+    "output": {
+      "model": "text-embedding-3-small",
+      "input": "hello",
+      "dimensions": 256
+    }
+  },
+  {
+    "name": "responses_identity_and_unknown_dropped",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "engine": null,
+    "input": {
+      "model": "gpt-4o",
+      "input": "hello",
+      "stream": true,
+      "instructions": "be brief",
+      "store": true,
+      "previous_response_id": "resp_prev",
+      "not_a_real_param": "x"
+    },
+    "output": {
+      "input": "hello",
+      "model": "gpt-4o",
+      "instructions": "be brief",
+      "previous_response_id": "resp_prev",
+      "store": true,
+      "stream": true
+    }
+  },
+  {
+    "name": "anthropic_to_openai_basic_system",
+    "format": "openai",
+    "fn": "messages",
+    "engine": null,
+    "input": {
+      "model": "gpt-4",
+      "max_tokens": 1024,
+      "system": "You are a helpful assistant.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello!"
+        }
+      ]
+    },
+    "output": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a helpful assistant."
+        },
+        {
+          "role": "user",
+          "content": "Hello!"
+        }
+      ],
+      "max_tokens": 1024
+    }
+  },
+  {
+    "name": "anthropic_to_openai_image_tools_tool_choice",
+    "format": "openai",
+    "fn": "messages",
+    "engine": null,
+    "input": {
+      "model": "gpt-4",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "url",
+                "url": "https://example.com/image.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get the weather for a location",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "location"
+            ]
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "any"
+      }
+    },
+    "output": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.com/image.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 1024,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a location",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "location"
+              ]
+            }
+          }
+        }
+      ],
+      "tool_choice": "required"
+    }
+  },
+  {
+    "name": "anthropic_to_openai_null_input_schema",
+    "format": "openai",
+    "fn": "messages",
+    "engine": null,
+    "input": {
+      "model": "gpt-4",
+      "max_tokens": 8,
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": [
+        {
+          "name": "y",
+          "input_schema": null
+        },
+        {
+          "type": "bash_20250124",
+          "input_schema": null
+        }
+      ]
+    },
+    "output": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 8,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "y",
+            "description": "",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "bash_20250124",
+            "description": "bash_20250124 tool",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "anthropic_to_openai_tool_use_and_result",
+    "format": "openai",
+    "fn": "messages",
+    "engine": null,
+    "input": {
+      "model": "gpt-4",
+      "max_tokens": 8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "calling"
+            },
+            {
+              "type": "tool_use",
+              "id": "c1",
+              "name": "f",
+              "input": {
+                "a": 1
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "c1",
+              "content": "result"
+            }
+          ]
+        }
+      ]
+    },
+    "output": {
+      "model": "gpt-4",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "calling",
+          "tool_calls": [
+            {
+              "id": "c1",
+              "type": "function",
+              "function": {
+                "name": "f",
+                "arguments": "{\"a\":1}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "c1",
+          "content": "result"
+        }
+      ],
+      "max_tokens": 8
+    }
+  },
+  {
+    "name": "openai_to_anthropic_system_split_and_renames",
+    "format": "anthropic",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "claude-3",
+      "max_tokens": 256,
+      "stop": [
+        "END"
+      ],
+      "user": "u-1",
+      "temperature": 5,
+      "messages": [
+        {
+          "role": "system",
+          "content": "be terse"
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ]
+    },
+    "output": {
+      "model": "claude-3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "system": [
+        {
+          "text": "be terse",
+          "type": "text"
+        }
+      ],
+      "max_tokens": 256,
+      "temperature": 1,
+      "stop_sequences": [
+        "END"
+      ],
+      "metadata": {
+        "user_id": "u-1"
+      }
+    }
+  },
+  {
+    "name": "openai_to_anthropic_tool_calls",
+    "format": "anthropic",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "claude-3",
+      "max_tokens": 256,
+      "tool_choice": "required",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "f",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "calling",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "function": {
+                "name": "f",
+                "arguments": "{\"a\":1}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "result"
+        }
+      ]
+    },
+    "output": {
+      "model": "claude-3",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "calling"
+            },
+            {
+              "type": "tool_use",
+              "name": "f",
+              "id": "call_1",
+              "input": {
+                "a": 1
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call_1",
+              "content": "result"
+            }
+          ]
+        }
+      ],
+      "system": [],
+      "tools": [
+        {
+          "name": "f",
+          "description": "",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "$defs": {}
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "any"
+      },
+      "max_tokens": 256
+    }
+  },
+  {
+    "name": "openai_to_anthropic_malformed_tool_args_error",
+    "format": "anthropic",
+    "fn": "chatComplete",
+    "engine": null,
+    "input": {
+      "model": "claude-3",
+      "max_tokens": 16,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c1",
+              "function": {
+                "name": "f",
+                "arguments": "{not json"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "error": true
+  },
+  {
+    "name": "anthropic_complete_prompt_wrap",
+    "format": "anthropic",
+    "fn": "complete",
+    "engine": null,
+    "input": {
+      "model": "claude-instant-1",
+      "prompt": "hello",
+      "max_tokens": 50,
+      "stop": null
+    },
+    "output": {
+      "model": "claude-instant-1",
+      "prompt": "\n\nHuman: hello\n\nAssistant:",
+      "max_tokens_to_sample": 50,
+      "stop_sequences": []
+    }
+  },
+  {
+    "name": "anthropic_messages_passthrough_drops_unknown",
+    "format": "anthropic",
+    "fn": "messages",
+    "engine": null,
+    "input": {
+      "model": "claude-3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 10,
+      "system": "sys",
+      "not_allowed": "drop me"
+    },
+    "output": {
+      "model": "claude-3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 10,
+      "system": "sys"
+    }
+  }
+]

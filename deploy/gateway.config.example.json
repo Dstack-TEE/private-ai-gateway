@@ -4,8 +4,8 @@
   "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
   "admin_token": "<long-random-admin-token>",
   "dstack_endpoint": "unix:/var/run/dstack.sock",
-  "executor": {
-    "uds_path": "/run/private-ai-gateway/executor.sock",
-    "backend_uds_path": "/run/private-ai-gateway/backend.sock"
+  "middleware": {
+    "control_url": "https://control.example",
+    "control_token": "<control-plane-bearer-token>"
   }
 }

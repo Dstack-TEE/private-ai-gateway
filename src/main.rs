@@ -17,10 +17,10 @@
 //! config. The active upstream database is `upstreams.json` and the
 //! attested-session log is `sessions.jsonl` inside that directory.
 //!
-//! When the static config includes an `executor` section, the gateway forwards
-//! public requests through the out-of-process middleware over `executor.uds_path`
-//! and serves its internal backend on `executor.backend_uds_path` for the
-//! middleware to call back. Without the section the gateway serves directly.
+//! When the static config includes a `middleware` section, the gateway runs the
+//! middleware: it consults the control plane at `middleware.control_url`
+//! and calls the service directly. Without the section the gateway serves the
+//! upstream directly.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -41,10 +41,8 @@ use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{
-    bind_unix_listener, build_internal_backend_router, build_router_with_admin,
-    build_router_with_admin_and_uds_middleware, serve_unix_listener, GatewayRequestStore,
-};
+use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
@@ -71,14 +69,7 @@ struct GatewayConfigFile {
     admin_token: Option<String>,
     tls: GatewayTlsConfig,
     dstack_endpoint: Option<String>,
-    executor: Option<GatewayExecutorConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GatewayExecutorConfig {
-    uds_path: String,
-    backend_uds_path: String,
+    middleware: Option<MiddlewareConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,8 +89,9 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
     let path = Path::new(path);
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
-    serde_json::from_str(&text)
-        .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))
+    let config: GatewayConfigFile = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
+    Ok(config)
 }
 
 fn resolve_state_dir(config_state_dir: Option<&str>) -> Result<PathBuf, String> {
@@ -347,7 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
-    let executor = gateway_config.executor.clone();
+    let middleware_config = gateway_config.middleware.clone();
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -435,27 +427,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(upstream_config.clone());
 
-    let app = if let Some(executor) = executor {
-        let request_store = GatewayRequestStore::default();
-        let backend_app = build_internal_backend_router(service.clone(), request_store.clone());
-        let backend_listener = bind_unix_listener(&executor.backend_uds_path)?;
+    let app = if let Some(middleware_config) = middleware_config {
+        let middleware = Arc::new(Middleware::new(&middleware_config).map_err(invalid_input)?);
         tracing::info!(
-            backend_uds_path = %executor.backend_uds_path,
-            executor_uds_path = %executor.uds_path,
-            "private-ai-gateway internal backend listening on Unix socket"
+            control_url = %middleware_config.control_url,
+            "private-ai-gateway middleware enabled"
         );
-        tokio::spawn(async move {
-            if let Err(err) = serve_unix_listener(backend_listener, backend_app).await {
-                tracing::error!(error = %err, "private-ai-gateway internal backend stopped");
-            }
-        });
-        build_router_with_admin_and_uds_middleware(
-            service,
-            upstream_config,
-            admin_token,
-            request_store,
-            executor.uds_path,
-        )
+        build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
     } else {
         build_router_with_admin(service, upstream_config, admin_token)
     };
@@ -649,14 +627,14 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn gateway_config_parses_executor_section() {
-        let config_path = temp_path("gateway-config-executor");
+    fn gateway_config_parses_middleware_section() {
+        let config_path = temp_path("gateway-config-middleware");
         std::fs::write(
             &config_path,
             r#"{
-                "executor": {
-                    "uds_path": "/run/pag/executor.sock",
-                    "backend_uds_path": "/run/pag/backend.sock"
+                "middleware": {
+                    "control_url": "https://control.example",
+                    "control_token": "secret"
                 }
             }"#,
         )
@@ -664,11 +642,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
-        // The executor section drives the middleware wiring in `main()`; the
-        // forwarding behavior itself is covered by tests/aggregator_scenarios.rs.
-        let executor = config.executor.expect("executor section must parse");
-        assert_eq!(executor.uds_path, "/run/pag/executor.sock");
-        assert_eq!(executor.backend_uds_path, "/run/pag/backend.sock");
+        let middleware = config.middleware.expect("middleware section must parse");
+        assert_eq!(middleware.control_url, "https://control.example");
+        assert_eq!(middleware.control_token.as_deref(), Some("secret"));
+        // Optional timeouts default to None and fall back inside the client.
+        assert_eq!(middleware.control_timeout_ms, None);
         let _ = std::fs::remove_file(config_path);
     }
 

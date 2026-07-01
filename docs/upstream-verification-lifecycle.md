@@ -271,11 +271,9 @@ request falls back into slow evidence refresh.
 
 ## Open Questions
 
-- P0: preserve this lifecycle while splitting the implementation into the
-  frontend/middleware/backend framework documented in
-  [frontend-middleware-backend.md](frontend-middleware-backend.md). The
-  middleware-disabled path must remain behavior-compatible with the current
-  request path.
+- P0: preserve this lifecycle across the frontend/backend split with the
+  middleware. The middleware-disabled path must remain
+  behavior-compatible with the direct request path.
 - P0: finish strict-release pins from the provider reports under
   [providers/](providers/README.md): NEAR AI gateway
   provenance/runtime policy, Tinfoil router compose/image identity, and Chutes
