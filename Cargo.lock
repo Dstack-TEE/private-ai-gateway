@@ -3265,8 +3265,6 @@ dependencies = [
  "hex",
  "hkdf",
  "http-body-util",
- "hyper",
- "hyper-util",
  "k256",
  "ml-kem",
  "prometheus",

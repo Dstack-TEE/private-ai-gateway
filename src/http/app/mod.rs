@@ -63,11 +63,9 @@
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
 //! including error paths.
 
-use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
     extract::{Request, State},
     http::{HeaderName, HeaderValue},
     middleware::{self, Next},
@@ -75,11 +73,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use hyper::body::Incoming;
-use hyper::server::conn::http1::Builder as HyperHttp1Builder;
-use hyper_util::{rt::TokioIo, service::TowerToHyperService};
-use tokio::net::UnixListener;
-use tower::ServiceExt as _;
 use tower_http::cors::CorsLayer;
 
 use crate::aggregator::service::AciService;
@@ -90,7 +83,6 @@ mod backend;
 mod error_responses;
 mod handlers;
 mod util;
-mod write_idle_timeout;
 
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
@@ -183,75 +175,6 @@ fn build_router_inner(
         // otherwise 405s since the routes only declare GET/POST/PUT.
         .layer(CorsLayer::permissive())
         .with_state(state)
-}
-
-pub async fn serve_unix_router(
-    socket_path: impl AsRef<FsPath>,
-    app: Router,
-) -> Result<(), std::io::Error> {
-    let listener = bind_unix_listener(socket_path)?;
-    serve_unix_listener(listener, app).await
-}
-
-pub fn bind_unix_listener(socket_path: impl AsRef<FsPath>) -> Result<UnixListener, std::io::Error> {
-    let socket_path = socket_path.as_ref();
-    prepare_unix_socket(socket_path)?;
-    UnixListener::bind(socket_path)
-}
-
-fn prepare_unix_socket(socket_path: &FsPath) -> Result<(), std::io::Error> {
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    match std::fs::symlink_metadata(socket_path) {
-        Ok(metadata) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileTypeExt;
-                if metadata.file_type().is_socket() {
-                    std::fs::remove_file(socket_path)?;
-                    return Ok(());
-                }
-            }
-            Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "refusing to replace non-socket path {}",
-                    socket_path.display()
-                ),
-            ))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-pub async fn serve_unix_listener(
-    listener: UnixListener,
-    app: Router,
-) -> Result<(), std::io::Error> {
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let service = app
-            .clone()
-            .map_request(|request: hyper::Request<Incoming>| request.map(Body::new));
-        tokio::spawn(async move {
-            let hyper_service = TowerToHyperService::new(service);
-            // Wrap the connection so a downstream that stalls without closing
-            // (and would otherwise pin a streaming forward's upstream connection
-            // open forever) is reaped after a long no-write-progress window.
-            let io = TokioIo::new(write_idle_timeout::WriteIdleTimeout::new(
-                stream,
-                write_idle_timeout::DOWNSTREAM_WRITE_IDLE_TIMEOUT,
-            ));
-            if let Err(err) = HyperHttp1Builder::new()
-                .serve_connection(io, hyper_service)
-                .await
-            {
-                tracing::debug!(error = %err, "Unix-socket HTTP connection closed");
-            }
-        });
-    }
 }
 
 /// Middleware that stamps `X-ACI-Version`, `X-ACI-Identity`, and
