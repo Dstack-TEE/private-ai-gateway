@@ -24,8 +24,13 @@ use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
 use std::collections::HashMap;
 
+// Provider statuses that make this candidate worth abandoning for the next one.
+// Beyond the transient 429/5xx signals, an auth/account failure specific to this
+// provider — 401 (invalid key), 402 (out of credit), 403 (key lacks access) — can
+// still be served by a sibling candidate on a different account. Request-level 4xx
+// (400/404/422) are excluded: they would fail identically on every candidate.
 fn is_retryable_provider_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
+    matches!(status, 401 | 402 | 403 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Track the highest-priority failover error so that, when every candidate
@@ -552,5 +557,29 @@ impl AciService {
             body: Box::pin(body),
             e2ee: e2ee_response,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable_provider_status;
+
+    #[test]
+    fn retryable_covers_transient_and_account_specific_statuses() {
+        // Transient provider trouble (429/5xx) plus auth/account failures
+        // (401 invalid key, 402 out of credit, 403 no access) fail over.
+        for status in [401, 402, 403, 429, 500, 502, 503, 504] {
+            assert!(
+                is_retryable_provider_status(status),
+                "{status} should retry"
+            );
+        }
+        // Request-level errors would fail identically on every candidate.
+        for status in [400, 404, 422] {
+            assert!(
+                !is_retryable_provider_status(status),
+                "{status} should not retry"
+            );
+        }
     }
 }
