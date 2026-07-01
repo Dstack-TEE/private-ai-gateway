@@ -19,8 +19,8 @@ use crate::aci::keys::{
 };
 use crate::aci::types::AttestationReport;
 use crate::aggregator::service::{
-    E2eeRequestParts, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
-    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
 use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
@@ -34,14 +34,13 @@ use super::error_responses::{
     internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
     unsupported_e2ee_response, upstream_config_error_response,
 };
-use super::proxy::{
-    finalize_middleware_http_response, forward_to_middleware, get_from_middleware,
-    MiddlewareFinalizeContext,
-};
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
 };
-use super::{AppState, StoredGatewayRequest};
+use super::AppState;
+use crate::middleware::errors::Surface;
+use crate::middleware::request_transform::Endpoint;
+use crate::middleware::{hash_api_key, CompletionInput};
 
 #[derive(Deserialize)]
 pub(super) struct AttestationQuery {
@@ -78,7 +77,7 @@ pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
 
 pub(super) async fn models(State(state): State<AppState>) -> Response {
     if let Some(middleware) = state.middleware.clone() {
-        return get_from_middleware(middleware, "/v1/models").await;
+        return middleware.handle_catalog("/v1/models").await;
     }
     match state.service.upstream().models().await {
         Ok(upstream) => upstream_direct_response(upstream, "application/json"),
@@ -101,7 +100,9 @@ pub(super) async fn models_subpath(
             "model sub-catalogs are not available in direct-upstream mode",
         );
     };
-    get_from_middleware(middleware, &format!("/v1/models/{rest}")).await
+    middleware
+        .handle_catalog(&format!("/v1/models/{rest}"))
+        .await
 }
 
 // Embedding model catalog. Only meaningful in the control-plane middleware
@@ -114,7 +115,7 @@ pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response
             "embedding model catalog is not available in direct-upstream mode",
         );
     };
-    get_from_middleware(middleware, "/v1/embeddings/models").await
+    middleware.handle_catalog("/v1/embeddings/models").await
 }
 
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
@@ -457,7 +458,7 @@ pub(super) async fn messages(
 ) -> Response {
     // Native Anthropic-format downstream surface. The frontend treats the body
     // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
-    // middleware; the executor handles Anthropic<->provider conversion.
+    // middleware, which handles Anthropic<->provider conversion.
     openai_completion_endpoint(state, headers, body, MESSAGES_PATH, false).await
 }
 
@@ -575,49 +576,34 @@ pub(super) async fn openai_completion_endpoint(
             .and_then(Value::as_bool)
             .unwrap_or(false);
     if let Some(middleware) = state.middleware.clone() {
-        let forwarded_body = forwarded_body.unwrap_or_else(|| service_body.clone());
-        let request_id = context.request_id.clone();
-        let receipt_journal = MiddlewareReceiptJournal::default();
-        state.request_store.insert(
-            request_id.clone(),
-            StoredGatewayRequest {
-                endpoint_path,
-                received_body: service_body,
-                upstream_required,
-                requester: requester.clone(),
-                e2ee: e2ee.clone(),
-                user_model: context.user_model.clone(),
-                receipt_journal: receipt_journal.clone(),
-            },
-        );
-        let response = match forward_to_middleware(
-            middleware,
-            endpoint_path,
-            context,
-            forwarded_body,
-            stream,
-            &headers,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(response) => {
-                state.request_store.take(&request_id);
-                return response;
-            }
+        let endpoint = match endpoint_path {
+            COMPLETIONS_PATH => Endpoint::Complete,
+            EMBEDDINGS_PATH => Endpoint::Embed,
+            MESSAGES_PATH => Endpoint::Messages,
+            RESPONSES_PATH => Endpoint::CreateModelResponse,
+            _ => Endpoint::ChatComplete,
         };
-        return finalize_middleware_http_response(
-            MiddlewareFinalizeContext {
-                service: state.service,
-                request_store: state.request_store,
-                request_id,
-                receipt_journal,
-                endpoint_path,
-                requester,
-                e2ee,
-            },
-            response,
-        );
+        let surface = if endpoint == Endpoint::Messages {
+            Surface::Anthropic
+        } else {
+            Surface::Openai
+        };
+        let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
+        let input = CompletionInput {
+            endpoint,
+            endpoint_path,
+            surface,
+            params: parsed,
+            received_body: service_body,
+            api_key_hash,
+            requester,
+            e2ee,
+            upstream_required,
+            request_id: context.request_id,
+            user_model: context.user_model,
+            stream,
+        };
+        return middleware.handle_completion(&state.service, input).await;
     }
 
     forward_to_backend(

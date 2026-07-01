@@ -63,10 +63,8 @@
 //! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
 //! including error paths.
 
-use std::collections::HashMap;
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::path::Path as FsPath;
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -84,19 +82,16 @@ use tokio::net::UnixListener;
 use tower::ServiceExt as _;
 use tower_http::cors::CorsLayer;
 
-use crate::aggregator::service::{
-    AciService, E2eeRequestContext, MiddlewareReceiptJournal, ReceiptOwner,
-};
+use crate::aggregator::service::AciService;
 use crate::aggregator::upstream_config::UpstreamConfigManager;
+use crate::middleware::Middleware;
 
 mod backend;
 mod error_responses;
 mod handlers;
-mod proxy;
 mod util;
 mod write_idle_timeout;
 
-use backend::internal_forward;
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
     admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
@@ -109,86 +104,11 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
-    middleware: Option<UdsMiddleware>,
-    request_store: GatewayRequestStore,
-}
-
-#[derive(Clone)]
-pub(super) struct UdsMiddleware {
-    base_url: String,
-    client: reqwest::Client,
-}
-
-#[derive(Clone)]
-pub struct GatewayRequestStore {
-    inner: Arc<Mutex<HashMap<String, PendingGatewayRequest>>>,
-    ttl: Duration,
-}
-
-#[derive(Clone)]
-struct PendingGatewayRequest {
-    expires_at: Instant,
-    request: StoredGatewayRequest,
-}
-
-#[derive(Clone)]
-pub struct StoredGatewayRequest {
-    pub endpoint_path: &'static str,
-    pub received_body: Vec<u8>,
-    pub upstream_required: bool,
-    pub requester: Option<ReceiptOwner>,
-    pub e2ee: Option<E2eeRequestContext>,
-    pub user_model: Option<String>,
-    pub receipt_journal: MiddlewareReceiptJournal,
-}
-
-impl GatewayRequestStore {
-    const DEFAULT_TTL: Duration = Duration::from_secs(300);
-
-    pub fn new(ttl: Duration) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-            ttl,
-        }
-    }
-
-    pub fn insert(&self, request_id: String, request: StoredGatewayRequest) {
-        let now = Instant::now();
-        let mut inner = self.inner.lock().expect("gateway request store poisoned");
-        inner.retain(|_, pending| pending.expires_at > now);
-        inner.insert(
-            request_id,
-            PendingGatewayRequest {
-                expires_at: now + self.ttl,
-                request,
-            },
-        );
-    }
-
-    fn take(&self, request_id: &str) -> Option<StoredGatewayRequest> {
-        let pending = self
-            .inner
-            .lock()
-            .expect("gateway request store poisoned")
-            .remove(request_id)?;
-        (pending.expires_at > Instant::now()).then_some(pending.request)
-    }
-}
-
-impl Default for GatewayRequestStore {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_TTL)
-    }
-}
-
-#[derive(Clone)]
-struct InternalBackendState {
-    service: Arc<AciService>,
-    request_store: GatewayRequestStore,
+    middleware: Option<Arc<Middleware>>,
 }
 
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None, GatewayRequestStore::default())
+    build_router_inner(service, None, None, None)
 }
 
 pub fn build_router_with_admin(
@@ -196,76 +116,36 @@ pub fn build_router_with_admin(
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
 ) -> Router {
-    build_router_inner(
-        service,
-        Some(upstream_config),
-        admin_token,
-        None,
-        GatewayRequestStore::default(),
-    )
+    build_router_inner(service, Some(upstream_config), admin_token, None)
 }
 
-pub fn build_router_with_admin_and_uds_middleware(
+/// Build the gateway router with the middleware, which consults the
+/// control plane and calls the service directly (in-process, no extra hop).
+pub fn build_router_with_admin_and_middleware(
     service: Arc<AciService>,
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
-    request_store: GatewayRequestStore,
-    middleware_socket_path: impl Into<PathBuf>,
+    middleware: Arc<Middleware>,
 ) -> Router {
     build_router_inner(
         service,
         Some(upstream_config),
         admin_token,
-        Some(uds_middleware(middleware_socket_path)),
-        request_store,
+        Some(middleware),
     )
-}
-
-pub fn build_router_with_uds_middleware(
-    service: Arc<AciService>,
-    request_store: GatewayRequestStore,
-    middleware_socket_path: impl Into<PathBuf>,
-) -> Router {
-    build_router_inner(
-        service,
-        None,
-        None,
-        Some(uds_middleware(middleware_socket_path)),
-        request_store,
-    )
-}
-
-fn uds_middleware(middleware_socket_path: impl Into<PathBuf>) -> UdsMiddleware {
-    let path = middleware_socket_path.into();
-    // Do not pool connections to the middleware. The hop is a local Unix socket
-    // (connecting is cheap, no TLS), and the middleware is a Node server that
-    // closes idle keep-alive sockets after ~5s; a pooled connection we reuse
-    // after that is already dead, which surfaces to the client as a
-    // `middleware_error`. One connection per request avoids the stale reuse.
-    let client = reqwest::Client::builder()
-        .unix_socket(path)
-        .pool_max_idle_per_host(0)
-        .build()
-        .expect("failed to construct Unix-socket middleware HTTP client");
-    UdsMiddleware {
-        base_url: "http://private-ai-gateway-middleware".to_string(),
-        client,
-    }
 }
 
 fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
-    middleware: Option<UdsMiddleware>,
-    request_store: GatewayRequestStore,
+    middleware: Option<Arc<Middleware>>,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
         middleware,
-        request_store,
     };
     Router::new()
         .route("/", get(root))
@@ -303,18 +183,6 @@ fn build_router_inner(
         // otherwise 405s since the routes only declare GET/POST/PUT.
         .layer(CorsLayer::permissive())
         .with_state(state)
-}
-
-pub fn build_internal_backend_router(
-    service: Arc<AciService>,
-    request_store: GatewayRequestStore,
-) -> Router {
-    Router::new()
-        .route("/internal/forward", post(internal_forward))
-        .with_state(InternalBackendState {
-            service,
-            request_store,
-        })
 }
 
 pub async fn serve_unix_router(

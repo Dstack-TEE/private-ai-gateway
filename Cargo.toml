@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 dstack-sdk = "0.1.2"
 bytes = "1"
+rust_decimal = "1"
 
 # Cryptography.
 sha2 = "0.10"

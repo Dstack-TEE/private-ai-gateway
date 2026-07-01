@@ -43,30 +43,34 @@ This is the smallest practical container config.
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `executor` | unset | Optional middleware section. When present, the gateway forwards public requests through the middleware; when unset it serves directly. See [Middleware](#middleware). |
+| `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
 
 ## Middleware
 
-The optional `executor` section wires the out-of-process middleware into the
-request path. When present the gateway forwards public requests to the middleware
-over `uds_path`, and serves an internal backend on `backend_uds_path` for the
-middleware to call back. When the section is omitted the gateway serves directly.
+The optional `middleware` section runs the middleware in the request
+path. When present, the gateway consults a control plane at `control_url` to
+authorize and route each request, shapes the provider request, injects response
+cost, and reports usage back to the control plane — all in-process, with no
+out-of-process hop. When the section is omitted the gateway serves directly.
 
-| Field | Use |
-| --- | --- |
-| `executor.uds_path` | Unix socket the middleware listens on; the gateway forwards public requests here. |
-| `executor.backend_uds_path` | Unix socket the gateway's internal backend serves for the middleware to call back. |
+| Field | Default | Use |
+| --- | --- | --- |
+| `middleware.control_url` | required | Base URL of the control plane the gateway consults for routing, authorization, catalogs, and usage reporting. |
+| `middleware.control_token` | unset | Bearer token sent to the control plane. When unset, no `Authorization` header is sent. |
+| `middleware.control_timeout_ms` | `60000` | Timeout for the pre-request consult and catalog fetches. A failed or timed-out consult fails closed. |
+| `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
+| `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses; `0` disables the heartbeat. |
 
 ```json
 {
-  "executor": {
-    "uds_path": "/run/private-ai-gateway/executor.sock",
-    "backend_uds_path": "/run/private-ai-gateway/backend.sock"
+  "middleware": {
+    "control_url": "https://control.example",
+    "control_token": "<control-plane-bearer-token>"
   }
 }
 ```
 
-Both fields are required together.
+Only `control_url` is required.
 
 ## Source Provenance
 

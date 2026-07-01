@@ -1,5 +1,5 @@
-//! The optional UDS-middleware split path: forwarding a request to the
-//! external middleware and finalizing the receipt/response it returns.
+//! The middleware seam: forwarding a request on behalf of the
+//! middleware and finalizing the receipt/response it returns.
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};

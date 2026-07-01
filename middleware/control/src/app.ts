@@ -4,7 +4,7 @@ import { bearerAuth } from 'hono/bearer-auth';
 import { loadConfig } from './config';
 
 /**
- * Control plane — config-driven, no database. Implements the executor<->control
+ * Control plane — config-driven, no database. Implements the gateway<->control
  * HTTP surface so the stack runs end-to-end. It only ever receives
  * `{ apiKeyHash, model }` and post-request usage counts.
  */
@@ -25,13 +25,13 @@ if (CONTROL_TOKEN) {
 // Liveness/identity probe.
 app.get('/', (c) => c.text('private-ai-gateway control plane\n'));
 
-// Model catalog. The executor's /v1/models proxies here.
+// Model catalog. The gateway's /v1/models proxies here.
 app.get('/models', (c) =>
   c.json({ data: Object.keys(config.models).map((id) => ({ id, object: 'model' })) })
 );
 
 // Pre-request consult: authorize + resolve pricing + ordered
-// candidates from config. A denial carries the status + message the executor
+// candidates from config. A denial carries the status + message the gateway
 // returns verbatim.
 app.post('/consult/pre', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {

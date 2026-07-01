@@ -12,10 +12,8 @@ generic; install, build, run, and ACI policy live in this repo.
 The checked-in compose runs in no-middleware mode: the public ACI frontend and
 verified-provider backend are the same process, and traffic is forwarded
 directly from frontend to backend. To enable middleware, configure it in the
-static gateway config (this compose leaves it disabled). See
-[`../docs/frontend-middleware-backend.md`](../docs/frontend-middleware-backend.md)
-and
-[`../docs/middleware-integration.md`](../docs/middleware-integration.md).
+static gateway config (this compose leaves it disabled). See the
+[configuration reference](../docs/configuration-reference.md#middleware).
 
 ## One-Command Deploy
 

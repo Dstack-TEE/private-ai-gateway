@@ -4,7 +4,7 @@ import { createAdaptorServer } from '@hono/node-server';
 import { app } from './app';
 
 /**
- * Listen on a TCP port; the executor reaches it over HTTP(S) at
+ * Listen on a TCP port; the gateway reaches it over HTTP(S) at
  * PRIVATE_AI_GATEWAY_CONTROL_URL. For production, terminate TLS in front of this
  * (a reverse proxy) and set a bearer token via PRIVATE_AI_GATEWAY_CONTROL_TOKEN
  * (enforced in app.ts).

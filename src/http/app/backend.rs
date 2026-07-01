@@ -1,11 +1,9 @@
-//! Direct-to-backend forwarding path and the internal forwarder used by the
-//! middleware split, plus upstream response shaping.
+//! Direct-to-backend forwarding path plus upstream response shaping.
 
 use std::sync::Arc;
 
 use axum::{
-    body::{Body, Bytes},
-    extract::State,
+    body::Body,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -16,7 +14,7 @@ use serde_json::Value;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
-    MiddlewareForwardResult, ReceiptOwner, ServiceError, StreamingForwardResult,
+    ReceiptOwner, ServiceError, StreamingForwardResult,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 
@@ -24,8 +22,6 @@ use super::error_responses::{
     e2ee_error_response, error_response, insert_str_header, internal_error_response,
     upstream_verification_error_response,
 };
-use super::util::{build_forward_candidates, header_str, insert_attribution_headers};
-use super::InternalBackendState;
 
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
@@ -117,145 +113,6 @@ pub(super) async fn forward_to_backend(
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            (status, resp_headers, forward.upstream_body).into_response()
-        }
-        Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_error_response(uv),
-        Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
-        Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
-            routing_error_response(message)
-        }
-        Err(other) => internal_error_response(other),
-    }
-}
-
-pub(super) async fn internal_forward(
-    State(state): State<InternalBackendState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let Some(request_id) = header_str(&headers, "x-private-ai-gateway-request-id") else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_internal_request",
-            "missing X-Private-AI-Gateway-Request-Id",
-        );
-    };
-    let request_id = request_id.to_string();
-    let Some(stored) = state.request_store.take(&request_id) else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_internal_request",
-            "unknown or expired request id",
-        );
-    };
-
-    let parsed = match serde_json::from_slice::<Value>(&body) {
-        Ok(value) => value,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("invalid json: {e}"),
-            );
-        }
-    };
-    let (candidates, stream) = match build_forward_candidates(&headers, &body, &parsed) {
-        Ok(parsed) => parsed,
-        Err(response) => return response,
-    };
-
-    let journal = stored.receipt_journal;
-    let received_body = stored.received_body;
-    let result = state
-        .service
-        .forward_chat_completion_for_middleware(
-            ChatCompletionRequest {
-                context: GatewayRequestContext {
-                    request_id,
-                    user_model: stored.user_model,
-                    target_route_id: None,
-                    user_tier: header_str(&headers, "x-user-tier").map(str::to_string),
-                },
-                endpoint_path: stored.endpoint_path,
-                received_body: &received_body,
-                forwarded_body: None,
-                upstream_required: Some(stored.upstream_required),
-                upstream_verification_event: None,
-                requester: stored.requester,
-                e2ee: stored.e2ee,
-            },
-            candidates,
-            stream,
-            journal.clone(),
-        )
-        .await;
-    match result {
-        Ok(MiddlewareForwardResult::Forwarded(forward)) => {
-            let forward = *forward;
-            journal.set(forward.receipt);
-            let default_content_type = if stream {
-                "text/event-stream"
-            } else {
-                "application/json"
-            };
-            let mut resp_headers = chat_response_headers(
-                &forward.receipt_id,
-                &forward.upstream_headers,
-                default_content_type,
-                None,
-            );
-            if stream {
-                resp_headers.insert(
-                    HeaderName::from_static("x-accel-buffering"),
-                    HeaderValue::from_static("no"),
-                );
-                resp_headers.insert(
-                    HeaderName::from_static("cache-control"),
-                    HeaderValue::from_static("no-cache"),
-                );
-            }
-            insert_attribution_headers(
-                &mut resp_headers,
-                &forward.selected_route,
-                &forward.failed_attempts,
-                forward.session_id.as_deref(),
-            );
-            let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            (status, resp_headers, forward.upstream_body).into_response()
-        }
-        Ok(MiddlewareForwardResult::Stream(forward)) => {
-            let forward = *forward;
-            let mut resp_headers = chat_response_headers(
-                &forward.receipt_id,
-                &forward.upstream_headers,
-                "text/event-stream",
-                None,
-            );
-            resp_headers.insert(
-                HeaderName::from_static("x-accel-buffering"),
-                HeaderValue::from_static("no"),
-            );
-            resp_headers.insert(
-                HeaderName::from_static("cache-control"),
-                HeaderValue::from_static("no-cache"),
-            );
-            insert_attribution_headers(
-                &mut resp_headers,
-                &forward.selected_route,
-                &forward.failed_attempts,
-                forward.session_id.as_deref(),
-            );
-            let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            let body = Body::from_stream(
-                forward
-                    .body
-                    .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string()))),
-            );
-            (status, resp_headers, body).into_response()
-        }
-        Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
-            let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            let resp_headers = upstream_direct_response_headers(&forward.upstream_headers);
             (status, resp_headers, forward.upstream_body).into_response()
         }
         Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_error_response(uv),
@@ -433,21 +290,6 @@ fn nearai_nvidia_payload(body: &Value, target: &AttestationUpstreamTarget) -> Op
             None
         }
     }
-}
-
-pub(super) fn reqwest_response_headers(upstream_headers: &reqwest::header::HeaderMap) -> HeaderMap {
-    let mut resp_headers = HeaderMap::new();
-    for (name, value) in upstream_headers {
-        let lower = name.as_str().to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "connection" | "transfer-encoding" | "content-length"
-        ) {
-            continue;
-        }
-        resp_headers.insert(name.clone(), value.clone());
-    }
-    resp_headers
 }
 
 pub(super) fn upstream_direct_response(

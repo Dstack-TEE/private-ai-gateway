@@ -72,7 +72,7 @@ flowchart LR
     middleware["Optional<br/>middleware"]
     backend["Backend"]
 
-    frontend -->|"UDS"| middleware
+    frontend -->|"in-process"| middleware
     middleware -->|"target"| backend
     frontend -->|"direct"| backend
   end
@@ -384,22 +384,22 @@ Deployment files:
 ## Middleware
 
 The gateway runs in no-middleware mode unless middleware is configured. In
-middleware mode:
+middleware mode the middleware runs in-process, between the frontend and
+backend:
 
-- Public `/v1/models` is forwarded to middleware.
+- Public `/v1/models` and its sub-catalogs are served from the control plane.
 - Public inference requests are decrypted and normalized by the frontend, then
-  forwarded to middleware as plaintext HTTP over UDS.
-- User headers, including `Authorization`, are forwarded to middleware for
-  middleware-owned auth and routing. Gateway-owned and stale E2EE protocol
-  headers are stripped.
-- Middleware calls `POST /internal/forward` with a one-use request id and a
-  configured target route.
+  handed to the middleware, which consults the control plane to
+  authorize and route the request and shapes the provider request.
+- The middleware selects a configured target route, forwards through the
+  backend, transforms the response, injects usage cost, and reports usage back
+  to the control plane. Verification facts still come from the backend.
 - Streaming responses stay streaming across backend, middleware, and frontend.
 - Middleware-generated OpenAI-compatible responses are passed through downstream
   E2EE when the original user request used E2EE.
 
-Read [docs/middleware-integration.md](docs/middleware-integration.md) before
-writing middleware.
+The middleware is configured by the `middleware` section of the static gateway
+config; see the [configuration reference](docs/configuration-reference.md#middleware).
 
 ## API Surface
 
@@ -549,8 +549,7 @@ tests/                         unit and integration coverage
 ## More Docs
 
 - [Deployment guide](deploy/README.md)
-- [Middleware integration guide](docs/middleware-integration.md)
-- [Frontend/middleware/backend architecture](docs/frontend-middleware-backend.md)
+- [Configuration reference](docs/configuration-reference.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)
 - [Providers (verification + audit)](docs/providers/README.md)
 - [Provider audit criteria](docs/providers/audit-criteria.md)
