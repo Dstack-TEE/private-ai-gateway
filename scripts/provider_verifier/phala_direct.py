@@ -9,7 +9,9 @@ import json
 import os
 import secrets
 import sys
+import time
 from typing import Any
+from urllib.parse import urlparse
 
 from .common import (
     emit,
@@ -38,6 +40,139 @@ def _phala_direct_compose_hash_ok(info: dict[str, Any]) -> tuple[bool, str]:
     if calculated.lower() != str(reported).lower():
         return False, "PhalaDirect compose hash mismatch"
     return True, ""
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    """Canonical JSON subset used by ACI identity/keyset digests."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _sha256_hex(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _pk(value: dict[str, Any]) -> dict[str, Any]:
+    return {"algo": value.get("algo"), "public_key": value.get("public_key")}
+
+
+def _keyed_pk(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "key_id": value.get("key_id"),
+        "algo": value.get("algo"),
+        "public_key": value.get("public_key"),
+    }
+
+
+def _tls_spki(value: dict[str, Any]) -> dict[str, Any]:
+    out = {"spki_sha256": value.get("spki_sha256")}
+    if value.get("domain") is not None:
+        out["domain"] = value.get("domain")
+    return out
+
+
+def _aci_workload_identity(keyset: dict[str, Any]) -> dict[str, Any]:
+    identity = keyset.get("workload_identity") or {}
+    return {
+        "public_key": _pk(identity.get("public_key") or {}),
+        "subject": identity.get("subject"),
+    }
+
+
+def _aci_keyset_canonical(keyset: dict[str, Any]) -> dict[str, Any]:
+    epoch = keyset.get("keyset_epoch") or {}
+    return {
+        "workload_identity": _aci_workload_identity(keyset),
+        "keyset_epoch": {
+            "version": epoch.get("version"),
+            "not_after": epoch.get("not_after"),
+        },
+        "receipt_signing_keys": [_keyed_pk(k) for k in keyset.get("receipt_signing_keys") or []],
+        "e2ee_public_keys": [_keyed_pk(k) for k in keyset.get("e2ee_public_keys") or []],
+        "tls_public_keys": [_tls_spki(k) for k in keyset.get("tls_public_keys") or []],
+    }
+
+
+def _validate_aci_report(
+    report: dict[str, Any],
+    *,
+    nonce: str,
+    quote_report_data: str,
+    tls_cert_fingerprint: str,
+    raw_origin: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Validate the ACI/1 wrapper around a PhalaDirect dstack report.
+
+    ACI/1 PhalaDirect endpoints keep the dstack report_data format
+    `SHA256(signing_address || downstream_tls_spki) || nonce`, while the TLS
+    SPKI, event log, and vm_config live under `attestation.evidence`; compose
+    fields are absent. Verify the ACI identity/keyset digests, freshness,
+    downstream TLS keyset membership, and quote/report-data bridge.
+    """
+
+    att = report.get("attestation") or {}
+    if report.get("api_version") != "aci/1" or not isinstance(att, dict):
+        return False, "not an ACI/1 report", {}
+    keyset = att.get("workload_keyset") or {}
+    if not isinstance(keyset, dict):
+        return False, "ACI report missing workload_keyset", {}
+
+    identity = _aci_workload_identity(keyset)
+    keyset_canonical = _aci_keyset_canonical(keyset)
+    workload_id = "sha256:" + _sha256_hex(_canonical_json_bytes(identity["public_key"]))
+    keyset_digest = "sha256:" + _sha256_hex(_canonical_json_bytes(keyset_canonical))
+    if workload_id != report.get("workload_id"):
+        return False, "ACI workload_id mismatch", {}
+    if keyset_digest != report.get("workload_keyset_digest"):
+        return False, "ACI workload_keyset_digest mismatch", {}
+
+    freshness = att.get("freshness") or {}
+    try:
+        fetched_at_raw = freshness["fetched_at"]
+        stale_after_raw = freshness["stale_after"]
+        now = int(time.time())
+        fetched_at = int(fetched_at_raw)
+        stale_after = int(stale_after_raw)
+    except (KeyError, TypeError, ValueError):
+        return False, "ACI report missing freshness bounds", {}
+    if now < fetched_at or now >= stale_after:
+        return False, "ACI report is not fresh", {}
+
+    evidence = att.get("evidence") or {}
+    downstream_tls = evidence.get("downstream_tls_binding") or {}
+    downstream_spki = downstream_tls.get("spki_sha256")
+    if not downstream_spki:
+        return False, "ACI report missing downstream TLS SPKI binding", {}
+    if downstream_spki.lower().removeprefix("0x") != tls_cert_fingerprint.lower().removeprefix("0x"):
+        return False, "ACI downstream TLS SPKI mismatch", {}
+
+    expected_domain = urlparse(raw_origin).hostname
+    reported_domain = downstream_tls.get("domain")
+    if expected_domain and reported_domain and expected_domain != reported_domain:
+        return False, "ACI downstream TLS domain mismatch", {}
+
+    keyset_tls = keyset_canonical.get("tls_public_keys") or []
+    if not any(
+        (k.get("spki_sha256") or "").lower().removeprefix("0x") == downstream_spki.lower().removeprefix("0x")
+        for k in keyset_tls
+    ):
+        return False, "ACI downstream TLS SPKI is not in workload_keyset", {}
+
+    report_data = att.get("report_data") or evidence.get("quote_report_data")
+    if not report_data:
+        return False, "ACI report missing report_data", {}
+    if str(report_data).lower() != str(quote_report_data).lower():
+        return False, "ACI report_data does not match verified quote report_data", {}
+    if not str(report_data).lower().endswith(nonce.lower()):
+        return False, "ACI report_data nonce did not match request nonce", {}
+
+    return True, "", {
+        "api_version": "aci/1",
+        "workload_id": workload_id,
+        "workload_keyset_digest": keyset_digest,
+        "source_provenance": att.get("source_provenance") or {},
+        "freshness": freshness,
+    }
 
 
 async def verify_phala_direct(request: dict[str, Any]) -> None:
@@ -97,16 +232,22 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     evidence = json_evidence_bundle(report, attestation_url)
 
-    # A per-model PhalaDirect endpoint returns a single attestation at the top level
-    # of the report — use it directly. (all_attestations is a multi-instance gateway
-    # shape and is not expected here.)
+    # Legacy PhalaDirect reports put attestation fields at the top level. ACI/1
+    # reports wrap dstack evidence under `attestation.evidence` and omit compose
+    # fields; unwrap both shapes into one verifier path.
     attestation = report
+    is_aci_report = report.get("api_version") == "aci/1" and isinstance(report.get("attestation"), dict)
+    aci_attestation = report.get("attestation") or {}
+    aci_evidence = aci_attestation.get("evidence") or {} if isinstance(aci_attestation, dict) else {}
 
-    intel_quote = attestation.get("intel_quote") or attestation.get("quote")
+    intel_quote = attestation.get("intel_quote") or attestation.get("quote") or aci_evidence.get("quote")
     signing_address = attestation.get("signing_address")
-    tls_cert_fingerprint = attestation.get("tls_cert_fingerprint")
-    event_log = attestation.get("event_log") or ""
-    vm_config = attestation.get("vm_config") or ""
+    tls_cert_fingerprint = (
+        attestation.get("tls_cert_fingerprint")
+        or (aci_evidence.get("downstream_tls_binding") or {}).get("spki_sha256")
+    )
+    event_log = attestation.get("event_log") or aci_evidence.get("event_log") or ""
+    vm_config = attestation.get("vm_config") or aci_evidence.get("vm_config") or ""
     info = attestation.get("info") or {}
     report_nonce = attestation.get("request_nonce")
     nvidia_payload = attestation.get("nvidia_payload")
@@ -161,15 +302,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
-    # 2. Compose hash: SHA256(app_compose) == reported compose_hash.
-    compose_ok, compose_reason = _phala_direct_compose_hash_ok(info)
-    if not compose_ok:
-        failed(provider, compose_reason, evidence=evidence, verifier_id=verifier_id)
-        return
-
-    # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
-    # report_data from the quote bytes the dstack verifier just proved authentic
-    # (it does not surface report_data itself).
+    # 2. Compose/source binding. Legacy dstack-vllm-proxy reports expose
+    # app_compose + compose_hash directly. ACI/1 reports expose a workload keyset
+    # and source provenance instead; validate that wrapper after the quote has
+    # proved the same report_data.
     report_data_hex = dstack_result.get("report_data") or _tdx_report_data_hex(intel_quote)
     if not report_data_hex:
         failed(
@@ -179,6 +315,30 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
             verifier_id=verifier_id,
         )
         return
+
+    aci_claims: dict[str, Any] = {}
+    compose_verified = False
+    if is_aci_report:
+        aci_ok, aci_reason, aci_claims = _validate_aci_report(
+            report,
+            nonce=nonce,
+            quote_report_data=report_data_hex,
+            tls_cert_fingerprint=tls_cert_fingerprint,
+            raw_origin=raw_origin,
+        )
+        if not aci_ok:
+            failed(provider, aci_reason, evidence=evidence, verifier_id=verifier_id)
+            return
+    else:
+        compose_ok, compose_reason = _phala_direct_compose_hash_ok(info)
+        if not compose_ok:
+            failed(provider, compose_reason, evidence=evidence, verifier_id=verifier_id)
+            return
+        compose_verified = True
+
+    # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
+    # report_data from the quote bytes the dstack verifier just proved authentic
+    # (it does not surface report_data itself).
     binding = verify_report_data(
         report_data_hex,
         signing_address,
@@ -274,10 +434,15 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "evidence_scope": "model_instance",
                 "canonical_model_id": request["model_id"],
                 "attestation_version": 2,
+                "attestation_api_version": "aci/1" if is_aci_report else "phala-direct/v2",
                 "tls_spki_from_report_data": True,
                 "signing_address": signing_address,
                 "report_data_nonce_matched": True,
-                "compose_hash_verified": True,
+                "compose_hash_verified": compose_verified,
+                "aci_report_verified": is_aci_report,
+                "aci_workload_id": aci_claims.get("workload_id"),
+                "aci_workload_keyset_digest": aci_claims.get("workload_keyset_digest"),
+                "aci_source_provenance": aci_claims.get("source_provenance"),
                 "tdx_debug_mode": False,
                 # OS-image provenance, resolved from dstack's published image and
                 # bound to the attested os_image_hash. production_os_image is the

@@ -29,6 +29,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import time
 import types
 from contextlib import redirect_stdout
 
@@ -87,6 +88,78 @@ def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gp
         attestation["tls_cert_fingerprint"] = report_fp
     attestation["all_attestations"] = [dict(attestation)]
     return attestation
+
+
+def _canonical_json_bytes(value: dict) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _sha256_hex(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _aci_keyset(spki: str = FP, domain: str = "model-a.phala.example") -> dict:
+    return {
+        "workload_identity": {
+            "public_key": {"algo": "ecdsa-secp256k1", "public_key": "04" + "22" * 64},
+            "subject": None,
+        },
+        "keyset_epoch": {"version": 1, "not_after": 2**64 - 1},
+        "receipt_signing_keys": [
+            {"key_id": "receipt", "algo": "ecdsa-secp256k1", "public_key": "04" + "33" * 64}
+        ],
+        "e2ee_public_keys": [
+            {"key_id": "e2ee", "algo": "secp256k1-aes-256-gcm-hkdf-sha256", "public_key": "04" + "44" * 64}
+        ],
+        "tls_public_keys": [{"domain": domain, "spki_sha256": spki}],
+    }
+
+
+def _aci_workload_id(keyset: dict) -> str:
+    return "sha256:" + _sha256_hex(_canonical_json_bytes(keyset["workload_identity"]["public_key"]))
+
+
+def _aci_keyset_digest(keyset: dict) -> str:
+    return "sha256:" + _sha256_hex(_canonical_json_bytes(keyset))
+
+
+def _aci_report(
+    nonce_hex: str,
+    *,
+    downstream_fp: str = FP,
+    keyset_fp: str = FP,
+    bind_fp: str | None = None,
+    domain: str = "model-a.phala.example",
+) -> dict:
+    legacy = _report(nonce_hex, bind_fp=bind_fp or downstream_fp, report_fp=None)
+    keyset = _aci_keyset(spki=keyset_fp, domain=domain)
+    report_data_hex = legacy["intel_quote"][2 * (48 + 520) : 2 * (48 + 584)]
+    return {
+        "api_version": "aci/1",
+        "workload_id": _aci_workload_id(keyset),
+        "workload_keyset_digest": _aci_keyset_digest(keyset),
+        "attestation": {
+            "vendor": "private-ai-gateway-dev",
+            "tee_type": "tdx",
+            "workload_keyset": keyset,
+            "report_data": report_data_hex,
+            "keyset_endorsement": {"algo": "ecdsa-secp256k1", "value": "00"},
+            "source_provenance": {"repo_url": "https://github.com/Dstack-TEE/private-ai-gateway.git", "repo_commit": "test"},
+            "freshness": {"fetched_at": int(time.time()) - 1, "stale_after": int(time.time()) + 3600},
+            "evidence": {
+                "quote": legacy["intel_quote"],
+                "quote_report_data": report_data_hex,
+                "event_log": legacy["event_log"],
+                "vm_config": legacy["vm_config"],
+                "downstream_tls_binding": {"domain": domain, "spki_sha256": downstream_fp},
+            },
+        },
+        "signing_algo": "ecdsa",
+        "signing_address": legacy["signing_address"],
+        "intel_quote": legacy["intel_quote"],
+        "nvidia_payload": legacy["nvidia_payload"],
+        "all_attestations": [],
+    }
 
 
 class _Resp:
@@ -222,6 +295,36 @@ def check() -> list[str]:
             f.append("genuine: os_image_version not surfaced from resolved metadata")
         if out.get("verifier_id") != "private-ai-verifier/phala-direct/v1":
             f.append(f"genuine: unexpected verifier_id {out.get('verifier_id')!r}")
+
+    # --- genuine ACI/1 wrapped report (current Phala private-ai-gateway shape) ---
+    out = _run(report_builder=lambda n: _aci_report(n))
+    if out.get("result") != "verified":
+        f.append(f"aci: expected verified, got {out!r}")
+    else:
+        bindings = out.get("channel_bindings") or []
+        if bindings != [
+            {"type": "tls_spki_sha256", "origin": URL_ORIGIN, "spki_sha256": FP}
+        ]:
+            f.append(f"aci: unexpected channel binding {bindings!r}")
+        claims = out.get("provider_claims") or {}
+        if claims.get("attestation_api_version") != "aci/1":
+            f.append(f"aci: api version claim missing ({claims!r})")
+        if claims.get("aci_report_verified") is not True:
+            f.append("aci: expected aci_report_verified=true")
+        if claims.get("compose_hash_verified") is not False:
+            f.append("aci: compose_hash_verified must be false when compose fields are absent")
+        if claims.get("aci_workload_id") is None or claims.get("aci_workload_keyset_digest") is None:
+            f.append("aci: workload identity/keyset claims missing")
+
+    # --- ACI downstream TLS binding must be in the workload keyset ---
+    out = _run(report_builder=lambda n: _aci_report(n, downstream_fp=FP, keyset_fp="cd" * 32))
+    if out.get("result") != "failed" or "workload_keyset" not in (out.get("reason") or ""):
+        f.append(f"aci-keyset-tls: expected workload_keyset TLS failure, got {out!r}")
+
+    # --- ACI report_data must still bind the requested TLS SPKI + nonce ---
+    out = _run(report_builder=lambda n: _aci_report(n, downstream_fp=FP, keyset_fp=FP, bind_fp="cd" * 32))
+    if out.get("result") != "failed" or "binding" not in (out.get("reason") or ""):
+        f.append(f"aci-swapped-fp: expected report_data binding failure, got {out!r}")
 
     # --- a production OS image resolves to production_os_image=true ---
     out = _run(
