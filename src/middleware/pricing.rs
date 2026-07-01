@@ -34,7 +34,6 @@ fn token_field(usage: &Value, keys: &[&str]) -> i64 {
 }
 
 fn resolve_usage(usage: &Value) -> ResolvedUsage {
-    let prompt = token_field(usage, &["prompt_tokens", "input_tokens"]);
     let completion = token_field(usage, &["completion_tokens", "output_tokens"]);
     let cache_read = token_value(usage, "cache_read_input_tokens")
         .or_else(|| {
@@ -44,6 +43,15 @@ fn resolve_usage(usage: &Value) -> ResolvedUsage {
         })
         .unwrap_or(0);
     let cache_creation = token_value(usage, "cache_creation_input_tokens").unwrap_or(0);
+    // OpenAI's `prompt_tokens` already includes cached tokens; Anthropic's
+    // `input_tokens` excludes them (cache_read/cache_creation are separate,
+    // additive buckets). Normalize to the OpenAI convention (prompt includes
+    // cache) so the uncached-input subtraction in `compute_cost` is correct for
+    // either family — otherwise native Anthropic usage under-counts input.
+    let prompt = match token_value(usage, "prompt_tokens") {
+        Some(prompt_tokens) => prompt_tokens,
+        None => token_value(usage, "input_tokens").unwrap_or(0) + cache_read + cache_creation,
+    };
     ResolvedUsage {
         prompt,
         completion,
@@ -108,6 +116,9 @@ mod tests {
             (100, 20, 10)
         );
 
+        // Anthropic `input_tokens` excludes cache, so `prompt` normalizes to
+        // input + cache_read + cache_creation = 100 + 10 + 5 = 115 (OpenAI
+        // convention: prompt includes cache).
         let anthropic = resolve_usage(&json!({
             "input_tokens": 100, "output_tokens": 20,
             "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5
@@ -119,7 +130,7 @@ mod tests {
                 anthropic.cache_read,
                 anthropic.cache_creation
             ),
-            (100, 20, 10, 5)
+            (115, 20, 10, 5)
         );
     }
 
@@ -143,9 +154,10 @@ mod tests {
         let usage =
             json!({ "input_tokens": 100, "output_tokens": 0, "cache_read_input_tokens": 40 });
         let pricing = json!({ "inputCostPerToken": "0.00001", "outputCostPerToken": "0" });
-        // uncached = 60; cache_read uses input rate 1e-5; cost = (60+40)*1e-5 = 0.001
+        // Anthropic input_tokens (100) excludes cache and is all uncached;
+        // cache_read (40) falls back to the input rate. cost = (100 + 40) * 1e-5.
         let cost = compute_cost(&usage, &pricing);
-        assert!((cost - 0.001).abs() < 1e-15, "got {cost}");
+        assert!((cost - 0.0014).abs() < 1e-15, "got {cost}");
     }
 
     #[test]
