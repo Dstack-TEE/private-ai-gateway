@@ -1,7 +1,7 @@
 # Reference Implementation vs. ACI Spec: Known Gaps
 
 Where this implementation currently falls short of, or diverges from,
-[the ACI Spec](../aci-spec.md). Spec soundness is authoritative; these are
+[the ACI Spec](../../spec/README.md). Spec soundness is authoritative; these are
 implementation compromises and cleanups, not spec changes. None are fixed by
 this document — each item is a candidate work item.
 

@@ -1,7 +1,7 @@
 # ACI Test Vectors
 
 Deterministic vectors for the digest, canonicalization, and signature
-constructions in the [ACI Spec](aci-spec.md). An implementation that
+constructions in the [ACI Spec](README.md). An implementation that
 reproduces every value below byte-for-byte has its canonicalization and
 binding logic right — which is where independent implementations diverge in
 practice.

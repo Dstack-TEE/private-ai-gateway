@@ -10,7 +10,7 @@ gateway attestation report, the provider verification event for the selected
 route, and the signed receipt that binds the response to the gateway identity.
 
 This repository is the reference implementation of the
-[ACI Spec](docs/aci-spec.md) (earlier draft discussion in
+[ACI Spec](spec/README.md) (earlier draft discussion in
 [`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694)). It is
 also the workload that
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher)

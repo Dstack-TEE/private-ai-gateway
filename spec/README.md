@@ -30,7 +30,7 @@ ACI v1 does **not** define routing policy, billing, pricing, model catalogs,
 canonical model identifiers, or a universal trust policy. It standardizes
 bindings; each relying party chooses the verifier policy it trusts (§1.3).
 For how ACI relates to other confidential-inference systems and standards,
-see [ACI and Related Work](aci-related-work.md).
+see [ACI and Related Work](related-work.md).
 
 ## 1. Trust Model
 
@@ -175,7 +175,7 @@ Every digest and signature payload in ACI is computed over **JCS** — the
 JSON Canonicalization Scheme of RFC 8785 — applied to the object described.
 Digest strings use the form `sha256:<lowercase-hex>`. Raw byte hashes (of
 HTTP bodies, evidence bytes) use plain SHA-256 with the same string form.
-[Test vectors](aci-test-vectors.md) pin every construction byte-for-byte.
+[Test vectors](test-vectors.md) pin every construction byte-for-byte.
 
 ACI objects restrict JSON numbers to integers (versions, timestamps,
 indexes). Implementations MAY therefore use a JCS subset that rejects
@@ -1248,9 +1248,9 @@ Referenced for architecture and composition:
   formats for source and model provenance claims.
 - dstack — KMS key custody and application identity model used by the
   reference implementation.
-- [ACI Test Vectors](aci-test-vectors.md) — byte-exact vectors for every
+- [ACI Test Vectors](test-vectors.md) — byte-exact vectors for every
   digest, canonicalization, and signature construction.
-- [ACI and Related Work](aci-related-work.md) — positioning against other
+- [ACI and Related Work](related-work.md) — positioning against other
   confidential-inference systems.
 
 ## Appendix A. Protocol Constants
