@@ -33,6 +33,20 @@ fn is_retryable_provider_status(status: u16) -> bool {
     matches!(status, 401 | 402 | 403 | 429 | 500 | 502 | 503 | 504)
 }
 
+// Whether to abandon this candidate and try the next. The status must be a
+// provider-specific/transient failure AND the error must not be the client's own
+// fault: a fetch failure on a client-supplied image URL fails identically on every
+// candidate, so it is terminal (committed and surfaced as a 400) rather than retried.
+fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> bool {
+    is_retryable_provider_status(status)
+        && crate::middleware::errors::classify_image_input_error(
+            received_body,
+            status,
+            upstream_body,
+        )
+        .is_none()
+}
+
 /// Track the highest-priority failover error so that, when every candidate
 /// fails, the returned error reflects the most informative failure.
 /// Priority order: verification (3), then transport (2), then routing (1).
@@ -260,14 +274,20 @@ impl AciService {
                         status,
                         None,
                     );
-                    if is_retryable_provider_status(status) && !is_last {
+                    // Collect the (small) error body up front so the failover
+                    // decision can inspect it. A truncated/unreadable error body
+                    // must not abort the remaining candidates, so it degrades to
+                    // empty — the caller's normalizer emits its generic message.
+                    let upstream_headers = upstream_response.headers;
+                    let upstream_body = collect_upstream_body(upstream_response.body)
+                        .await
+                        .unwrap_or_default();
+                    if !is_last && should_fail_over(status, received_body, &upstream_body) {
                         failed_attempts.push((route_id.clone(), status));
                         continue;
                     }
                     self.metrics
                         .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
-                    let upstream_headers = upstream_response.headers;
-                    let upstream_body = collect_upstream_body(upstream_response.body).await?;
                     return Ok(MiddlewareForwardResult::UpstreamError(
                         StreamingUpstreamError {
                             upstream_status: status,
@@ -364,7 +384,7 @@ impl AciService {
             };
 
             let status = upstream_response.status_code;
-            if is_retryable_provider_status(status) && !is_last {
+            if !is_last && should_fail_over(status, received_body, &upstream_response.body) {
                 self.metrics.record_upstream_response(
                     endpoint_path,
                     RequestMode::Buffered,

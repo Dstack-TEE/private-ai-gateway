@@ -501,6 +501,68 @@ async fn total_forward_failure_reports_upstream_failure() {
 }
 
 #[tokio::test]
+async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
+    // The upstream can't fetch the client's image URL and (wrongly) reports it as a
+    // 500. That is a bad-input error: the client must get a 400, it must not fail
+    // over across candidates (it would fail identically), and the provider must not
+    // be charged for it (the report carries 400, which control excludes from health).
+    let url = "https://halleonard.example/wl/02116757-wl.jpg";
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "openai:a", "format": "openai" },
+                { "routeId": "openai:b", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let upstream_body = format!(
+        r#"{{"error":{{"message":"403, message='Forbidden', url='{url}'","type":"InternalServerError","param":null,"code":500}}}}"#
+    );
+    let service = build_service_with_upstream(500, upstream_body.into_bytes());
+
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.params = json!({
+        "model": "gpt-test",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "describe" },
+                { "type": "image_url", "image_url": { "url": url } }
+            ]
+        }]
+    });
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
+
+    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 400, "a bad client image URL is a 400, not a 5xx");
+    assert_eq!(body["error"]["type"], json!("invalid_request_error"));
+    assert!(body["error"]["message"].as_str().unwrap().contains(url));
+
+    // The committed attempt is reported as 400 (client-attributable, not provider).
+    let report = wait_for_post(&posts, |r| {
+        r["status"].as_i64() == Some(400)
+            && r.get("errorSource").map(Value::is_null).unwrap_or(true)
+    })
+    .await;
+    assert_eq!(report["status"].as_i64(), Some(400));
+    // And the request was never failed over: no attempt is reported with the raw 500.
+    let failed_over = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r["status"].as_i64() == Some(500));
+    assert!(
+        !failed_over,
+        "an image-input error must not trigger failover attempts"
+    );
+}
+
+#[tokio::test]
 async fn empty_candidates_returns_model_not_found() {
     let control_url = spawn_control(200, json!({ "allow": true, "candidates": [] })).await;
     let mw = middleware(control_url);

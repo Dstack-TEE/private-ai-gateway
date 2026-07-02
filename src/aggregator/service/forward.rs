@@ -152,10 +152,34 @@ impl AciService {
             response_model.as_deref(),
         );
 
+        // A client image-URL fetch failure the upstream reports as a 5xx is the
+        // caller's bad input: remap it to a surface-correct 400. This is decided on
+        // the cleartext body here — before E2EE encryption and before the receipt is
+        // built — so the receipt attests exactly the body/status the client receives.
+        let mut upstream_headers = upstream_response.headers;
+        let (client_status, client_body) = match crate::middleware::errors::image_input_error_parts(
+            crate::middleware::errors::surface_for_path(endpoint_path),
+            received_body,
+            upstream_response.status_code,
+            &upstream_response.body,
+            None,
+        ) {
+            Some((status, body)) => {
+                // The remapped body is a JSON envelope; don't let the client inherit
+                // a non-JSON upstream content-type (some backends 5xx with text/*).
+                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
+                (status, body)
+            }
+            None => (
+                upstream_response.status_code,
+                upstream_response.body.clone(),
+            ),
+        };
+
         let e2ee = req.e2ee.as_ref();
         let wire_response_body = match e2ee {
-            Some(ctx) => encrypt_e2ee_response_body(&upstream_response.body, ctx, endpoint_path)?,
-            None => upstream_response.body.clone(),
+            Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,
+            None => client_body.clone(),
         };
         let e2ee_response = e2ee.map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -167,7 +191,7 @@ impl AciService {
         // do not even consult it; the byte source is the body the
         // service received from axum.
         let receipt_id = generate_receipt_id();
-        let chat_id = extract_chat_id(&upstream_response.body);
+        let chat_id = extract_chat_id(&client_body);
         let served_at = self.clock.now_secs();
         let mut builder = ReceiptBuilder::new(
             receipt_id,
@@ -198,10 +222,12 @@ impl AciService {
         // The session is keyed on the requested (routed) model; record the exact
         // upstream-served model in the receipt's upstream.verified event.
         builder.set_upstream_verified_model_id(response_model.clone());
+        // Modified when the returned bytes differ from what the upstream sent —
+        // whether from E2EE encryption or an image-input 400 remap.
         if upstream_response.body != wire_response_body {
             builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
         }
-        builder.add_response_returned(&upstream_response.body, &wire_response_body)?;
+        builder.add_response_returned(&client_body, &wire_response_body)?;
 
         let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
         self.store_receipt(receipt.clone(), req.requester.clone());
@@ -213,9 +239,9 @@ impl AciService {
 
         Ok(ForwardResult {
             receipt,
-            upstream_status: upstream_response.status_code,
+            upstream_status: client_status,
             upstream_body: wire_response_body,
-            upstream_headers: upstream_response.headers,
+            upstream_headers,
             e2ee: e2ee_response,
         })
     }

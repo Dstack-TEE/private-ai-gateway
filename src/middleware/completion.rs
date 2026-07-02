@@ -266,10 +266,11 @@ pub async fn run(
                     surface,
                     upstream_status,
                     &forward.upstream_body,
+                    &received_body,
                     Some(&request_id),
                 );
                 meter.success(
-                    upstream_status,
+                    reported_status(mapped, upstream_status),
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
@@ -395,14 +396,15 @@ pub async fn run(
         }
         Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
             // Streaming non-2xx: attribution is not carried on this variant, so the
-            // report records the raw status with no selected route (parity).
-            meter.upstream_error(forward.upstream_status);
+            // report records the status with no selected route (parity).
             let (status, body) = errors::normalize_upstream_error_parts(
                 surface,
                 forward.upstream_status,
                 &forward.upstream_body,
+                &received_body,
                 Some(&request_id),
             );
+            meter.upstream_error(reported_status(status, forward.upstream_status));
             finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
         }
         // All candidates failed. Record an upstream-attributed failure so the
@@ -516,6 +518,18 @@ impl Meter<'_> {
 
 fn truncate(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
+}
+
+// The status reported to the control plane for a normalized upstream error: the
+// client-facing status when it is client-attributable (4xx) — a remapped
+// image-fetch failure must not count against the provider's health — otherwise
+// the raw upstream status, preserving the provider's real code in the logs.
+fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
+    if (400..500).contains(&mapped) {
+        mapped
+    } else {
+        upstream_status
+    }
 }
 
 // Map a forward/finalize `ServiceError` to a client-facing generated response.
