@@ -243,6 +243,17 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        // The native Anthropic API only serves /v1/messages; without an
+        // explicit path the router falls back to /v1/chat/completions and
+        // every request 404s with no config-time signal.
+        if upstream.provider == UpstreamProvider::Anthropic
+            && upstream.path.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider anthropic requires path (e.g. \"/v1/messages\")",
+                upstream.name
+            )));
+        }
         for (public_model, upstream_model) in &upstream.models {
             if public_model.trim().is_empty() {
                 return Err(UpstreamConfigError::InvalidConfig(format!(

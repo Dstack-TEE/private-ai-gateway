@@ -1,5 +1,15 @@
 [
   {
+    "name": "anthropic",
+    "provider": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "path": "/v1/messages",
+    "models": {
+      "anthropic/claude-haiku-4.5": "claude-haiku-4-5"
+    },
+    "bearer_token": "<anthropic-api-key>"
+  },
+  {
     "name": "tinfoil-glm51",
     "provider": "tinfoil",
     "base_url": "https://inference.tinfoil.sh",
