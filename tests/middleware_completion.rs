@@ -237,6 +237,8 @@ fn middleware(control_url: String) -> Middleware {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        stream_commit_grace_ms: None,
+        stream_first_byte_timeout_ms: None,
     })
     .unwrap()
 }
@@ -274,7 +276,7 @@ async fn denial_returns_forbidden_envelope() {
     let service = build_service();
 
     let (status, _, body) =
-        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+        response_parts(mw.handle_completion(service.clone(), chat_input()).await).await;
     assert_eq!(status, 403);
     assert_eq!(body["error"]["type"], json!("permission_error"));
     assert_eq!(body["error"]["message"], json!("forbidden"));
@@ -287,7 +289,7 @@ async fn control_unavailable_fails_closed() {
     let service = build_service();
 
     let (status, _, body) =
-        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+        response_parts(mw.handle_completion(service.clone(), chat_input()).await).await;
     assert_eq!(status, 503);
     assert_eq!(body["error"]["type"], json!("service_unavailable"));
     assert_eq!(body["error"]["message"], json!("control plane unavailable"));
@@ -309,7 +311,7 @@ async fn rate_limit_denial_sets_headers_and_code() {
     let service = build_service();
 
     let (status, headers, body) =
-        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+        response_parts(mw.handle_completion(service.clone(), chat_input()).await).await;
     assert_eq!(status, 429);
     assert_eq!(headers.get("x-ratelimit-limit").unwrap(), "5");
     assert_eq!(headers.get("x-ratelimit-remaining").unwrap(), "0");
@@ -335,7 +337,8 @@ async fn allow_forwards_and_finalizes_receipt() {
 
     let mut input = chat_input();
     input.upstream_required = false;
-    let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, body) =
+        response_parts(mw.handle_completion(service.clone(), input).await).await;
     assert_eq!(status, 200);
     assert!(
         headers.get("x-receipt-id").is_some(),
@@ -370,7 +373,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     let mut input = chat_input();
     input.upstream_required = false;
     let (status, _headers, body) =
-        response_parts(mw.handle_completion(&service, input).await).await;
+        response_parts(mw.handle_completion(service.clone(), input).await).await;
 
     assert_eq!(status, 200);
     // Transformed to the OpenAI chat surface.
@@ -404,6 +407,8 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        stream_commit_grace_ms: None,
+        stream_first_byte_timeout_ms: None,
     })
     .unwrap();
     let report = StreamReport {
@@ -468,7 +473,8 @@ async fn malformed_2xx_body_returns_502_upstream() {
     let mut input = chat_input();
     input.upstream_required = false;
 
-    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, _, body) =
+        response_parts(mw.handle_completion(service.clone(), input).await).await;
     assert_eq!(
         status, 502,
         "malformed 2xx must not be a fabricated success"
@@ -492,7 +498,7 @@ async fn total_forward_failure_reports_upstream_failure() {
     let mut input = chat_input();
     input.upstream_required = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, _, _) = response_parts(mw.handle_completion(service.clone(), input).await).await;
     assert_eq!(status, 503);
 
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
@@ -538,7 +544,8 @@ async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
     });
     input.received_body = serde_json::to_vec(&input.params).unwrap();
 
-    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, _, body) =
+        response_parts(mw.handle_completion(service.clone(), input).await).await;
     assert_eq!(status, 400, "a bad client image URL is a 400, not a 5xx");
     assert_eq!(body["error"]["type"], json!("invalid_request_error"));
     assert!(body["error"]["message"].as_str().unwrap().contains(url));
@@ -569,7 +576,7 @@ async fn empty_candidates_returns_model_not_found() {
     let service = build_service();
 
     let (status, _, body) =
-        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+        response_parts(mw.handle_completion(service.clone(), chat_input()).await).await;
     assert_eq!(status, 400);
     assert_eq!(body["error"]["type"], json!("model_not_found"));
     assert!(body["error"]["message"]

@@ -49,6 +49,7 @@ pub(super) async fn forward_to_backend(
                 upstream_verification_event: None,
                 requester: input.requester,
                 e2ee: input.e2ee,
+                first_byte_deadline: None,
             })
             .await;
         return match result {
@@ -114,6 +115,7 @@ pub(super) async fn forward_to_backend(
             upstream_verification_event: None,
             requester: input.requester,
             e2ee: input.e2ee,
+            first_byte_deadline: None,
         })
         .await;
     match result {

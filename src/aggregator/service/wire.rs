@@ -199,6 +199,10 @@ pub struct StreamingUpstreamError {
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub upstream_body: Vec<u8>,
+    /// Candidates that failed before this terminal non-2xx, as
+    /// (route_id, status) in the order tried — kept so failover attempts stay
+    /// observable even when no candidate ends up serving a stream.
+    pub failed_attempts: Vec<(String, u16)>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +240,11 @@ pub struct ChatCompletionRequest<'a> {
     /// receipt that any caller can retrieve.
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
+    /// Streaming failover deadline: how long a non-final candidate may take to
+    /// produce its first body byte (response-header wait included) before it
+    /// is abandoned for the next candidate. The last candidate is never cut
+    /// short. `None` disables the deadline. Buffered forwards ignore it.
+    pub first_byte_deadline: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, Default)]

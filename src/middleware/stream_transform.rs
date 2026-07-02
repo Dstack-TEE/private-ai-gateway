@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
+use super::errors::now_secs;
 use super::request_transform::Endpoint;
 use super::types::ProviderFormat;
 
@@ -105,13 +106,6 @@ struct StreamState {
     current_content_index: i64,
     tool_calls_started: BTreeSet<i64>,
     finish_reason: Option<String>,
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 fn now_millis() -> u128 {

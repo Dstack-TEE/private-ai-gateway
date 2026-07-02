@@ -31,14 +31,18 @@ use errors::Surface;
 /// Middleware handle held by the gateway's app state.
 pub struct Middleware {
     control: ControlClient,
-    sse_keepalive_ms: Option<u64>,
+    timings: completion::StreamTimings,
 }
 
 impl Middleware {
     pub fn new(config: &MiddlewareConfig) -> Result<Self, String> {
         Ok(Self {
             control: ControlClient::new(config)?,
-            sse_keepalive_ms: config.sse_keepalive_ms,
+            timings: completion::StreamTimings {
+                sse_keepalive_ms: config.sse_keepalive_ms,
+                stream_commit_grace_ms: config.stream_commit_grace_ms,
+                stream_first_byte_timeout_ms: config.stream_first_byte_timeout_ms,
+            },
         })
     }
 
@@ -70,12 +74,14 @@ impl Middleware {
 
     /// Run the completion flow: consult the control plane, shape
     /// candidate bodies, forward through the service, and finalize the response.
+    /// Takes the service by `Arc`: on streaming early commit the forward keeps
+    /// running inside the response body, beyond this call's borrows.
     pub async fn handle_completion(
         &self,
-        service: &AciService,
+        service: std::sync::Arc<AciService>,
         input: CompletionInput,
     ) -> Response {
-        completion::run(&self.control, service, self.sse_keepalive_ms, input).await
+        completion::run(&self.control, service, self.timings, input).await
     }
 }
 
@@ -109,6 +115,8 @@ mod tests {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            stream_commit_grace_ms: None,
+            stream_first_byte_timeout_ms: None,
         })
         .unwrap();
 
@@ -134,6 +142,8 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            stream_commit_grace_ms: None,
+            stream_first_byte_timeout_ms: None,
         })
         .unwrap();
 

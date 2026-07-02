@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::errors::now_secs;
 use super::request_transform::Endpoint;
 use super::types::ProviderFormat;
 
@@ -28,13 +29,6 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Valu
         // responses (createModelResponse).
         _ => body,
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 fn now_millis() -> u128 {

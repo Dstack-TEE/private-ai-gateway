@@ -661,6 +661,7 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             }),
             requester: Some(ReceiptOwner::from_bearer("requester-a")),
             e2ee: None,
+            first_byte_deadline: None,
         })
         .await
         .unwrap();

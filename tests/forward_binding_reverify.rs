@@ -218,6 +218,7 @@ fn forward_request(
         upstream_verification_event,
         requester: None,
         e2ee: None,
+        first_byte_deadline: None,
     }
 }
 

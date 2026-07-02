@@ -117,6 +117,8 @@ async fn relays_catalogs_from_control() {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            stream_commit_grace_ms: None,
+            stream_first_byte_timeout_ms: None,
         })
         .unwrap(),
     );

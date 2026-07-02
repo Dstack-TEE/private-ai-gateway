@@ -255,6 +255,8 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            stream_commit_grace_ms: None,
+            stream_first_byte_timeout_ms: None,
         }
     }
 

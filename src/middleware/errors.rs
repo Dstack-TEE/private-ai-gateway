@@ -16,6 +16,8 @@ use axum::{
 };
 use serde_json::{json, Value};
 
+use super::request_transform::Endpoint;
+
 /// Downstream API surface that shapes the error envelope and `error.type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
@@ -126,12 +128,17 @@ pub fn rate_limit_envelope_bytes(
     serde_json::to_vec(&rate_limit_envelope(surface, message, request_id)).unwrap_or_default()
 }
 
+/// Wall-clock seconds since the Unix epoch, for `created`-style fields.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The standard rate-limit response headers (`X-RateLimit-*`, `Retry-After`).
 pub fn rate_limit_headers(limit: i64, reset_at: i64) -> Vec<(&'static str, String)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_secs() as i64;
     let retry_after = (reset_at - now).max(1);
     vec![
         ("X-RateLimit-Limit", limit.to_string()),
@@ -139,6 +146,77 @@ pub fn rate_limit_headers(limit: i64, reset_at: i64) -> Vec<(&'static str, Strin
         ("X-RateLimit-Reset", reset_at.to_string()),
         ("Retry-After", retry_after.to_string()),
     ]
+}
+
+/// Serialize an error as a terminal in-band SSE event, for failures that occur
+/// after a streaming response has already been committed (the HTTP status is
+/// pinned at 200 by then). Each endpoint gets the terminal-error shape its
+/// streaming protocol defines: chunk-shaped with a top-level `error` and
+/// `finish_reason: "error"` plus `[DONE]` for chat/legacy completions — the
+/// shape streaming clients of aggregated APIs already handle — a typed
+/// `event: error` for the model-responses protocol, and the native `error`
+/// event for the Anthropic surface.
+pub fn sse_error_event(
+    surface: Surface,
+    endpoint: Endpoint,
+    status: u16,
+    message: &str,
+    request_id: &str,
+    model: &str,
+) -> Vec<u8> {
+    match endpoint {
+        Endpoint::Messages => {
+            let event = envelope(
+                surface,
+                error_type(surface, status),
+                message,
+                Some(request_id),
+            );
+            format!(
+                "event: error\ndata: {}\n\n",
+                serde_json::to_string(&event).unwrap_or_default()
+            )
+            .into_bytes()
+        }
+        Endpoint::CreateModelResponse => {
+            let event = json!({
+                "type": "error",
+                "code": error_type(surface, status),
+                "message": message,
+                "param": null,
+            });
+            format!(
+                "event: error\ndata: {}\n\n",
+                serde_json::to_string(&event).unwrap_or_default()
+            )
+            .into_bytes()
+        }
+        Endpoint::ChatComplete | Endpoint::Complete | Endpoint::Embed => {
+            let chat = endpoint != Endpoint::Complete;
+            let choice = if chat {
+                json!({ "index": 0, "delta": { "content": "" }, "finish_reason": "error" })
+            } else {
+                json!({ "index": 0, "text": "", "finish_reason": "error" })
+            };
+            let event = json!({
+                "id": request_id,
+                "object": if chat { "chat.completion.chunk" } else { "text_completion" },
+                "created": now_secs(),
+                "model": model,
+                "error": {
+                    "code": status,
+                    "message": message,
+                    "type": error_type(surface, status),
+                },
+                "choices": [choice],
+            });
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                serde_json::to_string(&event).unwrap_or_default()
+            )
+            .into_bytes()
+        }
+    }
 }
 
 fn json_response(body: &Value, status: u16, extra_headers: &[(&str, String)]) -> Response {
@@ -191,7 +269,9 @@ pub fn rate_limit_response(
     )
 }
 
-fn extract_error_message(body: &[u8]) -> Option<String> {
+/// Pull the human-readable message out of a surface error envelope (either
+/// surface nests it under `error.message`).
+pub fn extract_error_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     match value.get("error") {
         Some(Value::String(message)) => Some(message.clone()),

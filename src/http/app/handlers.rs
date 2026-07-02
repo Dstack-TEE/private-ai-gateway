@@ -603,7 +603,9 @@ pub(super) async fn openai_completion_endpoint(
             user_model: context.user_model,
             stream,
         };
-        return middleware.handle_completion(&state.service, input).await;
+        return middleware
+            .handle_completion(state.service.clone(), input)
+            .await;
     }
 
     forward_to_backend(

@@ -83,6 +83,7 @@ impl AciService {
             upstream_verification_event,
             requester: None,
             e2ee: None,
+            first_byte_deadline: None,
         })
         .await
     }
@@ -334,6 +335,8 @@ impl AciService {
                     upstream_status,
                     upstream_headers,
                     upstream_body,
+                    // Single-candidate path: no failover attempts to carry.
+                    failed_attempts: Vec::new(),
                 },
             ));
         }

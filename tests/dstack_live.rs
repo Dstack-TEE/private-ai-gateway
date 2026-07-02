@@ -329,6 +329,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
             upstream_verification_event: None,
             requester: None,
             e2ee: None,
+            first_byte_deadline: None,
         })
         .await
         .unwrap();

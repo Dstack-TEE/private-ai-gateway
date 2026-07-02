@@ -331,6 +331,74 @@ impl KeepAliveStream {
 
 const KEEP_ALIVE_COMMENT: &[u8] = b": PROCESSING\n\n";
 
+/// The still-running forward behind an early-committed response: resolves to
+/// the client-surface stream, or to the prepared in-band error event bytes
+/// when no candidate served.
+pub type EarlyCommitFuture =
+    Pin<Box<dyn Future<Output = Result<ServiceResponseStream, Bytes>> + Send>>;
+
+enum EarlyCommitState {
+    Waiting(EarlyCommitFuture),
+    Streaming(ServiceResponseStream),
+    Done,
+}
+
+/// The body of a streaming response that was committed before the upstream
+/// resolved: emits an immediate `: PROCESSING` comment (the client's first
+/// byte), then hands over to the resolved stream — or, if every candidate
+/// failed, emits the prepared in-band error event and ends.
+///
+/// Idle-wait heartbeats are NOT produced here: the caller wraps this stream in
+/// a [`KeepAliveStream`], which covers the waiting period the same way it
+/// covers mid-stream stalls. Sits inside the receipt finalizer like every
+/// other client-visible byte source, so the comment and the in-band error are
+/// hashed into `response.returned`.
+pub struct EarlyCommitStream {
+    state: EarlyCommitState,
+    sent_initial: bool,
+}
+
+impl EarlyCommitStream {
+    pub fn new(forward: EarlyCommitFuture) -> Self {
+        Self {
+            state: EarlyCommitState::Waiting(forward),
+            sent_initial: false,
+        }
+    }
+}
+
+impl Stream for EarlyCommitStream {
+    type Item = Result<Bytes, ServiceError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                EarlyCommitState::Waiting(forward) => {
+                    // The commit itself already spent the grace window in
+                    // silence; give the client its first byte right away.
+                    if !this.sent_initial {
+                        this.sent_initial = true;
+                        return Poll::Ready(Some(Ok(Bytes::from_static(KEEP_ALIVE_COMMENT))));
+                    }
+                    match forward.as_mut().poll(cx) {
+                        Poll::Ready(Ok(stream)) => {
+                            this.state = EarlyCommitState::Streaming(stream);
+                        }
+                        Poll::Ready(Err(event)) => {
+                            this.state = EarlyCommitState::Done;
+                            return Poll::Ready(Some(Ok(event)));
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                EarlyCommitState::Streaming(stream) => return stream.as_mut().poll_next(cx),
+                EarlyCommitState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
 impl Stream for KeepAliveStream {
     type Item = Result<Bytes, ServiceError>;
 
@@ -364,11 +432,61 @@ impl Stream for KeepAliveStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
 
     #[test]
     fn metered_status_mapping() {
         assert_eq!(metered_status(Outcome::Completed, 200), 200);
         assert_eq!(metered_status(Outcome::Failed, 200), 502);
         assert_eq!(metered_status(Outcome::ClientClosed, 200), 499);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn early_commit_stream_heartbeats_delegates_and_surfaces_errors() {
+        // Pending forward, wrapped in KeepAliveStream as the caller composes
+        // it: the commit emits an immediate comment, the keep-alive layer
+        // heartbeats the idle wait, and the resolved stream takes over.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let forward: EarlyCommitFuture = Box::pin(async move {
+            let _ = rx.await;
+            let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(b"data: {}\n\n"),
+            )]));
+            Ok(inner)
+        });
+        let mut stream = KeepAliveStream::new(
+            Box::pin(EarlyCommitStream::new(forward)),
+            Some(Duration::from_secs(10)),
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            KEEP_ALIVE_COMMENT,
+            "first byte must be an immediate comment"
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            KEEP_ALIVE_COMMENT,
+            "idle wait emits keep-alive heartbeats"
+        );
+        tx.send(()).unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            b"data: {}\n\n"
+        );
+        assert!(stream.next().await.is_none());
+
+        // Failed forward: the prepared in-band error event terminates the stream.
+        let forward: EarlyCommitFuture =
+            Box::pin(async move { Err(Bytes::from_static(b"data: {\"error\":{}}\n\n")) });
+        let mut stream = EarlyCommitStream::new(forward);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            KEEP_ALIVE_COMMENT
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref(),
+            b"data: {\"error\":{}}\n\n"
+        );
+        assert!(stream.next().await.is_none());
     }
 }

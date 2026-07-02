@@ -29,4 +29,23 @@ pub struct MiddlewareConfig {
     /// `0` disables the heartbeat.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
+    /// How long a streaming request may wait for the upstream response before
+    /// the gateway commits a `200 text/event-stream` to the client and starts
+    /// heartbeating while the forward continues behind the live stream. Within
+    /// the grace window the response keeps full status fidelity (upstream
+    /// status and headers pass through); past it, upstream failures are
+    /// delivered as an in-band SSE error event. Defaults to 2_000 ms; `0`
+    /// disables early commit (the response always waits for the upstream).
+    #[serde(default)]
+    pub stream_commit_grace_ms: Option<u64>,
+    /// Per-candidate deadline for a streaming attempt to produce its first
+    /// body byte (covers the response-header wait too; heartbeat comments do
+    /// not count). On expiry the candidate is abandoned and the next one is
+    /// tried; the last candidate is never cut short. Disabled by default
+    /// (`0`/unset): waiting for the first byte delays the commit decision, so
+    /// enabling it routes slow-first-token streams on multi-candidate routes
+    /// through the early-commit path. Enable deliberately (e.g. 60_000) for
+    /// deployments whose candidates are known to stall.
+    #[serde(default)]
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }

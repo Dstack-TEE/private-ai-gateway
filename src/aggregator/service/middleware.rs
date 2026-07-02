@@ -19,10 +19,13 @@ use super::{
     ReceiptOwner, ServiceError, ServiceResponseStream, StreamingUpstreamError,
 };
 use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
-use crate::aci::upstream::{UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{UpstreamBodyStream, UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
+use bytes::Bytes;
+use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
+use std::time::Instant;
 
 // Provider statuses that make this candidate worth abandoning for the next one.
 // Beyond the transient 429/5xx signals, an auth/account failure specific to this
@@ -56,6 +59,21 @@ fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: Service
     }
 }
 
+// Whether this chunk carries a non-comment, non-empty SSE line. `at_line_start`
+// tracks line boundaries across chunks so a comment split mid-chunk is not
+// misread as data. Heartbeat comments (`: ...`) must not satisfy the
+// first-byte deadline: a provider whose backend is wedged can keep emitting
+// them while never producing output.
+fn scan_for_data_line(chunk: &[u8], at_line_start: &mut bool) -> bool {
+    for &byte in chunk {
+        if *at_line_start && !matches!(byte, b':' | b'\n' | b'\r') {
+            return true;
+        }
+        *at_line_start = byte == b'\n';
+    }
+    false
+}
+
 /// The request/response context observed for one forwarded candidate,
 /// captured inside the TEE. Grouped so
 /// [`AciService::build_middleware_receipt_prefix`] reads by field name rather
@@ -74,6 +92,13 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
 }
 
 impl AciService {
+    /// Mint a receipt id ahead of a forward. A streaming caller pre-reserves it
+    /// on the journal so the `x-receipt-id` header can be sent before a
+    /// candidate commits; the committing candidate adopts the reserved id.
+    pub fn new_receipt_id(&self) -> String {
+        generate_receipt_id()
+    }
+
     pub(super) fn build_middleware_receipt_prefix(
         &self,
         inputs: MiddlewareReceiptInputs<'_>,
@@ -226,23 +251,49 @@ impl AciService {
             let forwarded_body = prepared.request.body.clone();
 
             if stream {
-                let upstream_response = match self
-                    .forward_with_binding_reverify(
-                        &prepared,
-                        &mut recorded_event,
-                        candidate_required,
-                        caller_supplied_upstream_event,
-                        // Failover path: flush a possibly-stale binding on any
-                        // terminal mismatch so the next candidate/request re-verifies.
-                        true,
-                        |prepared, event| async move {
-                            self.upstream
-                                .forward_stream_verified_prepared(prepared, &event)
-                                .await
-                        },
-                    )
-                    .await
-                {
+                // Per-candidate first-byte deadline (header wait included).
+                // Only applied while a sibling remains: cutting the last
+                // candidate short would turn a slow success into a failure
+                // with nothing left to fail over to.
+                let deadline = req.first_byte_deadline.filter(|_| !is_last);
+                let attempt_started = Instant::now();
+                let reverify = self.forward_with_binding_reverify(
+                    &prepared,
+                    &mut recorded_event,
+                    candidate_required,
+                    caller_supplied_upstream_event,
+                    // Failover path: flush a possibly-stale binding on any
+                    // terminal mismatch so the next candidate/request re-verifies.
+                    true,
+                    |prepared, event| async move {
+                        self.upstream
+                            .forward_stream_verified_prepared(prepared, &event)
+                            .await
+                    },
+                );
+                let outcome = match deadline {
+                    Some(deadline) => match tokio::time::timeout(deadline, reverify).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            tracing::info!(
+                                route = %route_id,
+                                elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                                "streaming candidate abandoned before responding"
+                            );
+                            failed_attempts.push((route_id.clone(), 504));
+                            upgrade_err(
+                                &mut aggregated_err,
+                                2,
+                                ServiceError::Upstream(UpstreamError::Transport(format!(
+                                    "candidate {route_id} timed out before responding"
+                                ))),
+                            );
+                            continue;
+                        }
+                    },
+                    None => reverify.await,
+                };
+                let upstream_response = match outcome {
                     ReverifyOutcome::Forwarded(response) => Some(response),
                     ReverifyOutcome::RefreshFailed(err) => {
                         let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
@@ -293,17 +344,76 @@ impl AciService {
                             upstream_status: status,
                             upstream_headers,
                             upstream_body,
+                            failed_attempts: std::mem::take(&mut failed_attempts),
                         },
                     ));
                 }
 
-                // Commit this candidate.
+                // A 200 whose body produces no output within the deadline is
+                // as dead as a stalled header wait; abandon it while nothing
+                // has been forwarded. Only a non-comment line counts as
+                // output — heartbeat comments alone must not commit the
+                // candidate. Peeked chunks are chained back so the receipt
+                // drafting below still observes every upstream byte.
                 let upstream_headers = upstream_response.headers;
-                let receipt_id = generate_receipt_id();
+                let served_instance_id = upstream_response.served_instance_id;
+                let mut body = upstream_response.body;
+                if let Some(deadline) = deadline {
+                    let mut peeked: Vec<Result<Bytes, UpstreamError>> = Vec::new();
+                    let mut at_line_start = true;
+                    let outcome = loop {
+                        let remaining = deadline.saturating_sub(attempt_started.elapsed());
+                        match tokio::time::timeout(remaining, body.next()).await {
+                            Ok(Some(Ok(chunk))) => {
+                                let saw_data = scan_for_data_line(&chunk, &mut at_line_start);
+                                peeked.push(Ok(chunk));
+                                if saw_data {
+                                    break Ok(());
+                                }
+                            }
+                            Ok(Some(Err(err))) => break Err((502, ServiceError::Upstream(err))),
+                            Ok(None) => {
+                                break Err((
+                                    502,
+                                    ServiceError::Upstream(UpstreamError::Transport(format!(
+                                        "candidate {route_id} ended its stream without output"
+                                    ))),
+                                ))
+                            }
+                            Err(_) => {
+                                break Err((
+                                    504,
+                                    ServiceError::Upstream(UpstreamError::Transport(format!(
+                                        "candidate {route_id} timed out before its first byte"
+                                    ))),
+                                ))
+                            }
+                        }
+                    };
+                    if let Err((status, err)) = outcome {
+                        tracing::info!(
+                            route = %route_id,
+                            status,
+                            elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                            error = %err,
+                            "streaming candidate abandoned before first output"
+                        );
+                        failed_attempts.push((route_id.clone(), status));
+                        upgrade_err(&mut aggregated_err, 2, err);
+                        continue;
+                    }
+                    body = Box::pin(stream::iter(peeked).chain(body)) as UpstreamBodyStream;
+                }
+
+                // Commit this candidate. A pre-reserved journal id (streaming
+                // early-commit callers) is adopted so the already-sent
+                // `x-receipt-id` header matches the stored receipt.
+                let receipt_id = receipt_journal
+                    .peek_receipt_id()
+                    .unwrap_or_else(generate_receipt_id);
                 let served_at = self.clock.now_secs();
                 let sealed = self.record_attested_upstream_session(&recorded_event)?;
-                let recorded =
-                    cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
+                let recorded = cite_served_session(&sealed, served_instance_id.as_deref());
                 let session_id = recorded.as_ref().map(|(id, _)| id.clone());
                 let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                     receipt_id: &receipt_id,
@@ -320,7 +430,7 @@ impl AciService {
                 receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                 let body = MiddlewareProviderResponseDraftingStream::new(
-                    upstream_response.body,
+                    body,
                     builder,
                     receipt_journal,
                     receipt_id.clone(),

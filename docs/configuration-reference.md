@@ -60,6 +60,8 @@ out-of-process hop. When the section is omitted the gateway serves directly.
 | `middleware.control_timeout_ms` | `60000` | Timeout for the pre-request consult and catalog fetches. A failed or timed-out consult fails closed. |
 | `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
 | `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses; `0` disables the heartbeat. |
+| `middleware.stream_commit_grace_ms` | `2000` | How long a streaming request may wait for the upstream before the gateway commits `200 text/event-stream` and starts heartbeating while the forward continues behind the live stream. Within the grace window the response keeps full status fidelity (upstream status and headers pass through); past it, upstream failures arrive as a terminal in-band SSE error event on the committed 200. `0` disables early commit (the response always waits for the upstream). E2EE streaming requests always wait, regardless of this setting. |
+| `middleware.stream_first_byte_timeout_ms` | `0` (disabled) | Per-candidate deadline for a streaming attempt to produce its first body byte (the response-header wait counts; heartbeat comments from the provider do not). On expiry the candidate is abandoned and recorded as a failed attempt (504) and the next candidate is tried; the last candidate is never cut short. Off by default because the first-byte wait delays the commit decision: with it enabled, slow-first-token streams on multi-candidate routes are served through the early-commit path (200 committed at the grace boundary, upstream headers not passed through). Enable deliberately for deployments whose candidates are known to stall. |
 
 ```json
 {
