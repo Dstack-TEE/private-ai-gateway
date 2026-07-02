@@ -55,6 +55,8 @@ pub(super) enum E2eeDecryptor<'a> {
 #[derive(Debug, Clone)]
 pub struct ForwardResult {
     pub receipt: Receipt,
+    /// Client-facing status: the upstream's, or 400 when the service remapped a
+    /// client image-URL fetch failure. The receipt attests the matching body.
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
