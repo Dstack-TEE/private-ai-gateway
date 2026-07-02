@@ -14,10 +14,23 @@ use super::{
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
 
+/// Version header required by the native Anthropic API on every request.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// How the configured credential is attached to upstream requests.
+enum UpstreamAuth {
+    /// `Authorization: Bearer <token>` (OpenAI-compatible APIs).
+    Bearer(String),
+    /// `x-api-key: <key>` plus the required `anthropic-version` header
+    /// (native Anthropic API; it rejects API keys sent as Bearer).
+    AnthropicApiKey(String),
+}
+
 /// The minimal forwarder.
 ///
-/// Sends `req.body` as the request body to `base_url + path`. Adds
-/// an `Authorization: Bearer <token>` header when configured.
+/// Sends `req.body` as the request body to `base_url + path`. Attaches
+/// the configured credential as either a Bearer token or an Anthropic
+/// `x-api-key` header.
 ///
 /// This backend does *not* do upstream attestation. An aggregator
 /// that relies on it MUST run an attested per-upstream verifier
@@ -27,7 +40,7 @@ pub struct OpenAICompatibleBackend {
     name: String,
     base_url: String,
     path: String,
-    bearer_token: Option<String>,
+    auth: Option<UpstreamAuth>,
     client: reqwest::Client,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
@@ -60,7 +73,7 @@ impl OpenAICompatibleBackend {
             name: "openai-compatible".to_string(),
             base_url: base,
             path: "/v1/chat/completions".to_string(),
-            bearer_token: None,
+            auth: None,
             client,
             connect_timeout_seconds,
             read_timeout_seconds,
@@ -82,8 +95,25 @@ impl OpenAICompatibleBackend {
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.bearer_token = Some(token.into());
+        self.auth = Some(UpstreamAuth::Bearer(token.into()));
         self
+    }
+
+    pub fn with_anthropic_api_key(mut self, key: impl Into<String>) -> Self {
+        self.auth = Some(UpstreamAuth::AnthropicApiKey(key.into()));
+        self
+    }
+
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            Some(UpstreamAuth::Bearer(token)) => {
+                builder.header("authorization", format!("Bearer {token}"))
+            }
+            Some(UpstreamAuth::AnthropicApiKey(key)) => builder
+                .header("x-api-key", key.as_str())
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            None => builder,
+        }
     }
 }
 
@@ -330,18 +360,44 @@ impl OpenAICompatibleBackend {
         for (k, v) in req.headers.iter() {
             builder = builder.header(k, v);
         }
-        if let Some(t) = &self.bearer_token {
-            builder = builder.header("authorization", format!("Bearer {t}"));
-        }
-        builder
+        self.apply_auth(builder)
     }
 
     fn get_builder(&self, path: &str, accept: &'static str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
-        let mut builder = self.client.get(&url).header("accept", accept);
-        if let Some(t) = &self.bearer_token {
-            builder = builder.header("authorization", format!("Bearer {t}"));
-        }
-        builder
+        let builder = self.client.get(&url).header("accept", accept);
+        self.apply_auth(builder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_auth_sends_x_api_key_not_bearer() {
+        let backend = OpenAICompatibleBackend::new("https://api.anthropic.com")
+            .unwrap()
+            .with_anthropic_api_key("sk-test");
+        let req = backend
+            .get_builder("/v1/models", "application/json")
+            .build()
+            .unwrap();
+        assert_eq!(req.headers().get("x-api-key").unwrap(), "sk-test");
+        assert_eq!(
+            req.headers().get("anthropic-version").unwrap(),
+            ANTHROPIC_VERSION
+        );
+        assert!(req.headers().get("authorization").is_none());
+
+        let bearer = OpenAICompatibleBackend::new("https://example.com")
+            .unwrap()
+            .with_bearer_token("tok");
+        let req = bearer
+            .get_builder("/v1/models", "application/json")
+            .build()
+            .unwrap();
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer tok");
+        assert!(req.headers().get("x-api-key").is_none());
     }
 }

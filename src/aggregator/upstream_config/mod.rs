@@ -152,6 +152,9 @@ pub enum UpstreamProvider {
     #[default]
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
+    /// Native Anthropic API: authenticates with `x-api-key` plus the
+    /// required `anthropic-version` header instead of a Bearer token.
+    Anthropic,
     AciDcap,
     Chutes,
     Tinfoil,
@@ -167,14 +170,14 @@ impl UpstreamProvider {
             UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
-            // OpenAI-compatible has no verifier and ACI/DCAP uses its own, so for
-            // both this only tunes prewarm probe granularity. Per-model is the safe
-            // default — it never collapses channels. ACI's real scope is
-            // service-dependent (router or model), resolved when ACI becomes a
-            // first-party router.
-            UpstreamProvider::OpenAiCompatible | UpstreamProvider::AciDcap => {
-                AttestationScope::PerModel
-            }
+            // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
+            // and ACI/DCAP uses its own, so for all of these this only tunes
+            // prewarm probe granularity. Per-model is the safe default — it
+            // never collapses channels. ACI's real scope is service-dependent
+            // (router or model), resolved when ACI becomes a first-party router.
+            UpstreamProvider::OpenAiCompatible
+            | UpstreamProvider::Anthropic
+            | UpstreamProvider::AciDcap => AttestationScope::PerModel,
         }
     }
 }

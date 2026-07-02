@@ -73,7 +73,7 @@ fn build_model_router(
 /// with TLS endpoint binding only.
 fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
-        UpstreamProvider::OpenAiCompatible => false,
+        UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => false,
         UpstreamProvider::AciDcap
         | UpstreamProvider::Chutes
         | UpstreamProvider::Tinfoil
@@ -108,6 +108,7 @@ fn build_provider_backend(
             )?))
         }
         UpstreamProvider::OpenAiCompatible
+        | UpstreamProvider::Anthropic
         | UpstreamProvider::AciDcap
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
@@ -120,7 +121,11 @@ fn build_provider_backend(
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
             .with_name(cfg.name.clone());
             if let Some(token) = &cfg.bearer_token {
-                backend = backend.with_bearer_token(token.clone());
+                backend = if cfg.provider == UpstreamProvider::Anthropic {
+                    backend.with_anthropic_api_key(token.clone())
+                } else {
+                    backend.with_bearer_token(token.clone())
+                };
             }
             Ok(Arc::new(backend))
         }
@@ -192,10 +197,7 @@ fn build_provider_verifier(
     options: &UpstreamRuntimeOptions,
     sessions: &ProviderSessionRegistry,
 ) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    if !config
-        .iter()
-        .any(|cfg| cfg.provider != UpstreamProvider::OpenAiCompatible)
-    {
+    if !config.iter().any(|cfg| provider_is_tee(cfg.provider)) {
         return Ok(None);
     }
     let mut router = RoutingUpstreamVerifier::new();
@@ -207,7 +209,9 @@ fn build_provider_verifier(
             .verifier_request_timeout_seconds
             .unwrap_or(options.verifier_request_timeout_seconds);
         let verifier: Option<Arc<dyn UpstreamVerifier>> = match cfg.provider {
-            UpstreamProvider::OpenAiCompatible => build_global_verifier_for_config(cfg, options)?,
+            UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => {
+                build_global_verifier_for_config(cfg, options)?
+            }
             UpstreamProvider::AciDcap => Some(build_aci_dcap_verifier(cfg, options)?),
             UpstreamProvider::Chutes => {
                 let session_store = sessions.chutes(&cfg.name).ok_or_else(|| {
