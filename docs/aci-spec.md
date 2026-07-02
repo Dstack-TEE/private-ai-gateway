@@ -9,8 +9,7 @@
 > carries compatibility surfaces inherited from dstack-vllm-proxy that are not
 > part of this specification (§13).
 > **License:** Apache License 2.0 (see `LICENSE`). The patent grant is
-> intended: anyone may implement ACI, in any language, without further
-> permission.
+> intended: anyone may implement ACI without further permission.
 
 Attested Confidential Inference is an interface for AI inference services
 whose clients want proof, not promises. An ACI service proves **what workload
@@ -27,11 +26,11 @@ artifacts:
 | Inference receipt | `GET /v1/aci/receipts/{id}` | What happened for this specific request? |
 | Attested session | `GET /v1/aci/sessions/{session_id}` | Which verified upstream TEE served the inference (for aggregators)? |
 
-ACI v1 deliberately does **not** define routing policy, billing, pricing,
-model catalogs, canonical model identifiers, or a universal trust policy.
-It standardizes bindings; each relying party chooses the verifier policy it
-trusts (§1.3). For how ACI relates to other confidential-inference systems
-and standards, see [ACI and Related Work](aci-related-work.md).
+ACI v1 does **not** define routing policy, billing, pricing, model catalogs,
+canonical model identifiers, or a universal trust policy. It standardizes
+bindings; each relying party chooses the verifier policy it trusts (§1.3).
+For how ACI relates to other confidential-inference systems and standards,
+see [ACI and Related Work](aci-related-work.md).
 
 ## 1. Trust Model
 
@@ -44,9 +43,7 @@ ACI establishes two claims:
 
 A verifier accepts these claims by checking hardware-rooted TEE evidence, the
 binding of the workload identity and keyset into that evidence, source
-provenance, freshness, and private-key custody. Attestation establishes *who
-is serving*; receipts establish *what happened* per request; attested
-sessions establish *which upstream* an aggregator trusted with the prompt.
+provenance, freshness, and private-key custody.
 
 ### 1.1 What a client must check
 
@@ -54,22 +51,18 @@ If plaintext HTTPS terminates outside the accepted workload, a valid WebPKI
 certificate provides no ACI assurance. A channel is ACI-verifiable only when
 it is bound to the attested keyset:
 
-- **TLS** is ACI-verifiable only when the observed server certificate's SPKI
-  digest is listed in the keyset's `tls_public_keys`.
-- **E2EE** is ACI-verifiable only when the service E2EE key is listed in
-  `e2ee_public_keys`.
-- **Receipts** are ACI-verifiable only when signed by a key listed in
-  `receipt_signing_keys`.
+- **TLS** — the observed server certificate's SPKI digest is listed in
+  `tls_public_keys`.
+- **E2EE** — the service key is listed in `e2ee_public_keys`.
+- **Receipts** — signed by a key listed in `receipt_signing_keys`.
 
 Ordinary OpenAI SDK clients that check nothing get WebPKI assurance, not ACI
 assurance. Such clients can gain ACI assurance through a verifier SDK, an
 agent runtime, or a local verifying proxy.
 
-SPKI pinning against the attested keyset is the required baseline because it
-works with ordinary HTTPS stacks. Attested-TLS mechanisms that bind evidence
-into the connection itself (the direction of the IETF SEAT working group)
-MAY serve as a stronger transport profile once standardized; they do not
-replace the baseline.
+SPKI pinning is the required baseline because it works with ordinary HTTPS
+stacks; attested-TLS (IETF SEAT) MAY later serve as a stronger transport
+profile but does not replace it.
 
 ### 1.2 Aggregators
 
@@ -91,8 +84,7 @@ surface**, not its routing policy:
 
 How the aggregator verifies a given upstream (which quote formats, which
 measurements, which provenance) is verifier-specific and out of scope; the
-recorded claims are honest about their source (§9.3), so a relying party can
-distinguish hardware-proven facts from provider assertions.
+recorded claims name their source (§9.3).
 
 ### 1.3 Verifier profiles
 
@@ -109,12 +101,10 @@ location, directly observed by the verifier, or supplied by local policy.
 Missing required evidence is fail-closed. A profile MAY add checks; it MUST
 NOT relax the minimum checks in §10.
 
-In IETF RATS terms (RFC 9334): the ACI service is the Attester, the
-attestation report carries Evidence, the relying party appraises it
-directly or through a Verifier it trusts, and the verifier profile is its
-appraisal policy. ACI's typed session claims (§9.3) play the role of
-attestation results with explicit provenance, in an inference-specific
-vocabulary comparable to the RATS AR4SI trustworthiness vectors.
+In RATS terms (RFC 9334): the service is the Attester, the report carries
+Evidence, the relying party (or a Verifier it trusts) appraises it, and the
+verifier profile is the appraisal policy; typed session claims (§9.3) play
+the role of attestation results (cf. AR4SI).
 
 ### 1.4 Conformance summary
 
@@ -204,11 +194,10 @@ possibly by someone other than the original caller. Each artifact therefore
 names its own verification context instead of assuming out-of-band
 knowledge, even where a field is derivable from another:
 
-- A receipt carries `workload_keyset_digest` — the key-resolution context.
-  Across key rotations this is what tells a verifier *which* keyset document
-  resolves `signature.key_id`. It also carries the stable `workload_id` as
-  its issuer claim (the role `iss` plays in a JWT), so a reader can
-  attribute an archived receipt without first fetching the keyset.
+- A receipt carries `workload_keyset_digest` (which keyset resolves
+  `signature.key_id`, across rotations) and the stable `workload_id` as its
+  issuer claim — the role `iss` plays in a JWT — so an archived receipt is
+  attributable without fetching the keyset.
 - A report carries top-level `workload_id` and `workload_keyset_digest` so a
   relying party can identify and cache it before hashing the keyset.
 - `signature.algo` restates the algorithm of the keyset entry that `key_id`
@@ -426,23 +415,15 @@ replicas is out of scope.
   and revocation payloads (each with its own purpose tag), and receipt keys
   sign only receipts. The per-role key separation in §4.2 is what keeps this
   sound.
-- Algorithm defaults target clients without special cryptography: with the
-  X25519 E2EE suite and Ed25519 signatures, a browser can verify every ACI
-  artifact using only the Web Crypto API (SHA-256, HKDF, AES-GCM, Ed25519,
-  X25519). The secp256k1 options carry the EVM/dstack ecosystem — on-chain
-  `ecrecover` verification and KMS-derived keys — without putting that
-  ecosystem's toolchain in every client's path. P-256 was considered and
-  left out to keep the matrix small; an extension can add it if HSM-custody
-  profiles require it.
-- Keys and signatures use a minimal bespoke encoding rather than JWK/JWS.
-  Every signed object in ACI already rides on JCS, so one canonicalization
-  covers keys, statements, receipts, and AAD; wrapping signatures in JOSE
-  would add a second framework — with its algorithm-agility and
-  header-confusion pitfalls to profile away — without removing the JCS
-  dependency. `workload_id` is the same construction as an RFC 7638 JWK
-  thumbprint, applied to the ACI key object. A JOSE binding (JWK export of
-  keyset entries, JWS receipt envelopes) can be layered on as an extension
-  without changing the trust chain.
+- Algorithm defaults let a browser verify every artifact with the Web Crypto
+  API alone (§7.1); the secp256k1 options carry the EVM/dstack ecosystem
+  (`ecrecover`, KMS-derived keys) without putting its toolchain in every
+  client's path. An extension can add P-256 if HSM-custody profiles need it.
+- Keys and signatures use a minimal bespoke encoding rather than JWK/JWS:
+  everything already rides on JCS, and JOSE would add a second framework
+  with algorithm-agility pitfalls to profile away. `workload_id` is an
+  RFC 7638-style thumbprint of the ACI key object; a JOSE binding can be
+  layered on as an extension without changing the trust chain.
 
 ### 4.7 Expiry and revocation
 
@@ -452,11 +433,8 @@ first and reach for the others as its threat model requires.
 
 **Bounded lifetime.** Every keyset MUST set a bounded
 `keyset_epoch.not_after`, and a verifier profile SHOULD reject an
-implausibly distant expiry. Because recency comes from the nonce (§5.1) and clients always
-re-fetch the report, an expired keyset stops producing acceptable reports on
-its own — this is the baseline bound on how long a compromise stays useful,
-and it needs no coordination. A shorter window trades more frequent
-re-attestation for a smaller exposure window.
+implausibly distant expiry. Expiry bounds a compromise with no
+coordination: an expired keyset stops producing acceptable reports (§5.1).
 
 **Graceful rotation.** To replace a keyset ahead of expiry, the service
 publishes a new epoch with a higher `keyset_epoch.version` and a fresh report
@@ -480,14 +458,12 @@ statement verifies exactly like the endorsement (§4.3), under the identity
 key. This does not help when the **identity** key itself is compromised: no
 in-band signal from a key the attacker controls is trustworthy.
 
-**Relying-party deny-list.** The backstop for identity-key compromise, or for
-revoking faster than clients re-fetch, is a relying-party policy decision, not
-an in-band protocol message. ACI's contribution is the stable identifiers a
-deny-list keys on — `workload_id` and `workload_keyset_digest`. How such a
-list is published and distributed (an operator revocation endpoint, a
-transparency log, an on-chain registry) is profile- and deployment-specific
-and out of core scope. Archival verification of receipts signed under a
-now-expired or revoked keyset is likewise a local-policy decision (§12).
+**Relying-party deny-list.** The backstop — for identity-key compromise, or
+revoking faster than clients re-fetch — is a relying-party deny-list keyed
+on `workload_id` / `workload_keyset_digest`. Distribution (an operator
+endpoint, a transparency log, an on-chain registry) is profile- and
+deployment-specific. Archival verification under an expired or revoked
+keyset is likewise local policy (§12).
 
 ## 5. Attestation Report
 
@@ -545,15 +521,12 @@ Field rules:
   pinned commit. A report without acceptable provenance MUST be rejected by
   the verifier (the wire field may be absent on non-conformant or development
   deployments).
-- **Freshness**: recency comes primarily from the **nonce** — a client that
-  supplied a fresh `nonce` and checks it is bound into `report_data` knows
-  the quote was produced after the challenge. `fetched_at` / `stale_after`
-  are the service's declared validity window, meaningful to a verifier only
-  when its profile trusts the platform's clock; a profile that relies on
-  them SHOULD require a securely synchronized TEE clock (TDX and SEV-SNP
-  expose a trusted clock, but its accuracy depends on secure time sync such
-  as authenticated NTP). Absent that, treat the timestamps as advisory and
-  rely on the nonce. A report is never valid past
+- **Freshness**: recency comes from the **nonce** — a client that checks its
+  fresh `nonce` is bound into `report_data` knows the quote postdates the
+  challenge. `fetched_at` / `stale_after` are the service's declared validity
+  window; a profile relying on them SHOULD require a securely synchronized
+  TEE clock (the TDX/SEV-SNP trusted clock still needs secure time sync) and
+  otherwise treats them as advisory. A report is never valid past
   `keyset_epoch.not_after` (§4.7).
 - `service_capabilities.supported_e2ee_versions` lists the client-facing ACI
   E2EE scheme versions the service terminates (this document defines `"2"`,
@@ -767,12 +740,11 @@ Components:
 - `algo` — the algorithm string of the selected service E2EE key.
 - `model` — the top-level `model` string of the request as received,
   byte-exact, with no trimming, case-folding, alias expansion, or Unicode
-  normalization. Responses use the **request** model too, so the client can
-  derive response AAD entirely from its own request plus clear response
-  metadata. If the service later rewrites `model` for routing, AAD is
-  unaffected and the rewrite is audited through the receipt. A request whose
-  `model` is absent or not a string MUST be rejected with
-  `e2ee_invalid_payload_model` before any AAD is built.
+  normalization. Responses use the **request** model too, so the client
+  derives response AAD from its own request; service-side rewrites never
+  affect AAD and are audited through the receipt. A request whose `model` is
+  absent or not a string MUST be rejected with `e2ee_invalid_payload_model`
+  before any AAD is built.
 - `field` — the field path of the encrypted location (§7.2).
 - `id` — the clear `id` string of the response object (of each chunk when
   streaming), or `""` when the response carries none.
@@ -823,11 +795,10 @@ GET /v1/aci/receipts/{id}
 OpenAI-compatible response `id` when the response body contains one.
 Receipts are retained for a bounded, implementation-defined period; clients
 SHOULD fetch receipts promptly. An unknown or expired id returns
-`not_found`. A receipt is finalized when the response completes: for a
-streamed response it becomes available only after the stream ends (its
-hashes cover the whole stream), so there is no in-flight receipt. The
-`X-Receipt-Id` header is emitted with the response so the client holds the
-lookup id before the receipt is queryable.
+`not_found`. A receipt is finalized when the response completes: a streamed
+response has no in-flight receipt (its hashes cover the whole stream).
+`X-Receipt-Id` arrives with the response, so the client holds the id before
+the receipt is queryable.
 
 ### 8.2 Receipt shape
 
@@ -854,16 +825,12 @@ lookup id before the receipt is queryable.
 ```
 
 Receipts do not embed fresh attestation; they bind back to an established
-`workload_id`, `workload_keyset_digest`, and receipt signing key. The two
-identity fields are the receipt's self-description (§3.1):
-`workload_keyset_digest` names the exact keyset that resolves
-`signature.key_id`, and `workload_id` is the issuer claim. `model` is the
-model the user requested (the top-level `model` of the received request,
-before any service-side rewrite), so every receipt records what was asked
-for even on a direct single-model service; it is `null` only when the request
-carried no model. Events are flat objects: `seq` and `type` plus type-specific
-fields. `seq` MUST be strictly increasing from `0`, and the first event MUST
-be `request.received`.
+`workload_id`, `workload_keyset_digest`, and receipt signing key — the
+receipt's self-description (§3.1). `model` is the model the user requested
+(the top-level `model` of the received request, before any rewrite), `null`
+only when the request carried none. Events are flat objects: `seq` and
+`type` plus type-specific fields. `seq` MUST be strictly increasing from
+`0`, and the first event MUST be `request.received`.
 
 ### 8.3 Event vocabulary
 
@@ -875,7 +842,7 @@ influence receipt hashes.
 | --- | --- | --- | --- |
 | `request.received` | yes, first | `body_hash` | Request body after TLS/E2EE termination and field decryption, before any mutation. |
 | `request.forwarded` | yes | `body_hash` | The exact request body used for inference, after any service-side rewrite (for an aggregator, the bytes forwarded upstream). Equals `request.received.body_hash` when nothing was rewritten. |
-| `response.returned` | yes | `cleartext_hash`, `wire_hash` | `wire_hash` covers the exact response body bytes emitted to the client; for a streamed (SSE) response, the in-order concatenation of the raw stream including SSE framing (`data:` lines, blank-line delimiters, any terminating sentinel) — a client verifies it by hashing the bytes it read off the wire, no reassembly needed. `cleartext_hash` covers the same body in cleartext form: identical to `wire_hash` for plaintext responses; for E2EE responses it is the service-observed stream before response-field encryption (§12). |
+| `response.returned` | yes | `cleartext_hash`, `wire_hash` | `wire_hash` covers the exact response body bytes emitted (for SSE, the in-order raw stream including framing: `data:` lines, delimiters, terminating sentinel — hash what was read off the wire, §10.2). `cleartext_hash` covers the same body in cleartext: equal to `wire_hash` for plaintext; for E2EE, the service-observed pre-encryption stream (§12). |
 | `upstream.verified` | aggregator | §8.4 | Verification outcome for the upstream that served this request. |
 | `response.received` | no | `cleartext_hash` | The response as first produced, before service-side transformation. |
 | `transparency.request_modified` | conditional | — | MUST be present when `request.forwarded` differs from `request.received`. |
@@ -925,11 +892,9 @@ upstream. Defined shapes:
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
 
-To a generic verifier, this event is a signed claim by the accepted
-aggregator workload: it proves the attested aggregator *asserted* this
-verification outcome. The deep-audit path — fetching the referenced session
-and re-checking its evidence — is what upgrades the claim to independently
-checked (§9, §10.3).
+To a generic verifier this event proves only that the attested aggregator
+*asserted* the outcome; deep audit (§10.3) upgrades it to independently
+checked.
 
 ### 8.5 Signature
 
@@ -945,10 +910,9 @@ canonical_bytes = JCS(receipt minus signature.value)
   browser-native and standard-library cryptography.
 - `ecdsa-secp256k1` — `value` is a 65-byte recoverable signature
   `r || s || v` over `sha256(canonical_bytes)`, hex-encoded. `v` is the
-  recovery id (`0..3`; verifiers SHOULD also accept `27..30` minus 27). This
-  is deliberately not the JOSE ES256K `r || s` shape; 64-byte signatures MUST
-  be rejected. The recoverable form exists for the EVM ecosystem, where
-  `ecrecover` makes on-chain receipt verification cheap.
+  recovery id (`0..3`; verifiers SHOULD also accept `27..30` minus 27). Not
+  the JOSE ES256K shape — 64-byte signatures MUST be rejected. The
+  recoverable form serves EVM `ecrecover`.
 
 The verifier MUST additionally check that `signature.key_id` names a key in
 the established keyset's `receipt_signing_keys`, that `signature.algo`
@@ -967,11 +931,10 @@ Receipts for unauthenticated requests MAY be publicly retrievable.
 ## 9. Attested Sessions
 
 An attested session is an immutable record of one verified upstream **TEE
-channel** — the remote attested service an aggregator binds requests to. It
-exists so that "the aggregator verified the upstream" is not a bare
-assertion: the session carries the claims, the channel binding, and the
-evidence, and its identifier is a content hash, so the record a verifier
-fetches is exactly the record the receipt committed to.
+channel** — the remote attested service an aggregator binds requests to. The
+session carries the claims, channel binding, and evidence; its identifier is
+a content hash, so the fetched record is exactly what the receipt committed
+to.
 
 Sessions are per channel, not per model or per request: a router-style
 upstream that serves many models behind one TEE yields one session, and the
@@ -1042,10 +1005,8 @@ Note the wire record omits absent optional fields (`endpoint`, `identity`,
 verifier recomputing the id restores the nulls.
 
 Recomputing `session_id` from a fetched record is what makes it
-tamper-evident; there is no separate session signature. Trust in the record
-comes from the receipt: a signed receipt from an accepted workload commits
-to the `session_id`, and the content addressing makes the referenced record
-immutable.
+tamper-evident; there is no session signature. Trust comes from the signed
+receipt that commits to the id.
 
 ### 9.3 Typed claims
 
@@ -1077,16 +1038,12 @@ verifier output such as `tcb_status`, `gpu_arch`, measurement values); these
 are inputs to the typed claims, not claims themselves.
 
 `gpu_attested` MUST NOT be asserted unless the GPU evidence is nonce-bound
-to the verification round. On current hardware the GPU report has no
-hardware-rooted binding to the serving CPU TEE — the gap this claim's
-definition acknowledges; platforms with PCIe TDISP / TEE-I/O device binding
-are expected to close it, at which point a profile can demand the stronger
-statement.
+to the verification round. PCIe TDISP / TEE-I/O is expected to close the
+CPU-binding gap noted above, at which point a profile can demand the
+stronger statement.
 
 The same claims object is embedded in the receipt's `upstream.verified`
-event, so a **shallow audit** (trust the accepted aggregator's signature)
-reads verdicts directly from the receipt, and a **deep audit** follows
-`session_id` and re-checks the evidence.
+event; §10.3 defines the shallow and deep audits over it.
 
 ## 10. Verification Procedure
 
@@ -1201,35 +1158,27 @@ act on the status.
   `workload_keyset_digest` through the attestation report.
 - **Binding is not custody.** Every keyset entry needs a private-key custody
   story (§4.5), checked by the verifier profile.
-- **Quote and endorsement are both required.** Each keyset rotation needs a
-  fresh report binding the new digest; there is no endorsement-only rotation.
-- **Headers are hints.** `X-ACI-Identity` and friends are unauthenticated;
-  clients act on them only by re-fetching attestation.
+- **Quote and endorsement are both required** (§4.4); every rotation needs a
+  fresh report binding the new digest.
+- **Headers are hints** (§6.2): unauthenticated; act on a change only by
+  re-fetching attestation.
 - **Under E2EE, cleartext hashes are service-observed.** For E2EE requests,
   `request.received.body_hash` commits to the JSON body after field
   decryption as serialized by the service, not to the ciphertext the client
-  sent; likewise `response.returned.cleartext_hash` for an E2EE response
-  commits to the service's pre-encryption serialization. A client that wants
-  to reproduce these hashes must reproduce that serialization; otherwise it
-  verifies `wire_hash` (always the exact bytes it saw) and the AAD binding,
-  which already ties every encrypted field to its exact request context.
-- **Aggregator claims are claims.** `upstream.verified` and the session's
-  typed claims are statements by the aggregator workload. Their value rests
-  on (a) the aggregator's own attestation and reviewed source, and (b) the
-  deep-audit path re-checking the stored evidence. The `source` field keeps
-  provider assertions from masquerading as hardware proofs.
-- **Receipts are for the client to keep.** A receipt is a transparency
-  artifact the client retains at request time as its own record of what the
-  workload committed to — not a query it runs years later. The service's
-  `served_at` is self-asserted; ACI provides no trusted timestamp, so a
-  receipt's meaning comes from the client correlating it, when received, to a
-  response it actually got. Services retain receipts only briefly (§8.1).
-- **Receipts are not a transparency log.** ACI v1 receipts prove what one
-  service signed; they do not provide external timestamps or append-only
-  history. Long-term non-repudiation needs an external log. Receipts and
-  sessions are deliberately log-ready — signed, content-addressed, bounded —
-  and IETF SCITT (RFC 9943) with COSE Receipts (RFC 9942) is the anticipated
-  anchoring path.
+  sent; likewise `response.returned.cleartext_hash` commits to the service's
+  pre-encryption serialization. A client that cannot reproduce that
+  serialization verifies `wire_hash` (the exact bytes it saw) plus the AAD
+  binding instead.
+- **Aggregator claims are claims** — statements by the aggregator workload,
+  worth what its own attestation plus deep audit (§10.3) make them; `source`
+  keeps provider assertions distinct from hardware proofs.
+- **Receipts are records for the client, not a transparency log.** The
+  client fetches its receipt promptly (§8.1) and correlates it to a response
+  it actually got; `served_at` is self-asserted, and ACI provides no trusted
+  timestamp or append-only history. Long-term non-repudiation needs an
+  external log — receipts and sessions are log-ready (signed,
+  content-addressed, bounded), with SCITT (RFC 9943) and COSE Receipts
+  (RFC 9942) the anticipated anchor.
 - **ACI does not hide who is asking.** It proves what is serving and what
   happened, not client anonymity: the service sees client IPs and
   credentials. Deployments that need unlinkability compose a relay layer
@@ -1263,17 +1212,15 @@ use the `/v1/aci/*` endpoints and ignore compatibility fields.
 - A public append-only transparency log for receipts or sessions (SCITT is
   the anticipated binding; see §12).
 - Network metadata privacy — client IP unlinkability and anonymous
-  credentials. Compose an OHTTP relay (RFC 9458) in front of an ACI service.
+  credentials (compose an OHTTP relay, §12).
 - Continuity across identity-key rotation (operational key rotation under
   one identity is in scope).
 - Credential issuance for attestation-unaware relying parties (X.509, JWT
   issuance after verification).
 - JOSE/COSE/X.509 bindings for keys and signatures (JWK key export, JWS
   receipt envelopes) — see the §4.6 design note.
-- A core-defined deny-list distribution channel (CRL/OCSP equivalent) or
-  transparency log for revocations. ACI defines the revocation statement and
-  the identifiers a deny-list keys on (§4.7); distribution is profile- and
-  deployment-specific.
+- A core-defined deny-list distribution channel (CRL/OCSP equivalent); ACI
+  defines the revocation statement and identifiers (§4.7), not distribution.
 - Soft rotation that changes keys without fresh attestation.
 - Cross-replica key-distribution protocols.
 
