@@ -275,7 +275,7 @@ impl AciService {
                     Some(deadline) => match tokio::time::timeout(deadline, reverify).await {
                         Ok(outcome) => outcome,
                         Err(_) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 route = %route_id,
                                 elapsed_ms = attempt_started.elapsed().as_millis() as u64,
                                 "streaming candidate abandoned before responding"
@@ -391,7 +391,7 @@ impl AciService {
                         }
                     };
                     if let Err((status, err)) = outcome {
-                        tracing::info!(
+                        tracing::debug!(
                             route = %route_id,
                             status,
                             elapsed_ms = attempt_started.elapsed().as_millis() as u64,

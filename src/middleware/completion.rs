@@ -510,7 +510,7 @@ async fn run_streaming(run: StreamingRun) -> Response {
         // running. From here on the status is pinned at 200 and a total
         // failure becomes an in-band error event.
         None => {
-            tracing::info!(
+            tracing::debug!(
                 request_id = %request_id,
                 grace_ms = grace.map(|g| g.as_millis() as u64),
                 "streaming early commit: response committed before the upstream resolved"
