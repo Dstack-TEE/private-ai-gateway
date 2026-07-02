@@ -1,7 +1,8 @@
 # Attested Confidential Inference
 
 This page is the product-neutral source for `{PRODUCT_NAME}` inference docs.
-Product docs should replace every placeholder before publishing.
+Product docs should replace every placeholder before publishing. The
+normative protocol definition is the [ACI Spec](aci-spec.md).
 
 Primary reader: developers who call the OpenAI-compatible API and verifiers who
 need to prove which attested gateway served a response.
