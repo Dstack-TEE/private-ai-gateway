@@ -427,6 +427,99 @@ async fn chat_default_required_fails_closed_without_verifier() {
 }
 
 #[tokio::test]
+async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
+    // Direct path (no control middleware) on the Anthropic surface: an upstream 5xx
+    // caused by a client image URL becomes a 400 in the *Anthropic* error envelope,
+    // and the classification survives the buffered path (Findings: surface-aware
+    // envelope + classify on the cleartext body).
+    struct ErrUpstream;
+    #[async_trait]
+    impl UpstreamBackend for ErrUpstream {
+        fn name(&self) -> &str {
+            "err-upstream"
+        }
+        fn url_origin(&self) -> Option<&str> {
+            Some("http://err-upstream")
+        }
+        async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            let mut headers = std::collections::HashMap::new();
+            headers.insert("content-type".to_string(), "application/json".to_string());
+            Ok(UpstreamResponse {
+                status_code: 500,
+                body: br#"{"error":{"message":"403, message='Forbidden', url='https://img.example/x.jpg'","type":"InternalServerError"}}"#.to_vec(),
+                headers,
+                served_instance_id: None,
+            })
+        }
+        async fn forward_verified_prepared(
+            &self,
+            req: PreparedUpstreamRequest,
+            _event: &UpstreamVerifiedEvent,
+        ) -> Result<UpstreamResponse, UpstreamError> {
+            self.forward(req.request).await
+        }
+    }
+
+    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    cfg.service_capabilities = ServiceCapabilities::default();
+    let svc = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(ErrUpstream),
+            Arc::new(InMemoryReceiptStore::default()),
+            cfg,
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let app = build_router(svc.clone());
+
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": [
+            { "type": "image", "source": { "type": "url", "url": "https://img.example/x.jpg" } }
+        ]}]
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("x-upstream-verification", "none")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // The 400 is receipt-backed (the remap happens in the service before finalize),
+    // so it carries an x-receipt-id and the receipt is retrievable — the response is
+    // still provable, unlike a header-less body swapped in after signing.
+    let receipt_id = resp
+        .headers()
+        .get("x-receipt-id")
+        .expect("image-input 400 must still carry a receipt id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(svc.get_receipt_by_receipt_id(&receipt_id).is_some());
+    let json: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    // Anthropic envelope shape (not OpenAI): top-level "type":"error".
+    assert_eq!(json["type"], serde_json::json!("error"));
+    assert_eq!(
+        json["error"]["type"],
+        serde_json::json!("invalid_request_error")
+    );
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("https://img.example/x.jpg"));
+}
+
+#[tokio::test]
 async fn chat_opt_out_forwards_and_signs_receipt_with_failed_event() {
     let h = make_harness();
     let app = build_router(h.service.clone());

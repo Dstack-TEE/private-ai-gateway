@@ -77,10 +77,23 @@ pub(super) async fn forward_to_backend(
                 (status, resp_headers, body).into_response()
             }
             Ok(StreamingForwardResult::UpstreamError(forward)) => {
-                let status =
-                    StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-                let resp_headers = upstream_direct_response_headers(&forward.upstream_headers);
-                (status, resp_headers, forward.upstream_body).into_response()
+                // The streaming error body is cleartext (E2EE applies to the stream,
+                // not this pre-stream error), so classify and remap it here directly.
+                match image_input_error_response(
+                    input.endpoint_path,
+                    &input.received_body,
+                    forward.upstream_status,
+                    &forward.upstream_body,
+                ) {
+                    Some(resp) => resp,
+                    None => {
+                        let status =
+                            StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
+                        let resp_headers =
+                            upstream_direct_response_headers(&forward.upstream_headers);
+                        (status, resp_headers, forward.upstream_body).into_response()
+                    }
+                }
             }
             Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_error_response(uv),
             Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
@@ -105,6 +118,9 @@ pub(super) async fn forward_to_backend(
         .await;
     match result {
         Ok(forward) => {
+            // The service already remapped a client image-URL fetch failure to a
+            // surface-correct 400 (with a matching receipt + E2EE wire body), so the
+            // buffered response is returned uniformly here.
             let resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
                 &forward.upstream_headers,
@@ -305,6 +321,25 @@ pub(super) fn upstream_direct_response(
     }
     let status = StatusCode::from_u16(upstream.status_code).unwrap_or(StatusCode::BAD_GATEWAY);
     (status, headers, upstream.body).into_response()
+}
+
+/// The surface-appropriate 400 when the upstream error is a client image-URL
+/// fetch failure; `None` for any other error (caller keeps verbatim passthrough).
+fn image_input_error_response(
+    endpoint_path: &str,
+    received_body: &[u8],
+    upstream_status: u16,
+    upstream_body: &[u8],
+) -> Option<Response> {
+    use crate::middleware::errors::{image_input_error_parts, parts_response, surface_for_path};
+    let (status, body) = image_input_error_parts(
+        surface_for_path(endpoint_path),
+        received_body,
+        upstream_status,
+        upstream_body,
+        None,
+    )?;
+    Some(parts_response(status, body))
 }
 
 pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
