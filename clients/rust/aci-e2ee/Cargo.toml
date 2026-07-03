@@ -1,0 +1,15 @@
+[package]
+name = "aci-e2ee"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Client-side ACI end-to-end encryption (spec §7): encrypt request fields to an attested service E2EE key."
+
+[dependencies]
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+k256 = { version = "0.13", features = ["ecdh", "arithmetic"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
