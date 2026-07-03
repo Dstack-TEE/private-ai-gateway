@@ -16,32 +16,40 @@ use k256::ecdsa::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
+use x25519_dalek::StaticSecret as X25519SecretKey;
 
 use crate::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
-    decrypt_with_secret_key, ed25519_public_key_hex, legacy_ecdsa_public_key_from_secret,
-    public_key_from_secret, secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
-    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM,
+    decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
+    legacy_ecdsa_public_key_from_secret, public_key_from_secret, secret_key_from_bytes,
+    x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
+    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
 };
 use crate::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, KeyProvider, LegacySignature, Quote,
-    Quoter, ALGO_ECDSA_SECP256K1, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
+    Quoter, ALGO_ECDSA_SECP256K1, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
 use crate::aci::types::{KeyedPublicKey, PublicKeyMaterial, TlsSpki};
 
 const IDENTITY_PURPOSE: &str = "aci.identity.v1";
 const RECEIPT_PURPOSE: &str = "aci.receipt.v1";
+const RECEIPT_ED25519_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_PURPOSE: &str = "aci.e2ee.v1";
+const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
 
 #[derive(Debug, Clone)]
 pub struct DstackAciProviderConfig {
     pub identity_path: String,
     pub receipt_path: String,
+    pub ed25519_receipt_path: String,
     pub e2ee_path: String,
+    pub x25519_e2ee_path: String,
     pub legacy_ed25519_path: String,
     pub receipt_key_id: String,
+    pub ed25519_receipt_key_id: String,
     pub e2ee_key_id: String,
+    pub x25519_e2ee_key_id: String,
     pub legacy_ed25519_key_id: String,
 }
 
@@ -50,10 +58,14 @@ impl Default for DstackAciProviderConfig {
         Self {
             identity_path: "aci/identity/v1".to_string(),
             receipt_path: "aci/receipt/v1".to_string(),
+            ed25519_receipt_path: "aci/receipt-ed25519/v1".to_string(),
             e2ee_path: "aci/e2ee/v1".to_string(),
+            x25519_e2ee_path: "aci/e2ee-x25519/v1".to_string(),
             legacy_ed25519_path: "aci/legacy-ed25519/v1".to_string(),
             receipt_key_id: "dstack-kms-receipt-v1".to_string(),
+            ed25519_receipt_key_id: "dstack-kms-receipt-ed25519-v1".to_string(),
             e2ee_key_id: "dstack-kms-e2ee-v1".to_string(),
+            x25519_e2ee_key_id: "dstack-kms-e2ee-x25519-v1".to_string(),
             legacy_ed25519_key_id: "dstack-kms-legacy-ed25519-v1".to_string(),
         }
     }
@@ -74,14 +86,20 @@ pub struct DstackAciProvider {
     client: Arc<DstackClient>,
     identity: K256SigningKey,
     receipt: K256SigningKey,
+    ed25519_receipt: Ed25519SigningKey,
     e2ee: k256::SecretKey,
+    x25519_e2ee: X25519SecretKey,
     legacy_ed25519: Ed25519SigningKey,
     identity_evidence: KmsKeyEvidence,
     receipt_evidence: KmsKeyEvidence,
+    ed25519_receipt_evidence: KmsKeyEvidence,
     e2ee_evidence: KmsKeyEvidence,
+    x25519_e2ee_evidence: KmsKeyEvidence,
     legacy_ed25519_evidence: KmsKeyEvidence,
     receipt_key_id: String,
+    ed25519_receipt_key_id: String,
     e2ee_key_id: String,
+    x25519_e2ee_key_id: String,
     legacy_ed25519_key_id: String,
 }
 
@@ -104,14 +122,30 @@ impl DstackAciProvider {
                 .await?;
         let (receipt, receipt_evidence) =
             load_kms_signing_key(&client, "receipt", &config.receipt_path, RECEIPT_PURPOSE).await?;
+        let (ed25519_receipt, ed25519_receipt_evidence) = load_kms_ed25519_key(
+            &client,
+            "receipt-ed25519",
+            &config.ed25519_receipt_path,
+            RECEIPT_ED25519_PURPOSE,
+            ALGO_ED25519,
+        )
+        .await?;
         let (e2ee_signing_key, e2ee_evidence) =
             load_kms_signing_key(&client, "e2ee", &config.e2ee_path, E2EE_PURPOSE).await?;
         let e2ee = secret_key_from_bytes(&e2ee_signing_key.to_bytes())?;
+        let (x25519_e2ee, x25519_e2ee_evidence) = load_kms_x25519_key(
+            &client,
+            "e2ee-x25519",
+            &config.x25519_e2ee_path,
+            E2EE_X25519_PURPOSE,
+        )
+        .await?;
         let (legacy_ed25519, legacy_ed25519_evidence) = load_kms_ed25519_key(
             &client,
             "legacy-ed25519",
             &config.legacy_ed25519_path,
             LEGACY_ED25519_PURPOSE,
+            E2EE_ALGO_LEGACY_ED25519,
         )
         .await?;
 
@@ -119,14 +153,20 @@ impl DstackAciProvider {
             client,
             identity,
             receipt,
+            ed25519_receipt,
             e2ee,
+            x25519_e2ee,
             legacy_ed25519,
             identity_evidence,
             receipt_evidence,
+            ed25519_receipt_evidence,
             e2ee_evidence,
+            x25519_e2ee_evidence,
             legacy_ed25519_evidence,
             receipt_key_id: config.receipt_key_id,
+            ed25519_receipt_key_id: config.ed25519_receipt_key_id,
             e2ee_key_id: config.e2ee_key_id,
+            x25519_e2ee_key_id: config.x25519_e2ee_key_id,
             legacy_ed25519_key_id: config.legacy_ed25519_key_id,
         })
     }
@@ -188,7 +228,50 @@ async fn load_kms_ed25519_key(
     role: &'static str,
     path: &str,
     purpose: &'static str,
+    algo: &'static str,
 ) -> Result<(Ed25519SigningKey, KmsKeyEvidence), KeyError> {
+    let (key_bytes, signature_chain) = load_kms_raw32_key(client, role, path, purpose).await?;
+    let key = Ed25519SigningKey::from_bytes(&key_bytes);
+    let public_key_hex = ed25519_public_key_hex(&key);
+    let evidence = KmsKeyEvidence {
+        role,
+        path: path.to_string(),
+        purpose,
+        algo,
+        public_key_hex,
+        signature_chain,
+    };
+    Ok((key, evidence))
+}
+
+async fn load_kms_x25519_key(
+    client: &DstackClient,
+    role: &'static str,
+    path: &str,
+    purpose: &'static str,
+) -> Result<(X25519SecretKey, KmsKeyEvidence), KeyError> {
+    let (key_bytes, signature_chain) = load_kms_raw32_key(client, role, path, purpose).await?;
+    let key = x25519_secret_key_from_bytes(&key_bytes)?;
+    let public_key_hex = x25519_public_key_hex(&key);
+    let evidence = KmsKeyEvidence {
+        role,
+        path: path.to_string(),
+        purpose,
+        algo: E2EE_ALGO_X25519_AESGCM,
+        public_key_hex,
+        signature_chain,
+    };
+    Ok((key, evidence))
+}
+
+/// Release a KMS key and require it to be exactly 32 bytes — the raw scalar for
+/// Ed25519 and X25519 keys alike.
+async fn load_kms_raw32_key(
+    client: &DstackClient,
+    role: &'static str,
+    path: &str,
+    purpose: &'static str,
+) -> Result<([u8; 32], Vec<String>), KeyError> {
     let response = client
         .get_key(Some(path.to_string()), Some(purpose.to_string()))
         .await
@@ -202,17 +285,7 @@ async fn load_kms_ed25519_key(
             key_bytes.len()
         ))
     })?;
-    let key = Ed25519SigningKey::from_bytes(&key_bytes);
-    let public_key_hex = ed25519_public_key_hex(&key);
-    let evidence = KmsKeyEvidence {
-        role,
-        path: path.to_string(),
-        purpose,
-        algo: E2EE_ALGO_LEGACY_ED25519,
-        public_key_hex,
-        signature_chain: response.signature_chain,
-    };
-    Ok((key, evidence))
+    Ok((key_bytes, response.signature_chain))
 }
 
 fn signing_key_from_kms_response(
@@ -305,18 +378,34 @@ impl KeyProvider for DstackAciProvider {
     }
 
     fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
-        vec![KeyedPublicKey {
-            key_id: self.receipt_key_id.clone(),
-            algo: ALGO_ECDSA_SECP256K1.to_string(),
-            public_key_hex: public_key_hex(&self.receipt),
-        }]
+        // Ed25519 is the default (first) signer per §8.5 RECOMMENDED; the
+        // secp256k1 key stays listed for EVM `ecrecover` verifiers.
+        vec![
+            KeyedPublicKey {
+                key_id: self.ed25519_receipt_key_id.clone(),
+                algo: ALGO_ED25519.to_string(),
+                public_key_hex: ed25519_public_key_hex(&self.ed25519_receipt),
+            },
+            KeyedPublicKey {
+                key_id: self.receipt_key_id.clone(),
+                algo: ALGO_ECDSA_SECP256K1.to_string(),
+                public_key_hex: public_key_hex(&self.receipt),
+            },
+        ]
     }
 
     fn sign_receipt(&self, key_id: &str, canonical_bytes: &[u8]) -> Result<Vec<u8>, KeyError> {
+        if key_id == self.ed25519_receipt_key_id {
+            // ed25519: raw 64-byte RFC 8032 signature over canonical_bytes.
+            use ed25519_dalek::Signer;
+            let sig = self.ed25519_receipt.sign(canonical_bytes);
+            return Ok(sig.to_bytes().to_vec());
+        }
         if key_id != self.receipt_key_id {
             return Err(KeyError::UnknownReceiptKeyId(key_id.to_string()));
         }
 
+        // ecdsa-secp256k1: 65-byte recoverable signature over sha256(canonical_bytes).
         let prehash: [u8; 32] = Sha256::digest(canonical_bytes).into();
         let (sig, recid): (K256Signature, RecoveryId) = self
             .receipt
@@ -334,6 +423,11 @@ impl KeyProvider for DstackAciProvider {
                 key_id: self.e2ee_key_id.clone(),
                 algo: E2EE_ALGO_SECP256K1_AESGCM.to_string(),
                 public_key_hex: public_key_from_secret(&self.e2ee),
+            },
+            KeyedPublicKey {
+                key_id: self.x25519_e2ee_key_id.clone(),
+                algo: E2EE_ALGO_X25519_AESGCM.to_string(),
+                public_key_hex: x25519_public_key_hex(&self.x25519_e2ee),
             },
             KeyedPublicKey {
                 key_id: format!("{}-legacy-ecdsa", self.e2ee_key_id),
@@ -354,10 +448,13 @@ impl KeyProvider for DstackAciProvider {
         ciphertext_hex: &str,
         aad: &[u8],
     ) -> Result<Vec<u8>, KeyError> {
-        if key_id != self.e2ee_key_id {
-            return Err(KeyError::UnknownE2eeKeyId(key_id.to_string()));
+        if key_id == self.e2ee_key_id {
+            return decrypt_with_secret_key(&self.e2ee, ciphertext_hex, aad);
         }
-        decrypt_with_secret_key(&self.e2ee, ciphertext_hex, aad)
+        if key_id == self.x25519_e2ee_key_id {
+            return decrypt_x25519_with_secret_key(&self.x25519_e2ee, ciphertext_hex, aad);
+        }
+        Err(KeyError::UnknownE2eeKeyId(key_id.to_string()))
     }
 
     fn decrypt_legacy_e2ee(
@@ -425,8 +522,10 @@ impl KeyProvider for DstackAciProvider {
             "provider": "dstack-kms",
             "keys": [
                 key_evidence_json(&self.identity_evidence),
+                key_evidence_json(&self.ed25519_receipt_evidence),
                 key_evidence_json(&self.receipt_evidence),
                 key_evidence_json(&self.e2ee_evidence),
+                key_evidence_json(&self.x25519_e2ee_evidence),
                 key_evidence_json(&self.legacy_ed25519_evidence),
             ],
         })

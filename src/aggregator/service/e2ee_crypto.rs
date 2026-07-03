@@ -6,8 +6,8 @@ use super::streaming::E2eeSseTransformer;
 use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 use crate::aci::canonical::canonicalize;
 use crate::aci::e2ee::{
-    encrypt_for_public_key, encrypt_legacy_for_public_key, normalize_secp256k1_public_key_hex,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,
+    encrypt_aci_e2ee_for_public_key, encrypt_legacy_for_public_key,
+    normalize_secp256k1_public_key_hex, E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,
 };
 use crate::aci::keys::KeyProvider;
 
@@ -909,8 +909,10 @@ pub(super) fn encrypt_response_plaintext(
 ) -> Result<String, E2eeError> {
     match ctx.aad_mode {
         E2eeAadMode::AciV2 => {
+            // The response suite is the request's selected service E2EE key
+            // algo; `client_public_key_hex` is already normalized for it.
             let aad = aad.ok_or(E2eeError::EncryptionFailed)?;
-            encrypt_for_public_key(&ctx.client_public_key_hex, plaintext, aad)
+            encrypt_aci_e2ee_for_public_key(&ctx.algo, &ctx.client_public_key_hex, plaintext, aad)
                 .map_err(|_| E2eeError::EncryptionFailed)
         }
         E2eeAadMode::LegacyV1 | E2eeAadMode::LegacyV2 => {

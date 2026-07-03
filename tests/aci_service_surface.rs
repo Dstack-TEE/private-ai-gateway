@@ -20,9 +20,10 @@ use futures_util::stream;
 use private_ai_gateway::aci::canonical::{canonicalize, sha256_hex};
 use private_ai_gateway::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
-    decrypt_with_secret_key, ed25519_public_key_hex, encrypt_for_public_key,
-    encrypt_legacy_for_public_key, legacy_ecdsa_public_key_from_secret, public_key_from_secret,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V2,
+    decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
+    encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
+    legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
 };
 use private_ai_gateway::aci::receipt::{
     UpstreamVerifiedEvent, VerificationResult, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
@@ -40,6 +41,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::http::build_router;
 use serde_json::Value;
 use tower::ServiceExt;
+use x25519_dalek::StaticSecret as X25519SecretKey;
 
 use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
@@ -389,6 +391,48 @@ fn e2ee_chat_request(
     });
     let headers = vec![
         ("x-client-pub-key", public_key_from_secret(client_secret)),
+        ("x-model-pub-key", model_key.public_key_hex.clone()),
+        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
+        ("x-e2ee-nonce", nonce.to_string()),
+        ("x-e2ee-timestamp", timestamp.to_string()),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+/// Build an X25519-suite E2EE chat request: the client encrypts whole message
+/// content to the keyset's X25519 service key (§7.1 RECOMMENDED suite). Suite
+/// selection is by the `algo` of the matched `X-Model-Pub-Key` entry (§7.4).
+fn e2ee_x25519_chat_request(
+    h: &Harness,
+    client_secret: &X25519SecretKey,
+    nonce: &str,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model = "aci-model";
+    let timestamp = 1_700_000_000u64;
+    let model_key = h
+        .service
+        .keyset()
+        .e2ee_public_keys
+        .iter()
+        .find(|k| k.algo == E2EE_ALGO_X25519_AESGCM)
+        .expect("x25519 e2ee key is published")
+        .clone();
+    let aad = aci_request_aad(
+        &model_key.algo,
+        model,
+        "messages.0.content",
+        nonce,
+        timestamp,
+    );
+    let encrypted_content =
+        encrypt_x25519_for_public_key(&model_key.public_key_hex, b"hello", &aad).unwrap();
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [{"role": "user", "content": encrypted_content}],
+    });
+    let headers = vec![
+        ("x-client-pub-key", x25519_public_key_hex(client_secret)),
         ("x-model-pub-key", model_key.public_key_hex.clone()),
         ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
         ("x-e2ee-nonce", nonce.to_string()),
@@ -809,6 +853,71 @@ async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire
         receipt_event(&receipt, EVENT_TRANSPARENCY_RESPONSE_MODIFIED),
         &serde_json::json!({})
     );
+}
+
+#[tokio::test]
+async fn e2ee_v2_x25519_suite_selected_by_model_key_round_trips() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x71u8; 32]);
+    let nonce = "nonce-x25519";
+    let (encrypted_body, headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    // The response header follows the suite selected by X-Model-Pub-Key (§7.4).
+    assert_eq!(
+        header(&resp.headers, "x-e2ee-algo"),
+        E2EE_ALGO_X25519_AESGCM
+    );
+
+    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&upstream_body).unwrap()["messages"][0]["content"],
+        "hello"
+    );
+
+    // The service encrypts the response back under X25519 to the client key.
+    let encrypted_response = json_body(&resp);
+    let encrypted_content = encrypted_response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+    let response_aad = aci_response_aad(
+        E2EE_ALGO_X25519_AESGCM,
+        "aci-model",
+        "chat-aci-1",
+        "choices.0.message.content",
+        nonce,
+        1_700_000_000,
+    );
+    let decrypted =
+        decrypt_x25519_with_secret_key(&client_secret, encrypted_content, &response_aad).unwrap();
+    assert_eq!(decrypted, b"plain-answer");
+}
+
+#[tokio::test]
+async fn e2ee_v2_model_key_absent_from_keyset_is_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x72u8; 32]);
+    let nonce = "nonce-x25519-stranger";
+    let (encrypted_body, mut headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
+    // Well-formed X25519 key that is not one of the attested service keys.
+    let stranger = x25519_public_key_hex(&X25519SecretKey::from([0x99u8; 32]));
+    for header in headers.iter_mut() {
+        if header.0 == "x-model-pub-key" {
+            header.1 = stranger.clone();
+        }
+    }
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_model_key_mismatch");
 }
 
 #[tokio::test]
