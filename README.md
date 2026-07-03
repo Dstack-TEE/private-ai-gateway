@@ -9,8 +9,9 @@ A relying party evaluates three artifacts before accepting a response: the
 gateway attestation report, the provider verification event for the selected
 route, and the signed receipt that binds the response to the gateway identity.
 
-This repository is a developer preview for the ACI draft in
-[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694). It is
+This repository is the reference implementation of the
+[ACI Spec](spec/aci.md) (earlier draft discussion in
+[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694)). It is
 also the workload that
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher)
 can fetch, build, and run inside a dstack v2 application VM.
