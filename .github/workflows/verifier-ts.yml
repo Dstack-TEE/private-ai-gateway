@@ -1,0 +1,38 @@
+name: verifier-ts
+
+on:
+  pull_request:
+    paths:
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/verifier-ts.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/verifier-ts.yml'
+
+defaults:
+  run:
+    working-directory: clients/verifier-ts
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: clients/verifier-ts/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test (spec vectors)
+        run: npm test
