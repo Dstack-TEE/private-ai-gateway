@@ -92,6 +92,13 @@ pub trait KeyProvider: Send + Sync {
     /// MUST match [`KeyProvider::identity_public_key`]`.algo`.
     fn sign_keyset_endorsement(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError>;
 
+    /// Sign the JCS-canonicalised revocation payload from
+    /// [`super::identity::keyset_revocation_payload`] (§4.7). Uses the same
+    /// identity key and signature encoding as
+    /// [`KeyProvider::sign_keyset_endorsement`]; only the signed payload's
+    /// purpose tag differs.
+    fn sign_keyset_revocation(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError>;
+
     fn receipt_keys(&self) -> Vec<KeyedPublicKey>;
 
     /// Sign the JCS canonical bytes of the receipt minus

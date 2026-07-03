@@ -31,8 +31,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
-    unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, keyset_revoked_response,
+    unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
@@ -200,6 +200,39 @@ pub(super) async fn admin_put_upstreams(
     }
 }
 
+/// Revoke the current workload keyset (§4.7). Guarded by the admin token: the
+/// service signs the revocation payload with the identity key, persists the
+/// statement, and stops serving reports/inference under this keyset. On the
+/// next restart the launcher rolls to a fresh epoch so it can serve again,
+/// while the revoked digest stays listed at `GET /v1/aci/revocations`.
+pub(super) async fn admin_revoke_keyset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = enforce_admin(&state, &headers) {
+        return resp;
+    }
+    match state.service.revoke_current_keyset() {
+        Ok(statement) => Json(json!({
+            "api_version": "aci/1",
+            "revoked": statement,
+        }))
+        .into_response(),
+        Err(e) => internal_error_response(e),
+    }
+}
+
+/// Public transparency surface: every keyset revocation statement this service
+/// has issued (§4.7), so a verifier can reject reports and receipts under a
+/// revoked digest. Unauthenticated, like the attested-session endpoints.
+pub(super) async fn aci_revocations(State(state): State<AppState>) -> Response {
+    Json(json!({
+        "api_version": "aci/1",
+        "revocations": state.service.revocations(),
+    }))
+    .into_response()
+}
+
 pub(super) async fn attestation_report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -318,6 +351,7 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
+        Err(ServiceError::KeysetRevoked) => keyset_revoked_response(),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -489,6 +523,12 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
+    // request would use; stop serving inference under it (§4.7).
+    if state.service.is_keyset_revoked() {
+        return keyset_revoked_response();
+    }
+
     let has_e2ee = has_e2ee_headers(&headers);
     if has_e2ee && state.service.supported_e2ee_versions().is_empty() {
         return unsupported_e2ee_response();

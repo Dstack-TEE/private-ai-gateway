@@ -40,6 +40,10 @@ impl AciService {
         nonce: Option<String>,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
+        // A revoked keyset must stop producing acceptable reports (§4.7).
+        if self.is_keyset_revoked() {
+            return Err(ServiceError::KeysetRevoked);
+        }
         let statement = attestation_statement(&self.keyset, nonce)?;
         let rd = report_data(&statement)?;
         let quote = self.quoter.get_quote(rd).await?;

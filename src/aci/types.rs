@@ -145,6 +145,7 @@ impl WorkloadKeyset {
 
 pub const REPORT_DATA_PURPOSE: &str = "aci.report_data.v1";
 pub const KEYSET_ENDORSEMENT_PURPOSE: &str = "aci.keyset.endorsement.v1";
+pub const KEYSET_REVOCATION_PURPOSE: &str = "aci.keyset.revocation.v1";
 
 /// The named report-data payload that the TEE quote MUST cover.
 ///
@@ -191,6 +192,24 @@ pub struct KeysetEndorsement {
     pub algo: String,
     #[serde(rename = "value")]
     pub value_hex: String,
+}
+
+/// The named payload the identity key signs to revoke a keyset (§4.7). Same
+/// shape as [`KeysetEndorsementPayload`] under a different purpose tag; a
+/// service repudiates the digest it was serving, and a verifier that obtains
+/// the statement rejects reports and receipts under that digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeysetRevocationPayload {
+    pub workload_keyset_digest: String,
+}
+
+impl KeysetRevocationPayload {
+    pub fn to_canonical_value(&self) -> Value {
+        json!({
+            "purpose": KEYSET_REVOCATION_PURPOSE,
+            "workload_keyset_digest": self.workload_keyset_digest,
+        })
+    }
 }
 
 // ---------- §5 Attestation report ----------

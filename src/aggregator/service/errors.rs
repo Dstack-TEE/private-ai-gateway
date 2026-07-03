@@ -29,6 +29,10 @@ pub enum ServiceError {
     Upstream(#[from] UpstreamError),
     #[error("attested session store error: {0}")]
     SessionStore(String),
+    #[error("revocation store error: {0}")]
+    RevocationStore(String),
+    #[error("the current workload keyset has been revoked (§4.7); refusing to serve it")]
+    KeysetRevoked,
     #[error("metrics error: {0}")]
     Metrics(String),
     #[error("missing receipt signing key in keyset")]

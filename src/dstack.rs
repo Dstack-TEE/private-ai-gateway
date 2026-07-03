@@ -377,6 +377,13 @@ impl KeyProvider for DstackAciProvider {
         Ok(sig.to_bytes().to_vec())
     }
 
+    fn sign_keyset_revocation(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
+        // §4.7 revocation verifies exactly like the endorsement (§4.3): the
+        // identity key over the JCS payload, 64-byte `r || s` for secp256k1.
+        let sig: K256Signature = K256Signer::sign(&self.identity, payload);
+        Ok(sig.to_bytes().to_vec())
+    }
+
     fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
         // Ed25519 is the default (first) signer per §8.5 RECOMMENDED; the
         // secp256k1 key stays listed for EVM `ecrecover` verifiers.

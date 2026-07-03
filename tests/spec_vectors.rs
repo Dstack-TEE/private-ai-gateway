@@ -10,6 +10,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 
 use private_ai_gateway::aci::canonical;
+use private_ai_gateway::aci::identity::keyset_revocation_payload;
 use private_ai_gateway::aci::keys::{KeyError, KeyProvider, ALGO_ED25519};
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, ChannelBinding, ReceiptBuilder, UpstreamVerifiedEvent,
@@ -78,6 +79,9 @@ impl KeyProvider for VectorKeys {
         unimplemented!("not exercised by the spec-vector cross-check")
     }
     fn sign_keyset_endorsement(&self, _payload: &[u8]) -> Result<Vec<u8>, KeyError> {
+        unimplemented!("not exercised by the spec-vector cross-check")
+    }
+    fn sign_keyset_revocation(&self, _payload: &[u8]) -> Result<Vec<u8>, KeyError> {
         unimplemented!("not exercised by the spec-vector cross-check")
     }
     fn e2ee_keys(&self) -> Vec<KeyedPublicKey> {
@@ -197,5 +201,27 @@ fn section6_receipt_canonical_digest_and_signature_match_vector() {
     assert_eq!(
         receipt.signature.value_hex,
         RECEIPT_SIGNATURE.replace(char::is_whitespace, "")
+    );
+}
+
+// §4 revocation vector: payload bytes and the Ed25519 identity-key signature.
+const REVOCATION_PAYLOAD: &[u8] = br#"{"purpose":"aci.keyset.revocation.v1","workload_keyset_digest":"sha256:f2fba7e1b1451e0c0231df624f293407692ef939d3e0e55bca723131bea3f1ff"}"#;
+const REVOCATION_SIGNATURE: &str =
+    "5f30e02aa53bb628c7f6410636e9f5e33402d2b0b416a6ed278ea3e6e40b48a9\
+     af6ba6e5e55abb89a7ad4627eca444a73cad9d25e22bf239c9c6b362d48ed50f";
+
+#[test]
+fn section4_keyset_revocation_payload_and_signature_match_vector() {
+    // The revocation payload is built from the revoked keyset digest alone.
+    let payload = keyset_revocation_payload(WORKLOAD_KEYSET_DIGEST).unwrap();
+    assert_eq!(payload, REVOCATION_PAYLOAD);
+
+    // Signed by the identity key (Ed25519 seed 32 × 0x01) exactly like the
+    // endorsement, under a different purpose tag.
+    let identity = SigningKey::from_bytes(&[0x01; 32]);
+    let signature = identity.sign(&payload);
+    assert_eq!(
+        hex::encode(signature.to_bytes()),
+        REVOCATION_SIGNATURE.replace(char::is_whitespace, "")
     );
 }

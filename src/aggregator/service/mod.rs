@@ -23,6 +23,7 @@ use crate::aci::keys::{KeyProvider, Quoter};
 use crate::aci::types::{WorkloadIdentity, WorkloadKeyset};
 use crate::aci::upstream::UpstreamBackend;
 use crate::aggregator::metrics::{MetricsSnapshot, ServiceMetrics};
+use crate::aggregator::revocation_store::{RevocationStatement, RevocationStore};
 use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
@@ -67,6 +68,7 @@ pub struct AciService {
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
     session_store: Arc<dyn SessionStore>,
+    revocation_store: Arc<RevocationStore>,
     keyset: WorkloadKeyset,
     workload_id: String,
     workload_keyset_digest: String,
@@ -165,6 +167,7 @@ impl AciService {
             upstream_verifier,
             receipt_store,
             session_store: Arc::new(InMemorySessionStore::default()),
+            revocation_store: Arc::new(RevocationStore::in_memory()),
             keyset,
             workload_id,
             workload_keyset_digest,
@@ -183,6 +186,46 @@ impl AciService {
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = session_store;
         self
+    }
+
+    /// Swap in a durable revocation store (file-backed in production). Defaults
+    /// to an in-memory store.
+    pub fn with_revocation_store(mut self, revocation_store: Arc<RevocationStore>) -> Self {
+        self.revocation_store = revocation_store;
+        self
+    }
+
+    /// Whether the current keyset digest has been revoked. A revoked service
+    /// stops serving reports and inference under that keyset (§4.7).
+    pub fn is_keyset_revoked(&self) -> bool {
+        self.revocation_store
+            .is_revoked(&self.workload_keyset_digest)
+    }
+
+    /// All revocation statements issued by this service (§4.7), served at
+    /// `GET /v1/aci/revocations`.
+    pub fn revocations(&self) -> Vec<RevocationStatement> {
+        self.revocation_store.list()
+    }
+
+    /// Sign a revocation for the current keyset digest with the identity key,
+    /// persist it, and return the statement (§4.7). Idempotent per digest.
+    /// After this the service stops serving the revoked keyset
+    /// ([`Self::is_keyset_revoked`]).
+    pub fn revoke_current_keyset(&self) -> Result<RevocationStatement, ServiceError> {
+        let payload = identity::keyset_revocation_payload(&self.workload_keyset_digest)?;
+        let signature = self.keys.sign_keyset_revocation(&payload)?;
+        let statement = RevocationStatement::new(
+            self.workload_id.clone(),
+            self.workload_keyset_digest.clone(),
+            self.keys.identity_public_key().algo,
+            hex::encode(signature),
+            self.clock.now_secs(),
+        );
+        self.revocation_store
+            .record(statement.clone())
+            .map_err(|e| ServiceError::RevocationStore(e.to_string()))?;
+        Ok(statement)
     }
 
     pub fn workload_id(&self) -> &str {
