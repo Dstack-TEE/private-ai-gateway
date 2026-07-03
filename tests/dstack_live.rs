@@ -14,6 +14,7 @@ use private_ai_gateway::aci::canonical::sha256_hex;
 use private_ai_gateway::aci::identity;
 use private_ai_gateway::aci::keys::{
     verify_keyset_endorsement, verify_receipt_signature, KeyProvider, Quoter, ALGO_ECDSA_SECP256K1,
+    ALGO_ED25519,
 };
 use private_ai_gateway::aci::receipt::{
     canonical_bytes_for_signing, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
@@ -182,25 +183,33 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
     assert_eq!(identity.public_key_hex.len(), 130);
 
     let receipt_keys = provider.receipt_keys();
-    assert_eq!(receipt_keys.len(), 1);
-    assert_eq!(receipt_keys[0].algo, ALGO_ECDSA_SECP256K1);
-    assert_eq!(receipt_keys[0].public_key_hex.len(), 130);
+    assert_eq!(receipt_keys.len(), 2);
+    // Ed25519 is the default (first) receipt signer; secp256k1 stays listed.
+    assert_eq!(receipt_keys[0].algo, ALGO_ED25519);
+    assert_eq!(receipt_keys[0].public_key_hex.len(), 64);
+    assert_eq!(receipt_keys[1].algo, ALGO_ECDSA_SECP256K1);
+    assert_eq!(receipt_keys[1].public_key_hex.len(), 130);
 
     let e2ee_keys = provider.e2ee_keys();
-    assert_eq!(e2ee_keys.len(), 3);
+    assert_eq!(e2ee_keys.len(), 4);
     assert_eq!(
         e2ee_keys[0].algo,
         private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM
     );
     assert_eq!(e2ee_keys[0].public_key_hex.len(), 130);
-    assert_eq!(e2ee_keys[1].algo, "ecdsa");
-    assert_eq!(e2ee_keys[1].public_key_hex.len(), 128);
-    assert_eq!(e2ee_keys[2].algo, "ed25519");
-    assert_eq!(e2ee_keys[2].public_key_hex.len(), 64);
+    assert_eq!(
+        e2ee_keys[1].algo,
+        private_ai_gateway::aci::e2ee::E2EE_ALGO_X25519_AESGCM
+    );
+    assert_eq!(e2ee_keys[1].public_key_hex.len(), 64);
+    assert_eq!(e2ee_keys[2].algo, "ecdsa");
+    assert_eq!(e2ee_keys[2].public_key_hex.len(), 128);
+    assert_eq!(e2ee_keys[3].algo, "ed25519");
+    assert_eq!(e2ee_keys[3].public_key_hex.len(), 64);
 
     let evidence = provider.key_custody_evidence();
     assert_eq!(evidence["provider"], "dstack-kms");
-    assert_eq!(evidence["keys"].as_array().unwrap().len(), 4);
+    assert_eq!(evidence["keys"].as_array().unwrap().len(), 6);
     assert!(evidence["keys"][0]["signature_chain"]
         .as_array()
         .is_some_and(|chain| !chain.is_empty()));
