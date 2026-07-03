@@ -100,7 +100,7 @@ async fn run() -> Result<(), String> {
         upstream_name: "chutes".to_string(),
         // Live-probe bypass, not a real attestation — leave the provider type
         // unset so the session does not synthesize hardware-proven claims.
-        provider: None,
+        provider_type: None,
         model_id: MODEL.to_string(),
         url_origin: Some(CHUTES_API_BASE.to_string()),
         verifier_id: "live-probe/bypass/v1".to_string(),

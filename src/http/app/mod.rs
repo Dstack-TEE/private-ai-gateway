@@ -45,7 +45,7 @@
 //! * `GET  /v1/aci/receipts/{id}` - the signed ACI receipt (canonical value).
 //! * `GET  /v1/aci/sessions/{session_id}` - the attested-session record a
 //!   receipt references.
-//! * `GET  /v1/aci/sessions?provider=&model=` - list attested sessions.
+//! * `GET  /v1/aci/sessions?upstream_name=&model=` - list attested sessions.
 //!
 //! Legacy aliases for dstack-vllm-proxy compatibility:
 //! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`

@@ -20,6 +20,7 @@ fn builder(_keys: &StaticKeyProvider) -> ReceiptBuilder {
     ReceiptBuilder::new(
         "rcpt-test-1".to_string(),
         Some("chat-xyz".to_string()),
+        Some("demo-model".to_string()),
         format!(
             "sha256:{}",
             "deadbeef".repeat(8) // fake but valid-shaped digest

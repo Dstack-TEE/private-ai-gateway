@@ -57,7 +57,7 @@ pub(super) struct SignatureQuery {
 
 #[derive(Deserialize)]
 pub(super) struct SessionListQuery {
-    provider: Option<String>,
+    upstream_name: Option<String>,
     model: Option<String>,
 }
 
@@ -656,15 +656,16 @@ pub(super) async fn aci_receipt(
 }
 
 /// List the attested TEE channels (one per upstream endpoint), optionally
-/// filtered by `?provider=` (the upstream config name) and/or `?model=`.
+/// filtered by `?upstream_name=` (the operator's upstream config name) and/or
+/// `?model=`.
 ///
 /// Sessions are per-TEE-channel, not per-model, so a `?model=` filter is
 /// resolved to the upstream(s) that serve that model (via the upstream config)
-/// and then matched on `provider`.
+/// and then matched on `upstream_name`.
 ///
 /// Intentionally unauthenticated (like [`attested_session`]): a session record
-/// is a transparency artifact carrying only verification material — provider,
-/// endpoint, the verified identity (e.g. signing address), channel bindings,
+/// is a transparency artifact carrying only verification material — upstream
+/// name, endpoint, the verified identity (e.g. signing address), channel bindings,
 /// claims, and an evidence digest. It holds no request or response content. The
 /// list response carries only the evidence **digest**, not the full evidence
 /// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{id}`) for the
@@ -675,7 +676,7 @@ pub(super) async fn aci_list_sessions(
 ) -> Response {
     let mut sessions = match q.model.as_deref() {
         // Resolve the model to the upstream(s) serving it, then list each
-        // channel's sessions (honoring a provider filter if both are given).
+        // channel's sessions (honoring an upstream_name filter if both are given).
         Some(model) => {
             let names = state
                 .upstream_config
@@ -684,7 +685,7 @@ pub(super) async fn aci_list_sessions(
                 .unwrap_or_default();
             let mut merged = names
                 .iter()
-                .filter(|n| q.provider.as_deref().is_none_or(|p| p == n.as_str()))
+                .filter(|n| q.upstream_name.as_deref().is_none_or(|p| p == n.as_str()))
                 .flat_map(|n| state.service.list_attested_sessions(Some(n)))
                 .collect::<Vec<_>>();
             // Each per-upstream list is already sorted, but the fan-out just
@@ -693,7 +694,9 @@ pub(super) async fn aci_list_sessions(
             sort_sessions_newest_first(&mut merged);
             merged
         }
-        None => state.service.list_attested_sessions(q.provider.as_deref()),
+        None => state
+            .service
+            .list_attested_sessions(q.upstream_name.as_deref()),
     };
     // Keep the digest as the integrity anchor; drop the data-URI bytes from the
     // broad listing.

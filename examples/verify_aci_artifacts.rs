@@ -236,6 +236,11 @@ fn parse_receipt_response(value: Value) -> Result<Receipt, String> {
             Some(Value::String(s)) => Some(s.clone()),
             _ => return Err("receipt chat_id must be string or null".to_string()),
         },
+        model: match obj.get("model") {
+            Some(Value::Null) | None => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => return Err("receipt model must be string or null".to_string()),
+        },
         workload_id: object_string(obj, "workload_id")?,
         workload_keyset_digest: object_string(obj, "workload_keyset_digest")?,
         endpoint: object_string(obj, "endpoint")?,

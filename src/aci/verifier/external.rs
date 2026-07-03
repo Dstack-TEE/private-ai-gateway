@@ -352,7 +352,7 @@ impl ExternalProviderVerifier {
         }
         Ok(UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: Some(self.provider.to_string()),
+            provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: output
@@ -418,7 +418,7 @@ impl ExternalProviderVerifier {
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
-            provider: Some(self.provider.to_string()),
+            provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: format!("{}/external-verifier/v1", self.provider),

@@ -88,7 +88,7 @@ recorded on the receipt's `upstream.verified` event, not on the session.
 struct AttestedSession {
     api_version: String,
     session_id: String,            // "as_" + sha256 over the verified material below
-    provider: String,              // the upstream config name this channel belongs to
+    upstream_name: String,         // the operator's upstream config name this channel belongs to
     endpoint: Option<String>,      // the verified upstream origin
     verifier_id: String,
     established_at: u64,            // when this material was verified
@@ -101,9 +101,10 @@ struct AttestedSession {
 ```
 
 `session_id` is `"as_" + hex(sha256(JCS(material)))` where `material` is the
-immutable subset — provider, endpoint, verifier_id, identity, channel binding,
-claims, and the evidence digest (no model: the channel, not the model, is what
-is attested). Timestamps are excluded so identical material dedups to one id.
+immutable subset — upstream_name, endpoint, verifier_id, identity, channel
+binding, claims, and the evidence digest (no model: the channel, not the model,
+is what is attested). Timestamps are excluded so identical material dedups to one
+id.
 `established_at` records when it was verified; `expires_at` is a *retention*
 window (kept at least as long as the receipts that cite it), not a
 binding-validity deadline — the forwarding path only ever uses a binding from a
@@ -182,8 +183,8 @@ or config.
 `session_claims_for_event` maps a verified upstream event onto the typed claims
 **honestly**: a claim is asserted only when *this* verifier's evidence backs it,
 and the raw `provider_claims` are always preserved verbatim in `extra` so a deep
-auditor sees the full provider scope. The event carries a stable `provider` type
-(distinct from the operator's per-endpoint config `vendor`) that selects the
+auditor sees the full provider scope. The event carries a stable `provider_type`
+(distinct from the operator's per-endpoint config `name`) that selects the
 mapping. A `failed` result asserts nothing.
 
 | Claim | tinfoil | near-ai | chutes | phala-direct | generic |
@@ -310,7 +311,7 @@ Canonical (clean shapes):
   audit) plus the content-addressed `session_id`.
 - `GET /v1/aci/sessions/{session_id}` — the immutable session record, with full
   evidence + per-claim reasons (deep audit).
-- `GET /v1/aci/sessions?provider=&model=` — a provider's attested sessions. This
+- `GET /v1/aci/sessions?upstream_name=&model=` — a provider's attested sessions. This
   is the **preflight survey**: a read of the
   session store (see below), so a user can inspect the attested session + claims
   for a model *before* releasing any data.

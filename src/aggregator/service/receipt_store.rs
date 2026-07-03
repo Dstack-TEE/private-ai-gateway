@@ -176,6 +176,7 @@ mod tests {
             api_version: "aci/1".to_string(),
             receipt_id: id.to_string(),
             chat_id: Some(chat_id.to_string()),
+            model: None,
             workload_id: "wl".to_string(),
             workload_keyset_digest: "sha256:0".to_string(),
             endpoint: "/v1/chat/completions".to_string(),

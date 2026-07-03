@@ -300,6 +300,10 @@ pub struct Receipt {
     pub api_version: String,
     pub receipt_id: String,
     pub chat_id: Option<String>,
+    /// The model the user requested — the top-level `model` of the received
+    /// request, before any service-side rewrite; `null` when the request
+    /// carried none (ACI §8.2).
+    pub model: Option<String>,
     pub workload_id: String,
     pub workload_keyset_digest: String,
     pub endpoint: String,
@@ -328,6 +332,7 @@ impl Receipt {
             "api_version": self.api_version,
             "receipt_id": self.receipt_id,
             "chat_id": self.chat_id,
+            "model": self.model,
             "workload_id": self.workload_id,
             "workload_keyset_digest": self.workload_keyset_digest,
             "endpoint": self.endpoint,
