@@ -125,6 +125,16 @@ pub(super) fn unknown_downstream_host_response(err: ServiceError) -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", err.to_string())
 }
 
+/// The current keyset has been revoked (§4.7); the service refuses to serve
+/// reports or inference under it until it rotates to a fresh epoch on restart.
+pub(super) fn keyset_revoked_response() -> Response {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "keyset_revoked",
+        "the current workload keyset has been revoked; the service is not serving it",
+    )
+}
+
 pub(super) fn error_response(
     status: StatusCode,
     error_type: &str,

@@ -110,6 +110,11 @@ impl KeyProvider for StaticKeyProvider {
         Ok(sig.to_bytes().to_vec())
     }
 
+    fn sign_keyset_revocation(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
+        let sig: K256Signature = K256Signer::sign(&self.identity, payload);
+        Ok(sig.to_bytes().to_vec())
+    }
+
     fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
         vec![KeyedPublicKey {
             key_id: self.receipt_key_id.clone(),
