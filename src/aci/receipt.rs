@@ -54,12 +54,12 @@ pub struct UpstreamVerifiedEvent {
     /// The operator's per-endpoint upstream config `name` (e.g.
     /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
     pub upstream_name: String,
-    /// The provider *type* the verification logic keys on (e.g. "tinfoil",
-    /// "near-ai", "chutes", "phala-direct"). Many `upstream_name` entries can
-    /// share one `provider` (two configs both pointing at Tinfoil). Used to map provider
-    /// evidence onto typed session claims; `None` for generic/static verifiers
-    /// that have no provider type.
-    pub provider: Option<String>,
+    /// The verifier adapter *type* the verification logic keys on (e.g.
+    /// "tinfoil", "near-ai", "chutes", "phala-direct"). Many `upstream_name`
+    /// entries can share one `provider_type` (two configs both pointing at
+    /// Tinfoil). Used to map provider evidence onto typed session claims;
+    /// `None` for generic/static verifiers that have no provider type.
+    pub provider_type: Option<String>,
     pub model_id: String,
     pub url_origin: Option<String>,
     pub verifier_id: String,
@@ -147,7 +147,7 @@ impl UpstreamVerifiedEvent {
         // evidence is not retained here either — `reason` records why it failed.
         serde_json::json!({
             "upstream_name": self.upstream_name,
-            "provider": self.provider,
+            "provider_type": self.provider_type,
             "model_id": self.model_id,
             "url_origin": self.url_origin,
             "verifier_id": self.verifier_id,
@@ -164,6 +164,9 @@ impl UpstreamVerifiedEvent {
 pub struct ReceiptBuilder {
     receipt_id: String,
     chat_id: Option<String>,
+    /// The user-requested model (received request's top-level `model`), before
+    /// any service-side rewrite; `None` when the request carried none (§8.2).
+    model: Option<String>,
     workload_id: String,
     workload_keyset_digest: String,
     endpoint: String,
@@ -178,6 +181,7 @@ impl ReceiptBuilder {
     pub fn new(
         receipt_id: String,
         chat_id: Option<String>,
+        model: Option<String>,
         workload_id: String,
         workload_keyset_digest: String,
         endpoint: String,
@@ -187,6 +191,7 @@ impl ReceiptBuilder {
         Self {
             receipt_id,
             chat_id,
+            model,
             workload_id,
             workload_keyset_digest,
             endpoint,
@@ -417,6 +422,7 @@ impl ReceiptBuilder {
             api_version: "aci/1".to_string(),
             receipt_id: self.receipt_id,
             chat_id: self.chat_id,
+            model: self.model,
             workload_id: self.workload_id,
             workload_keyset_digest: self.workload_keyset_digest,
             endpoint: self.endpoint,

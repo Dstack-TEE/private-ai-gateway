@@ -865,7 +865,7 @@ appear):
   "seq": 2,
   "type": "upstream.verified",
   "upstream_name": "<service-chosen upstream label>",
-  "provider": "<verifier adapter type or null>",
+  "provider_type": "<verifier adapter type or null>",
   "model_id": "<upstream model served>",
   "url_origin": "<https-origin-or-null>",
   "verifier_id": "<verifier implementation id>",
@@ -945,8 +945,8 @@ SPKI, a new measurement, a changed claim) yields a new session.
 ### 9.1 Endpoints
 
 ```text
-GET /v1/aci/sessions/{session_id}      one session, full evidence
-GET /v1/aci/sessions?provider=&model=  list current sessions (evidence digest only)
+GET /v1/aci/sessions/{session_id}           one session, full evidence
+GET /v1/aci/sessions?upstream_name=&model=  list current sessions (evidence digest only)
 ```
 
 Sessions carry only verification material — no request or response content —
@@ -961,7 +961,7 @@ The list form omits the raw evidence `data` and keeps its digest.
 {
   "api_version": "aci/1",
   "session_id": "as_<64-hex>",
-  "provider": "<service-chosen upstream label>",
+  "upstream_name": "<service-chosen upstream label>",
   "endpoint": "<verified-upstream-origin>",
   "verifier_id": "<verifier implementation id>",
   "established_at": 1750000000,
@@ -988,7 +988,7 @@ timestamps and the (re-fetchable) evidence bytes excluded:
 
 ```text
 material = {
-  "provider":        <provider>,
+  "upstream_name":   <upstream_name>,
   "endpoint":        <endpoint-or-null>,
   "verifier_id":     <verifier_id>,
   "identity":        <identity-or-null>,

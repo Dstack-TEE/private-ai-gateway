@@ -82,11 +82,11 @@ pub trait SessionStore: Send + Sync {
     /// the bumped deadline.
     fn renew_session(&self, session_id: &str, new_expires_at: u64, now: u64) -> bool;
 
-    /// List non-expired sessions, optionally filtered by provider (the upstream
-    /// config name). Sessions are per-TEE-channel, so there is no model filter
-    /// here; a model→channel lookup (via the upstream config) belongs to the
-    /// caller.
-    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession>;
+    /// List non-expired sessions, optionally filtered by `upstream_name` (the
+    /// operator's upstream config name). Sessions are per-TEE-channel, so there
+    /// is no model filter here; a model→channel lookup (via the upstream config)
+    /// belongs to the caller.
+    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession>;
 }
 
 /// In-memory session index shared by both stores: the id→session map plus an
@@ -183,12 +183,12 @@ impl SessionIndex {
         true
     }
 
-    fn list(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
+    fn list(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let mut out: Vec<AttestedSession> = self
             .by_id
             .values()
             .filter(|s| now < s.expires_at)
-            .filter(|s| provider.is_none_or(|p| s.provider == p))
+            .filter(|s| upstream_name.is_none_or(|p| s.upstream_name == p))
             .cloned()
             .collect();
         sort_sessions_newest_first(&mut out);
@@ -436,11 +436,11 @@ impl SessionStore for JsonlSessionStore {
             .renew(session_id, new_expires_at, now)
     }
 
-    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
+    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
         self.index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .list(provider, now)
+            .list(upstream_name, now)
     }
 }
 
@@ -476,9 +476,9 @@ impl SessionStore for InMemorySessionStore {
         guard.index.renew(session_id, new_expires_at, now)
     }
 
-    fn list_sessions(&self, provider: Option<&str>, now: u64) -> Vec<AttestedSession> {
+    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        guard.index.list(provider, now)
+        guard.index.list(upstream_name, now)
     }
 }
 
@@ -921,12 +921,12 @@ mod tests {
             let store = open_store(&path);
             store.put_session(good.clone(), 1_000).unwrap();
         }
-        // Hand-append a record whose contents were altered (provider flipped)
-        // but whose session_id was left as the original — so the id no longer
-        // matches a fresh hash of the contents.
+        // Hand-append a record whose contents were altered (upstream_name
+        // flipped) but whose session_id was left as the original — so the id no
+        // longer matches a fresh hash of the contents.
         {
             let mut tampered = good.clone();
-            tampered.provider = "attacker".to_string();
+            tampered.upstream_name = "attacker".to_string();
             let record = SessionLogRecord {
                 seq: 1,
                 ts: 1_001,
