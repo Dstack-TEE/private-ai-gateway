@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use super::e2ee_crypto::{
     decrypt_request_payload, legacy_public_keys_match, normalize_legacy_public_key_for_replay,
-    validate_e2ee_nonce, validate_legacy_e2ee_nonce, validate_payload_model, E2eeFieldCrypto,
+    validate_aci_e2ee_nonce, validate_aci_payload_model, validate_legacy_e2ee_nonce,
+    validate_payload_model, E2eeFieldCrypto,
 };
 use super::{
     AciService, E2eeError, E2eePreparedRequest, E2eeReplayKey, E2eeRequestContext,
@@ -269,7 +270,7 @@ impl AciService {
         let nonce = parts.nonce.ok_or(E2eeError::HeaderMissing)?;
         let timestamp = parts.timestamp.ok_or(E2eeError::HeaderMissing)?;
 
-        validate_e2ee_nonce(nonce)?;
+        validate_aci_e2ee_nonce(nonce)?;
         let timestamp = timestamp
             .parse::<u64>()
             .map_err(|_| E2eeError::InvalidTimestamp)?;
@@ -295,7 +296,7 @@ impl AciService {
 
         let mut payload: Value =
             serde_json::from_slice(body).map_err(|_| E2eeError::DecryptionFailed)?;
-        let request_model = validate_payload_model(&payload)?;
+        let request_model = validate_aci_payload_model(&payload)?;
         self.claim_e2ee_replay(
             client_public_key_hex.clone(),
             model_public_key_hex.clone(),

@@ -43,8 +43,11 @@ pub(super) enum E2eeAadMode {
 }
 
 impl E2eeAadMode {
-    pub(super) fn uses_aad(self) -> bool {
-        matches!(self, Self::AciV2 | Self::LegacyV2)
+    /// The spec ACI v2 path (JCS AAD, §7.3), as opposed to the frozen legacy
+    /// X-Signing-Algo compatibility modes. Per-part multimodal field paths
+    /// (§7.2) exist only here.
+    pub(super) fn is_aci(self) -> bool {
+        matches!(self, Self::AciV2)
     }
 }
 
