@@ -128,6 +128,11 @@ export function responseAad(
   });
 }
 
+/** Generate a fresh `X-E2EE-Nonce`: 32 CSPRNG bytes as 64 lowercase hex characters (spec §7.5). */
+export function generateNonce(): string {
+  return bytesToHex(randomBytes(32));
+}
+
 // --- internals ------------------------------------------------------------
 
 // Exported for the deterministic known-answer test; not part of the public API.

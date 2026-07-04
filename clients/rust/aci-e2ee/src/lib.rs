@@ -19,16 +19,17 @@
 //! # Example
 //!
 //! ```no_run
-//! # use aci_e2ee::{encrypt_request_field, ALGO_X25519};
+//! # use aci_e2ee::{encrypt_request_field, generate_nonce, ALGO_X25519};
 //! // From the attested keyset entry you selected (`X-Model-Pub-Key`):
 //! let service_key_hex = "aa...";
+//! let nonce = generate_nonce(); // 64 lowercase hex chars for X-E2EE-Nonce
 //! // Encrypt the first message's whole content (spec §7.2 field path):
 //! let ciphertext_hex = encrypt_request_field(
 //!     service_key_hex,
 //!     ALGO_X25519,
 //!     "gpt-x",                // request `model`, byte-exact
 //!     "messages.0.content",   // field path
-//!     "6e6f6e63652d31323334", // X-E2EE-Nonce
+//!     &nonce,                 // X-E2EE-Nonce
 //!     1_750_000_000,          // X-E2EE-Timestamp
 //!     b"hello",
 //! ).unwrap();
@@ -113,7 +114,13 @@ pub fn encrypt(
         ALGO_X25519 => {
             let mut eph_secret = [0u8; 32];
             OsRng.fill_bytes(&mut eph_secret);
-            seal_x25519(service_public_key_hex, eph_secret, gcm_nonce, plaintext, aad)
+            seal_x25519(
+                service_public_key_hex,
+                eph_secret,
+                gcm_nonce,
+                plaintext,
+                aad,
+            )
         }
         ALGO_SECP256K1 => {
             let eph = K256SecretKey::random(&mut OsRng);
@@ -159,6 +166,14 @@ pub fn response_aad(
     ])
 }
 
+/// Generate a fresh `X-E2EE-Nonce`: 32 bytes from the OS CSPRNG as 64 lowercase
+/// hex characters (spec §7.5). Use a new one per request.
+pub fn generate_nonce() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 fn seal_x25519(
     recipient_hex: &str,
     ephemeral_secret: [u8; 32],
@@ -197,7 +212,13 @@ fn seal(
     aad: &[u8],
 ) -> Result<Vec<u8>, Error> {
     cipher
-        .encrypt(Nonce::from_slice(gcm_nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            Nonce::from_slice(gcm_nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Encrypt)
 }
 
@@ -218,10 +239,9 @@ fn aes_from_shared(shared: &[u8], info: &[u8]) -> Result<Aes256Gcm, Error> {
 
 fn parse_x25519_public(value: &str) -> Result<X25519PublicKey, Error> {
     let bytes = decode_hex(value)?;
-    let bytes: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::InvalidPublicKey(format!("X25519 key must be 32 bytes, got {}", bytes.len())))?;
+    let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        Error::InvalidPublicKey(format!("X25519 key must be 32 bytes, got {}", bytes.len()))
+    })?;
     Ok(X25519PublicKey::from(bytes))
 }
 
@@ -240,7 +260,8 @@ fn parse_secp256k1_public(value: &str) -> Result<K256PublicKey, Error> {
         }
     }
     .map_err(|e| Error::InvalidPublicKey(e.to_string()))?;
-    K256PublicKey::from_sec1_bytes(encoded.as_bytes()).map_err(|e| Error::InvalidPublicKey(e.to_string()))
+    K256PublicKey::from_sec1_bytes(encoded.as_bytes())
+        .map_err(|e| Error::InvalidPublicKey(e.to_string()))
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, Error> {
@@ -308,8 +329,8 @@ mod tests {
     use super::*;
 
     // spec/test-vectors.md §7 — byte-exact expected AAD.
-    const REQUEST_AAD_VECTOR: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.request.v2","ts":1750000000}"#;
-    const RESPONSE_AAD_VECTOR: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.response.v2","ts":1750000000}"#;
+    const REQUEST_AAD_VECTOR: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2","ts":1750000000}"#;
+    const RESPONSE_AAD_VECTOR: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2","ts":1750000000}"#;
 
     // Fixed inputs for a deterministic known-answer test, shared byte-for-byte
     // with the TypeScript client so the two implementations are proven to
@@ -319,13 +340,13 @@ mod tests {
     const GCM_NONCE: [u8; NONCE_LEN] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
     const KAT_MODEL: &str = "demo-model";
     const KAT_FIELD: &str = "messages.0.content";
-    const KAT_NONCE: &str = "6e6f6e63652d31323334";
+    const KAT_NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const KAT_TS: u64 = 1_750_000_000;
     const KAT_PLAINTEXT: &[u8] = b"hello";
 
     // Cross-language known-answer ciphertexts (see clients/typescript).
-    const KAT_X25519: &str = "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee059769140a79f8c2733c7872ba5c6167c";
-    const KAT_SECP256K1: &str = "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d94f73340e54c1045b20d4d431f17f277";
+    const KAT_X25519: &str = "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee060a4f0f13144b6b54211955b1aefeebd";
+    const KAT_SECP256K1: &str = "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d132d09f59283db7d4c457c294b402312";
 
     fn x25519_recipient_public_hex(secret: [u8; 32]) -> String {
         let sk = X25519StaticSecret::from(secret);
@@ -357,7 +378,8 @@ mod tests {
         let ct = &blob[77..];
         let sk = K256SecretKey::from_slice(&recipient_secret).unwrap();
         let shared = diffie_hellman(sk.to_nonzero_scalar(), eph.as_affine());
-        let cipher = aes_from_shared(shared.raw_secret_bytes().as_ref(), HKDF_INFO_SECP256K1).unwrap();
+        let cipher =
+            aes_from_shared(shared.raw_secret_bytes().as_ref(), HKDF_INFO_SECP256K1).unwrap();
         cipher
             .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad })
             .unwrap()
@@ -369,7 +391,7 @@ mod tests {
             ALGO_X25519,
             "demo-model",
             "messages.0.content",
-            "6e6f6e63652d31323334",
+            KAT_NONCE,
             1_750_000_000,
         );
         assert_eq!(aad, REQUEST_AAD_VECTOR.as_bytes());
@@ -382,7 +404,7 @@ mod tests {
             "demo-model",
             "chatcmpl-123",
             "choices.0.message.content",
-            "6e6f6e63652d31323334",
+            KAT_NONCE,
             1_750_000_000,
         );
         assert_eq!(aad, RESPONSE_AAD_VECTOR.as_bytes());
@@ -410,9 +432,16 @@ mod tests {
     fn secp256k1_round_trip() {
         let recipient = secp256k1_recipient_public_hex(RECIPIENT_SECRET);
         let field = "prompt";
-        let blob =
-            encrypt_request_field(&recipient, ALGO_SECP256K1, "gpt-x", field, "nonce-xyz", 42, b"hi")
-                .unwrap();
+        let blob = encrypt_request_field(
+            &recipient,
+            ALGO_SECP256K1,
+            "gpt-x",
+            field,
+            "nonce-xyz",
+            42,
+            b"hi",
+        )
+        .unwrap();
         let aad = request_aad(ALGO_SECP256K1, "gpt-x", field, "nonce-xyz", 42);
         assert_eq!(open_secp256k1(RECIPIENT_SECRET, &blob, &aad), b"hi");
     }
@@ -426,8 +455,8 @@ mod tests {
         assert_eq!(open_secp256k1(RECIPIENT_SECRET, &blob, &aad), b"x");
     }
 
-    // Deterministic cross-language vectors. Prints the values so they can be
-    // pinned in the TypeScript test; asserts once the constants are filled in.
+    // Deterministic cross-language vectors: these fixed inputs must yield the
+    // same ciphertext here and in clients/typescript, proving byte-level interop.
     #[test]
     fn known_answer_vectors() {
         let aad = request_aad(ALGO_X25519, KAT_MODEL, KAT_FIELD, KAT_NONCE, KAT_TS);
@@ -448,14 +477,17 @@ mod tests {
             &aad2,
         )
         .unwrap();
-        println!("KAT_X25519={x}");
-        println!("KAT_SECP256K1={s}");
-        // Self-consistency regardless of the pinned constants:
+        assert_eq!(x, KAT_X25519, "x25519 KAT drift");
+        assert_eq!(s, KAT_SECP256K1, "secp256k1 KAT drift");
         assert_eq!(open_x25519(RECIPIENT_SECRET, &x, &aad), KAT_PLAINTEXT);
         assert_eq!(open_secp256k1(RECIPIENT_SECRET, &s, &aad2), KAT_PLAINTEXT);
-        if KAT_SECP256K1 != "PLACEHOLDER" {
-            assert_eq!(x, KAT_X25519, "x25519 KAT drift");
-            assert_eq!(s, KAT_SECP256K1, "secp256k1 KAT drift");
-        }
+    }
+
+    #[test]
+    fn generate_nonce_is_fresh_64_lowercase_hex() {
+        let n = generate_nonce();
+        assert_eq!(n.len(), 64);
+        assert!(n.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert_ne!(generate_nonce(), generate_nonce());
     }
 }

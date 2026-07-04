@@ -29,14 +29,17 @@ both reproduce the AAD test vectors in `spec/test-vectors.md §7`.
 2. For each field you send, encrypt the value at its field path and put the hex
    ciphertext back in place, keeping the JSON OpenAI-compatible.
 3. Send `X-E2EE-Version: 2`, `X-Client-Pub-Key` (your key, same curve),
-   `X-E2EE-Nonce`, and `X-E2EE-Timestamp`. Response fields are encrypted to your
-   client key; decrypt them with the matching `responseAad`.
+   `X-E2EE-Nonce`, and `X-E2EE-Timestamp`. The nonce is a fresh 32-byte CSPRNG
+   value as 64 lowercase hex characters (§7.5); use `generate_nonce()` /
+   `generateNonce()`. Response fields are encrypted to your client key; decrypt
+   them with the matching `responseAad`.
 
 ## Rust
 
 ```rust
-use aci_e2ee::{encrypt_request_field, ALGO_X25519};
+use aci_e2ee::{encrypt_request_field, generate_nonce, ALGO_X25519};
 
+let nonce = generate_nonce(); // 64 lowercase hex chars for X-E2EE-Nonce
 let ciphertext_hex = encrypt_request_field(
     service_key_hex,        // X-Model-Pub-Key you selected
     ALGO_X25519,            // its algo
@@ -51,8 +54,9 @@ let ciphertext_hex = encrypt_request_field(
 ## TypeScript
 
 ```ts
-import { encryptRequestField, ALGO_X25519 } from "@aci/e2ee";
+import { encryptRequestField, generateNonce, ALGO_X25519 } from "@aci/e2ee";
 
+const nonce = generateNonce(); // 64 lowercase hex chars for X-E2EE-Nonce
 const ciphertextHex = encryptRequestField(
   serviceKeyHex,          // X-Model-Pub-Key you selected
   ALGO_X25519,            // its algo

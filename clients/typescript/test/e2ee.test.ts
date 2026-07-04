@@ -12,6 +12,7 @@ import {
   ALGO_SECP256K1,
   ALGO_X25519,
   encryptRequestField,
+  generateNonce,
   requestAad,
   responseAad,
   sealSecp256k1,
@@ -20,24 +21,24 @@ import {
 
 // spec/test-vectors.md §7 — byte-exact expected AAD.
 const REQUEST_AAD_VECTOR =
-  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.request.v2","ts":1750000000}';
+  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2","ts":1750000000}';
 const RESPONSE_AAD_VECTOR =
-  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.response.v2","ts":1750000000}';
+  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2","ts":1750000000}';
 
 // Deterministic known-answer ciphertexts produced by the Rust client
 // (clients/rust/aci-e2ee) with the same fixed inputs. Matching them proves the
 // two implementations interoperate byte-for-byte.
 const KAT_X25519 =
-  "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee059769140a79f8c2733c7872ba5c6167c";
+  "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee060a4f0f13144b6b54211955b1aefeebd";
 const KAT_SECP256K1 =
-  "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d94f73340e54c1045b20d4d431f17f277";
+  "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d132d09f59283db7d4c457c294b402312";
 
 const EPH_SECRET = new Uint8Array(32).fill(1);
 const RECIPIENT_SECRET = new Uint8Array(32).fill(2);
 const GCM_NONCE = Uint8Array.from({ length: 12 }, (_, i) => i);
 const KAT_MODEL = "demo-model";
 const KAT_FIELD = "messages.0.content";
-const KAT_NONCE = "6e6f6e63652d31323334";
+const KAT_NONCE = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const KAT_TS = 1750000000;
 const KAT_PLAINTEXT = utf8ToBytes("hello");
 
@@ -64,7 +65,7 @@ function openSecp256k1(recipientSecret: Uint8Array, blobHex: string, aad: Uint8A
 }
 
 test("request AAD matches spec vector", () => {
-  const aad = requestAad(ALGO_X25519, "demo-model", "messages.0.content", "6e6f6e63652d31323334", 1750000000);
+  const aad = requestAad(ALGO_X25519, "demo-model", "messages.0.content", KAT_NONCE, 1750000000);
   assert.equal(decoder.decode(aad), REQUEST_AAD_VECTOR);
 });
 
@@ -74,7 +75,7 @@ test("response AAD matches spec vector", () => {
     "demo-model",
     "chatcmpl-123",
     "choices.0.message.content",
-    "6e6f6e63652d31323334",
+    KAT_NONCE,
     1750000000,
   );
   assert.equal(decoder.decode(aad), RESPONSE_AAD_VECTOR);
@@ -116,4 +117,10 @@ test("secp256k1 known-answer matches the Rust client", () => {
   const aad = requestAad(ALGO_SECP256K1, KAT_MODEL, KAT_FIELD, KAT_NONCE, KAT_TS);
   const blob = sealSecp256k1(recipient, EPH_SECRET, GCM_NONCE, KAT_PLAINTEXT, aad);
   assert.equal(blob, KAT_SECP256K1);
+});
+
+test("generateNonce produces a fresh 64-lowercase-hex value", () => {
+  const nonce = generateNonce();
+  assert.match(nonce, /^[0-9a-f]{64}$/);
+  assert.notEqual(generateNonce(), nonce);
 });
