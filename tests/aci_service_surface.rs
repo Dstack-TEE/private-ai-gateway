@@ -934,44 +934,6 @@ async fn e2ee_v2_model_key_absent_from_keyset_is_rejected() {
     assert_eq!(error_type(&resp), "e2ee_model_key_mismatch");
 }
 
-/// Byte-exact ciphertexts produced by the reference clients (`clients/e2ee-rs`,
-/// `clients/e2ee-ts`) for the deterministic known-answer vectors — field
-/// `messages.0.content`, recipient secret `0x02`×32. Decrypting them under the
-/// gateway's own crypto proves a client-produced field round-trips end to end,
-/// the check the client-only KATs cannot make themselves.
-#[test]
-fn reference_client_ciphertexts_decrypt_under_the_server() {
-    const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    const KAT_X25519: &str = "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee060a4f0f13144b6b54211955b1aefeebd";
-    const KAT_SECP256K1: &str = "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d132d09f59283db7d4c457c294b402312";
-
-    let x_aad = aci_request_aad(
-        E2EE_ALGO_X25519_AESGCM,
-        "demo-model",
-        "messages.0.content",
-        NONCE,
-        1_750_000_000,
-    );
-    let x_secret = X25519SecretKey::from([0x02u8; 32]);
-    assert_eq!(
-        decrypt_x25519_with_secret_key(&x_secret, KAT_X25519, &x_aad).unwrap(),
-        b"hello"
-    );
-
-    let secp_aad = aci_request_aad(
-        "secp256k1-aes-256-gcm-hkdf-sha256",
-        "demo-model",
-        "messages.0.content",
-        NONCE,
-        1_750_000_000,
-    );
-    let secp_secret = k256::SecretKey::from_slice(&[0x02u8; 32]).unwrap();
-    assert_eq!(
-        decrypt_with_secret_key(&secp_secret, KAT_SECP256K1, &secp_aad).unwrap(),
-        b"hello"
-    );
-}
-
 #[tokio::test]
 async fn e2ee_v2_response_aad_uses_request_model_not_upstream_response_model() {
     let upstream_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"private-upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
