@@ -763,13 +763,11 @@ is encrypting to a key it could have verified.
 - `X-E2EE-Timestamp` is Unix seconds. The service MUST reject requests where
   `|now − timestamp| > 300`, or a narrower window the service publishes
   (`e2ee_invalid_timestamp`).
-- `X-E2EE-Nonce` is a per-request replay token, distinct from the per-field
-  AES-GCM nonce of §7.1: exactly 32 bytes of CSPRNG output, hex-encoded (64 hex
-  characters, either case, no `0x` prefix). The client MUST generate a fresh
-  value per request; the service MUST reject any value that is not 64 hex
-  characters (`e2ee_invalid_nonce`). The fixed width bounds the replay-cache
-  key; the service cannot verify entropy, so unpredictability rests on the
-  client's CSPRNG.
+- `X-E2EE-Nonce` is 32 random bytes, hex-encoded as 64 characters (either case,
+  no `0x` prefix) — a per-request replay token, distinct from the per-field
+  AES-GCM nonce of §7.1. The client MUST generate a fresh value per request; the
+  service MUST reject any value that is not 64 hex characters
+  (`e2ee_invalid_nonce`).
 - The service MUST reject a repeated
   `(client_public_key, service_public_key, nonce)` tuple within the
   acceptance window (`e2ee_replay_detected`). An in-memory replay cache

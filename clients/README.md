@@ -5,5 +5,4 @@
   **E2EE channel** to a *verified* workload (`openE2eeChannel`) to encrypt
   request fields and decrypt replies (X25519 suite, §7).
 
-secp256k1 and non-browser (Rust) clients are separate extensions, kept out of
-the base library so the common path stays small and browser-native.
+The secp256k1 suite and non-browser (Rust) clients are separate extensions.
