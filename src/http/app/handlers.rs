@@ -288,15 +288,17 @@ pub(super) async fn attestation_report(
     {
         Ok(report) => {
             let nvidia_payload = match target.as_ref() {
-                Some(target) => fetch_upstream_nvidia_payload(
-                    target,
-                    &nonce,
-                    inbound_aci_forward_depth(&headers),
-                )
-                .await
-                .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce))),
-                None => empty_nvidia_payload(Some(&nonce)),
-            };
+                Some(target) => {
+                    fetch_upstream_nvidia_payload(
+                        target,
+                        &nonce,
+                        inbound_aci_forward_depth(&headers),
+                    )
+                    .await
+                }
+                None => None,
+            }
+            .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce)));
             match report_with_legacy_attestation_fields(
                 report,
                 q.signing_algo.as_deref(),
