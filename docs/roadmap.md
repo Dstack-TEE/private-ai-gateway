@@ -20,7 +20,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
-| Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI/DCAP upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
+| Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI service upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
 | Frontend/middleware/backend framework | Shipped | Frontend/backend split with an optional middleware that consults the control plane to route, transform, cost-inject, and report usage; the middleware-disabled path stays behavior-compatible. |
 | Multi-domain downstream TLS binding | In progress | Domain-tagged TLS SPKIs can be configured, published in the keyset, and selected in report evidence from the HTTP `Host`. Downstream session ids are still pending. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
@@ -122,7 +122,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   have the same verification shape as the NEAR AI model path, but the gateway
   connects directly to the GPU workload instead of routing through another
   gateway. Add or document the adapter as a direct vLLM-proxy verifier path.
-- Defer first-party ACI-compatible GPU worker support. The ACI/DCAP upstream path
+- Defer first-party ACI-compatible GPU worker support. The ACI service upstream path
   should remain small for now. When first-party GPU workers are upgraded from
   vLLM-proxy to an ACI-compatible server, revisit accepted workload IDs, image
   digests, KMS roots, and the vLLM-proxy-derived server component.
@@ -157,8 +157,8 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   deep verifier and the live harness. The bridge today only dispatches
   `tinfoil`/`near-ai`/`chutes`, and the vendored verifier's Phala/Redpill paths go
   through the hosted `api.redpill.ai` / `cloud-api.phala.network` endpoints, not a raw
-  node's `/v1/attestation/report`. The gateway already verifies first-party Phala
-  workers natively in Rust (`AciDcapUpstreamVerifier`); the follow-up is a `phala`
+  node's `/v1/attestation/report`. The gateway already verifies first-party
+  ACI-service workers natively in Rust (`AciServiceUpstreamVerifier`); the follow-up is a `phala`
   bridge branch + a standalone-dstack verifier so the deep/user verifier and harness
   can verify a raw node the same way as the other providers. Pairs with the direct
   vLLM-proxy worker bullet above.
@@ -167,7 +167,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   section in `docs/upstream-verification-lifecycle.md`): Chutes (DCAP +
   `report_data`↔`nonce‖e2e_pubkey`), NEAR AI (`report_data` binding now enforced),
   Tinfoil (official `tinfoil` SDK: AMD signature chain + Sigstore provenance + TLS
-  binding), and AciDcap (TLS keys covered by the keyset digest bound into `report_data`
+  binding), and AciService (TLS keys covered by the keyset digest bound into `report_data`
   and the keyset endorsement). Live tamper tests confirm rejection.
 - Follow-up (defense-in-depth, not a forgeable hole): verify the NVIDIA NRAS GPU JWT
   signature against NRAS' JWKS. Today the GPU tokens are fetched online from NRAS over

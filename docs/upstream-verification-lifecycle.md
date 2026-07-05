@@ -191,7 +191,7 @@ The good parts:
 - Verification and transport enforcement are separated cleanly. The verifier
   decides what identity and binding to trust; the backend must prove it can
   enforce that binding before forwarding.
-- Chutes is handled as a provider adapter, not forced into ACI/DCAP. That keeps
+- Chutes is handled as a provider adapter, not forced into ACI service. That keeps
   ACI clean and makes provider adoption practical.
 - Config is the operator-owned source of truth for provider credentials and
   provider-specific tuning. Verifier commands are not user-configured.

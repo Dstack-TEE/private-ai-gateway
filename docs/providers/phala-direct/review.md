@@ -2,7 +2,7 @@
 
 Provider: `phala-direct` — direct connection to a Phala dstack-vllm-proxy attestation
 endpoint, one per model. Expected to be superseded by an ACI-compatible server later
-(`aci-dcap` is the eventual target shape); this is the pre-ACI "direct" path.
+(`aci-service` is the eventual target shape); this is the pre-ACI "direct" path.
 
 > **How the gateway verifies this provider:** see [verification.md](verification.md).
 > Binding is **derive-and-bind**: the TLS SPKI is read from the version-2 attestation
@@ -34,7 +34,7 @@ can *prove* it on this path or only record an operator assertion.
 
 - Pin the accepted vllm-proxy image/compose digest (allowlist) on the PhalaDirect path —
   today the config's `accepted_image_digests` / `accepted_workload_ids` fields are wired to
-  the native `aci-dcap` path, not this external bridge.
+  the native `aci-service` path, not this external bridge.
 - `production_os_image` is now decided from dstack's published image metadata (bound to the
   attested `os_image_hash`), so dev images are flagged today (the deployed fleet is all
   `is_dev: true`). Remaining: decide whether to **gate** on it (reject non-prod) for a

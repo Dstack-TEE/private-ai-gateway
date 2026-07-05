@@ -24,7 +24,7 @@ use private_ai_gateway::aci::upstream::{
     UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aci::verifier::{
-    AciDcapUpstreamVerifier, AciDcapVerifierPolicy, PreverifiedUpstreamVerifier,
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, PreverifiedUpstreamVerifier,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
@@ -375,7 +375,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
 
 #[tokio::test]
 #[ignore = "requires PRIVATE_AI_GATEWAY_DSTACK_TEST_ENDPOINT plus live PCCS/DCAP collateral access"]
-async fn dstack_live_aci_dcap_upstream_verifier_accepts_real_aci_service() {
+async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
     let provider = Arc::new(
         DstackAciProvider::new(Some(endpoint()), DstackAciProviderConfig::default())
             .await
@@ -415,13 +415,13 @@ async fn dstack_live_aci_dcap_upstream_verifier_accepts_real_aci_service() {
         .unwrap(),
     );
     let base_url = serve_aci_report(service.clone()).await;
-    let policy = AciDcapVerifierPolicy::new(
+    let policy = AciServiceVerifierPolicy::new(
         vec![service.workload_id().to_string()],
         Vec::new(),
         vec![accepted_kms_root],
     )
     .unwrap();
-    let verifier = AciDcapUpstreamVerifier::with_default_pccs(&base_url, policy, 300).unwrap();
+    let verifier = AciServiceUpstreamVerifier::with_default_pccs(&base_url, policy, 300).unwrap();
 
     let event = verifier
         .verify(UpstreamVerificationRequest {
@@ -439,7 +439,7 @@ async fn dstack_live_aci_dcap_upstream_verifier_accepts_real_aci_service() {
         "{:?}",
         event.reason
     );
-    assert_eq!(event.verifier_id, "aci-dcap/v1");
+    assert_eq!(event.verifier_id, "aci-service/v1");
     assert!(event.evidence.is_some());
     assert_eq!(
         event.channel_bindings,

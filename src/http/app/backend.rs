@@ -227,33 +227,73 @@ pub(super) fn upstream_direct_response_headers(
     resp_headers
 }
 
-/// Fetch the upstream model node's real `nvidia_payload` GPU evidence, bound to
-/// the client's `nonce`, so a model-scoped attestation report can carry GPU
-/// evidence the gateway (CPU-only) cannot produce itself. Dispatches per
-/// provider; returns `None` on any failure or for providers that do not expose
-/// `nvidia_payload` via `/v1/attestation/report` (caller falls back to an empty
-/// placeholder).
+/// Remaining aci-service chaining hops, passed between aggregators so a config
+/// cycle can't recurse until the host runs out of resources.
+pub(super) const ACI_FORWARD_DEPTH_HEADER: &str = "x-aci-forward-depth";
+
+/// Hop budget for a request without a depth header (the top of a chain).
+pub(super) const MAX_ACI_FORWARD_HOPS: u32 = 8;
+
+/// Inbound hop budget, clamped so a caller can only lower it, not raise it.
+pub(super) fn inbound_aci_forward_depth(headers: &HeaderMap) -> u32 {
+    headers
+        .get(ACI_FORWARD_DEPTH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.min(MAX_ACI_FORWARD_HOPS))
+        .unwrap_or(MAX_ACI_FORWARD_HOPS)
+}
+
+/// Fetch the upstream node's real `nvidia_payload` GPU evidence for `model`,
+/// bound to `nonce` (this gateway is CPU-only and can't produce it). `None` on
+/// any failure or for providers that don't expose it; `forward_depth` is the
+/// remaining chaining budget.
 pub(super) async fn fetch_upstream_nvidia_payload(
     target: &AttestationUpstreamTarget,
     nonce: &str,
+    forward_depth: u32,
 ) -> Option<Value> {
-    let query = match target.provider {
-        UpstreamProvider::PhalaDirect => format!("signing_algo=ecdsa&nonce={nonce}&version=2"),
-        UpstreamProvider::NearAi => format!(
-            "signing_algo=ecdsa&nonce={nonce}&include_tls_fingerprint=true&model={}",
-            target.upstream_model_id
+    // `next_depth`: budget for the next hop, `None` for terminal providers.
+    let (query, next_depth) = match target.provider {
+        UpstreamProvider::PhalaDirect => {
+            (format!("signing_algo=ecdsa&nonce={nonce}&version=2"), None)
+        }
+        UpstreamProvider::NearAi => (
+            format!(
+                "signing_algo=ecdsa&nonce={nonce}&include_tls_fingerprint=true&model={}",
+                target.upstream_model_id
+            ),
+            None,
         ),
+        // Upstream is another aggregator: fetch its legacy report for this
+        // model+nonce and pass the GPU evidence through verbatim; `forward_depth`
+        // caps the recursion down the chain.
+        UpstreamProvider::AciService => {
+            if forward_depth == 0 {
+                tracing::warn!(
+                    upstream = %target.upstream_name,
+                    "aci-service attestation-forward depth exhausted; omitting GPU evidence"
+                );
+                return None;
+            }
+            (
+                format!("model={}&nonce={nonce}", target.upstream_model_id),
+                Some(forward_depth - 1),
+            )
+        }
         // Chutes / Tinfoil expose GPU evidence through other mechanisms.
         _ => return None,
     };
-    fetch_report_nvidia_payload(target, &query).await
+    fetch_report_nvidia_payload(target, &query, next_depth).await
 }
 
 /// GET `{base_url}/v1/attestation/report?{query}` and return its top-level
-/// `nvidia_payload` field verbatim. `None` on any error.
+/// `nvidia_payload` verbatim. `None` on any error; `forward_depth` propagates as
+/// the hop-budget header.
 async fn fetch_report_nvidia_payload(
     target: &AttestationUpstreamTarget,
     query: &str,
+    forward_depth: Option<u32>,
 ) -> Option<Value> {
     let url = format!("{}/v1/attestation/report?{query}", target.base_url);
     let client = reqwest::Client::builder()
@@ -263,6 +303,9 @@ async fn fetch_report_nvidia_payload(
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "build attestation client"))
         .ok()?;
     let mut req = client.get(&url).header("accept", "application/json");
+    if let Some(depth) = forward_depth {
+        req = req.header(ACI_FORWARD_DEPTH_HEADER, depth.to_string());
+    }
     if let Some(token) = &target.bearer_token {
         req = req.header("authorization", format!("Bearer {token}"));
     }

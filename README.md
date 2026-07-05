@@ -139,7 +139,7 @@ Useful terms:
 - **dstack KMS**: the dstack key-release service used by this implementation to
   obtain stable workload keys inside an approved TEE workload.
 - **TDX quote / DCAP**: Intel TDX attestation evidence and the verification
-  path used for dstack and ACI/DCAP upstream reports.
+  path used for dstack and ACI service upstream reports.
 - **Receipt**: a signed per-request event log that binds the observed request,
   provider route, upstream verification result, and returned response.
 - **SPKI digest**: a SHA-256 digest of a TLS public key used as channel-binding
@@ -180,7 +180,7 @@ container.
 | Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
-| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, PhalaDirect, ACI/DCAP, and generic OpenAI-compatible upstreams |
+| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |
 | Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
 | Middleware framework | Implemented over HTTP on Unix domain sockets |
 | Receipt store | In-memory; receipt TTL is configurable. The gateway never stores request bodies (receipts hold hashes, not content). |
@@ -318,13 +318,13 @@ Supported `provider` values:
 | Provider | Use |
 | --- | --- |
 | `openai-compatible` | Generic OpenAI-compatible upstream with no provider-owned verifier. |
-| `aci-dcap` | Upstream ACI service that exposes ACI attestation and dstack/DCAP evidence. |
+| `aci-service` | Upstream ACI service that exposes ACI attestation and dstack/DCAP evidence. |
 | `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
 | `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
 | `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
 
-ACI/DCAP verification policy is set on the upstream entry with
+ACI service verification policy is set on the upstream entry with
 `accepted_workload_ids`, `accepted_image_digests`,
 `accepted_dstack_kms_root_public_keys`, and `pccs_url`.
 
