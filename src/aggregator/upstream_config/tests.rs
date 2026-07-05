@@ -82,7 +82,7 @@ fn provider_attestation_scopes() {
         UpstreamProvider::OpenAiCompatible.attestation_scope(),
         PerModel
     );
-    assert_eq!(UpstreamProvider::AciDcap.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
     assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
 }
@@ -158,7 +158,7 @@ fn parse_config_rejects_attestation_report_base_url() {
             [
               {
                 "name": "aci",
-                "provider": "aci-dcap",
+                "provider": "aci-service",
                 "base_url": "https://aci.example",
                 "attestation_report_base_url": "http://aci.internal:8086",
                 "models": {"public-model": "upstream-model"}
@@ -172,7 +172,7 @@ fn parse_config_rejects_attestation_report_base_url() {
 }
 
 #[test]
-fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams() {
+fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstreams() {
     let config = vec![
         test_upstream_config(
             "near-ai",
@@ -188,7 +188,7 @@ fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams
         ),
     ];
     let options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::AciDcap,
+        verifier_mode: UpstreamVerifierMode::AciService,
         accepted_workload_ids: Vec::new(),
         accepted_image_digests: Vec::new(),
         accepted_dstack_kms_root_public_keys: Vec::new(),
@@ -200,7 +200,7 @@ fn global_aci_dcap_does_not_require_policy_for_plain_openai_compatible_upstreams
     };
 
     let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
-        .expect("plain OpenAI-compatible upstreams should not require ACI DCAP policy");
+        .expect("plain OpenAI-compatible upstreams should not require ACI service policy");
 
     assert!(verifier.is_some());
 }

@@ -1,5 +1,5 @@
 {
-  "provider": "aci-dcap",
+  "provider": "aci-service",
   "reviewed_at": "2026-05-16",
   "mode": "deployment-owned",
   "accepted_models": {}

@@ -4,7 +4,7 @@ use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 
-use super::dcap::{aci_report_tls_channel_bindings, CachedAciDcapVerification};
+use super::aci_service::{aci_report_tls_channel_bindings, CachedAciServiceVerification};
 use super::dstack::verify_dstack_kms_identity_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
@@ -687,8 +687,8 @@ fi"#
 }
 
 #[test]
-fn cached_aci_dcap_verification_preserves_channel_bindings() {
-    let cached = CachedAciDcapVerification {
+fn cached_aci_service_verification_preserves_channel_bindings() {
+    let cached = CachedAciServiceVerification {
         expires_at: 10,
         vendor: "gpu-a".to_string(),
         evidence: Some(json!({
@@ -708,7 +708,7 @@ fn cached_aci_dcap_verification_preserves_channel_bindings() {
             forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
             required: true,
         },
-        "aci-dcap/v1",
+        "aci-service/v1",
     );
 
     assert_eq!(event.result, VerificationResult::Verified);
@@ -863,7 +863,7 @@ fn verifies_dstack_kms_identity_key_custody_chain() {
     .concat();
     let app_signature = sign_recoverable(&root, &root_message);
     let report = custody_report(&identity, vec![purpose_signature, app_signature]);
-    let policy = AciDcapVerifierPolicy::new(
+    let policy = AciServiceVerifierPolicy::new(
         vec![report.workload_id.clone()],
         Vec::new(),
         vec![public_key_uncompressed_hex(&root)],
@@ -892,7 +892,7 @@ fn rejects_dstack_kms_identity_key_custody_under_unaccepted_root() {
     .concat();
     let app_signature = sign_recoverable(&root, &root_message);
     let report = custody_report(&identity, vec![purpose_signature, app_signature]);
-    let policy = AciDcapVerifierPolicy::new(
+    let policy = AciServiceVerifierPolicy::new(
         vec![report.workload_id.clone()],
         Vec::new(),
         vec![public_key_uncompressed_hex(&other_root)],

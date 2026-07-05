@@ -218,10 +218,10 @@ Example seed:
 ]
 ```
 
-Supported provider values are `openai-compatible`, `aci-dcap`, `tinfoil`,
+Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
 `near-ai`, `chutes`, and `phala-direct`.
 
-For `aci-dcap`, `base_url` is the HTTPS origin used for both model traffic and
+For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.

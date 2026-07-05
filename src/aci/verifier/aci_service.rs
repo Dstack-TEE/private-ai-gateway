@@ -1,5 +1,5 @@
-//! Native ACI/DCAP upstream verifier: quote validation, policy enforcement,
-//! and the per-request verification cache.
+//! Native verifier for an upstream ACI service: fetches its attestation report,
+//! checks the identity/key policy and the evidence (a dstack DCAP/TDX quote today).
 
 use std::collections::BTreeSet;
 use std::sync::RwLock;
@@ -22,13 +22,13 @@ use crate::aci::types::AttestationReport;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 #[derive(Debug, thiserror::Error)]
-pub enum AciDcapVerifierConfigError {
+pub enum AciServiceVerifierConfigError {
     #[error(
-        "ACI DCAP upstream verifier requires at least one accepted workload id or image digest"
+        "ACI service upstream verifier requires at least one accepted workload id or image digest"
     )]
     EmptyPolicy,
     #[error(
-        "ACI DCAP upstream verifier requires at least one accepted dstack KMS root public key"
+        "ACI service upstream verifier requires at least one accepted dstack KMS root public key"
     )]
     EmptyKmsRootPolicy,
     #[error("invalid dstack KMS root public key: {0}")]
@@ -42,18 +42,18 @@ pub enum AciDcapVerifierConfigError {
 }
 
 #[derive(Debug, Clone)]
-pub struct AciDcapVerifierPolicy {
+pub struct AciServiceVerifierPolicy {
     accepted_workload_ids: BTreeSet<String>,
     accepted_image_digests: BTreeSet<String>,
     pub(super) accepted_kms_root_public_keys: BTreeSet<String>,
 }
 
-impl AciDcapVerifierPolicy {
+impl AciServiceVerifierPolicy {
     pub fn new(
         accepted_workload_ids: impl IntoIterator<Item = String>,
         accepted_image_digests: impl IntoIterator<Item = String>,
         accepted_kms_root_public_keys: impl IntoIterator<Item = String>,
-    ) -> Result<Self, AciDcapVerifierConfigError> {
+    ) -> Result<Self, AciServiceVerifierConfigError> {
         let accepted_workload_ids = accepted_workload_ids
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -66,14 +66,14 @@ impl AciDcapVerifierPolicy {
             .into_iter()
             .map(|key| {
                 compressed_k256_public_key_hex(&key)
-                    .map_err(AciDcapVerifierConfigError::InvalidKmsRootPublicKey)
+                    .map_err(AciServiceVerifierConfigError::InvalidKmsRootPublicKey)
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
         if accepted_workload_ids.is_empty() && accepted_image_digests.is_empty() {
-            return Err(AciDcapVerifierConfigError::EmptyPolicy);
+            return Err(AciServiceVerifierConfigError::EmptyPolicy);
         }
         if accepted_kms_root_public_keys.is_empty() {
-            return Err(AciDcapVerifierConfigError::EmptyKmsRootPolicy);
+            return Err(AciServiceVerifierConfigError::EmptyKmsRootPolicy);
         }
         Ok(Self {
             accepted_workload_ids,
@@ -94,7 +94,7 @@ impl AciDcapVerifierPolicy {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum AciDcapVerificationError {
+pub(super) enum AciServiceVerificationError {
     #[error("upstream attestation request failed: {0}")]
     Transport(String),
     #[error("upstream attestation returned HTTP {status}: {body}")]
@@ -160,14 +160,14 @@ pub(super) enum AciDcapVerificationError {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct CachedAciDcapVerification {
+pub(super) struct CachedAciServiceVerification {
     pub(super) expires_at: u64,
     pub(super) vendor: String,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
 }
 
-impl CachedAciDcapVerification {
+impl CachedAciServiceVerification {
     pub(super) fn event_for(
         &self,
         request: UpstreamVerificationRequest,
@@ -196,10 +196,10 @@ struct SelectedDownstreamTlsBinding {
 pub(super) fn aci_report_tls_channel_bindings(
     report: &AttestationReport,
     origin: &str,
-) -> Result<Vec<ChannelBinding>, AciDcapVerificationError> {
+) -> Result<Vec<ChannelBinding>, AciServiceVerificationError> {
     let tls_public_keys = &report.attestation.workload_keyset.tls_public_keys;
     if tls_public_keys.is_empty() {
-        return Err(AciDcapVerificationError::MissingTlsSpkiBinding);
+        return Err(AciServiceVerificationError::MissingTlsSpkiBinding);
     }
 
     let has_domain_scoped_keys = tls_public_keys.iter().any(|key| key.domain.is_some());
@@ -210,7 +210,7 @@ pub(super) fn aci_report_tls_channel_bindings(
                 Ok(ChannelBinding::TlsSpkiSha256 {
                     origin: origin.to_string(),
                     spki_sha256: normalize_sha256_hex(&key.spki_sha256_hex).map_err(|e| {
-                        AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+                        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
                             "invalid keyset TLS SPKI digest: {e}"
                         ))
                     })?,
@@ -222,10 +222,12 @@ pub(super) fn aci_report_tls_channel_bindings(
     let selected = selected_downstream_tls_binding(&report.attestation.evidence)?;
     let origin_domain = origin_host_domain(origin)?;
     if selected.domain != origin_domain {
-        return Err(AciDcapVerificationError::DownstreamTlsBindingHostMismatch {
-            reported: selected.domain,
-            expected: origin_domain,
-        });
+        return Err(
+            AciServiceVerificationError::DownstreamTlsBindingHostMismatch {
+                reported: selected.domain,
+                expected: origin_domain,
+            },
+        );
     }
 
     for key in tls_public_keys {
@@ -233,12 +235,12 @@ pub(super) fn aci_report_tls_channel_bindings(
             continue;
         };
         let key_domain = normalize_tls_domain(domain).map_err(|e| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
                 "invalid keyset TLS domain {domain:?}: {e}"
             ))
         })?;
         let key_spki = normalize_sha256_hex(&key.spki_sha256_hex).map_err(|e| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
                 "invalid keyset TLS SPKI digest: {e}"
             ))
         })?;
@@ -250,20 +252,20 @@ pub(super) fn aci_report_tls_channel_bindings(
         }
     }
 
-    Err(AciDcapVerificationError::DownstreamTlsBindingNotInKeyset)
+    Err(AciServiceVerificationError::DownstreamTlsBindingNotInKeyset)
 }
 
 fn selected_downstream_tls_binding(
     evidence: &Value,
-) -> Result<SelectedDownstreamTlsBinding, AciDcapVerificationError> {
+) -> Result<SelectedDownstreamTlsBinding, AciServiceVerificationError> {
     let binding = evidence
         .get("downstream_tls_binding")
-        .ok_or(AciDcapVerificationError::MissingDownstreamTlsBinding)?;
+        .ok_or(AciServiceVerificationError::MissingDownstreamTlsBinding)?;
     let domain = binding
         .get("domain")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(
                 "downstream_tls_binding.domain must be a string".to_string(),
             )
         })?;
@@ -271,37 +273,37 @@ fn selected_downstream_tls_binding(
         .get("spki_sha256")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(
                 "downstream_tls_binding.spki_sha256 must be a string".to_string(),
             )
         })?;
     Ok(SelectedDownstreamTlsBinding {
         domain: normalize_tls_domain(domain).map_err(|e| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
                 "invalid downstream_tls_binding.domain: {e}"
             ))
         })?,
         spki_sha256: normalize_sha256_hex(spki_sha256).map_err(|e| {
-            AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
                 "invalid downstream_tls_binding.spki_sha256: {e}"
             ))
         })?,
     })
 }
 
-fn origin_host_domain(origin: &str) -> Result<String, AciDcapVerificationError> {
+fn origin_host_domain(origin: &str) -> Result<String, AciServiceVerificationError> {
     let url = reqwest::Url::parse(origin).map_err(|e| {
-        AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
             "invalid report base URL {origin:?}: {e}"
         ))
     })?;
     let host = url.host_str().ok_or_else(|| {
-        AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
             "report base URL {origin:?} has no host"
         ))
     })?;
     normalize_tls_domain(host).map_err(|e| {
-        AciDcapVerificationError::InvalidDownstreamTlsBinding(format!(
+        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
             "invalid report base URL host {host:?}: {e}"
         ))
     })
@@ -329,28 +331,26 @@ fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     Ok(value.to_ascii_lowercase())
 }
 
-/// Verifies an upstream ACI/dstack service by fetching its attestation
-/// report, checking ACI identity/key binding against the configured
-/// accepted identity, and verifying the embedded Intel DCAP quote with
-/// `dcap-qvl`.
-pub struct AciDcapUpstreamVerifier {
+/// Verifies an upstream ACI service: fetches its canonical report
+/// (`/v1/aci/attestation`), checks identity/key binding, and verifies the DCAP quote.
+pub struct AciServiceUpstreamVerifier {
     client: reqwest::Client,
     report_base_url: String,
     pccs_url: String,
-    policy: AciDcapVerifierPolicy,
+    policy: AciServiceVerifierPolicy,
     cache_ttl_seconds: u64,
     request_timeout_seconds: u64,
-    cache: RwLock<Option<CachedAciDcapVerification>>,
+    cache: RwLock<Option<CachedAciServiceVerification>>,
     verifier_id: String,
 }
 
-impl AciDcapUpstreamVerifier {
+impl AciServiceUpstreamVerifier {
     pub fn new(
         report_base_url: impl Into<String>,
         pccs_url: impl Into<String>,
-        policy: AciDcapVerifierPolicy,
+        policy: AciServiceVerifierPolicy,
         cache_ttl_seconds: u64,
-    ) -> Result<Self, AciDcapVerifierConfigError> {
+    ) -> Result<Self, AciServiceVerifierConfigError> {
         Self::new_with_timeouts(
             report_base_url,
             pccs_url,
@@ -364,21 +364,21 @@ impl AciDcapUpstreamVerifier {
     pub fn new_with_timeouts(
         report_base_url: impl Into<String>,
         pccs_url: impl Into<String>,
-        policy: AciDcapVerifierPolicy,
+        policy: AciServiceVerifierPolicy,
         cache_ttl_seconds: u64,
         connect_timeout_seconds: u64,
         request_timeout_seconds: u64,
-    ) -> Result<Self, AciDcapVerifierConfigError> {
+    ) -> Result<Self, AciServiceVerifierConfigError> {
         let report_base_url = report_base_url.into();
         let report_base_url = report_base_url.trim().trim_end_matches('/').to_string();
         if report_base_url.is_empty() {
-            return Err(AciDcapVerifierConfigError::EmptyBaseUrl);
+            return Err(AciServiceVerifierConfigError::EmptyBaseUrl);
         }
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(connect_timeout_seconds))
             .timeout(Duration::from_secs(request_timeout_seconds))
             .build()
-            .map_err(|e| AciDcapVerifierConfigError::Client(e.to_string()))?;
+            .map_err(|e| AciServiceVerifierConfigError::Client(e.to_string()))?;
         Ok(Self {
             client,
             report_base_url,
@@ -387,15 +387,15 @@ impl AciDcapUpstreamVerifier {
             cache_ttl_seconds,
             request_timeout_seconds,
             cache: RwLock::new(None),
-            verifier_id: "aci-dcap/v1".to_string(),
+            verifier_id: "aci-service/v1".to_string(),
         })
     }
 
     pub fn with_default_pccs(
         report_base_url: impl Into<String>,
-        policy: AciDcapVerifierPolicy,
+        policy: AciServiceVerifierPolicy,
         cache_ttl_seconds: u64,
-    ) -> Result<Self, AciDcapVerifierConfigError> {
+    ) -> Result<Self, AciServiceVerifierConfigError> {
         Self::with_default_pccs_and_timeouts(
             report_base_url,
             policy,
@@ -407,11 +407,11 @@ impl AciDcapUpstreamVerifier {
 
     pub fn with_default_pccs_and_timeouts(
         report_base_url: impl Into<String>,
-        policy: AciDcapVerifierPolicy,
+        policy: AciServiceVerifierPolicy,
         cache_ttl_seconds: u64,
         connect_timeout_seconds: u64,
         request_timeout_seconds: u64,
-    ) -> Result<Self, AciDcapVerifierConfigError> {
+    ) -> Result<Self, AciServiceVerifierConfigError> {
         Self::new_with_timeouts(
             report_base_url,
             dcap_qvl::PHALA_PCCS_URL.to_string(),
@@ -422,35 +422,40 @@ impl AciDcapUpstreamVerifier {
         )
     }
 
-    async fn verify_uncached(&self) -> Result<CachedAciDcapVerification, AciDcapVerificationError> {
+    async fn verify_uncached(
+        &self,
+    ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
         let nonce = random_nonce_hex();
-        let report_url = format!("{}/v1/attestation/report", self.report_base_url);
+        // Canonical report, not the legacy alias: the binding check below expects
+        // `report_data = sha256(JCS(statement))`, which only the canonical report
+        // carries (the legacy alias binds `identity ‖ nonce`).
+        let report_url = format!("{}/v1/aci/attestation", self.report_base_url);
         let url = format!("{report_url}?nonce={nonce}");
         let response = self
             .client
             .get(&url)
             .send()
             .await
-            .map_err(|e| AciDcapVerificationError::Transport(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
-            .map_err(|e| AciDcapVerificationError::Transport(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         if !(200..300).contains(&status) {
-            return Err(AciDcapVerificationError::HttpStatus {
+            return Err(AciServiceVerificationError::HttpStatus {
                 status,
                 body: String::from_utf8_lossy(&body).to_string(),
             });
         }
 
         let report: AttestationReport = serde_json::from_slice(&body)
-            .map_err(|e| AciDcapVerificationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
         let verified_at = now_secs();
         let validated =
             validate_aci_report_binding(&report, Some(&nonce), verified_at, Some(&body))?;
         if !self.policy.accepts(&report) {
-            return Err(AciDcapVerificationError::PolicyRejected);
+            return Err(AciServiceVerificationError::PolicyRejected);
         }
         self.verify_dcap_quote(&report, &validated, verified_at)
             .await?;
@@ -459,7 +464,7 @@ impl AciDcapUpstreamVerifier {
             .min(report.attestation.freshness.stale_after);
         let channel_bindings = aci_report_tls_channel_bindings(&report, &self.report_base_url)?;
 
-        Ok(CachedAciDcapVerification {
+        Ok(CachedAciServiceVerification {
             expires_at,
             vendor: report.attestation.vendor,
             evidence: validated.evidence,
@@ -472,20 +477,21 @@ impl AciDcapUpstreamVerifier {
         report: &AttestationReport,
         validated: &ValidatedAciReport,
         now_secs: u64,
-    ) -> Result<(), AciDcapVerificationError> {
+    ) -> Result<(), AciServiceVerificationError> {
         let quote_hex = report
             .attestation
             .evidence
             .get("quote")
             .and_then(Value::as_str)
-            .ok_or(AciDcapVerificationError::MissingQuote)?;
-        let raw_quote = decode_hex(quote_hex).map_err(AciDcapVerificationError::InvalidQuoteHex)?;
+            .ok_or(AciServiceVerificationError::MissingQuote)?;
+        let raw_quote =
+            decode_hex(quote_hex).map_err(AciServiceVerificationError::InvalidQuoteHex)?;
 
         let collateral = dcap_qvl::collateral::get_collateral(&self.pccs_url, &raw_quote)
             .await
-            .map_err(|e| AciDcapVerificationError::Collateral(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Collateral(e.to_string()))?;
         let verified = dcap_qvl::verify::rustcrypto::verify(&raw_quote, &collateral, now_secs)
-            .map_err(|e| AciDcapVerificationError::QuoteVerification(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::QuoteVerification(e.to_string()))?;
 
         let verified_tee_type = if verified.report.is_sgx() {
             "sgx"
@@ -493,7 +499,7 @@ impl AciDcapUpstreamVerifier {
             "tdx"
         };
         if report.attestation.tee_type != verified_tee_type {
-            return Err(AciDcapVerificationError::TeeTypeMismatch {
+            return Err(AciServiceVerificationError::TeeTypeMismatch {
                 reported: report.attestation.tee_type.clone(),
                 verified: verified_tee_type.to_string(),
             });
@@ -507,14 +513,14 @@ impl AciDcapUpstreamVerifier {
             .and_then(Value::as_str)
         {
             let evidence_report_data = decode_hex(evidence_report_data_hex)
-                .map_err(AciDcapVerificationError::InvalidQuoteReportDataHex)?;
+                .map_err(AciServiceVerificationError::InvalidQuoteReportDataHex)?;
             if evidence_report_data.as_slice() != quote_report_data {
-                return Err(AciDcapVerificationError::QuoteReportDataEvidenceMismatch);
+                return Err(AciServiceVerificationError::QuoteReportDataEvidenceMismatch);
             }
         }
 
         if quote_report_data != expected_dcap_report_data(validated.report_data).as_slice() {
-            return Err(AciDcapVerificationError::QuoteReportDataMismatch);
+            return Err(AciServiceVerificationError::QuoteReportDataMismatch);
         }
         let app_id =
             verify_dstack_event_log_and_app_id(&report.attestation.evidence, &verified.report)?;
@@ -524,13 +530,13 @@ impl AciDcapUpstreamVerifier {
 }
 
 #[async_trait]
-impl UpstreamVerifier for AciDcapUpstreamVerifier {
+impl UpstreamVerifier for AciServiceUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let now_secs = now_secs();
         if let Some(cached) = self
             .cache
             .read()
-            .expect("ACI DCAP verifier cache poisoned")
+            .expect("ACI service verifier cache poisoned")
             .clone()
         {
             if now_secs < cached.expires_at {
@@ -543,14 +549,14 @@ impl UpstreamVerifier for AciDcapUpstreamVerifier {
             self.verify_uncached(),
         )
         .await
-        .map_err(|_| AciDcapVerificationError::Timeout)
+        .map_err(|_| AciServiceVerificationError::Timeout)
         .and_then(|result| result)
         {
             Ok(verified) => {
                 *self
                     .cache
                     .write()
-                    .expect("ACI DCAP verifier cache poisoned") = Some(verified.clone());
+                    .expect("ACI service verifier cache poisoned") = Some(verified.clone());
                 verified.event_for(request, &self.verifier_id)
             }
             Err(err) => UpstreamVerifiedEvent {

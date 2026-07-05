@@ -139,7 +139,7 @@ the admin API.
 [
   {
     "name": "route-a",
-    "provider": "aci-dcap",
+    "provider": "aci-service",
     "base_url": "https://upstream-a.example",
     "models": {
       "public-model": "provider-model"
@@ -155,17 +155,17 @@ Supported `provider` values:
 | Provider | Use |
 | --- | --- |
 | `openai-compatible` | Generic OpenAI-compatible upstream with no provider-owned verifier. |
-| `aci-dcap` | ACI service that exposes dstack/DCAP evidence. |
+| `aci-service` | ACI service that exposes dstack/DCAP evidence. |
 | `tinfoil` | Tinfoil provider adapter. |
 | `near-ai` | NEAR AI provider adapter. |
 | `chutes` | Chutes provider adapter. |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
 
-Provider verification policy belongs on the upstream entry. For ACI/DCAP
+Provider verification policy belongs on the upstream entry. For ACI service
 routes, configure accepted workload ids, image digests, or dstack KMS root
 public keys on that entry.
 
-For `aci-dcap`, `base_url` is the HTTPS origin used for both model traffic and
+For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.

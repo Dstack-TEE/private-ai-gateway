@@ -1057,6 +1057,85 @@ async fn attestation_report_merges_upstream_nvidia_payload() {
 }
 
 #[tokio::test]
+async fn attestation_report_plumbs_nvidia_payload_through_aci_service_upstream() {
+    // The upstream is another ACI service; this gateway must pass its GPU evidence
+    // through verbatim, bound to the client nonce, so the caller still gets GPU
+    // attestation from a Phala-direct node further down the chain.
+    let nvidia_payload = format!(
+        r#"{{"nonce":"{TEST_NONCE}","evidence_list":[{{"certificate":"gpu","evidence":"cc"}}],"arch":"HOPPER"}}"#
+    );
+    // The phala stub stands in for the upstream aggregator's legacy report.
+    let (base, captured) = serve_phala_stub(Some(nvidia_payload.clone())).await;
+    // aci-service builds a native verifier eagerly, so a policy is required here
+    // (KMS root = secp256k1 generator point) though this path never uses it.
+    let config = format!(
+        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_workload_ids":["wid-test"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
+    );
+    let (_svc, app) = setup_with_config(&config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/attestation/report?model=aci/model&nonce={TEST_NONCE}&signing_algo=ecdsa"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+
+    // Plumbed through verbatim, not the empty placeholder.
+    assert_eq!(body["nvidia_payload"].as_str().unwrap(), nvidia_payload);
+
+    // Queried with the upstream's own model id and the client nonce.
+    let (query, auth) = captured.lock().unwrap().clone().unwrap();
+    assert!(query.contains("model=aci-up-model"), "query: {query}");
+    assert!(
+        query.contains(&format!("nonce={TEST_NONCE}")),
+        "query: {query}"
+    );
+    assert_eq!(auth.as_deref(), Some("Bearer tok"));
+}
+
+#[tokio::test]
+async fn attestation_report_stops_aci_service_forwarding_at_depth_zero() {
+    // Cycle guard: at depth zero the gateway must not fetch the upstream again,
+    // degrading to the empty placeholder instead of recursing.
+    let (base, captured) =
+        serve_phala_stub(Some("{\"evidence_list\":[\"unreached\"]}".to_string())).await;
+    let config = format!(
+        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_workload_ids":["wid-test"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
+    );
+    let (_svc, app) = setup_with_config(&config);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/attestation/report?model=aci/model&nonce={TEST_NONCE}"
+                ))
+                .header("x-aci-forward-depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+
+    // Upstream never queried; report carries the empty placeholder.
+    assert!(
+        captured.lock().unwrap().is_none(),
+        "upstream must not be fetched at depth 0"
+    );
+    let nv: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
+    assert_eq!(nv["evidence_list"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn attestation_report_generates_nonce_and_merges_when_client_omits_nonce() {
     // No client nonce: the gateway generates one (like dstack-vllm-proxy) and
     // still fetches/merges the upstream GPU evidence, rather than returning an

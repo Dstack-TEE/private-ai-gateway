@@ -14,9 +14,9 @@ use crate::aci::upstream::{
     OpenAICompatibleBackend, UpstreamBackend,
 };
 use crate::aci::verifier::{
-    AciDcapUpstreamVerifier, AciDcapVerifierPolicy, ChutesProviderVerifier, NearAiProviderVerifier,
-    PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier, RoutingUpstreamVerifier,
-    TinfoilProviderVerifier,
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
+    NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
+    RoutingUpstreamVerifier, TinfoilProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -74,7 +74,7 @@ fn build_model_router(
 fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => false,
-        UpstreamProvider::AciDcap
+        UpstreamProvider::AciService
         | UpstreamProvider::Chutes
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
@@ -109,7 +109,7 @@ fn build_provider_backend(
         }
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
-        | UpstreamProvider::AciDcap
+        | UpstreamProvider::AciService
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::PhalaDirect => {
@@ -176,10 +176,10 @@ pub(super) fn build_verifier(
         UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
             "preverified/out-of-band/v1",
         )))),
-        UpstreamVerifierMode::AciDcap => {
+        UpstreamVerifierMode::AciService => {
             let mut router = RoutingUpstreamVerifier::new();
             for cfg in config {
-                let verifier = build_aci_dcap_verifier(cfg, options)?;
+                let verifier = build_aci_service_verifier(cfg, options)?;
                 router = router
                     .add_origin(
                         cfg.base_url.trim_end_matches('/').to_string(),
@@ -212,7 +212,7 @@ fn build_provider_verifier(
             UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => {
                 build_global_verifier_for_config(cfg, options)?
             }
-            UpstreamProvider::AciDcap => Some(build_aci_dcap_verifier(cfg, options)?),
+            UpstreamProvider::AciService => Some(build_aci_service_verifier(cfg, options)?),
             UpstreamProvider::Chutes => {
                 let session_store = sessions.chutes(&cfg.name).ok_or_else(|| {
                     UpstreamConfigError::InvalidConfig(format!(
@@ -282,7 +282,7 @@ fn build_global_verifier_for_config(
         UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
             "preverified/out-of-band/v1",
         )))),
-        UpstreamVerifierMode::AciDcap => {
+        UpstreamVerifierMode::AciService => {
             let has_explicit_aci_policy = cfg
                 .accepted_workload_ids
                 .as_ref()
@@ -292,7 +292,7 @@ fn build_global_verifier_for_config(
                     .as_ref()
                     .is_some_and(|digests| !digests.is_empty());
             if has_explicit_aci_policy {
-                build_aci_dcap_verifier(cfg, options).map(Some)
+                build_aci_service_verifier(cfg, options).map(Some)
             } else {
                 Ok(None)
             }
@@ -300,11 +300,11 @@ fn build_global_verifier_for_config(
     }
 }
 
-fn build_aci_dcap_verifier(
+fn build_aci_service_verifier(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
 ) -> Result<Arc<dyn UpstreamVerifier>, UpstreamConfigError> {
-    let policy = AciDcapVerifierPolicy::new(
+    let policy = AciServiceVerifierPolicy::new(
         cfg.accepted_workload_ids
             .clone()
             .unwrap_or_else(|| options.accepted_workload_ids.clone()),
@@ -328,7 +328,7 @@ fn build_aci_dcap_verifier(
     let pccs_url = cfg.pccs_url.clone().or_else(|| options.pccs_url.clone());
     match pccs_url {
         Some(pccs_url) => Ok(Arc::new(
-            AciDcapUpstreamVerifier::new_with_timeouts(
+            AciServiceUpstreamVerifier::new_with_timeouts(
                 cfg.base_url.clone(),
                 pccs_url,
                 policy,
@@ -339,7 +339,7 @@ fn build_aci_dcap_verifier(
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
         )),
         None => Ok(Arc::new(
-            AciDcapUpstreamVerifier::with_default_pccs_and_timeouts(
+            AciServiceUpstreamVerifier::with_default_pccs_and_timeouts(
                 cfg.base_url.clone(),
                 policy,
                 cache_seconds,
