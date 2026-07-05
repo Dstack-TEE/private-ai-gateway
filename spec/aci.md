@@ -764,12 +764,12 @@ is encrypting to a key it could have verified.
   `|now − timestamp| > 300`, or a narrower window the service publishes
   (`e2ee_invalid_timestamp`).
 - `X-E2EE-Nonce` is a per-request replay token, distinct from the per-field
-  AES-GCM nonce of §7.1: exactly 32 bytes of CSPRNG output, encoded as 64
-  lowercase hex characters. The client MUST generate a fresh value per request;
-  the service MUST reject any value that is not 64 lowercase hex characters
-  (`e2ee_invalid_nonce`). The fixed width bounds the replay-cache key and keeps
-  the token uniform with ACI's other 32-byte values (§3); the service cannot
-  verify entropy, so unpredictability rests on the client's CSPRNG.
+  AES-GCM nonce of §7.1: exactly 32 bytes of CSPRNG output, hex-encoded (64 hex
+  characters, either case, no `0x` prefix). The client MUST generate a fresh
+  value per request; the service MUST reject any value that is not 64 hex
+  characters (`e2ee_invalid_nonce`). The fixed width bounds the replay-cache
+  key; the service cannot verify entropy, so unpredictability rests on the
+  client's CSPRNG.
 - The service MUST reject a repeated
   `(client_public_key, service_public_key, nonce)` tuple within the
   acceptance window (`e2ee_replay_detected`). An in-memory replay cache
@@ -1144,7 +1144,7 @@ ACI-defined error types, with the HTTP status a service SHOULD use:
 | `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, or the service does not terminate E2EE. |
 | `e2ee_invalid_public_key` | 400 | A supplied public key does not parse. |
 | `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
-| `e2ee_invalid_nonce` | 400 | Nonce is not 64 lowercase hex characters (§7.5). |
+| `e2ee_invalid_nonce` | 400 | Nonce is not 64 hex characters (§7.5). |
 | `e2ee_invalid_timestamp` | 400 | Timestamp outside the acceptance window. |
 | `e2ee_replay_detected` | 400 | Repeated `(client key, service key, nonce)` tuple. |
 | `e2ee_invalid_payload_model` | 400 | `model` absent or not a string (§7.3). |

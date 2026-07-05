@@ -155,7 +155,7 @@ signature.value (ed25519, receipt-1) = 0861f62296f57a120620e79fc0e91008a187e3793
 Request AAD for the first message's whole-string content
 (`field = messages.0.content`), X25519 suite, nonce
 `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f` (§7.5: 32
-bytes as 64 lowercase hex), timestamp 1750000000 — the AAD bytes are exactly:
+bytes, hex-encoded), timestamp 1750000000 — the AAD bytes are exactly:
 
 ```text
 {"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2","ts":1750000000}

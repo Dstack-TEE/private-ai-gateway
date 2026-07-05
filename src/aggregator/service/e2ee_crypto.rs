@@ -12,14 +12,11 @@ use crate::aci::e2ee::{
 use crate::aci::keys::KeyProvider;
 
 /// ACI v2 nonce (§7.5): a per-request replay token — exactly 32 bytes of CSPRNG
-/// output as 64 lowercase hex characters. The fixed width is the only rule; the
-/// service cannot verify entropy.
+/// output, hex-encoded (64 hex characters, either case). The fixed width is the
+/// only rule; the service cannot verify entropy.
 pub(super) fn validate_aci_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
-    let is_64_lower_hex = nonce.len() == 64
-        && nonce
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    if !is_64_lower_hex {
+    let is_64_hex = nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_64_hex {
         return Err(E2eeError::InvalidNonce);
     }
     Ok(())
@@ -964,14 +961,14 @@ mod tests {
     }
 
     #[test]
-    fn nonce_validation_requires_64_lowercase_hex() {
+    fn nonce_validation_requires_64_hex() {
         assert!(super::validate_aci_e2ee_nonce(NONCE).is_ok());
+        // Either case is accepted (§7.5).
+        assert!(super::validate_aci_e2ee_nonce(&"A".repeat(64)).is_ok());
         assert!(super::validate_aci_e2ee_nonce("").is_err());
         assert!(super::validate_aci_e2ee_nonce("nonce-1").is_err());
         assert!(super::validate_aci_e2ee_nonce(&"a".repeat(63)).is_err());
         assert!(super::validate_aci_e2ee_nonce(&"a".repeat(65)).is_err());
-        // Uppercase hex is rejected — the token is canonical lowercase.
-        assert!(super::validate_aci_e2ee_nonce(&"A".repeat(64)).is_err());
         // Right length, non-hex character.
         assert!(super::validate_aci_e2ee_nonce(&format!("{}g", "0".repeat(63))).is_err());
     }
