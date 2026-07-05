@@ -414,7 +414,7 @@ config; see the [configuration reference](docs/configuration-reference.md#middle
 | `GET /v1/aci/attestation?nonce=<n>` | Gateway workload identity and keyset evidence. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
 | `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
-| `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |
+| `GET /v1/aci/sessions?upstream_name=&model=` | List a provider's imported attested sessions. |
 | `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. |
 | `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
 | `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |

@@ -121,7 +121,7 @@ expired, unsigned, or rejected by policy.
 | `GET /v1/aci/attestation?nonce=<nonce>` | Fresh gateway attestation report. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt (bare). `{id}` can be a receipt ID or response chat ID. |
 | `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by receipt events. |
-| `GET /v1/aci/sessions?provider=&model=` | List a provider's imported attested sessions. |
+| `GET /v1/aci/sessions?upstream_name=&model=` | List a provider's imported attested sessions. |
 | `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. New verifiers should use the `/v1/aci/*` endpoints above. |
 
 ## Tracing a receipt to its session

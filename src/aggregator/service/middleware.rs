@@ -63,6 +63,9 @@ fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: Service
 pub(super) struct MiddlewareReceiptInputs<'a> {
     pub receipt_id: &'a str,
     pub chat_id: Option<String>,
+    /// The user-requested model (received request's top-level `model`), recorded
+    /// as the receipt's top-level `model`; `None` when the request carried none.
+    pub model: Option<String>,
     pub served_at: u64,
     pub endpoint_path: &'a str,
     pub received_body: &'a [u8],
@@ -81,6 +84,7 @@ impl AciService {
         let MiddlewareReceiptInputs {
             receipt_id,
             chat_id,
+            model,
             served_at,
             endpoint_path,
             received_body,
@@ -93,6 +97,7 @@ impl AciService {
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
             chat_id,
+            model,
             self.workload_id.clone(),
             self.workload_keyset_digest.clone(),
             endpoint_path.to_string(),
@@ -119,6 +124,8 @@ impl AciService {
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        // The user-requested model, recorded as the receipt's top-level `model`.
+        let user_model = req.context.user_model.clone();
         let mode = if stream {
             RequestMode::Streaming
         } else {
@@ -308,6 +315,7 @@ impl AciService {
                 let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                     receipt_id: &receipt_id,
                     chat_id: None,
+                    model: user_model.clone(),
                     served_at,
                     endpoint_path,
                     received_body,
@@ -414,6 +422,7 @@ impl AciService {
             let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                 receipt_id: &receipt_id,
                 chat_id,
+                model: user_model.clone(),
                 served_at,
                 endpoint_path,
                 received_body,

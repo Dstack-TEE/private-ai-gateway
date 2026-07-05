@@ -23,11 +23,11 @@ pub(super) trait ProviderClaimMapper {
     fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims;
 }
 
-/// Route a provider *type* to its claim mapper; an absent/unknown provider gets
+/// Route a provider *type* to its claim mapper; an absent/unknown type gets
 /// the generic mapper. This is the only place that branches on the provider
-/// string — the per-provider logic lives in the `ProviderClaimMapper` impls.
-pub(super) fn claim_mapper(provider: Option<&str>) -> &'static dyn ProviderClaimMapper {
-    match provider {
+/// type string — the per-provider logic lives in the `ProviderClaimMapper` impls.
+pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn ProviderClaimMapper {
+    match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
@@ -39,7 +39,7 @@ pub(super) fn claim_mapper(provider: Option<&str>) -> &'static dyn ProviderClaim
 /// provider scope, typed or not.
 pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
     let mut claims = if event.result == VerificationResult::Verified {
-        claim_mapper(event.provider.as_deref()).claims(event)
+        claim_mapper(event.provider_type.as_deref()).claims(event)
     } else {
         SessionClaims::default()
     };
@@ -58,7 +58,7 @@ pub(super) fn chutes_instance_id<'a>(
     event: &UpstreamVerifiedEvent,
     binding: &'a ChannelBinding,
 ) -> Option<&'a str> {
-    if event.provider.as_deref() != Some("chutes") {
+    if event.provider_type.as_deref() != Some("chutes") {
         return None;
     }
     match binding {
@@ -77,7 +77,7 @@ pub(super) fn per_instance_session_claims(
     instance_id: &str,
 ) -> SessionClaims {
     let instance_event = UpstreamVerifiedEvent {
-        provider: event.provider.clone(),
+        provider_type: event.provider_type.clone(),
         verifier_id: event.verifier_id.clone(),
         result: event.result,
         provider_claims: Some(per_instance_provider_claims(
@@ -329,13 +329,13 @@ mod claim_mapping_tests {
     use serde_json::{json, Value};
 
     fn event(
-        provider: Option<&str>,
+        provider_type: Option<&str>,
         result: VerificationResult,
         provider_claims: Option<Value>,
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: "operator-config-name".to_string(),
-            provider: provider.map(str::to_string),
+            provider_type: provider_type.map(str::to_string),
             model_id: "m".to_string(),
             url_origin: Some("https://up".to_string()),
             verifier_id: "vid/v1".to_string(),

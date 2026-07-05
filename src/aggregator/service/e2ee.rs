@@ -15,8 +15,8 @@ use super::{
 use sha2::{Digest, Sha256};
 
 use crate::aci::e2ee::{
-    normalize_secp256k1_public_key_hex, E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,
-    E2EE_ALGO_SECP256K1_AESGCM, E2EE_VERSION_V1, E2EE_VERSION_V2,
+    is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
+    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_VERSION_V1, E2EE_VERSION_V2,
 };
 use crate::aci::identity::{self, attestation_statement, report_data};
 use crate::aci::keys::{
@@ -40,6 +40,10 @@ impl AciService {
         nonce: Option<String>,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
+        // A revoked keyset must stop producing acceptable reports (§4.7).
+        if self.is_keyset_revoked() {
+            return Err(ServiceError::KeysetRevoked);
+        }
         let statement = attestation_statement(&self.keyset, nonce)?;
         let rd = report_data(&statement)?;
         let quote = self.quoter.get_quote(rd).await?;
@@ -279,20 +283,27 @@ impl AciService {
             return Err(E2eeError::InvalidTimestamp);
         }
 
-        let client_public_key_hex = normalize_secp256k1_public_key_hex(client_public_key)
-            .map_err(|_| E2eeError::InvalidPublicKey)?;
-        let model_public_key_hex = normalize_secp256k1_public_key_hex(model_public_key)
-            .map_err(|_| E2eeError::InvalidPublicKey)?;
+        // The client selects a §7.1 suite by the `algo` of the keyset entry it
+        // encrypts to (§7.4). Match `X-Model-Pub-Key` against each suite entry
+        // under that suite's own normalization; the first match fixes the suite.
         let selected_key = self
             .keyset
             .e2ee_public_keys
             .iter()
             .find(|key| {
-                key.algo == E2EE_ALGO_SECP256K1_AESGCM
-                    && normalize_secp256k1_public_key_hex(&key.public_key_hex)
-                        .is_ok_and(|normalized| normalized == model_public_key_hex)
+                is_aci_e2ee_suite(&key.algo)
+                    && normalize_aci_e2ee_public_key_hex(&key.algo, model_public_key)
+                        .ok()
+                        .zip(normalize_aci_e2ee_public_key_hex(&key.algo, &key.public_key_hex).ok())
+                        .is_some_and(|(supplied, stored)| supplied == stored)
             })
             .ok_or(E2eeError::ModelKeyMismatch)?;
+        let client_public_key_hex =
+            normalize_aci_e2ee_public_key_hex(&selected_key.algo, client_public_key)
+                .map_err(|_| E2eeError::InvalidPublicKey)?;
+        let model_public_key_hex =
+            normalize_aci_e2ee_public_key_hex(&selected_key.algo, model_public_key)
+                .map_err(|_| E2eeError::InvalidPublicKey)?;
 
         let mut payload: Value =
             serde_json::from_slice(body).map_err(|_| E2eeError::DecryptionFailed)?;

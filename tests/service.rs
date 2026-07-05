@@ -263,7 +263,7 @@ async fn verified_upstream_binding_creates_attested_session() {
         .expect("session audit record should be queryable");
     assert_eq!(session.session_id, session_id);
     assert_eq!(session.api_version, "aci/1");
-    assert_eq!(session.provider, "stub-upstream");
+    assert_eq!(session.upstream_name, "stub-upstream");
     assert_eq!(session.endpoint.as_deref(), Some("https://stub-upstream"));
     assert_eq!(session.verifier_id, "stub-verifier-1");
     // provider_claims are folded verbatim into claims.extra; typed claims beyond
@@ -314,7 +314,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
     let svc = svc.with_session_store(Arc::new(FailingSessionStore));
     let event = UpstreamVerifiedEvent {
         upstream_name: "stub-upstream".to_string(),
-        provider: None,
+        provider_type: None,
         model_id: "x".to_string(),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -583,7 +583,7 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
 async fn background_verification_writes_inspectable_session_into_the_store() {
     let (service, _) = make_service(b"{}", true);
     let event = UpstreamVerifiedEvent {
-        provider: Some("tinfoil".to_string()),
+        provider_type: Some("tinfoil".to_string()),
         url_origin: Some("https://preflight-upstream".to_string()),
         verifier_id: "preflight-verifier/v1".to_string(),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -605,7 +605,7 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
     let listed = service.list_attested_sessions(Some("preflight-upstream"));
     assert_eq!(listed.len(), 1);
     let session = &listed[0];
-    assert_eq!(session.provider, "preflight-upstream");
+    assert_eq!(session.upstream_name, "preflight-upstream");
     assert_eq!(
         session.endpoint.as_deref(),
         Some("https://preflight-upstream")

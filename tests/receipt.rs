@@ -20,6 +20,7 @@ fn builder(_keys: &StaticKeyProvider) -> ReceiptBuilder {
     ReceiptBuilder::new(
         "rcpt-test-1".to_string(),
         Some("chat-xyz".to_string()),
+        Some("demo-model".to_string()),
         format!(
             "sha256:{}",
             "deadbeef".repeat(8) // fake but valid-shaped digest
@@ -50,6 +51,56 @@ fn signed_receipt_verifies_under_keyset_receipt_key() {
     let receipt_keys = keys.receipt_keys();
     assert!(verify_receipt_signature(
         &receipt_keys[0],
+        &canonical_bytes,
+        &sig
+    ));
+}
+
+#[test]
+fn default_receipt_signature_is_ed25519() {
+    let keys = keys();
+    // The default receipt key id is the first listed key (§8.5 RECOMMENDED).
+    let key_id = keys.receipt_keys()[0].key_id.clone();
+    let mut b = builder(&keys);
+    b.add_request_received(b"a").unwrap();
+    b.add_request_forwarded(b"a").unwrap();
+    b.add_response_returned(b"b", b"b").unwrap();
+
+    let receipt = b.finalize(&keys, &key_id).unwrap();
+    assert_eq!(receipt.signature.algo, "ed25519");
+    // Ed25519 signatures are a raw 64-byte RFC 8032 pair.
+    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
+    assert_eq!(sig.len(), 64);
+    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
+    assert!(verify_receipt_signature(
+        &keys.receipt_keys()[0],
+        &canonical_bytes,
+        &sig
+    ));
+}
+
+#[test]
+fn secp256k1_receipt_key_stays_functional() {
+    let keys = keys();
+    let key_id = keys.secp256k1_receipt_key_id().to_string();
+    let mut b = builder(&keys);
+    b.add_request_received(b"a").unwrap();
+    b.add_request_forwarded(b"a").unwrap();
+    b.add_response_returned(b"b", b"b").unwrap();
+
+    let receipt = b.finalize(&keys, &key_id).unwrap();
+    assert_eq!(receipt.signature.algo, "ecdsa-secp256k1");
+    // Recoverable r||s||v is exactly 65 bytes (§8.5).
+    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
+    assert_eq!(sig.len(), 65);
+    let secp256k1_key = keys
+        .receipt_keys()
+        .into_iter()
+        .find(|k| k.key_id == key_id)
+        .unwrap();
+    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
+    assert!(verify_receipt_signature(
+        &secp256k1_key,
         &canonical_bytes,
         &sig
     ));

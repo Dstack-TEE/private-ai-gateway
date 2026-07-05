@@ -31,8 +31,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
-    unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, keyset_revoked_response,
+    unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
@@ -57,7 +57,7 @@ pub(super) struct SignatureQuery {
 
 #[derive(Deserialize)]
 pub(super) struct SessionListQuery {
-    provider: Option<String>,
+    upstream_name: Option<String>,
     model: Option<String>,
 }
 
@@ -200,6 +200,39 @@ pub(super) async fn admin_put_upstreams(
     }
 }
 
+/// Revoke the current workload keyset (§4.7). Guarded by the admin token: the
+/// service signs the revocation payload with the identity key, persists the
+/// statement, and stops serving reports/inference under this keyset. On the
+/// next restart the launcher rolls to a fresh epoch so it can serve again,
+/// while the revoked digest stays listed at `GET /v1/aci/revocations`.
+pub(super) async fn admin_revoke_keyset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = enforce_admin(&state, &headers) {
+        return resp;
+    }
+    match state.service.revoke_current_keyset() {
+        Ok(statement) => Json(json!({
+            "api_version": "aci/1",
+            "revoked": statement,
+        }))
+        .into_response(),
+        Err(e) => internal_error_response(e),
+    }
+}
+
+/// Public transparency surface: every keyset revocation statement this service
+/// has issued (§4.7), so a verifier can reject reports and receipts under a
+/// revoked digest. Unauthenticated, like the attested-session endpoints.
+pub(super) async fn aci_revocations(State(state): State<AppState>) -> Response {
+    Json(json!({
+        "api_version": "aci/1",
+        "revocations": state.service.revocations(),
+    }))
+    .into_response()
+}
+
 pub(super) async fn attestation_report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -318,6 +351,7 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
+        Err(ServiceError::KeysetRevoked) => keyset_revoked_response(),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -489,6 +523,12 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
+    // request would use; stop serving inference under it (§4.7).
+    if state.service.is_keyset_revoked() {
+        return keyset_revoked_response();
+    }
+
     let has_e2ee = has_e2ee_headers(&headers);
     if has_e2ee && state.service.supported_e2ee_versions().is_empty() {
         return unsupported_e2ee_response();
@@ -656,15 +696,16 @@ pub(super) async fn aci_receipt(
 }
 
 /// List the attested TEE channels (one per upstream endpoint), optionally
-/// filtered by `?provider=` (the upstream config name) and/or `?model=`.
+/// filtered by `?upstream_name=` (the operator's upstream config name) and/or
+/// `?model=`.
 ///
 /// Sessions are per-TEE-channel, not per-model, so a `?model=` filter is
 /// resolved to the upstream(s) that serve that model (via the upstream config)
-/// and then matched on `provider`.
+/// and then matched on `upstream_name`.
 ///
 /// Intentionally unauthenticated (like [`attested_session`]): a session record
-/// is a transparency artifact carrying only verification material — provider,
-/// endpoint, the verified identity (e.g. signing address), channel bindings,
+/// is a transparency artifact carrying only verification material — upstream
+/// name, endpoint, the verified identity (e.g. signing address), channel bindings,
 /// claims, and an evidence digest. It holds no request or response content. The
 /// list response carries only the evidence **digest**, not the full evidence
 /// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{id}`) for the
@@ -675,7 +716,7 @@ pub(super) async fn aci_list_sessions(
 ) -> Response {
     let mut sessions = match q.model.as_deref() {
         // Resolve the model to the upstream(s) serving it, then list each
-        // channel's sessions (honoring a provider filter if both are given).
+        // channel's sessions (honoring an upstream_name filter if both are given).
         Some(model) => {
             let names = state
                 .upstream_config
@@ -684,7 +725,7 @@ pub(super) async fn aci_list_sessions(
                 .unwrap_or_default();
             let mut merged = names
                 .iter()
-                .filter(|n| q.provider.as_deref().is_none_or(|p| p == n.as_str()))
+                .filter(|n| q.upstream_name.as_deref().is_none_or(|p| p == n.as_str()))
                 .flat_map(|n| state.service.list_attested_sessions(Some(n)))
                 .collect::<Vec<_>>();
             // Each per-upstream list is already sorted, but the fan-out just
@@ -693,7 +734,9 @@ pub(super) async fn aci_list_sessions(
             sort_sessions_newest_first(&mut merged);
             merged
         }
-        None => state.service.list_attested_sessions(q.provider.as_deref()),
+        None => state
+            .service
+            .list_attested_sessions(q.upstream_name.as_deref()),
     };
     // Keep the digest as the integrity anchor; drop the data-URI bytes from the
     // broad listing.

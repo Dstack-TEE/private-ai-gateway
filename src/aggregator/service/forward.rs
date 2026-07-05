@@ -196,6 +196,7 @@ impl AciService {
         let mut builder = ReceiptBuilder::new(
             receipt_id,
             chat_id,
+            req.context.user_model.clone(),
             self.workload_id.clone(),
             self.workload_keyset_digest.clone(),
             endpoint_path.to_string(),
@@ -343,6 +344,7 @@ impl AciService {
         let mut builder = ReceiptBuilder::new(
             receipt_id.clone(),
             None,
+            req.context.user_model.clone(),
             self.workload_id.clone(),
             self.workload_keyset_digest.clone(),
             endpoint_path.to_string(),

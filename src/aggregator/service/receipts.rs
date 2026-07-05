@@ -49,12 +49,13 @@ impl AciService {
             .get_session(session_id, self.clock.now_secs())
     }
 
-    /// List attested sessions (TEE channels), optionally filtered by provider
-    /// (the upstream config name). A model→channel lookup belongs to the caller,
-    /// since a session is per-channel, not per-model.
-    pub fn list_attested_sessions(&self, provider: Option<&str>) -> Vec<AttestedSession> {
+    /// List attested sessions (TEE channels), optionally filtered by
+    /// `upstream_name` (the operator's upstream config name). A model→channel
+    /// lookup belongs to the caller, since a session is per-channel, not
+    /// per-model.
+    pub fn list_attested_sessions(&self, upstream_name: Option<&str>) -> Vec<AttestedSession> {
         self.session_store
-            .list_sessions(provider, self.clock.now_secs())
+            .list_sessions(upstream_name, self.clock.now_secs())
     }
 
     /// E2EE protocol versions this workload has actually wired.

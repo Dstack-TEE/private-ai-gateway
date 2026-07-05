@@ -34,6 +34,10 @@
 //!   current upstream config, with secrets redacted.
 //! * `PUT  /v1/admin/upstreams` - authenticated admin replacement of
 //!   the single upstream config file.
+//! * `POST /v1/admin/revoke-keyset` - authenticated admin revocation of the
+//!   current workload keyset (§4.7). Signs and persists the revocation
+//!   statement, after which the service stops serving reports/inference under
+//!   the revoked keyset.
 //!
 //! ACI verification artifacts live under the `/v1/aci/` namespace so they do
 //! not pollute the OpenAI surface. The id parameter accepts the gateway
@@ -45,7 +49,9 @@
 //! * `GET  /v1/aci/receipts/{id}` - the signed ACI receipt (canonical value).
 //! * `GET  /v1/aci/sessions/{session_id}` - the attested-session record a
 //!   receipt references.
-//! * `GET  /v1/aci/sessions?provider=&model=` - list attested sessions.
+//! * `GET  /v1/aci/sessions?upstream_name=&model=` - list attested sessions.
+//! * `GET  /v1/aci/revocations` - all issued keyset revocation statements
+//!   (§4.7), a public transparency surface.
 //!
 //! Legacy aliases for dstack-vllm-proxy compatibility:
 //! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`
@@ -85,10 +91,10 @@ mod handlers;
 mod util;
 
 use handlers::{
-    aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
-    admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
-    embeddings, embeddings_models, health, messages, metrics, models, models_subpath,
-    receipt_by_chat_id, responses, root,
+    aci_attestation_report, aci_list_sessions, aci_receipt, aci_revocations, admin_get_upstreams,
+    admin_put_upstreams, admin_revoke_keyset, attestation_report, attested_session,
+    chat_completions, completions, embeddings, embeddings_models, health, messages, metrics,
+    models, models_subpath, receipt_by_chat_id, responses, root,
 };
 
 #[derive(Clone)]
@@ -157,11 +163,13 @@ fn build_router_inner(
             "/v1/admin/upstreams",
             get(admin_get_upstreams).put(admin_put_upstreams),
         )
+        .route("/v1/admin/revoke-keyset", post(admin_revoke_keyset))
         // Canonical ACI verification surface (clean shapes).
         .route("/v1/aci/attestation", get(aci_attestation_report))
         .route("/v1/aci/receipts/:id", get(aci_receipt))
         .route("/v1/aci/sessions", get(aci_list_sessions))
         .route("/v1/aci/sessions/:session_id", get(attested_session))
+        .route("/v1/aci/revocations", get(aci_revocations))
         // Legacy dstack-vllm-proxy aliases (vllm-proxy response shapes only;
         // we owe no back-compat to earlier private-ai-gateway paths).
         .route("/v1/attestation/report", get(attestation_report))

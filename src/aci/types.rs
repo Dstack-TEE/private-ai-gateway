@@ -145,6 +145,7 @@ impl WorkloadKeyset {
 
 pub const REPORT_DATA_PURPOSE: &str = "aci.report_data.v1";
 pub const KEYSET_ENDORSEMENT_PURPOSE: &str = "aci.keyset.endorsement.v1";
+pub const KEYSET_REVOCATION_PURPOSE: &str = "aci.keyset.revocation.v1";
 
 /// The named report-data payload that the TEE quote MUST cover.
 ///
@@ -191,6 +192,24 @@ pub struct KeysetEndorsement {
     pub algo: String,
     #[serde(rename = "value")]
     pub value_hex: String,
+}
+
+/// The named payload the identity key signs to revoke a keyset (§4.7). Same
+/// shape as [`KeysetEndorsementPayload`] under a different purpose tag; a
+/// service repudiates the digest it was serving, and a verifier that obtains
+/// the statement rejects reports and receipts under that digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeysetRevocationPayload {
+    pub workload_keyset_digest: String,
+}
+
+impl KeysetRevocationPayload {
+    pub fn to_canonical_value(&self) -> Value {
+        json!({
+            "purpose": KEYSET_REVOCATION_PURPOSE,
+            "workload_keyset_digest": self.workload_keyset_digest,
+        })
+    }
 }
 
 // ---------- §5 Attestation report ----------
@@ -300,6 +319,10 @@ pub struct Receipt {
     pub api_version: String,
     pub receipt_id: String,
     pub chat_id: Option<String>,
+    /// The model the user requested — the top-level `model` of the received
+    /// request, before any service-side rewrite; `null` when the request
+    /// carried none (ACI §8.2).
+    pub model: Option<String>,
     pub workload_id: String,
     pub workload_keyset_digest: String,
     pub endpoint: String,
@@ -328,6 +351,7 @@ impl Receipt {
             "api_version": self.api_version,
             "receipt_id": self.receipt_id,
             "chat_id": self.chat_id,
+            "model": self.model,
             "workload_id": self.workload_id,
             "workload_keyset_digest": self.workload_keyset_digest,
             "endpoint": self.endpoint,

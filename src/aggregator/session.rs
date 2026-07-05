@@ -213,8 +213,9 @@ pub struct AttestedSession {
     pub api_version: String,
     /// `"as_" + hex(sha256(JCS(verified material)))`.
     pub session_id: String,
-    /// The upstream this channel belongs to (the operator's upstream config name).
-    pub provider: String,
+    /// The upstream this channel belongs to (the operator's upstream config
+    /// `name`) — the same label the receipt's `upstream.verified` event carries.
+    pub upstream_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     pub verifier_id: String,
@@ -239,7 +240,7 @@ impl AttestedSession {
     /// material dedups to one session.
     #[allow(clippy::too_many_arguments)]
     pub fn seal(
-        provider: impl Into<String>,
+        upstream_name: impl Into<String>,
         endpoint: Option<String>,
         verifier_id: impl Into<String>,
         identity: Option<WorkloadIdentityRef>,
@@ -252,7 +253,7 @@ impl AttestedSession {
         let mut session = Self {
             api_version: SESSION_API_VERSION.to_string(),
             session_id: String::new(),
-            provider: provider.into(),
+            upstream_name: upstream_name.into(),
             endpoint,
             verifier_id: verifier_id.into(),
             established_at,
@@ -278,7 +279,7 @@ impl AttestedSession {
         /// here are load-bearing (they feed the canonical hash).
         #[derive(Serialize)]
         struct ContentMaterial<'a> {
-            provider: &'a str,
+            upstream_name: &'a str,
             endpoint: &'a Option<String>,
             verifier_id: &'a str,
             identity: &'a Option<WorkloadIdentityRef>,
@@ -287,7 +288,7 @@ impl AttestedSession {
             evidence_digest: &'a Option<String>,
         }
         let material = serde_json::to_value(ContentMaterial {
-            provider: &self.provider,
+            upstream_name: &self.upstream_name,
             endpoint: &self.endpoint,
             verifier_id: &self.verifier_id,
             identity: &self.identity,
