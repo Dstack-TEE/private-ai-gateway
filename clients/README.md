@@ -1,9 +1,12 @@
 # ACI E2EE client libraries
 
-Client-side end-to-end encryption for the ACI protocol (spec §7). These
-libraries encrypt the content-bearing fields of a request to the attested
+Reference client-side end-to-end **encryption** for the ACI protocol (spec §7).
+These libraries encrypt the content-bearing fields of a request to the attested
 service E2EE key, so plaintext is readable only inside the TEE even when TLS
-terminates elsewhere.
+terminates elsewhere. For the **verification** side (checking attestation
+reports and receipts, decrypting response fields), see the
+[`@dstack/aci-verifier`](verifier-ts) package, which shares the same JCS and AAD
+construction.
 
 Both cipher suites of §7.1 are supported; the client picks one by the `algo`
 of the keyset entry it encrypts to:
@@ -18,9 +21,11 @@ canonicalization of a purpose-tagged object whose `field` is the location's
 field path (§7.2), e.g. `messages.0.content`,
 `messages.1.content.0.image_url.url`, `prompt`, `input.2`.
 
-The [Rust](rust/aci-e2ee) and [TypeScript](typescript) implementations are
-verified against each other with a shared byte-exact known-answer test, and
-both reproduce the AAD test vectors in `spec/test-vectors.md §7`.
+The [Rust](e2ee-rs) and [TypeScript](e2ee-ts) implementations are verified
+against each other with a shared byte-exact known-answer test, both reproduce
+the AAD test vectors in `spec/test-vectors.md §7`, and their known-answer
+ciphertexts are decrypted by the gateway itself in
+`tests/aci_service_surface.rs::reference_client_ciphertexts_decrypt_under_the_server`.
 
 ## Typical flow
 

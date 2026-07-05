@@ -344,7 +344,7 @@ mod tests {
     const KAT_TS: u64 = 1_750_000_000;
     const KAT_PLAINTEXT: &[u8] = b"hello";
 
-    // Cross-language known-answer ciphertexts (see clients/typescript).
+    // Cross-language known-answer ciphertexts (see clients/e2ee-ts).
     const KAT_X25519: &str = "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee060a4f0f13144b6b54211955b1aefeebd";
     const KAT_SECP256K1: &str = "041b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f70beaf8f588b541507fed6a642c5ab42dfdf8120a7f639de5122d47a69a8e8d1000102030405060708090a0bc1efd31f5d132d09f59283db7d4c457c294b402312";
 
@@ -456,7 +456,7 @@ mod tests {
     }
 
     // Deterministic cross-language vectors: these fixed inputs must yield the
-    // same ciphertext here and in clients/typescript, proving byte-level interop.
+    // same ciphertext here and in clients/e2ee-ts, proving byte-level interop.
     #[test]
     fn known_answer_vectors() {
         let aad = request_aad(ALGO_X25519, KAT_MODEL, KAT_FIELD, KAT_NONCE, KAT_TS);

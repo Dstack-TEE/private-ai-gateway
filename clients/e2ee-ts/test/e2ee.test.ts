@@ -15,9 +15,8 @@ import {
   generateNonce,
   requestAad,
   responseAad,
-  sealSecp256k1,
-  sealX25519,
 } from "../src/index.ts";
+import { sealSecp256k1, sealX25519 } from "../src/internal.ts";
 
 // spec/test-vectors.md §7 — byte-exact expected AAD.
 const REQUEST_AAD_VECTOR =
@@ -26,7 +25,7 @@ const RESPONSE_AAD_VECTOR =
   '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2","ts":1750000000}';
 
 // Deterministic known-answer ciphertexts produced by the Rust client
-// (clients/rust/aci-e2ee) with the same fixed inputs. Matching them proves the
+// (clients/e2ee-rs) with the same fixed inputs. Matching them proves the
 // two implementations interoperate byte-for-byte.
 const KAT_X25519 =
   "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209000102030405060708090a0beb61256ee060a4f0f13144b6b54211955b1aefeebd";
@@ -123,4 +122,15 @@ test("generateNonce produces a fresh 64-lowercase-hex value", () => {
   const nonce = generateNonce();
   assert.match(nonce, /^[0-9a-f]{64}$/);
   assert.notEqual(generateNonce(), nonce);
+});
+
+test("requestAad rejects a non-integer timestamp", () => {
+  assert.throws(() => requestAad(ALGO_X25519, "m", "messages.0.content", KAT_NONCE, 1750000000.5));
+});
+
+test("encrypt rejects a 65-byte secp256k1 key without the 0x04 prefix", () => {
+  const bad = "05" + "11".repeat(64); // 65 bytes, wrong prefix
+  const aad = requestAad(ALGO_SECP256K1, "m", "prompt", KAT_NONCE, KAT_TS);
+  assert.throws(() => encryptRequestField(bad, ALGO_SECP256K1, "m", "prompt", KAT_NONCE, KAT_TS, KAT_PLAINTEXT));
+  assert.throws(() => sealSecp256k1(bad, EPH_SECRET, GCM_NONCE, KAT_PLAINTEXT, aad));
 });
