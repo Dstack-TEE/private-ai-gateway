@@ -70,6 +70,24 @@ if (!(await checkResponseWireHash(receipt, responseBytes))) {
 }
 ```
 
+### E2EE (§7)
+
+Encrypt request fields to a *verified* workload. `openE2eeChannel` refuses
+unless the report passed `verifyReportBinding`, so you can only encrypt to an
+attested, endorsed key (X25519 suite; secp256k1 is a separate extension).
+
+```ts
+import { verifyReportBinding, openE2eeChannel } from '@dstack/aci-verifier';
+
+const v = await verifyReportBinding(report, attestationNonce);
+if (!v.ok) throw new Error('workload failed verification');
+
+const chan = await openE2eeChannel(report, v);
+const { body, headers } = await chan.seal({ model, messages }); // encrypts content, sets X-E2EE-*
+// ...POST body + headers to /v1/chat/completions...
+const reply = await chan.open(responseJson);                    // decrypts the reply
+```
+
 ## Development
 
 ```sh

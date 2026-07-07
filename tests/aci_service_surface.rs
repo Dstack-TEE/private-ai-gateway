@@ -350,6 +350,17 @@ fn aci_response_aad(
     .unwrap()
 }
 
+/// A valid ACI v2 nonce (64 lowercase hex chars, §7.5) derived from a label, so
+/// each test uses a distinct, readable value without hardcoding 64-char hex.
+fn hex_nonce(label: &str) -> String {
+    let mut out = String::with_capacity(64);
+    let bytes = label.as_bytes();
+    for i in 0..32 {
+        out.push_str(&format!("{:02x}", bytes.get(i).copied().unwrap_or(0)));
+    }
+    out
+}
+
 fn e2ee_request(
     h: &Harness,
     client_secret: &k256::SecretKey,
@@ -801,7 +812,8 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire_separately() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x55; 32]).unwrap();
-    let nonce = "nonce-1";
+    let nonce = hex_nonce("nonce-1");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -859,7 +871,8 @@ async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire
 async fn e2ee_v2_x25519_suite_selected_by_model_key_round_trips() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = X25519SecretKey::from([0x71u8; 32]);
-    let nonce = "nonce-x25519";
+    let nonce = hex_nonce("nonce-x25519");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -902,7 +915,8 @@ async fn e2ee_v2_x25519_suite_selected_by_model_key_round_trips() {
 async fn e2ee_v2_model_key_absent_from_keyset_is_rejected() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = X25519SecretKey::from([0x72u8; 32]);
-    let nonce = "nonce-x25519-stranger";
+    let nonce = hex_nonce("nonce-x25519-stranger");
+    let nonce = nonce.as_str();
     let (encrypted_body, mut headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
     // Well-formed X25519 key that is not one of the attested service keys.
     let stranger = x25519_public_key_hex(&X25519SecretKey::from([0x99u8; 32]));
@@ -925,7 +939,8 @@ async fn e2ee_v2_response_aad_uses_request_model_not_upstream_response_model() {
     let upstream_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"private-upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(upstream_response));
     let client_secret = k256::SecretKey::from_slice(&[0x56; 32]).unwrap();
-    let nonce = "nonce-request-model-aad";
+    let nonce = hex_nonce("nonce-request-model-aad");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -963,7 +978,8 @@ async fn e2ee_v2_decrypts_multimodal_image_and_audio_parts() {
     // alongside a text part (spec §7.2).
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x64; 32]).unwrap();
-    let nonce = "nonce-multimodal";
+    let nonce = hex_nonce("nonce-multimodal");
+    let nonce = nonce.as_str();
     let timestamp = 1_700_000_000u64;
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     let algo = model_key.algo.clone();
@@ -1029,7 +1045,8 @@ async fn e2ee_v2_response_encrypts_message_audio_data() {
     let audio_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","audio":{"id":"audio-1","data":"QUJDMTIzYXVkaW8="}},"finish_reason":"stop"}]}"#;
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(audio_response));
     let client_secret = k256::SecretKey::from_slice(&[0x65; 32]).unwrap();
-    let nonce = "nonce-response-audio";
+    let nonce = hex_nonce("nonce-response-audio");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -1138,7 +1155,7 @@ async fn e2ee_v2_missing_headers_are_rejected_before_upstream() {
 async fn e2ee_v2_invalid_version_is_rejected_before_upstream() {
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x56; 32]).unwrap();
-    let (_body, mut headers) = e2ee_request(&h, &client_secret, "nonce-version");
+    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-version"));
     headers
         .iter_mut()
         .find(|(name, _)| *name == "x-e2ee-version")
@@ -1157,7 +1174,7 @@ async fn e2ee_v2_invalid_version_is_rejected_before_upstream() {
 async fn e2ee_v2_invalid_timestamp_is_rejected_before_upstream() {
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x57; 32]).unwrap();
-    let (_body, mut headers) = e2ee_request(&h, &client_secret, "nonce-timestamp");
+    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-timestamp"));
     headers
         .iter_mut()
         .find(|(name, _)| *name == "x-e2ee-timestamp")
@@ -1176,7 +1193,7 @@ async fn e2ee_v2_invalid_timestamp_is_rejected_before_upstream() {
 async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
-    let (body, headers) = e2ee_request(&h, &client_secret, "nonce-replay");
+    let (body, headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-replay"));
     let first = h
         .requester
         .post_owned_headers("/v1/chat/completions", &body, &headers)
@@ -1200,6 +1217,7 @@ async fn e2ee_v2_invalid_payload_model_is_rejected_before_upstream() {
     // or not a string (spec §7.3), never for its contents.
     let invalid = br#"{"model":123,"messages":[]}"#;
     let client_pub = public_key_from_secret(&client_secret);
+    let nonce = hex_nonce("payload-model");
     let resp = h
         .requester
         .post(
@@ -1209,13 +1227,33 @@ async fn e2ee_v2_invalid_payload_model_is_rejected_before_upstream() {
                 ("x-client-pub-key", &client_pub),
                 ("x-model-pub-key", &model_key.public_key_hex),
                 ("x-e2ee-version", "2"),
-                ("x-e2ee-nonce", "nonce-1"),
+                ("x-e2ee-nonce", &nonce),
                 ("x-e2ee-timestamp", "1700000000"),
             ],
         )
         .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&resp), "e2ee_invalid_payload_model");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v2_malformed_nonce_is_rejected_before_upstream() {
+    // §7.5: the nonce must be exactly 64 lowercase hex characters.
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = k256::SecretKey::from_slice(&[0x60; 32]).unwrap();
+    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("valid-nonce"));
+    headers
+        .iter_mut()
+        .find(|(name, _)| *name == "x-e2ee-nonce")
+        .unwrap()
+        .1 = "not-64-hex".to_string();
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", CHAT_REQUEST, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_nonce");
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
@@ -1291,7 +1329,8 @@ async fn e2ee_v2_streaming_chat_encrypts_sse_events_and_hashes_cleartext_and_wir
         .collect::<Vec<_>>();
     let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(stream_chunks));
     let client_secret = k256::SecretKey::from_slice(&[0x5b; 32]).unwrap();
-    let nonce = "nonce-stream";
+    let nonce = hex_nonce("nonce-stream");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_stream_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -1466,7 +1505,8 @@ async fn completions_endpoint_supports_e2ee_as_optional_add_on() {
         E2EE_COMPLETION_RESPONSE,
     ));
     let client_secret = k256::SecretKey::from_slice(&[0x5a; 32]).unwrap();
-    let nonce = "nonce-completion";
+    let nonce = hex_nonce("nonce-completion");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_completion_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -1529,7 +1569,8 @@ async fn completions_endpoint_streaming_supports_e2ee_as_optional_add_on() {
         .collect::<Vec<_>>();
     let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(stream_chunks));
     let client_secret = k256::SecretKey::from_slice(&[0x5c; 32]).unwrap();
-    let nonce = "nonce-completion-stream";
+    let nonce = hex_nonce("nonce-completion-stream");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_completion_stream_request(&h, &client_secret, nonce);
 
     let resp = h
@@ -1855,7 +1896,8 @@ async fn embeddings_endpoint_supports_aci_v2_e2ee_with_string_input() {
         E2EE_EMBEDDINGS_RESPONSE,
     ));
     let client_secret = k256::SecretKey::from_slice(&[0x71; 32]).unwrap();
-    let nonce = "nonce-embed-string";
+    let nonce = hex_nonce("nonce-embed-string");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_embeddings_request_string(&h, &client_secret, nonce);
 
     let resp = h
@@ -1908,7 +1950,8 @@ async fn embeddings_endpoint_supports_aci_v2_e2ee_with_array_input() {
     let response_with_two = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[1.0]},{"object":"embedding","index":1,"embedding":[2.0]}],"model":"aci-model","usage":{"prompt_tokens":4,"total_tokens":4}}"#;
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(response_with_two));
     let client_secret = k256::SecretKey::from_slice(&[0x72; 32]).unwrap();
-    let nonce = "nonce-embed-array";
+    let nonce = hex_nonce("nonce-embed-array");
+    let nonce = nonce.as_str();
     let (encrypted_body, headers) = e2ee_embeddings_request_array(&h, &client_secret, nonce);
 
     let resp = h

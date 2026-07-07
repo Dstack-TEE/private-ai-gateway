@@ -219,7 +219,7 @@ request_aad = jcs(
         "algo": E2EE_ALGO,
         "field": "messages.0.content",
         "model": "demo-model",
-        "nonce": "6e6f6e63652d31323334",
+        "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "ts": 1750000000,
     }
 )
@@ -230,7 +230,7 @@ response_aad = jcs(
         "field": "choices.0.message.content",
         "id": "chatcmpl-123",
         "model": "demo-model",
-        "nonce": "6e6f6e63652d31323334",
+        "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "ts": 1750000000,
     }
 )
@@ -269,11 +269,11 @@ def main():
                  "sha256:80d70e44d0ae1e829fd5f37c3ee4a60dfbea8d3aa18407ea3f34cf7ec91da34d")
     ok &= _check("§7 request AAD", request_aad.decode(),
                  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content",'
-                 '"model":"demo-model","nonce":"6e6f6e63652d31323334",'
+                 '"model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
                  '"purpose":"aci.e2ee.request.v2","ts":1750000000}')
     ok &= _check("§7 response AAD", response_aad.decode(),
                  '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content",'
-                 '"id":"chatcmpl-123","model":"demo-model","nonce":"6e6f6e63652d31323334",'
+                 '"id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
                  '"purpose":"aci.e2ee.response.v2","ts":1750000000}')
 
     # Cross-check that the ONLY thing the rename changes is the field name: the

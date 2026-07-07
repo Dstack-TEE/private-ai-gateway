@@ -46,6 +46,10 @@ export {
 } from './e2ee.js';
 export type { AadCommon } from './e2ee.js';
 
+// E2EE channel to a verified workload — encrypt requests, decrypt replies (§7)
+export { openE2eeChannel } from './e2ee-channel.js';
+export type { E2eeChannel } from './e2ee-channel.js';
+
 // Level 1 receipt verification (§10.2)
 export {
   verifyReceipt,

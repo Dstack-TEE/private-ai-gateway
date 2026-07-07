@@ -11,10 +11,12 @@ use crate::aci::e2ee::{
 };
 use crate::aci::keys::KeyProvider;
 
-/// ACI v2 nonce (§7.5): reject only an empty nonce. With JCS AAD (§7.3) the
-/// old `|`/CR/LF ambiguity checks are unnecessary.
+/// ACI v2 nonce (§7.5): a per-request replay token — exactly 32 bytes of CSPRNG
+/// output, hex-encoded (64 hex characters, either case). The fixed width is the
+/// only rule; the service cannot verify entropy.
 pub(super) fn validate_aci_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
-    if nonce.is_empty() {
+    let is_64_hex = nonce.len() == 64 && nonce.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_64_hex {
         return Err(E2eeError::InvalidNonce);
     }
     Ok(())
@@ -927,8 +929,9 @@ mod tests {
     use super::{aci_request_aad, aci_response_aad};
 
     // Byte-exact expected AAD from spec/test-vectors.md §7 (X25519 suite).
-    const REQUEST_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.request.v2","ts":1750000000}"#;
-    const RESPONSE_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"6e6f6e63652d31323334","purpose":"aci.e2ee.response.v2","ts":1750000000}"#;
+    const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const REQUEST_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2","ts":1750000000}"#;
+    const RESPONSE_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2","ts":1750000000}"#;
 
     #[test]
     fn request_aad_matches_spec_test_vector() {
@@ -936,7 +939,7 @@ mod tests {
             "x25519-aes-256-gcm-hkdf-sha256",
             "demo-model",
             "messages.0.content",
-            "6e6f6e63652d31323334",
+            NONCE,
             1_750_000_000,
         )
         .unwrap();
@@ -950,10 +953,23 @@ mod tests {
             "demo-model",
             "chatcmpl-123",
             "choices.0.message.content",
-            "6e6f6e63652d31323334",
+            NONCE,
             1_750_000_000,
         )
         .unwrap();
         assert_eq!(aad, RESPONSE_AAD.as_bytes());
+    }
+
+    #[test]
+    fn nonce_validation_requires_64_hex() {
+        assert!(super::validate_aci_e2ee_nonce(NONCE).is_ok());
+        // Either case is accepted (§7.5).
+        assert!(super::validate_aci_e2ee_nonce(&"A".repeat(64)).is_ok());
+        assert!(super::validate_aci_e2ee_nonce("").is_err());
+        assert!(super::validate_aci_e2ee_nonce("nonce-1").is_err());
+        assert!(super::validate_aci_e2ee_nonce(&"a".repeat(63)).is_err());
+        assert!(super::validate_aci_e2ee_nonce(&"a".repeat(65)).is_err());
+        // Right length, non-hex character.
+        assert!(super::validate_aci_e2ee_nonce(&format!("{}g", "0".repeat(63))).is_err());
     }
 }
