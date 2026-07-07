@@ -1,8 +1,8 @@
-# AciDcap (first-party Phala) — attested session verification & binding
+# AciService (first-party) — attested session verification & binding
 
 - **TEE:** Intel TDX (CPU) + NVIDIA Confidential Compute, on dstack
 - **Session binding:** `tls_spki_sha256`
-- **Verifier:** native Rust — `AciDcapUpstreamVerifier` (`src/aci/verifier.rs`). No
+- **Verifier:** native Rust — `AciServiceUpstreamVerifier` (`src/aci/verifier.rs`). No
   bridge / Python; this is the path for the gateway's own ACI-compatible workers.
 - **Status:** sound (designed with the keyset-digest binding from the start;
   covered by `tests/upstream_verifier.rs`).
@@ -11,8 +11,8 @@
 
 ## What is verified
 
-`AciDcapUpstreamVerifier` fetches `GET /v1/attestation/report?nonce=<random>` from the
-worker and verifies it natively:
+`AciServiceUpstreamVerifier` fetches `GET /v1/aci/attestation?nonce=<random>` (the
+canonical ACI report) from the worker and verifies it natively:
 
 1. **ACI report binding** (`validate_aci_report_binding`, `src/aci/verifier.rs`):
    - `workload_id` recomputed from the workload identity must equal the reported
@@ -66,14 +66,14 @@ connection before forwarding.
 ## Notes
 
 - This is the path the gateway uses for its own GPU workers once they expose an
-  ACI-compatible `/v1/attestation/report`. It is kept minimal today; see the roadmap's
+  ACI-compatible `/v1/aci/attestation`. It is kept minimal today; see the roadmap's
   "Provider Soundness and Strict Pins" and the deferred standalone-Phala work.
 - Policy inputs (accepted workload ids / image digests / KMS root keys, PCCS URL) are
   configured per upstream, not via broad process-level env.
 
 ## Source & platform provenance, and TCB status
 
-Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md) (AciDcap has no
+Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md) (AciService has no
 separate `review.md`):
 
 - **Software provenance** (worker code → reviewed source): via the
@@ -87,7 +87,7 @@ separate `review.md`):
 
 ## Reproduce
 
-Driven through upstream entries with `provider: "aci-dcap"` against workers
-that expose `/v1/attestation/report`; see
+Driven through upstream entries with `provider: "aci-service"` against workers
+that expose `/v1/aci/attestation`; see
 `scripts/phala_multi_upstream_smoke.sh` and
 `scripts/local_multi_upstream_smoke.sh`.

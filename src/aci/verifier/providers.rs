@@ -245,7 +245,7 @@ impl UpstreamVerifier for NearAiProviderVerifier {
 /// [`OpenAICompatibleBackend`] pins on the forward connection.
 ///
 /// (Named "direct" because it is expected to be superseded by an ACI-compatible
-/// server; see [`AciDcapUpstreamVerifier`].)
+/// server; see [`AciServiceUpstreamVerifier`].)
 #[derive(Debug, Clone)]
 pub struct PhalaDirectProviderVerifier {
     verifier: ExternalProviderVerifier,

@@ -404,7 +404,7 @@ routes_json=$(
     '[
       {
         name: "route-a",
-        provider: "aci-dcap",
+        provider: "aci-service",
         base_url: $url_a,
         models: {"public-a": "routed-upstream-a-model"},
         accepted_workload_ids: [$wid_a],
@@ -412,7 +412,7 @@ routes_json=$(
       },
       {
         name: "route-b",
-        provider: "aci-dcap",
+        provider: "aci-service",
         base_url: $url_b,
         models: {"public-b": "routed-upstream-b-model"},
         accepted_workload_ids: [$wid_b],

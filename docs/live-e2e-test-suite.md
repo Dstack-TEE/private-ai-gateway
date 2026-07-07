@@ -62,7 +62,7 @@ scripts/live_e2e/
     tinfoil.json
     near-ai.json
     chutes.json
-    aci-dcap.json
+    aci-service.json
 examples/
   verify_aci_artifacts.rs
 ```
@@ -204,7 +204,7 @@ Provider-specific rules:
   for the binding enforced by the transport. Strict production entries should
   pin upstream model ids to concrete `chute_id` UUIDs with `chutes_chute_ids`;
   the verifier and upstream config use the same pins.
-- ACI/DCAP: verify `/v1/attestation/report?nonce=...`, quote report data,
+- ACI service: verify `/v1/attestation/report?nonce=...`, quote report data,
   dstack KMS identity custody, accepted workload id or image digest, accepted
   KMS root, and attested TLS SPKI.
 
@@ -220,7 +220,7 @@ Checks:
 - Required API keys are present but never printed.
 - The vendored `scripts/confidential_verifier` package exists, or
   `PRIVATE_AI_VERIFIER_DIR` points at an explicit verifier override.
-- `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI/DCAP tests.
+- `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI service tests.
 - A local dstack socket exists for gateway attestation tests. The runner writes
   the static gateway config and defaults `dstack_endpoint` to
   `unix:/tmp/aci-dstack-sock-dev.dstack.sock`; pass `--dstack-endpoint` to use

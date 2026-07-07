@@ -155,7 +155,7 @@ pub enum UpstreamProvider {
     /// Native Anthropic API: authenticates with `x-api-key` plus the
     /// required `anthropic-version` header instead of a Bearer token.
     Anthropic,
-    AciDcap,
+    AciService,
     Chutes,
     Tinfoil,
     NearAi,
@@ -171,13 +171,13 @@ impl UpstreamProvider {
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
-            // and ACI/DCAP uses its own, so for all of these this only tunes
+            // and ACI service uses its own, so for all of these this only tunes
             // prewarm probe granularity. Per-model is the safe default — it
             // never collapses channels. ACI's real scope is service-dependent
             // (router or model), resolved when ACI becomes a first-party router.
             UpstreamProvider::OpenAiCompatible
             | UpstreamProvider::Anthropic
-            | UpstreamProvider::AciDcap => AttestationScope::PerModel,
+            | UpstreamProvider::AciService => AttestationScope::PerModel,
         }
     }
 }
@@ -223,7 +223,7 @@ impl AttestationScope {
 pub enum UpstreamVerifierMode {
     None,
     Preverified,
-    AciDcap,
+    AciService,
 }
 
 impl UpstreamVerifierMode {
@@ -231,7 +231,7 @@ impl UpstreamVerifierMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "none" => Ok(Self::None),
             "preverified" => Ok(Self::Preverified),
-            "aci-dcap" => Ok(Self::AciDcap),
+            "aci-service" => Ok(Self::AciService),
             other => Err(UpstreamConfigError::InvalidConfig(format!(
                 "invalid upstream verifier mode {other:?}"
             ))),

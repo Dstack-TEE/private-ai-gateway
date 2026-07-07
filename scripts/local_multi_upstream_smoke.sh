@@ -649,7 +649,7 @@ jq -cn \
   '[
     {
       name: "route-a",
-      provider: "aci-dcap",
+      provider: "aci-service",
       base_url: "https://upstream-a-tls:8443",
       models: {
         "public-a": "routed-upstream-a-model",
@@ -661,7 +661,7 @@ jq -cn \
     },
     {
       name: "route-b",
-      provider: "aci-dcap",
+      provider: "aci-service",
       base_url: "https://upstream-b-tls:8443",
       models: {"public-b": "routed-upstream-b-model"},
       accepted_workload_ids: [$wid_b],

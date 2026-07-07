@@ -26,8 +26,9 @@ use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
 use super::backend::{
-    fetch_upstream_nvidia_payload, forward_to_backend, generate_request_id, strip_empty_tool_calls,
-    upstream_direct_response, upstream_proxy_error_response, BackendForwardInput,
+    fetch_upstream_nvidia_payload, forward_to_backend, generate_request_id,
+    inbound_aci_forward_depth, strip_empty_tool_calls, upstream_direct_response,
+    upstream_proxy_error_response, BackendForwardInput,
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
@@ -287,11 +288,17 @@ pub(super) async fn attestation_report(
     {
         Ok(report) => {
             let nvidia_payload = match target.as_ref() {
-                Some(target) => fetch_upstream_nvidia_payload(target, &nonce)
+                Some(target) => {
+                    fetch_upstream_nvidia_payload(
+                        target,
+                        &nonce,
+                        inbound_aci_forward_depth(&headers),
+                    )
                     .await
-                    .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce))),
-                None => empty_nvidia_payload(Some(&nonce)),
-            };
+                }
+                None => None,
+            }
+            .unwrap_or_else(|| empty_nvidia_payload(Some(&nonce)));
             match report_with_legacy_attestation_fields(
                 report,
                 q.signing_algo.as_deref(),

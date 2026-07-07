@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 
-mod dcap;
+mod aci_service;
 mod dstack;
 mod external;
 mod providers;
@@ -39,7 +39,9 @@ mod simple;
 #[cfg(test)]
 mod tests;
 
-pub use dcap::{AciDcapUpstreamVerifier, AciDcapVerifierConfigError, AciDcapVerifierPolicy};
+pub use aci_service::{
+    AciServiceUpstreamVerifier, AciServiceVerifierConfigError, AciServiceVerifierPolicy,
+};
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
