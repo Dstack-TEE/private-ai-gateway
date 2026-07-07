@@ -479,6 +479,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_session_store(session_store)
         .with_revocation_store(revocation_store);
     let service = Arc::new(service_inner);
+    if service.supported_e2ee_versions().is_empty() {
+        // The spec requires E2EE on chat completions; a deployment that
+        // advertises no versions rejects every E2EE request and is not
+        // spec-conformant. Fine for local dev, worth flagging in production.
+        tracing::warn!(
+            "E2EE is disabled (supported_e2ee_versions is empty): E2EE requests will be \
+             rejected and this deployment is not ACI spec-conformant for chat completions"
+        );
+    }
     // The background upstream verification keeps the attested-session store fresh
     // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
     // (preflight) is populated before any traffic. (The completion path also
