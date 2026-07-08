@@ -1197,7 +1197,7 @@ and report fields for backward compatibility with pre-ACI clients. The
 reference implementation serves the inherited dstack-vllm-proxy surface:
 `GET /v1/attestation/report` (a legacy report with its own report-data
 layout and injected `signing_address` / `intel_quote` / `nvidia_payload`
-fields), `GET /v1/signature/{id}`, and legacy E2EE modes selected by
+fields), `GET /v1/signature/{id}`, and the no-AAD legacy E2EE mode selected by
 `X-Signing-Algo`.
 
 Compatibility surfaces MUST NOT alter ACI artifacts: canonical report and

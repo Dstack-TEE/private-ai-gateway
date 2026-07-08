@@ -5,8 +5,7 @@ use serde_json::{json, Value};
 
 use super::e2ee_crypto::{
     decrypt_request_payload, legacy_public_keys_match, normalize_legacy_public_key_for_replay,
-    validate_aci_e2ee_nonce, validate_aci_payload_model, validate_legacy_e2ee_nonce,
-    validate_payload_model, E2eeFieldCrypto,
+    validate_aci_e2ee_nonce, validate_aci_payload_model, E2eeFieldCrypto,
 };
 use super::{
     AciService, E2eeError, E2eePreparedRequest, E2eeReplayKey, E2eeRequestContext,
@@ -375,65 +374,31 @@ impl AciService {
             })
             .ok_or(E2eeError::ModelKeyMismatch)?;
 
+        // The AAD-bound legacy variant (LegacyV2) is removed. Reject requests
+        // that ask for it — via `X-E2EE-Version: 2` or the nonce/timestamp it
+        // required — so they fail loudly rather than silently decrypting with no
+        // AAD; such clients should use the ACI path (`X-E2EE-Version: 2`).
         let version_header = parts.version.unwrap_or("").trim();
-        if !version_header.is_empty()
-            && version_header != E2EE_VERSION_V1
-            && version_header != E2EE_VERSION_V2
+        if (!version_header.is_empty() && version_header != E2EE_VERSION_V1)
+            || parts.nonce.is_some_and(|n| !n.trim().is_empty())
+            || parts.timestamp.is_some_and(|t| !t.trim().is_empty())
         {
             return Err(E2eeError::InvalidVersion);
         }
-        let has_nonce = parts.nonce.is_some_and(|nonce| !nonce.is_empty());
-        let has_timestamp = parts.timestamp.is_some_and(|ts| !ts.is_empty());
-        if has_nonce ^ has_timestamp {
-            return Err(E2eeError::HeaderMissing);
-        }
-        let use_v2 = version_header == E2EE_VERSION_V2 || (has_nonce && has_timestamp);
-        let (version, aad_mode, nonce, timestamp) = if use_v2 {
-            let nonce = parts.nonce.ok_or(E2eeError::HeaderMissing)?;
-            validate_legacy_e2ee_nonce(nonce)?;
-            let timestamp = parts
-                .timestamp
-                .ok_or(E2eeError::HeaderMissing)?
-                .parse::<u64>()
-                .map_err(|_| E2eeError::InvalidTimestamp)?;
-            let now = self.clock.now_secs();
-            if now.abs_diff(timestamp) > 300 {
-                return Err(E2eeError::InvalidTimestamp);
-            }
-            self.claim_e2ee_replay(
-                normalize_legacy_public_key_for_replay(&signing_algo, client_public_key)?,
-                normalize_legacy_public_key_for_replay(&signing_algo, model_public_key)?,
-                nonce.to_string(),
-                now,
-            )?;
-            (
-                E2EE_VERSION_V2.to_string(),
-                E2eeAadMode::LegacyV2,
-                Some(nonce.to_string()),
-                Some(timestamp),
-            )
-        } else {
-            (
-                E2EE_VERSION_V1.to_string(),
-                E2eeAadMode::LegacyV1,
-                None,
-                None,
-            )
-        };
 
         let mut payload: Value =
             serde_json::from_slice(body).map_err(|_| E2eeError::DecryptionFailed)?;
-        let request_model = validate_payload_model(&payload)?;
+        let request_model = validate_aci_payload_model(&payload)?;
         let crypto = E2eeFieldCrypto {
             keys: self.keys.as_ref(),
             decryptor: E2eeDecryptor::Legacy {
                 signing_algo: &signing_algo,
             },
             algo: &signing_algo,
-            aad_mode,
+            aad_mode: E2eeAadMode::LegacyV1,
             model: &request_model,
-            nonce: nonce.as_deref(),
-            timestamp,
+            nonce: None,
+            timestamp: None,
         };
         decrypt_request_payload(&crypto, endpoint_path, &mut payload)?;
         let decrypted_body =
@@ -443,13 +408,13 @@ impl AciService {
         Ok(E2eePreparedRequest {
             decrypted_body,
             context: E2eeRequestContext {
-                version,
+                version: E2EE_VERSION_V1.to_string(),
                 algo: signing_algo,
-                aad_mode,
+                aad_mode: E2eeAadMode::LegacyV1,
                 request_model,
                 client_public_key_hex,
-                nonce,
-                timestamp,
+                nonce: None,
+                timestamp: None,
             },
         })
     }
