@@ -297,9 +297,11 @@ API-version token, `aci/1`: in-body as `api_version` on signed artifacts (so the
 version lives inside the signed bytes, where a header cannot), and as the
 `X-ACI-Version` response header on every HTTP response (stamped by a single
 middleware, error paths included). This is a separate axis from the
-`aci.<purpose>.v1` strings (`aci.identity.v1`, `aci.receipt.v1`,
-`aci.report_data.v1`) — those are cryptographic domain-separation tags for
-signed messages, not API versions, and version independently.
+`aci.<purpose>.v1` strings (`aci.report_data.v1`, `aci.keyset.endorsement.v1`)
+— those are cryptographic domain-separation tags for the two signed payloads
+(the attestation report-data statement and the keyset endorsement), not API
+versions, and version independently. Receipts carry no purpose tag: the
+signature covers the whole canonical receipt, which is self-describing.
 
 Canonical (clean shapes):
 
