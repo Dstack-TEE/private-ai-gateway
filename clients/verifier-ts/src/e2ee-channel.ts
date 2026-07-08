@@ -2,10 +2,10 @@
  * E2EE channel to a *verified* workload (§7). `openE2eeChannel` refuses unless
  * the report passed {@link verifyReportBinding} — you cannot encrypt to a key
  * that is not in a verified, endorsed keyset. `seal` encrypts the request's
- * message contents to the attested X25519 key and returns the `X-E2EE-*`
- * headers; `open` decrypts the reply. All crypto is Web Crypto (X25519, HKDF,
- * AES-GCM) — no dependencies, runs in the browser. secp256k1 is a separate
- * extension (not in the Web Crypto API).
+ * content fields to the attested X25519 key and returns the `X-E2EE-*` headers;
+ * `open` decrypts a buffered response and `openChunk` decrypts one streamed SSE
+ * chunk. All crypto is Web Crypto (X25519, HKDF, AES-GCM) — no dependencies,
+ * runs in the browser. secp256k1 is a separate extension (not in Web Crypto).
  */
 
 import { requestAad, responseAad } from './e2ee.js';
@@ -22,10 +22,12 @@ type Json = Record<string, unknown>;
 
 /** An encrypted channel bound to one verified workload. */
 export interface E2eeChannel {
-  /** Encrypt a chat request's message contents; returns the body and `X-E2EE-*` headers. */
+  /** Encrypt a request's content fields; returns the body and `X-E2EE-*` headers. */
   seal(request: Json): Promise<{ body: Json; headers: Record<string, string> }>;
-  /** Decrypt the buffered chat response produced for the most recent `seal`. */
+  /** Decrypt a buffered response produced for the most recent `seal`. */
   open(response: Json): Promise<Json>;
+  /** Decrypt one streamed SSE chunk (a `chat.completion.chunk` / completion chunk). */
+  openChunk(chunk: Json): Promise<Json>;
 }
 
 /**
@@ -60,18 +62,26 @@ export async function openE2eeChannel(
       const nonce = toHex(crypto.getRandomValues(new Uint8Array(32)));
       const ts = Math.floor(Date.now() / 1000);
       sent = { model, nonce, ts };
-      const messages = (request.messages as Json[] | undefined) ?? [];
-      const out = await Promise.all(
-        messages.map(async (m, i) => {
-          if (m?.content == null) return m;
-          const field = `messages.${i}.content`;
-          const plaintext = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-          const aad = requestAad({ algo: ALGO, model, field, nonce, ts });
-          return { ...m, content: await sealField(serviceRaw, enc.encode(plaintext), aad) };
-        }),
-      );
+      const encField = (text: string, field: string) =>
+        sealField(serviceRaw, enc.encode(text), requestAad({ algo: ALGO, model, field, nonce, ts }));
+
+      const body: Json = { ...request };
+      if (Array.isArray(request.messages)) {
+        // Whole-content encryption (§7.2) — the universal form for any modality.
+        body.messages = await Promise.all(
+          (request.messages as Json[]).map(async (m, i) => {
+            if (m?.content == null) return m;
+            const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+            return { ...m, content: await encField(text, `messages.${i}.content`) };
+          }),
+        );
+      } else if (request.prompt !== undefined) {
+        body.prompt = await sealStringOrArray(request.prompt, 'prompt', encField); // completions
+      } else if (request.input !== undefined) {
+        body.input = await sealStringOrArray(request.input, 'input', encField); // embeddings
+      }
       return {
-        body: { ...request, messages: out },
+        body,
         headers: {
           'X-E2EE-Version': '2',
           'X-Client-Pub-Key': clientPubHex,
@@ -83,26 +93,113 @@ export async function openE2eeChannel(
     },
 
     async open(response) {
-      if (!sent) throw new Error('open: call seal first');
-      const id = typeof response.id === 'string' ? response.id : '';
-      const choices = (response.choices as Json[] | undefined) ?? [];
-      const out = await Promise.all(
-        choices.map(async (c, i) => {
-          const message = c?.message as Json | undefined;
-          if (!message) return c;
-          const opened: Json = { ...message };
-          for (const f of ['content', 'reasoning_content']) {
-            if (typeof opened[f] !== 'string') continue;
-            const field = `choices.${i}.message.${f}`;
-            const aad = responseAad({ algo: ALGO, model: sent!.model, id, field, nonce: sent!.nonce, ts: sent!.ts });
-            opened[f] = dec.decode(await openField(client.privateKey, opened[f] as string, aad));
-          }
-          return { ...c, message: opened };
-        }),
-      );
-      return { ...response, choices: out };
+      const decField = responseDecryptor(client.privateKey, sent, textFrom(response.id));
+      const body: Json = { ...response };
+      if (Array.isArray(response.choices)) {
+        body.choices = await Promise.all(
+          (response.choices as Json[]).map(async (c, pos) => {
+            const i = indexOf(c, pos);
+            const out: Json = { ...c };
+            if (out.message && typeof out.message === 'object') {
+              const m: Json = { ...(out.message as Json) };
+              await openStr(m, 'content', `choices.${i}.message.content`, decField);
+              await openStr(m, 'reasoning_content', `choices.${i}.message.reasoning_content`, decField);
+              if (m.audio && typeof m.audio === 'object') {
+                const a: Json = { ...(m.audio as Json) };
+                await openStr(a, 'data', `choices.${i}.message.audio.data`, decField);
+                m.audio = a;
+              }
+              out.message = m;
+            } else {
+              await openStr(out, 'text', `choices.${i}.text`, decField); // completions
+            }
+            return out;
+          }),
+        );
+      }
+      if (Array.isArray(response.data)) {
+        // Embeddings: the value is serialized compactly then encrypted (§7.2).
+        body.data = await Promise.all(
+          (response.data as Json[]).map(async (d, pos) => {
+            const i = indexOf(d, pos);
+            const out: Json = { ...d };
+            if (typeof out.embedding === 'string') {
+              out.embedding = JSON.parse(await decField(out.embedding, `data.${i}.embedding`));
+            }
+            return out;
+          }),
+        );
+      }
+      return body;
+    },
+
+    async openChunk(chunk) {
+      const decField = responseDecryptor(client.privateKey, sent, textFrom(chunk.id));
+      const body: Json = { ...chunk };
+      if (Array.isArray(chunk.choices)) {
+        body.choices = await Promise.all(
+          (chunk.choices as Json[]).map(async (c, pos) => {
+            const i = indexOf(c, pos);
+            const out: Json = { ...c };
+            if (out.delta && typeof out.delta === 'object') {
+              const d: Json = { ...(out.delta as Json) };
+              await openStr(d, 'content', `choices.${i}.delta.content`, decField);
+              await openStr(d, 'reasoning_content', `choices.${i}.delta.reasoning_content`, decField);
+              out.delta = d;
+            } else {
+              await openStr(out, 'text', `choices.${i}.text`, decField); // completions stream
+            }
+            return out;
+          }),
+        );
+      }
+      return body;
     },
   };
+}
+
+/** A field decryptor bound to the request context (§7.3) and the response `id`. */
+function responseDecryptor(
+  clientPriv: CryptoKey,
+  sent: { model: string; nonce: string; ts: number } | undefined,
+  id: string,
+): (blobHex: string, field: string) => Promise<string> {
+  if (!sent) throw new Error('open: call seal first');
+  const { model, nonce, ts } = sent;
+  return async (blobHex, field) =>
+    dec.decode(await openField(clientPriv, blobHex, responseAad({ algo: ALGO, model, id, field, nonce, ts })));
+}
+
+/** `choices`/`data` index is the entry's `index` member, else its array position (§7.2). */
+function indexOf(entry: Json, position: number): number {
+  return typeof entry.index === 'number' ? entry.index : position;
+}
+
+function textFrom(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+/** Decrypt string member `key` of `obj` at `field`, in place; leave non-strings untouched. */
+async function openStr(
+  obj: Json,
+  key: string,
+  field: string,
+  decField: (blobHex: string, field: string) => Promise<string>,
+): Promise<void> {
+  if (typeof obj[key] === 'string') obj[key] = await decField(obj[key] as string, field);
+}
+
+/** Encrypt a string, or each string element of an array at `name.{i}` (§7.2). */
+async function sealStringOrArray(
+  value: unknown,
+  name: string,
+  encField: (text: string, field: string) => Promise<string>,
+): Promise<unknown> {
+  if (typeof value === 'string') return encField(value, name);
+  if (Array.isArray(value)) {
+    return Promise.all(value.map((v, i) => (typeof v === 'string' ? encField(v, `${name}.${i}`) : v)));
+  }
+  return value;
 }
 
 // `Uint8Array` → `BufferSource` (Web Crypto typings friction; see crypto.ts).

@@ -85,8 +85,13 @@ if (!v.ok) throw new Error('workload failed verification');
 const chan = await openE2eeChannel(report, v);
 const { body, headers } = await chan.seal({ model, messages }); // encrypts content, sets X-E2EE-*
 // ...POST body + headers to /v1/chat/completions...
-const reply = await chan.open(responseJson);                    // decrypts the reply
+const reply = await chan.open(responseJson);                    // buffered reply
+// For a streamed (SSE) response, decrypt each event's chunk instead:
+//   const chunk = await chan.openChunk(JSON.parse(sseEvent.data));
 ```
+
+`seal` also covers `/v1/completions` (`prompt`) and `/v1/embeddings` (`input`);
+`open` covers `message.audio.data`, completion `text`, and embedding vectors.
 
 ## Development
 
