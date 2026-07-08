@@ -19,11 +19,10 @@ use bytes::Bytes;
 use futures_util::stream;
 use private_ai_gateway::aci::canonical::{canonicalize, sha256_hex};
 use private_ai_gateway::aci::e2ee::{
-    decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
-    decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
+    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
     encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
     legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
 };
 use private_ai_gateway::aci::receipt::{
     UpstreamVerifiedEvent, VerificationResult, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
@@ -538,36 +537,6 @@ fn legacy_ecdsa_request(
             legacy_ecdsa_public_key_from_secret(client_secret),
         ),
         ("x-model-pub-key", model_key),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-fn legacy_ed25519_v2_request(
-    h: &Harness,
-    client_secret: &ed25519_dalek::SigningKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = legacy_model_public_key(h, E2EE_ALGO_LEGACY_ED25519);
-    let aad = format!("v2|req|algo=ed25519|model={model}|m=0|c=-|n={nonce}|ts={timestamp}");
-    let encrypted_content = encrypt_legacy_for_public_key(
-        E2EE_ALGO_LEGACY_ED25519,
-        &model_key,
-        b"hello",
-        Some(aad.as_bytes()),
-    )
-    .unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": encrypted_content}],
-    });
-    let headers = vec![
-        ("x-signing-algo", E2EE_ALGO_LEGACY_ED25519.to_string()),
-        ("x-client-pub-key", ed25519_public_key_hex(client_secret)),
-        ("x-model-pub-key", model_key),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
     ];
     (serde_json::to_vec(&body).unwrap(), headers)
 }
@@ -1096,43 +1065,24 @@ async fn legacy_ecdsa_e2ee_v1_matches_vllm_proxy_no_aad_shape() {
 }
 
 #[tokio::test]
-async fn legacy_ed25519_e2ee_v2_uses_x25519_and_response_model_aad() {
-    let upstream_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"private-upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(upstream_response));
-    let client_secret = ed25519_dalek::SigningKey::from_bytes(&[0x62; 32]);
-    let nonce = "legacy-ed25519-nonce";
-    let (encrypted_body, headers) = legacy_ed25519_v2_request(&h, &client_secret, nonce);
+async fn legacy_signing_algo_with_nonce_is_rejected_as_removed_v2() {
+    // The AAD-bound legacy variant (LegacyV2) is removed: a legacy X-Signing-Algo
+    // request that carries a nonce/timestamp is rejected, rather than silently
+    // decrypted without AAD. Such clients must drop X-Signing-Algo and use the
+    // ACI path instead.
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = k256::SecretKey::from_slice(&[0x62; 32]).unwrap();
+    let (body, mut headers) = legacy_ecdsa_request(&h, &client_secret);
+    headers.push(("x-e2ee-nonce", "any-nonce".to_string()));
+    headers.push(("x-e2ee-timestamp", "1700000000".to_string()));
 
     let resp = h
         .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
         .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ed25519");
-
-    let encrypted_response = json_body(&resp);
-    let encrypted_content = encrypted_response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
-    let legacy_response_aad = "v2|resp|algo=ed25519|model=private-upstream-model|id=chat-aci-1|choice=0|field=content|n=legacy-ed25519-nonce|ts=1700000000";
-    let decrypted_response = decrypt_legacy_ed25519_with_secret_key(
-        &client_secret,
-        encrypted_content,
-        Some(legacy_response_aad.as_bytes()),
-    )
-    .unwrap();
-    assert_eq!(decrypted_response, b"plain-answer");
-
-    let request_model_aad =
-        legacy_response_aad.replace("model=private-upstream-model", "model=aci-model");
-    assert!(decrypt_legacy_ed25519_with_secret_key(
-        &client_secret,
-        encrypted_content,
-        Some(request_model_aad.as_bytes()),
-    )
-    .is_err());
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_version");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1759,36 +1709,6 @@ fn legacy_ecdsa_embeddings_request(
     (serde_json::to_vec(&body).unwrap(), headers)
 }
 
-fn legacy_ed25519_v2_embeddings_request(
-    h: &Harness,
-    client_secret: &ed25519_dalek::SigningKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = legacy_model_public_key(h, E2EE_ALGO_LEGACY_ED25519);
-    let aad = format!("v2|req|algo=ed25519|model={model}|field=input|n={nonce}|ts={timestamp}");
-    let encrypted_input = encrypt_legacy_for_public_key(
-        E2EE_ALGO_LEGACY_ED25519,
-        &model_key,
-        b"hello",
-        Some(aad.as_bytes()),
-    )
-    .unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "input": encrypted_input,
-    });
-    let headers = vec![
-        ("x-signing-algo", E2EE_ALGO_LEGACY_ED25519.to_string()),
-        ("x-client-pub-key", ed25519_public_key_hex(client_secret)),
-        ("x-model-pub-key", model_key),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
 #[tokio::test]
 async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     let h = harness_with_upstream(RecordingUpstream::with_response_body(
@@ -2015,50 +1935,4 @@ async fn embeddings_endpoint_supports_legacy_v1_e2ee() {
         decrypt_legacy_ecdsa_with_secret_key(&client_secret, encrypted_embedding, None).unwrap();
     let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
     assert_eq!(decoded, serde_json::json!([0.5, -0.25, 1.0]));
-}
-
-#[tokio::test]
-async fn embeddings_endpoint_supports_legacy_ed25519_v2_e2ee() {
-    let upstream_response = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[7.5]}],"model":"private-upstream-model","usage":{"prompt_tokens":1,"total_tokens":1}}"#;
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(upstream_response));
-    let client_secret = ed25519_dalek::SigningKey::from_bytes(&[0x74; 32]);
-    let nonce = "legacy-ed25519-embed-nonce";
-    let (encrypted_body, headers) = legacy_ed25519_v2_embeddings_request(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
-        .await;
-    assert_eq!(
-        resp.status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&resp.body)
-    );
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ed25519");
-
-    let encrypted_response = json_body(&resp);
-    let encrypted_embedding = encrypted_response["data"][0]["embedding"].as_str().unwrap();
-    // Legacy v2 binds the response model (not the request model) into AAD.
-    let response_aad =
-        "v2|resp|algo=ed25519|model=private-upstream-model|id=|data=0|field=embedding|n=legacy-ed25519-embed-nonce|ts=1700000000";
-    let decrypted = decrypt_legacy_ed25519_with_secret_key(
-        &client_secret,
-        encrypted_embedding,
-        Some(response_aad.as_bytes()),
-    )
-    .unwrap();
-    let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
-    assert_eq!(decoded, serde_json::json!([7.5]));
-
-    // Request-model AAD must NOT decrypt under legacy v2.
-    let wrong_aad = response_aad.replace("model=private-upstream-model", "model=aci-model");
-    assert!(decrypt_legacy_ed25519_with_secret_key(
-        &client_secret,
-        encrypted_embedding,
-        Some(wrong_aad.as_bytes()),
-    )
-    .is_err());
 }

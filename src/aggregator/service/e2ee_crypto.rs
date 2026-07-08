@@ -22,23 +22,6 @@ pub(super) fn validate_aci_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
     Ok(())
 }
 
-/// Legacy X-Signing-Algo nonce: empty or `|`/CR/LF is rejected because the
-/// legacy AAD is pipe-delimited. Frozen compatibility surface.
-fn validate_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
-    if nonce.is_empty() || aad_component_is_ambiguous(nonce) {
-        return Err(E2eeError::InvalidNonce);
-    }
-    Ok(())
-}
-
-pub(super) fn validate_legacy_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
-    validate_e2ee_nonce(nonce)?;
-    if nonce.len() < 16 {
-        return Err(E2eeError::InvalidNonce);
-    }
-    Ok(())
-}
-
 pub(super) fn legacy_public_keys_match(
     signing_algo: &str,
     expected_hex: &str,
@@ -95,21 +78,6 @@ pub(super) fn validate_aci_payload_model(payload: &Value) -> Result<String, E2ee
         .ok_or(E2eeError::InvalidPayloadModel)
 }
 
-/// Legacy model: present, a string, and free of `|`/CR/LF. Frozen.
-pub(super) fn validate_payload_model(payload: &Value) -> Result<String, E2eeError> {
-    let Some(model) = payload.get("model").and_then(Value::as_str) else {
-        return Err(E2eeError::InvalidPayloadModel);
-    };
-    if aad_component_is_ambiguous(model) {
-        return Err(E2eeError::InvalidPayloadModel);
-    }
-    Ok(model.to_string())
-}
-
-fn aad_component_is_ambiguous(value: &str) -> bool {
-    value.contains('|') || value.contains('\r') || value.contains('\n')
-}
-
 /// ACI v2 request AAD (§7.3): the JCS canonicalization of the purpose-tagged
 /// object. `field` is the encrypted location's field path (§7.2).
 fn aci_request_aad(
@@ -150,64 +118,6 @@ fn aci_response_aad(
         "ts": timestamp,
     }))
     .map_err(|_| E2eeError::EncryptionFailed)
-}
-
-/// Legacy pipe-delimited request AAD for chat message content. Frozen.
-fn legacy_request_aad(
-    algo: &str,
-    model: &str,
-    message_index: usize,
-    content_index: Option<usize>,
-    nonce: &str,
-    timestamp: u64,
-) -> String {
-    let content_index = content_index
-        .map(|idx| idx.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    format!(
-        "v2|req|algo={algo}|model={model}|m={message_index}|c={content_index}|n={nonce}|ts={timestamp}"
-    )
-}
-
-/// Legacy pipe-delimited request AAD for prompt / embedding-input fields. Frozen.
-fn legacy_completion_request_aad(
-    algo: &str,
-    model: &str,
-    field_name: &str,
-    nonce: &str,
-    timestamp: u64,
-) -> String {
-    format!("v2|req|algo={algo}|model={model}|field={field_name}|n={nonce}|ts={timestamp}")
-}
-
-/// Legacy pipe-delimited response AAD for embedding data. Frozen.
-fn legacy_embedding_response_aad(
-    algo: &str,
-    model: &str,
-    response_id: &str,
-    data_index: u64,
-    field_name: &str,
-    nonce: &str,
-    timestamp: u64,
-) -> String {
-    format!(
-        "v2|resp|algo={algo}|model={model}|id={response_id}|data={data_index}|field={field_name}|n={nonce}|ts={timestamp}"
-    )
-}
-
-/// Legacy pipe-delimited response AAD for chat / completion fields. Frozen.
-fn legacy_response_aad(
-    algo: &str,
-    model: &str,
-    response_id: &str,
-    choice_index: u64,
-    field_name: &str,
-    nonce: &str,
-    timestamp: u64,
-) -> String {
-    format!(
-        "v2|resp|algo={algo}|model={model}|id={response_id}|choice={choice_index}|field={field_name}|n={nonce}|ts={timestamp}"
-    )
 }
 
 pub(super) struct E2eeFieldCrypto<'a> {
@@ -271,7 +181,7 @@ pub(super) fn decrypt_completion_prompt(
 
     let decrypted_count = match prompt {
         Value::String(ciphertext_hex) => {
-            let aad = completion_request_aad_for_crypto(crypto, "prompt")?;
+            let aad = request_field_aad(crypto, "prompt")?;
             let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
             *ciphertext_hex =
                 String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
@@ -284,7 +194,7 @@ pub(super) fn decrypt_completion_prompt(
                     continue;
                 };
                 let field_name = format!("prompt.{index}");
-                let aad = completion_request_aad_for_crypto(crypto, &field_name)?;
+                let aad = request_field_aad(crypto, &field_name)?;
                 let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
                 *ciphertext_hex =
                     String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
@@ -311,7 +221,7 @@ pub(super) fn decrypt_embedding_input(
 
     let decrypted_count = match input {
         Value::String(ciphertext_hex) => {
-            let aad = completion_request_aad_for_crypto(crypto, "input")?;
+            let aad = request_field_aad(crypto, "input")?;
             let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
             *ciphertext_hex =
                 String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
@@ -327,7 +237,7 @@ pub(super) fn decrypt_embedding_input(
                     continue;
                 };
                 let field_name = format!("input.{index}");
-                let aad = completion_request_aad_for_crypto(crypto, &field_name)?;
+                let aad = request_field_aad(crypto, &field_name)?;
                 let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
                 *ciphertext_hex =
                     String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
@@ -353,7 +263,7 @@ pub(super) fn decrypt_content_value(
         // Whole-content encryption, any modality: `messages.{m}.content`.
         Value::String(ciphertext_hex) => {
             let field = format!("messages.{message_index}.content");
-            let aad = content_request_aad(crypto, message_index, None, &field)?;
+            let aad = request_field_aad(crypto, &field)?;
             let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
             let plaintext =
                 String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
@@ -388,32 +298,16 @@ fn decrypt_content_part(
     match part.get("type").and_then(Value::as_str) {
         Some("text") => {
             let field = format!("messages.{message_index}.content.{content_index}.text");
-            decrypt_content_part_field(crypto, message_index, content_index, part, "text", &field)
+            decrypt_content_part_field(crypto, part, "text", &field)
         }
         Some("image_url") if crypto.aad_mode.is_aci() => {
             let field = format!("messages.{message_index}.content.{content_index}.image_url.url");
-            decrypt_content_part_nested(
-                crypto,
-                message_index,
-                content_index,
-                part,
-                "image_url",
-                "url",
-                &field,
-            )
+            decrypt_content_part_nested(crypto, part, "image_url", "url", &field)
         }
         Some("input_audio") if crypto.aad_mode.is_aci() => {
             let field =
                 format!("messages.{message_index}.content.{content_index}.input_audio.data");
-            decrypt_content_part_nested(
-                crypto,
-                message_index,
-                content_index,
-                part,
-                "input_audio",
-                "data",
-                &field,
-            )
+            decrypt_content_part_nested(crypto, part, "input_audio", "data", &field)
         }
         _ => Ok(0),
     }
@@ -422,8 +316,6 @@ fn decrypt_content_part(
 /// Decrypt a direct string member (`text`) of a content part.
 fn decrypt_content_part_field(
     crypto: &E2eeFieldCrypto<'_>,
-    message_index: usize,
-    content_index: usize,
     part: &mut serde_json::Map<String, Value>,
     key: &str,
     field: &str,
@@ -431,7 +323,7 @@ fn decrypt_content_part_field(
     let Some(Value::String(ciphertext_hex)) = part.get_mut(key) else {
         return Ok(0);
     };
-    let aad = content_request_aad(crypto, message_index, Some(content_index), field)?;
+    let aad = request_field_aad(crypto, field)?;
     let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
     *ciphertext_hex = String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
     Ok(1)
@@ -441,8 +333,6 @@ fn decrypt_content_part_field(
 /// content part.
 fn decrypt_content_part_nested(
     crypto: &E2eeFieldCrypto<'_>,
-    message_index: usize,
-    content_index: usize,
     part: &mut serde_json::Map<String, Value>,
     wrapper_key: &str,
     inner_key: &str,
@@ -454,52 +344,15 @@ fn decrypt_content_part_nested(
     let Some(Value::String(ciphertext_hex)) = wrapper.get_mut(inner_key) else {
         return Ok(0);
     };
-    let aad = content_request_aad(crypto, message_index, Some(content_index), field)?;
+    let aad = request_field_aad(crypto, field)?;
     let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
     *ciphertext_hex = String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
     Ok(1)
 }
 
-/// AAD for a chat message-content location. ACI uses the JCS field path;
-/// the legacy modes keep the pipe-delimited `m`/`c` form.
-fn content_request_aad(
-    crypto: &E2eeFieldCrypto<'_>,
-    message_index: usize,
-    content_index: Option<usize>,
-    aci_field: &str,
-) -> Result<Option<Vec<u8>>, E2eeError> {
-    match crypto.aad_mode {
-        E2eeAadMode::AciV2 => {
-            let (nonce, timestamp) = crypto.nonce_ts()?;
-            Ok(Some(aci_request_aad(
-                crypto.algo,
-                crypto.model,
-                aci_field,
-                nonce,
-                timestamp,
-            )?))
-        }
-        E2eeAadMode::LegacyV2 => {
-            let (nonce, timestamp) = crypto.nonce_ts()?;
-            Ok(Some(
-                legacy_request_aad(
-                    crypto.algo,
-                    crypto.model,
-                    message_index,
-                    content_index,
-                    nonce,
-                    timestamp,
-                )
-                .into_bytes(),
-            ))
-        }
-        E2eeAadMode::LegacyV1 => Ok(None),
-    }
-}
-
-/// AAD for a prompt / embedding-input field, whose field path (`prompt`,
-/// `prompt.{i}`, `input`, `input.{i}`) is already the field-path component.
-fn completion_request_aad_for_crypto(
+/// AAD for a request field (§7.3): the JCS canonicalization bound to the field
+/// path (§7.2) on the ACI path, and none on the legacy (no-AAD) path.
+fn request_field_aad(
     crypto: &E2eeFieldCrypto<'_>,
     field: &str,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
@@ -513,13 +366,6 @@ fn completion_request_aad_for_crypto(
                 nonce,
                 timestamp,
             )?))
-        }
-        E2eeAadMode::LegacyV2 => {
-            let (nonce, timestamp) = crypto.nonce_ts()?;
-            Ok(Some(
-                legacy_completion_request_aad(crypto.algo, crypto.model, field, nonce, timestamp)
-                    .into_bytes(),
-            ))
         }
         E2eeAadMode::LegacyV1 => Ok(None),
     }
@@ -564,17 +410,9 @@ pub(super) fn encrypt_e2ee_response_body(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let response_model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if ctx.aad_mode == E2eeAadMode::LegacyV2 && aad_component_is_ambiguous(&response_id) {
-        return Err(E2eeError::EncryptionFailed);
-    }
 
     if endpoint_path == EMBEDDINGS_PATH {
-        encrypt_embedding_data(&mut payload, ctx, &response_model, &response_id)?;
+        encrypt_embedding_data(&mut payload, ctx, &response_id)?;
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     }
 
@@ -596,9 +434,7 @@ pub(super) fn encrypt_e2ee_response_body(
                 "text",
                 &format!("choices.{choice_index}.text"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
         } else if let Some(Value::Object(message)) = choice.get_mut("message") {
             encrypt_response_field(
@@ -606,18 +442,14 @@ pub(super) fn encrypt_e2ee_response_body(
                 "content",
                 &format!("choices.{choice_index}.message.content"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
             encrypt_response_field(
                 message,
                 "reasoning_content",
                 &format!("choices.{choice_index}.message.reasoning_content"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
             // Response audio (`message.audio.data`, §7.2) is ACI-only.
             if ctx.aad_mode.is_aci() {
@@ -632,7 +464,6 @@ pub(super) fn encrypt_e2ee_response_body(
 pub(super) fn encrypt_embedding_data(
     payload: &mut Value,
     ctx: &E2eeRequestContext,
-    response_model: &str,
     response_id: &str,
 ) -> Result<(), E2eeError> {
     let Some(items) = payload.get_mut("data").and_then(Value::as_array_mut) else {
@@ -656,7 +487,7 @@ pub(super) fn encrypt_embedding_data(
         // the original type, mirroring how chat content arrays are
         // recovered.
         let plaintext = serde_json::to_vec(embedding).map_err(|_| E2eeError::EncryptionFailed)?;
-        let aad = embedding_response_aad_for_context(ctx, response_model, response_id, data_index)?;
+        let aad = embedding_response_aad_for_context(ctx, response_id, data_index)?;
         let ciphertext_hex = encrypt_response_plaintext(ctx, &plaintext, aad.as_deref())?;
         *embedding = Value::String(ciphertext_hex);
     }
@@ -665,7 +496,6 @@ pub(super) fn encrypt_embedding_data(
 
 fn embedding_response_aad_for_context(
     ctx: &E2eeRequestContext,
-    response_model: &str,
     response_id: &str,
     data_index: u64,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
@@ -681,24 +511,6 @@ fn embedding_response_aad_for_context(
                 nonce,
                 timestamp,
             )?))
-        }
-        E2eeAadMode::LegacyV2 => {
-            if aad_component_is_ambiguous(response_model) {
-                return Err(E2eeError::EncryptionFailed);
-            }
-            let (nonce, timestamp) = response_nonce_ts(ctx)?;
-            Ok(Some(
-                legacy_embedding_response_aad(
-                    &ctx.algo,
-                    response_model,
-                    response_id,
-                    data_index,
-                    "embedding",
-                    nonce,
-                    timestamp,
-                )
-                .into_bytes(),
-            ))
         }
         E2eeAadMode::LegacyV1 => Ok(None),
     }
@@ -743,15 +555,6 @@ pub(super) fn encrypt_e2ee_stream_payload(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let response_model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if ctx.aad_mode == E2eeAadMode::LegacyV2 && aad_component_is_ambiguous(&response_id) {
-        return Err(E2eeError::EncryptionFailed);
-    }
-
     let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     };
@@ -770,9 +573,7 @@ pub(super) fn encrypt_e2ee_stream_payload(
                 "text",
                 &format!("choices.{choice_index}.text"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
         } else if let Some(Value::Object(delta)) = choice.get_mut("delta") {
             if delta.get("content").and_then(Value::as_str) == Some("") {
@@ -783,18 +584,14 @@ pub(super) fn encrypt_e2ee_stream_payload(
                 "content",
                 &format!("choices.{choice_index}.delta.content"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
             encrypt_response_field(
                 delta,
                 "reasoning_content",
                 &format!("choices.{choice_index}.delta.reasoning_content"),
                 ctx,
-                &response_model,
                 &response_id,
-                choice_index,
             )?;
         }
     }
@@ -807,21 +604,12 @@ pub(super) fn encrypt_response_field(
     field_name: &str,
     aci_field: &str,
     ctx: &E2eeRequestContext,
-    response_model: &str,
     response_id: &str,
-    choice_index: u64,
 ) -> Result<(), E2eeError> {
     let Some(Value::String(plaintext)) = container.get_mut(field_name) else {
         return Ok(());
     };
-    let aad = response_aad_for_context(
-        ctx,
-        response_model,
-        response_id,
-        choice_index,
-        field_name,
-        aci_field,
-    )?;
+    let aad = response_aad_for_context(ctx, response_id, aci_field)?;
     *plaintext = encrypt_response_plaintext(ctx, plaintext.as_bytes(), aad.as_deref())?;
     Ok(())
 }
@@ -856,10 +644,7 @@ fn encrypt_message_audio_data(
 
 fn response_aad_for_context(
     ctx: &E2eeRequestContext,
-    response_model: &str,
     response_id: &str,
-    choice_index: u64,
-    field_name: &str,
     aci_field: &str,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
     match ctx.aad_mode {
@@ -873,25 +658,6 @@ fn response_aad_for_context(
                 nonce,
                 timestamp,
             )?))
-        }
-        E2eeAadMode::LegacyV2 => {
-            if aad_component_is_ambiguous(field_name) || aad_component_is_ambiguous(response_model)
-            {
-                return Err(E2eeError::EncryptionFailed);
-            }
-            let (nonce, timestamp) = response_nonce_ts(ctx)?;
-            Ok(Some(
-                legacy_response_aad(
-                    &ctx.algo,
-                    response_model,
-                    response_id,
-                    choice_index,
-                    field_name,
-                    nonce,
-                    timestamp,
-                )
-                .into_bytes(),
-            ))
         }
         E2eeAadMode::LegacyV1 => Ok(None),
     }
@@ -917,7 +683,7 @@ pub(super) fn encrypt_response_plaintext(
             encrypt_aci_e2ee_for_public_key(&ctx.algo, &ctx.client_public_key_hex, plaintext, aad)
                 .map_err(|_| E2eeError::EncryptionFailed)
         }
-        E2eeAadMode::LegacyV1 | E2eeAadMode::LegacyV2 => {
+        E2eeAadMode::LegacyV1 => {
             encrypt_legacy_for_public_key(&ctx.algo, &ctx.client_public_key_hex, plaintext, aad)
                 .map_err(|_| E2eeError::EncryptionFailed)
         }
