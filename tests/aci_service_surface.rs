@@ -1068,7 +1068,8 @@ async fn legacy_ecdsa_e2ee_v1_matches_vllm_proxy_no_aad_shape() {
 async fn legacy_signing_algo_with_nonce_is_rejected_as_removed_v2() {
     // The AAD-bound legacy variant (LegacyV2) is removed: a legacy X-Signing-Algo
     // request that carries a nonce/timestamp is rejected, rather than silently
-    // decrypted without AAD. Such clients should use the ACI path.
+    // decrypted without AAD. Such clients must drop X-Signing-Algo and use the
+    // ACI path instead.
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x62; 32]).unwrap();
     let (body, mut headers) = legacy_ecdsa_request(&h, &client_secret);

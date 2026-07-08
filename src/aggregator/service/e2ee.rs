@@ -377,7 +377,9 @@ impl AciService {
         // The AAD-bound legacy variant (LegacyV2) is removed. Reject requests
         // that ask for it — via `X-E2EE-Version: 2` or the nonce/timestamp it
         // required — so they fail loudly rather than silently decrypting with no
-        // AAD; such clients should use the ACI path (`X-E2EE-Version: 2`).
+        // AAD. Reaching the ACI path means dropping `X-Signing-Algo` entirely
+        // (it routes here whenever present) and encrypting to a §7.1 suite via
+        // `X-Model-Pub-Key` + `X-E2EE-Version: 2`.
         let version_header = parts.version.unwrap_or("").trim();
         if (!version_header.is_empty() && version_header != E2EE_VERSION_V1)
             || parts.nonce.is_some_and(|n| !n.trim().is_empty())
