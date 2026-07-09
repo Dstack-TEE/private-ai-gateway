@@ -99,9 +99,10 @@ pub async fn run(
     if !consult.allow {
         let status = consult.status.unwrap_or(403);
         let message = consult.message.as_deref().unwrap_or("forbidden");
-        // Only our-infra 5xx denials are recorded as a gateway failure; user
-        // denials (401/402/404/429) are attributable to the caller.
-        if status >= 500 {
+        // Record 5xx and 429 denials as gateway failures; other user denials
+        // (401/402/404) are caller-attributable and left unrecorded. Tagging
+        // these ErrorSource::Control keeps them out of upstream-health signals.
+        if status == 429 || status >= 500 {
             meter.gateway_failure(status, ErrorSource::Control, message, stream);
         }
         if status == 429 {
@@ -335,9 +336,11 @@ pub async fn run(
                 ms => Some(Duration::from_millis(ms)),
             };
             // Order: provider stream (drafts response.received) -> format
-            // transform (if cross-format) -> keep-alive -> meter/cost -> finalizer
+            // transform (if cross-format) -> meter/cost -> keep-alive -> finalizer
             // (hashes response.returned). Same-format streaming is native
-            // passthrough (no transform).
+            // passthrough (no transform). Metering sits inside the keep-alive so
+            // it only ever buffers real upstream SSE bytes; the heartbeat comments
+            // are injected downstream and never enter its line reassembly.
             let response_header_map = response_headers(&forward.upstream_headers, &content_type);
             let selected_format = candidates
                 .iter()
@@ -350,14 +353,13 @@ pub async fn run(
                     Some(transform) => Box::pin(SseTransformStream::new(forward.body, transform)),
                     None => forward.body,
                 };
-            let kept: ServiceResponseStream =
-                Box::pin(KeepAliveStream::new(transformed, keepalive));
-            let metered: ServiceResponseStream = Box::pin(MeterStream::new(kept, report));
+            let metered: ServiceResponseStream = Box::pin(MeterStream::new(transformed, report));
+            let kept: ServiceResponseStream = Box::pin(KeepAliveStream::new(metered, keepalive));
 
             let receipt_id = journal.peek_receipt_id();
             match service.finalize_middleware_response_stream(
                 journal,
-                metered,
+                kept,
                 endpoint_path,
                 Some(&content_type),
                 requester,
