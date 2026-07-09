@@ -992,6 +992,7 @@ fn openai_complete_config() -> ProviderConfig {
         ),
         ("n", vec![pc("n").with_default(json!(1))]),
         ("stream", vec![pc("stream").with_default(json!(false))]),
+        ("stream_options", vec![pc("stream_options")]),
         ("logprobs", vec![pc("logprobs").with_max(5)]),
         ("echo", vec![pc("echo").with_default(json!(false))]),
         ("stop", vec![pc("stop")]),
@@ -1223,6 +1224,21 @@ mod tests {
             None,
         );
         assert_eq!(chat_out["stream_options"], json!({ "include_usage": true }));
+
+        // Legacy /v1/completions must also carry include_usage to upstream, or
+        // usage-only streaming providers (e.g. vLLM) never emit a usage chunk
+        // and the meter records 0 tokens.
+        let complete_out = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &json!({ "model": "m", "prompt": "hi", "stream": true }),
+            Endpoint::Complete,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            complete_out["stream_options"],
+            json!({ "include_usage": true })
+        );
 
         let responses = transform_to_provider_request(
             ProviderFormat::Openai,
