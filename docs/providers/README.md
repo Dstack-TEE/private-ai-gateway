@@ -42,9 +42,10 @@ Redpill tenant.
   share the serving instance's namespace.
 
 Tinfoil's behavior is attestation-backed. Chutes configuration is control-plane
-evidence and is not bound by its current attestation. To enforce isolation, the
-gateway must override caller values with a stable, opaque tenant partition,
-using `cache_salt` for Chutes and `user_cache_secret` for Tinfoil.
+evidence and is not bound by its current attestation. The intended interface is
+caller-controlled: preserve `cache_salt` for Chutes and translate it to
+`user_cache_secret` for Tinfoil. The gateway should not derive or override the
+partition from Redpill tenant identity.
 
 ## The shared verification model
 
