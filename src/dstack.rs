@@ -7,65 +7,57 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dstack_sdk::dstack_client::{DstackClient, GetKeyResponse};
+use dstack_sdk::dstack_client::DstackClient;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
-use k256::ecdsa::{
-    signature::Signer as K256Signer, RecoveryId, Signature as K256Signature,
-    SigningKey as K256SigningKey,
-};
+use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
 use serde_json::json;
-use sha2::{Digest, Sha256};
-use sha3::Keccak256;
+use sha3::{Digest, Keccak256};
 use x25519_dalek::StaticSecret as X25519SecretKey;
 
 use crate::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
-    decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
-    legacy_ecdsa_public_key_from_secret, public_key_from_secret, secret_key_from_bytes,
-    x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
-    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
+    ed25519_public_key_hex, legacy_ecdsa_public_key_from_secret, public_key_from_secret,
+    secret_key_from_bytes, unseal_v3, x25519_public_key_hex, x25519_secret_key_from_bytes,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_X25519_AESGCM,
 };
+use crate::aci::identity::report_data_slot;
 use crate::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, KeyProvider, LegacySignature, Quote,
-    Quoter, ALGO_ECDSA_SECP256K1, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
+    Quoter, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
-use crate::aci::types::{KeyedPublicKey, PublicKeyMaterial, TlsSpki};
+use crate::aci::types::{KeyedPublicKey, TlsSpki};
 
-const IDENTITY_PURPOSE: &str = "aci.identity.v1";
-const RECEIPT_PURPOSE: &str = "aci.receipt.v1";
-const RECEIPT_ED25519_PURPOSE: &str = "aci.receipt.ed25519.v1";
-const E2EE_PURPOSE: &str = "aci.e2ee.v1";
+const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
+/// §13 legacy keys: the k256 key doubles as the legacy `signing_address` and
+/// legacy `ecdsa` E2EE key; the ed25519 key serves the legacy `ed25519` mode.
+const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
 
 #[derive(Debug, Clone)]
 pub struct DstackAciProviderConfig {
-    pub identity_path: String,
     pub receipt_path: String,
-    pub ed25519_receipt_path: String,
-    pub e2ee_path: String,
     pub x25519_e2ee_path: String,
+    pub legacy_e2ee_path: String,
     pub legacy_ed25519_path: String,
     pub receipt_key_id: String,
-    pub ed25519_receipt_key_id: String,
-    pub e2ee_key_id: String,
     pub x25519_e2ee_key_id: String,
+    pub legacy_e2ee_key_id: String,
     pub legacy_ed25519_key_id: String,
 }
 
 impl Default for DstackAciProviderConfig {
     fn default() -> Self {
         Self {
-            identity_path: "aci/identity/v1".to_string(),
-            receipt_path: "aci/receipt/v1".to_string(),
-            ed25519_receipt_path: "aci/receipt-ed25519/v1".to_string(),
-            e2ee_path: "aci/e2ee/v1".to_string(),
+            receipt_path: "aci/receipt-ed25519/v1".to_string(),
             x25519_e2ee_path: "aci/e2ee-x25519/v1".to_string(),
+            // Unchanged from the pre-ACI deployment: this path fixes the
+            // legacy `signing_address` old clients already pin.
+            legacy_e2ee_path: "aci/e2ee/v1".to_string(),
             legacy_ed25519_path: "aci/legacy-ed25519/v1".to_string(),
-            receipt_key_id: "dstack-kms-receipt-v1".to_string(),
-            ed25519_receipt_key_id: "dstack-kms-receipt-ed25519-v1".to_string(),
-            e2ee_key_id: "dstack-kms-e2ee-v1".to_string(),
+            receipt_key_id: "dstack-kms-receipt-ed25519-v1".to_string(),
             x25519_e2ee_key_id: "dstack-kms-e2ee-x25519-v1".to_string(),
+            legacy_e2ee_key_id: "dstack-kms-e2ee-v1".to_string(),
             legacy_ed25519_key_id: "dstack-kms-legacy-ed25519-v1".to_string(),
         }
     }
@@ -78,28 +70,27 @@ struct KmsKeyEvidence {
     purpose: &'static str,
     algo: &'static str,
     public_key_hex: String,
+    /// Compressed hex of the k256 counterpart of the released 32-byte scalar.
+    /// The dstack KMS signature chain covers `"{purpose}:{kms_public_key}"`,
+    /// so publishing it makes the chain verifiable for non-k256 roles.
+    kms_public_key_hex: String,
     signature_chain: Vec<String>,
 }
 
 /// Provider backed by dstack KMS keys plus dstack TDX quotes.
 pub struct DstackAciProvider {
     client: Arc<DstackClient>,
-    identity: K256SigningKey,
-    receipt: K256SigningKey,
-    ed25519_receipt: Ed25519SigningKey,
-    e2ee: k256::SecretKey,
+    receipt: Ed25519SigningKey,
     x25519_e2ee: X25519SecretKey,
+    legacy_e2ee: k256::SecretKey,
     legacy_ed25519: Ed25519SigningKey,
-    identity_evidence: KmsKeyEvidence,
     receipt_evidence: KmsKeyEvidence,
-    ed25519_receipt_evidence: KmsKeyEvidence,
-    e2ee_evidence: KmsKeyEvidence,
     x25519_e2ee_evidence: KmsKeyEvidence,
+    legacy_e2ee_evidence: KmsKeyEvidence,
     legacy_ed25519_evidence: KmsKeyEvidence,
     receipt_key_id: String,
-    ed25519_receipt_key_id: String,
-    e2ee_key_id: String,
     x25519_e2ee_key_id: String,
+    legacy_e2ee_key_id: String,
     legacy_ed25519_key_id: String,
 }
 
@@ -117,64 +108,91 @@ impl DstackAciProvider {
         client: Arc<DstackClient>,
         config: DstackAciProviderConfig,
     ) -> Result<Self, KeyError> {
-        let (identity, identity_evidence) =
-            load_kms_signing_key(&client, "identity", &config.identity_path, IDENTITY_PURPOSE)
-                .await?;
-        let (receipt, receipt_evidence) =
-            load_kms_signing_key(&client, "receipt", &config.receipt_path, RECEIPT_PURPOSE).await?;
-        let (ed25519_receipt, ed25519_receipt_evidence) = load_kms_ed25519_key(
-            &client,
-            "receipt-ed25519",
-            &config.ed25519_receipt_path,
-            RECEIPT_ED25519_PURPOSE,
-            ALGO_ED25519,
-        )
-        .await?;
-        let (e2ee_signing_key, e2ee_evidence) =
-            load_kms_signing_key(&client, "e2ee", &config.e2ee_path, E2EE_PURPOSE).await?;
-        let e2ee = secret_key_from_bytes(&e2ee_signing_key.to_bytes())?;
-        let (x25519_e2ee, x25519_e2ee_evidence) = load_kms_x25519_key(
+        let (receipt_bytes, receipt_chain) =
+            load_kms_raw32_key(&client, "receipt", &config.receipt_path, RECEIPT_PURPOSE).await?;
+        let receipt = Ed25519SigningKey::from_bytes(&receipt_bytes);
+        let receipt_evidence = KmsKeyEvidence {
+            role: "receipt",
+            path: config.receipt_path.clone(),
+            purpose: RECEIPT_PURPOSE,
+            algo: ALGO_ED25519,
+            public_key_hex: ed25519_public_key_hex(&receipt),
+            kms_public_key_hex: kms_counterpart_public_key_hex("receipt", &receipt_bytes)?,
+            signature_chain: receipt_chain,
+        };
+
+        let (x25519_bytes, x25519_chain) = load_kms_raw32_key(
             &client,
             "e2ee-x25519",
             &config.x25519_e2ee_path,
             E2EE_X25519_PURPOSE,
         )
         .await?;
-        let (legacy_ed25519, legacy_ed25519_evidence) = load_kms_ed25519_key(
+        let x25519_e2ee = x25519_secret_key_from_bytes(&x25519_bytes)?;
+        let x25519_e2ee_evidence = KmsKeyEvidence {
+            role: "e2ee-x25519",
+            path: config.x25519_e2ee_path.clone(),
+            purpose: E2EE_X25519_PURPOSE,
+            algo: E2EE_ALGO_X25519_AESGCM,
+            public_key_hex: x25519_public_key_hex(&x25519_e2ee),
+            kms_public_key_hex: kms_counterpart_public_key_hex("e2ee-x25519", &x25519_bytes)?,
+            signature_chain: x25519_chain,
+        };
+
+        let (legacy_e2ee_bytes, legacy_e2ee_chain) = load_kms_raw32_key(
+            &client,
+            "legacy-e2ee",
+            &config.legacy_e2ee_path,
+            LEGACY_E2EE_PURPOSE,
+        )
+        .await?;
+        let legacy_e2ee = secret_key_from_bytes(&legacy_e2ee_bytes)?;
+        let legacy_e2ee_evidence = KmsKeyEvidence {
+            role: "legacy-e2ee",
+            path: config.legacy_e2ee_path.clone(),
+            purpose: LEGACY_E2EE_PURPOSE,
+            algo: E2EE_ALGO_LEGACY_ECDSA,
+            public_key_hex: public_key_from_secret(&legacy_e2ee),
+            kms_public_key_hex: kms_counterpart_public_key_hex("legacy-e2ee", &legacy_e2ee_bytes)?,
+            signature_chain: legacy_e2ee_chain,
+        };
+
+        let (legacy_ed25519_bytes, legacy_ed25519_chain) = load_kms_raw32_key(
             &client,
             "legacy-ed25519",
             &config.legacy_ed25519_path,
             LEGACY_ED25519_PURPOSE,
-            E2EE_ALGO_LEGACY_ED25519,
         )
         .await?;
+        let legacy_ed25519 = Ed25519SigningKey::from_bytes(&legacy_ed25519_bytes);
+        let legacy_ed25519_evidence = KmsKeyEvidence {
+            role: "legacy-ed25519",
+            path: config.legacy_ed25519_path.clone(),
+            purpose: LEGACY_ED25519_PURPOSE,
+            algo: E2EE_ALGO_LEGACY_ED25519,
+            public_key_hex: ed25519_public_key_hex(&legacy_ed25519),
+            kms_public_key_hex: kms_counterpart_public_key_hex(
+                "legacy-ed25519",
+                &legacy_ed25519_bytes,
+            )?,
+            signature_chain: legacy_ed25519_chain,
+        };
 
         Ok(Self {
             client,
-            identity,
             receipt,
-            ed25519_receipt,
-            e2ee,
             x25519_e2ee,
+            legacy_e2ee,
             legacy_ed25519,
-            identity_evidence,
             receipt_evidence,
-            ed25519_receipt_evidence,
-            e2ee_evidence,
             x25519_e2ee_evidence,
+            legacy_e2ee_evidence,
             legacy_ed25519_evidence,
             receipt_key_id: config.receipt_key_id,
-            ed25519_receipt_key_id: config.ed25519_receipt_key_id,
-            e2ee_key_id: config.e2ee_key_id,
             x25519_e2ee_key_id: config.x25519_e2ee_key_id,
+            legacy_e2ee_key_id: config.legacy_e2ee_key_id,
             legacy_ed25519_key_id: config.legacy_ed25519_key_id,
         })
-    }
-
-    pub fn dstack_report_data(aci_report_data: [u8; 32]) -> [u8; 64] {
-        let mut out = [0u8; 64];
-        out[..32].copy_from_slice(&aci_report_data);
-        out
     }
 }
 
@@ -196,76 +214,16 @@ fn normalize_dstack_endpoint(endpoint: Option<String>) -> Result<Option<String>,
     Ok(Some(normalized.to_string()))
 }
 
-async fn load_kms_signing_key(
-    client: &DstackClient,
-    role: &'static str,
-    path: &str,
-    purpose: &'static str,
-) -> Result<(K256SigningKey, KmsKeyEvidence), KeyError> {
-    let response = client
-        .get_key(Some(path.to_string()), Some(purpose.to_string()))
-        .await
-        .map_err(|e| KeyError::Crypto(format!("dstack KMS get_key({role}): {e}")))?;
-    let key = signing_key_from_kms_response(role, &response)?;
-    let public_key_hex = public_key_hex(&key);
-    let evidence = KmsKeyEvidence {
-        role,
-        path: path.to_string(),
-        purpose,
-        algo: if role == "e2ee" {
-            E2EE_ALGO_SECP256K1_AESGCM
-        } else {
-            ALGO_ECDSA_SECP256K1
-        },
-        public_key_hex,
-        signature_chain: response.signature_chain,
-    };
-    Ok((key, evidence))
+/// The compressed k256 public key the dstack KMS signature chain covers for a
+/// released 32-byte scalar.
+fn kms_counterpart_public_key_hex(role: &str, key_bytes: &[u8; 32]) -> Result<String, KeyError> {
+    let key = K256SigningKey::from_slice(key_bytes)
+        .map_err(|e| KeyError::Crypto(format!("invalid k256 scalar for {role}: {e}")))?;
+    Ok(hex::encode(key.verifying_key().to_sec1_bytes()))
 }
 
-async fn load_kms_ed25519_key(
-    client: &DstackClient,
-    role: &'static str,
-    path: &str,
-    purpose: &'static str,
-    algo: &'static str,
-) -> Result<(Ed25519SigningKey, KmsKeyEvidence), KeyError> {
-    let (key_bytes, signature_chain) = load_kms_raw32_key(client, role, path, purpose).await?;
-    let key = Ed25519SigningKey::from_bytes(&key_bytes);
-    let public_key_hex = ed25519_public_key_hex(&key);
-    let evidence = KmsKeyEvidence {
-        role,
-        path: path.to_string(),
-        purpose,
-        algo,
-        public_key_hex,
-        signature_chain,
-    };
-    Ok((key, evidence))
-}
-
-async fn load_kms_x25519_key(
-    client: &DstackClient,
-    role: &'static str,
-    path: &str,
-    purpose: &'static str,
-) -> Result<(X25519SecretKey, KmsKeyEvidence), KeyError> {
-    let (key_bytes, signature_chain) = load_kms_raw32_key(client, role, path, purpose).await?;
-    let key = x25519_secret_key_from_bytes(&key_bytes)?;
-    let public_key_hex = x25519_public_key_hex(&key);
-    let evidence = KmsKeyEvidence {
-        role,
-        path: path.to_string(),
-        purpose,
-        algo: E2EE_ALGO_X25519_AESGCM,
-        public_key_hex,
-        signature_chain,
-    };
-    Ok((key, evidence))
-}
-
-/// Release a KMS key and require it to be exactly 32 bytes — the raw scalar for
-/// Ed25519 and X25519 keys alike.
+/// Release a KMS key and require it to be exactly 32 bytes — the raw scalar
+/// shared by the k256/Ed25519/X25519 roles.
 async fn load_kms_raw32_key(
     client: &DstackClient,
     role: &'static str,
@@ -286,27 +244,6 @@ async fn load_kms_raw32_key(
         ))
     })?;
     Ok((key_bytes, response.signature_chain))
-}
-
-fn signing_key_from_kms_response(
-    role: &str,
-    response: &GetKeyResponse,
-) -> Result<K256SigningKey, KeyError> {
-    let key_bytes = response
-        .decode_key()
-        .map_err(|e| KeyError::Crypto(format!("invalid dstack KMS key hex for {role}: {e}")))?;
-    if key_bytes.len() != 32 {
-        return Err(KeyError::Crypto(format!(
-            "dstack KMS key for {role} must be 32 bytes, got {}",
-            key_bytes.len()
-        )));
-    }
-    K256SigningKey::from_slice(&key_bytes)
-        .map_err(|e| KeyError::Crypto(format!("invalid secp256k1 KMS key for {role}: {e}")))
-}
-
-fn public_key_hex(key: &K256SigningKey) -> String {
-    hex::encode(key.verifying_key().to_encoded_point(false).as_bytes())
 }
 
 fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, KeyError> {
@@ -348,6 +285,7 @@ impl DstackAciProvider {
             report_data: returned_report_data,
             event_log: serde_json::Value::String(event_log),
             vm_config: serde_json::Value::String(response.vm_config),
+            app_compose: serde_json::Value::String(info.tcb_info.app_compose),
         })
     }
 }
@@ -355,7 +293,7 @@ impl DstackAciProvider {
 #[async_trait]
 impl Quoter for DstackAciProvider {
     async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError> {
-        self.quote_with_report_data(Self::dstack_report_data(report_data))
+        self.quote_with_report_data(report_data_slot(report_data))
             .await
     }
 
@@ -365,81 +303,57 @@ impl Quoter for DstackAciProvider {
 }
 
 impl KeyProvider for DstackAciProvider {
-    fn identity_public_key(&self) -> PublicKeyMaterial {
-        PublicKeyMaterial {
-            algo: ALGO_ECDSA_SECP256K1.to_string(),
-            public_key_hex: public_key_hex(&self.identity),
-        }
-    }
-
-    fn sign_keyset_endorsement(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
-        let sig: K256Signature = K256Signer::sign(&self.identity, payload);
-        Ok(sig.to_bytes().to_vec())
-    }
-
-    fn sign_keyset_revocation(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
-        // §4.7 revocation verifies exactly like the endorsement (§4.3): the
-        // identity key over the JCS payload, 64-byte `r || s` for secp256k1.
-        let sig: K256Signature = K256Signer::sign(&self.identity, payload);
-        Ok(sig.to_bytes().to_vec())
-    }
-
     fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
-        // Ed25519 is the default (first) signer per §8.5 RECOMMENDED; the
-        // secp256k1 key stays listed for EVM `ecrecover` verifiers.
-        vec![
-            KeyedPublicKey {
-                key_id: self.ed25519_receipt_key_id.clone(),
-                algo: ALGO_ED25519.to_string(),
-                public_key_hex: ed25519_public_key_hex(&self.ed25519_receipt),
-            },
-            KeyedPublicKey {
-                key_id: self.receipt_key_id.clone(),
-                algo: ALGO_ECDSA_SECP256K1.to_string(),
-                public_key_hex: public_key_hex(&self.receipt),
-            },
-        ]
+        vec![KeyedPublicKey {
+            key_id: self.receipt_key_id.clone(),
+            algo: ALGO_ED25519.to_string(),
+            public_key_hex: ed25519_public_key_hex(&self.receipt),
+        }]
     }
 
-    fn sign_receipt(&self, key_id: &str, canonical_bytes: &[u8]) -> Result<Vec<u8>, KeyError> {
-        if key_id == self.ed25519_receipt_key_id {
-            // ed25519: raw 64-byte RFC 8032 signature over canonical_bytes.
-            use ed25519_dalek::Signer;
-            let sig = self.ed25519_receipt.sign(canonical_bytes);
-            return Ok(sig.to_bytes().to_vec());
-        }
+    fn sign_receipt(&self, key_id: &str, payload: &[u8]) -> Result<Vec<u8>, KeyError> {
         if key_id != self.receipt_key_id {
             return Err(KeyError::UnknownReceiptKeyId(key_id.to_string()));
         }
-
-        // ecdsa-secp256k1: 65-byte recoverable signature over sha256(canonical_bytes).
-        let prehash: [u8; 32] = Sha256::digest(canonical_bytes).into();
-        let (sig, recid): (K256Signature, RecoveryId) = self
-            .receipt
-            .sign_prehash_recoverable(&prehash)
-            .map_err(|e| KeyError::Crypto(format!("k256 sign_prehash: {e}")))?;
-        let mut out = Vec::with_capacity(65);
-        out.extend_from_slice(&sig.to_bytes());
-        out.push(recid.to_byte());
-        Ok(out)
+        // Raw 64-byte RFC 8032 signature over the exact payload bytes (§8.2).
+        use ed25519_dalek::Signer;
+        Ok(self.receipt.sign(payload).to_bytes().to_vec())
     }
 
     fn e2ee_keys(&self) -> Vec<KeyedPublicKey> {
+        vec![KeyedPublicKey {
+            key_id: self.x25519_e2ee_key_id.clone(),
+            algo: E2EE_ALGO_X25519_AESGCM.to_string(),
+            public_key_hex: x25519_public_key_hex(&self.x25519_e2ee),
+        }]
+    }
+
+    fn decrypt_e2ee(
+        &self,
+        key_id: &str,
+        sealed: &[u8],
+        context: &str,
+        model: &str,
+        client_public_key_hex: &str,
+    ) -> Result<Vec<u8>, KeyError> {
+        if key_id != self.x25519_e2ee_key_id {
+            return Err(KeyError::UnknownE2eeKeyId(key_id.to_string()));
+        }
+        unseal_v3(
+            &self.x25519_e2ee,
+            context,
+            model,
+            Some(client_public_key_hex),
+            sealed,
+        )
+    }
+
+    fn legacy_e2ee_keys(&self) -> Vec<KeyedPublicKey> {
         vec![
             KeyedPublicKey {
-                key_id: self.e2ee_key_id.clone(),
-                algo: E2EE_ALGO_SECP256K1_AESGCM.to_string(),
-                public_key_hex: public_key_from_secret(&self.e2ee),
-            },
-            KeyedPublicKey {
-                key_id: self.x25519_e2ee_key_id.clone(),
-                algo: E2EE_ALGO_X25519_AESGCM.to_string(),
-                public_key_hex: x25519_public_key_hex(&self.x25519_e2ee),
-            },
-            KeyedPublicKey {
-                key_id: format!("{}-legacy-ecdsa", self.e2ee_key_id),
+                key_id: self.legacy_e2ee_key_id.clone(),
                 algo: E2EE_ALGO_LEGACY_ECDSA.to_string(),
-                public_key_hex: legacy_ecdsa_public_key_from_secret(&self.e2ee),
+                public_key_hex: legacy_ecdsa_public_key_from_secret(&self.legacy_e2ee),
             },
             KeyedPublicKey {
                 key_id: self.legacy_ed25519_key_id.clone(),
@@ -447,21 +361,6 @@ impl KeyProvider for DstackAciProvider {
                 public_key_hex: ed25519_public_key_hex(&self.legacy_ed25519),
             },
         ]
-    }
-
-    fn decrypt_e2ee(
-        &self,
-        key_id: &str,
-        ciphertext_hex: &str,
-        aad: &[u8],
-    ) -> Result<Vec<u8>, KeyError> {
-        if key_id == self.e2ee_key_id {
-            return decrypt_with_secret_key(&self.e2ee, ciphertext_hex, aad);
-        }
-        if key_id == self.x25519_e2ee_key_id {
-            return decrypt_x25519_with_secret_key(&self.x25519_e2ee, ciphertext_hex, aad);
-        }
-        Err(KeyError::UnknownE2eeKeyId(key_id.to_string()))
     }
 
     fn decrypt_legacy_e2ee(
@@ -472,7 +371,7 @@ impl KeyProvider for DstackAciProvider {
     ) -> Result<Vec<u8>, KeyError> {
         match signing_algo {
             E2EE_ALGO_LEGACY_ECDSA => {
-                decrypt_legacy_ecdsa_with_secret_key(&self.e2ee, ciphertext_hex, aad)
+                decrypt_legacy_ecdsa_with_secret_key(&self.legacy_e2ee, ciphertext_hex, aad)
             }
             E2EE_ALGO_LEGACY_ED25519 => {
                 decrypt_legacy_ed25519_with_secret_key(&self.legacy_ed25519, ciphertext_hex, aad)
@@ -495,7 +394,7 @@ impl KeyProvider for DstackAciProvider {
                 // Legacy clients use one secp256k1 key (the E2EE key) for both
                 // encryption and response signing, and verify against the
                 // attestation `signing_address` (also the E2EE key) — sign with it.
-                let signing_key = K256SigningKey::from(&self.e2ee);
+                let signing_key = K256SigningKey::from(&self.legacy_e2ee);
                 let prehash = ethereum_personal_message_hash(text);
                 let (sig, recid): (K256Signature, RecoveryId) = signing_key
                     .sign_prehash_recoverable(&prehash)
@@ -506,7 +405,7 @@ impl KeyProvider for DstackAciProvider {
                 Ok(LegacySignature {
                     signing_algo: LEGACY_ALGO_ECDSA.to_string(),
                     signing_address: ethereum_address_from_uncompressed_public_key(
-                        &public_key_from_secret(&self.e2ee),
+                        &public_key_from_secret(&self.legacy_e2ee),
                     )?,
                     signature: format!("0x{}", hex::encode(out)),
                 })
@@ -528,11 +427,9 @@ impl KeyProvider for DstackAciProvider {
         json!({
             "provider": "dstack-kms",
             "keys": [
-                key_evidence_json(&self.identity_evidence),
-                key_evidence_json(&self.ed25519_receipt_evidence),
                 key_evidence_json(&self.receipt_evidence),
-                key_evidence_json(&self.e2ee_evidence),
                 key_evidence_json(&self.x25519_e2ee_evidence),
+                key_evidence_json(&self.legacy_e2ee_evidence),
                 key_evidence_json(&self.legacy_ed25519_evidence),
             ],
         })
@@ -558,13 +455,15 @@ fn key_evidence_json(evidence: &KmsKeyEvidence) -> serde_json::Value {
         "purpose": evidence.purpose,
         "algo": evidence.algo,
         "public_key": evidence.public_key_hex,
+        "kms_public_key": evidence.kms_public_key_hex,
         "signature_chain": evidence.signature_chain,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_dstack_endpoint, DstackAciProvider};
+    use super::normalize_dstack_endpoint;
+    use crate::aci::identity::report_data_slot;
 
     #[test]
     fn normalizes_unix_scheme_for_dstack_sdk() {
@@ -585,8 +484,8 @@ mod tests {
     #[test]
     fn dstack_report_data_is_aci_digest_padded_with_zeroes() {
         let aci_report_data = [0x42u8; 32];
-        let dstack_report_data = DstackAciProvider::dstack_report_data(aci_report_data);
-        assert_eq!(&dstack_report_data[..32], &aci_report_data);
-        assert_eq!(&dstack_report_data[32..], &[0u8; 32]);
+        let slot = report_data_slot(aci_report_data);
+        assert_eq!(&slot[..32], &aci_report_data);
+        assert_eq!(&slot[32..], &[0u8; 32]);
     }
 }

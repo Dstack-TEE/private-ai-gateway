@@ -1,5 +1,9 @@
 use super::ServiceError;
-use crate::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki};
+use crate::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
+
+/// Default keyset lifetime: launch time + 30 days (§4.4 bounded lifetime).
+/// The launcher computes `keyset_not_after` from this unless configured.
+pub const DEFAULT_KEYSET_NOT_AFTER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 /// Validate source provenance before it is serialized in an attestation report.
 /// The binary derives runtime provenance from git-launcher; unknown provenance
@@ -32,19 +36,21 @@ pub(super) fn normalize_downstream_domain(raw: &str) -> Option<String> {
     Some(domain)
 }
 
-/// Configuration accepted by [`AciService::new`].
+/// Configuration accepted by [`super::AciService::new`].
 pub struct AciServiceConfig {
-    pub vendor: String,
     pub tee_type: String,
     /// Runtime source provenance. The binary populates this from
     /// `/etc/git-launcher/gateway.conf`; missing launcher metadata is
     /// represented by `SourceProvenance::default()`.
     pub source_provenance: SourceProvenance,
-    pub keyset_epoch: KeysetEpoch,
-    pub identity_subject: Option<String>,
+    /// Absolute keyset expiry (§4.1 `not_after`): launch time plus a
+    /// configurable duration ([`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] default).
+    pub keyset_not_after: u64,
+    /// Optional profile-interpreted keyset `subject` (§4.1).
+    pub subject: Option<String>,
     pub service_capabilities: ServiceCapabilities,
-    pub freshness_seconds: u64,
-    /// How long receipts stay queryable in the in-memory store.
+    /// How long receipts stay queryable in the in-memory store. Also the
+    /// attested-session validity period and per-citation retention extension.
     pub receipt_ttl_seconds: u64,
     pub upstream_required_default: bool,
     pub allow_test_keys: bool,
@@ -56,9 +62,8 @@ pub struct AciServiceConfig {
 }
 
 impl AciServiceConfig {
-    pub fn for_test(vendor: &str) -> Self {
+    pub fn for_test() -> Self {
         Self {
-            vendor: vendor.to_string(),
             tee_type: "tdx".to_string(),
             source_provenance: SourceProvenance {
                 repo_url: Some("https://github.com/Dstack-TEE/private-ai-gateway".to_string()),
@@ -66,13 +71,9 @@ impl AciServiceConfig {
                 image_digest: None,
                 image_provenance: None,
             },
-            keyset_epoch: KeysetEpoch {
-                version: 1,
-                not_after: 2_000_000_000,
-            },
-            identity_subject: None,
+            keyset_not_after: 2_000_000_000,
+            subject: None,
             service_capabilities: ServiceCapabilities::default(),
-            freshness_seconds: 3600,
             receipt_ttl_seconds: 3600,
             upstream_required_default: true,
             allow_test_keys: true,
@@ -82,7 +83,7 @@ impl AciServiceConfig {
 }
 
 /// Identifier the service records alongside a receipt so a relying party
-/// can prove it was the original requester (ACI §9.1, §9.5).
+/// can prove it was the original requester (§8.6).
 ///
 /// The aggregator never stores raw bearer tokens; it stores the SHA-256
 /// digest of whatever credential the requester presented at chat time.
@@ -100,7 +101,7 @@ impl ReceiptOwner {
     /// token. The raw bytes are hashed immediately and never kept.
     pub fn from_bearer(token: &str) -> Self {
         Self {
-            auth_token_sha256: crate::aci::canonical::sha256_hex(token.as_bytes()),
+            auth_token_sha256: crate::aci::digest::sha256_hex(token.as_bytes()),
         }
     }
 }

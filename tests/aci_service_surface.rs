@@ -2,9 +2,9 @@
 //!
 //! This file deliberately excludes the relying-party verification procedure
 //! from ACI §10. It covers the service behavior that an ACI aggregator should
-//! expose. Tests for implemented surfaces run by default. Tests for specified
-//! but not-yet-implemented surfaces are `#[ignore]` with a reason; they are
-//! still concrete executable specs, not a prose checklist.
+//! expose: reports, receipts (as §8.2 envelopes), response headers, the §13
+//! legacy compatibility surfaces, and the plaintext, ACI E2EE v3 (§7), and
+//! legacy E2EE request paths.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,22 +15,22 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::Bytes;
 use futures_util::stream;
-use private_ai_gateway::aci::canonical::{canonicalize, sha256_hex};
+use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
-    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
-    encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
-    legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
+    decrypt_legacy_ecdsa_with_secret_key, encrypt_legacy_for_public_key,
+    legacy_ecdsa_public_key_from_secret, seal_v3, unseal_v3, x25519_public_key_from_hex,
+    x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
+    E2EE_ALGO_X25519_AESGCM, E2EE_CONTEXT_REQUEST, E2EE_CONTEXT_RESPONSE,
 };
-use private_ai_gateway::aci::receipt::{
-    UpstreamVerifiedEvent, VerificationResult, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
-    EVENT_TRANSPARENCY_RESPONSE_MODIFIED,
-};
-use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities, TlsSpki};
+use private_ai_gateway::aci::keys::verify_receipt_signature;
+use private_ai_gateway::aci::receipt::{SignedReceipt, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
@@ -40,7 +40,6 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::http::build_router;
 use serde_json::Value;
 use tower::ServiceExt;
-use x25519_dalek::StaticSecret as X25519SecretKey;
 
 use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
@@ -48,7 +47,6 @@ const CHAT_REQUEST: &[u8] =
     br#"{"model":"aci-model","messages":[{"role":"user","content":"hello"}]}"#;
 const CHAT_RESPONSE: &[u8] = br#"{"id":"chat-aci-1","object":"chat.completion","choices":[]}"#;
 const E2EE_CHAT_RESPONSE: &[u8] = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
-const E2EE_COMPLETION_RESPONSE: &[u8] = br#"{"id":"cmpl-aci-1","object":"text_completion","model":"aci-model","choices":[{"index":0,"text":"completion-answer","finish_reason":"stop"}]}"#;
 
 #[derive(Clone)]
 struct HttpResult {
@@ -153,13 +151,6 @@ impl RecordingUpstream {
             ..Self::default()
         }
     }
-
-    fn with_stream_chunks(stream_chunks: Vec<Bytes>) -> Self {
-        Self {
-            stream_chunks,
-            ..Self::default()
-        }
-    }
 }
 
 #[async_trait]
@@ -196,6 +187,24 @@ impl UpstreamBackend for RecordingUpstream {
             served_instance_id: None,
         })
     }
+
+    // The mock stands in for a backend that enforces the verifier's channel
+    // binding on its connection (the trait default fails closed).
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
 }
 
 struct AlwaysVerified;
@@ -214,6 +223,20 @@ impl UpstreamVerifier for AlwaysVerified {
     }
 }
 
+/// A verifier that always fails: exercises the fail-closed refusal path.
+struct AlwaysFailed;
+
+#[async_trait]
+impl UpstreamVerifier for AlwaysFailed {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            reason: Some("quote verification failed".to_string()),
+            ..event_from_request(&request, VerificationResult::Failed)
+        }
+    }
+}
+
 struct Harness {
     requester: Requester,
     service: Arc<AciService>,
@@ -225,21 +248,25 @@ fn harness() -> Harness {
 }
 
 fn harness_with_upstream(upstream: RecordingUpstream) -> Harness {
-    harness_with_upstream_and_e2ee(upstream, false)
+    harness_with(upstream, Arc::new(AlwaysVerified), false)
 }
 
 fn harness_with_e2ee(upstream: RecordingUpstream) -> Harness {
-    harness_with_upstream_and_e2ee(upstream, true)
+    harness_with(upstream, Arc::new(AlwaysVerified), true)
 }
 
-fn harness_with_upstream_and_e2ee(upstream: RecordingUpstream, enable_e2ee: bool) -> Harness {
+fn harness_with(
+    upstream: RecordingUpstream,
+    verifier: Arc<dyn UpstreamVerifier>,
+    enable_e2ee: bool,
+) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream_calls = upstream.calls();
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: if enable_e2ee {
-            vec![E2EE_VERSION_V2.to_string()]
+            vec!["3".to_string()]
         } else {
             vec![]
         },
@@ -254,7 +281,7 @@ fn harness_with_upstream_and_e2ee(upstream: RecordingUpstream, enable_e2ee: bool
             keys,
             quoter,
             Arc::new(upstream),
-            Arc::new(AlwaysVerified),
+            verifier,
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
             Arc::new(FixedClock(1_700_000_000)),
@@ -305,218 +332,80 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers.get(name).unwrap().to_str().unwrap()
 }
 
-fn receipt_event<'a>(receipt: &'a Receipt, event_type: &str) -> &'a Value {
-    &receipt
-        .event_log
-        .iter()
-        .find(|event| event.event_type == event_type)
+fn receipt_payload(receipt: &SignedReceipt) -> Value {
+    receipt.payload_json().unwrap()
+}
+
+fn payload_event<'a>(payload: &'a Value, event_type: &str) -> &'a Value {
+    payload["event_log"]
+        .as_array()
         .unwrap()
-        .fields
-}
-
-/// ACI v2 request AAD: JCS of the purpose-tagged object (spec §7.3).
-fn aci_request_aad(algo: &str, model: &str, field: &str, nonce: &str, ts: u64) -> Vec<u8> {
-    canonicalize(&serde_json::json!({
-        "purpose": "aci.e2ee.request.v2",
-        "algo": algo,
-        "model": model,
-        "field": field,
-        "nonce": nonce,
-        "ts": ts,
-    }))
-    .unwrap()
-}
-
-/// ACI v2 response AAD: like the request AAD but tagged `aci.e2ee.response.v2`
-/// and additionally binding the response `id` (spec §7.3).
-fn aci_response_aad(
-    algo: &str,
-    model: &str,
-    id: &str,
-    field: &str,
-    nonce: &str,
-    ts: u64,
-) -> Vec<u8> {
-    canonicalize(&serde_json::json!({
-        "purpose": "aci.e2ee.response.v2",
-        "algo": algo,
-        "model": model,
-        "id": id,
-        "field": field,
-        "nonce": nonce,
-        "ts": ts,
-    }))
-    .unwrap()
-}
-
-/// A valid ACI v2 nonce (64 lowercase hex chars, §7.5) derived from a label, so
-/// each test uses a distinct, readable value without hardcoding 64-char hex.
-fn hex_nonce(label: &str) -> String {
-    let mut out = String::with_capacity(64);
-    let bytes = label.as_bytes();
-    for i in 0..32 {
-        out.push_str(&format!("{:02x}", bytes.get(i).copied().unwrap_or(0)));
-    }
-    out
-}
-
-fn e2ee_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    e2ee_chat_request(h, client_secret, nonce, false)
-}
-
-fn e2ee_stream_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    e2ee_chat_request(h, client_secret, nonce, true)
-}
-
-fn e2ee_chat_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-    stream: bool,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let aad = aci_request_aad(
-        &model_key.algo,
-        model,
-        "messages.0.content",
-        nonce,
-        timestamp,
-    );
-    let encrypted_content =
-        encrypt_for_public_key(&model_key.public_key_hex, b"hello", &aad).unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "stream": stream,
-        "messages": [{"role": "user", "content": encrypted_content}],
-    });
-    let headers = vec![
-        ("x-client-pub-key", public_key_from_secret(client_secret)),
-        ("x-model-pub-key", model_key.public_key_hex.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-/// Build an X25519-suite E2EE chat request: the client encrypts whole message
-/// content to the keyset's X25519 service key (§7.1 RECOMMENDED suite). Suite
-/// selection is by the `algo` of the matched `X-Model-Pub-Key` entry (§7.4).
-fn e2ee_x25519_chat_request(
-    h: &Harness,
-    client_secret: &X25519SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = h
-        .service
-        .keyset()
-        .e2ee_public_keys
         .iter()
-        .find(|k| k.algo == E2EE_ALGO_X25519_AESGCM)
-        .expect("x25519 e2ee key is published")
-        .clone();
-    let aad = aci_request_aad(
-        &model_key.algo,
-        model,
-        "messages.0.content",
-        nonce,
-        timestamp,
-    );
-    let encrypted_content =
-        encrypt_x25519_for_public_key(&model_key.public_key_hex, b"hello", &aad).unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "stream": false,
-        "messages": [{"role": "user", "content": encrypted_content}],
-    });
-    let headers = vec![
-        ("x-client-pub-key", x25519_public_key_hex(client_secret)),
-        ("x-model-pub-key", model_key.public_key_hex.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-fn e2ee_completion_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    e2ee_completion_request_with_stream(h, client_secret, nonce, false)
-}
-
-fn e2ee_completion_stream_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    e2ee_completion_request_with_stream(h, client_secret, nonce, true)
-}
-
-fn e2ee_completion_request_with_stream(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-    stream: bool,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let aad = aci_request_aad(&model_key.algo, model, "prompt", nonce, timestamp);
-    let encrypted_prompt =
-        encrypt_for_public_key(&model_key.public_key_hex, b"hello", &aad).unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "prompt": encrypted_prompt,
-        "stream": stream,
-    });
-    let headers = vec![
-        ("x-client-pub-key", public_key_from_secret(client_secret)),
-        ("x-model-pub-key", model_key.public_key_hex.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-/// ACI v2 response AAD bound to the request model `aci-model`, for the given
-/// response id and full field path (spec §7.2, §7.3).
-fn e2ee_response_aad(h: &Harness, nonce: &str, response_id: &str, field: &str) -> Vec<u8> {
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    aci_response_aad(
-        &model_key.algo,
-        "aci-model",
-        response_id,
-        field,
-        nonce,
-        1_700_000_000,
-    )
+        .find(|event| event["type"] == event_type)
+        .unwrap()
 }
 
 fn legacy_model_public_key(h: &Harness, signing_algo: &str) -> String {
     h.service
-        .keyset()
-        .e2ee_public_keys
+        .legacy_e2ee_keys()
         .iter()
         .find(|key| key.algo == signing_algo)
         .unwrap()
         .public_key_hex
         .clone()
+}
+
+/// The attested §7.1 X25519 service key a v3 client encrypts to.
+fn v3_model_public_key(h: &Harness) -> String {
+    h.service
+        .keyset()
+        .e2ee_public_keys
+        .iter()
+        .find(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+        .unwrap()
+        .public_key_hex
+        .clone()
+}
+
+/// Seal `plaintext` per §7.2 and return the envelope body plus the three
+/// E2EE headers (§6.1).
+fn v3_sealed_request(
+    h: &Harness,
+    model: &str,
+    plaintext: &[u8],
+    client_secret: &x25519_dalek::StaticSecret,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    let model_key = v3_model_public_key(h);
+    let recipient = x25519_public_key_from_hex(&model_key).unwrap();
+    let client_key = x25519_public_key_hex(client_secret);
+    let ctx = E2EE_CONTEXT_REQUEST;
+    let sealed = seal_v3(&recipient, ctx, model, Some(&client_key), plaintext).unwrap();
+    let body = serde_json::json!({ "model": model, "sealed_b64": BASE64.encode(sealed) });
+    let headers = vec![
+        ("x-e2ee-version", "3".to_string()),
+        ("x-client-pub-key", client_key),
+        ("x-model-pub-key", model_key),
+    ];
+    (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+/// Unseal one §7.3 response envelope (a buffered body or one SSE data payload).
+fn v3_unseal_response(
+    client_secret: &x25519_dalek::StaticSecret,
+    model: &str,
+    wire: &[u8],
+) -> Vec<u8> {
+    let envelope: Value = serde_json::from_slice(wire).unwrap();
+    let object = envelope.as_object().unwrap();
+    assert_eq!(
+        object.keys().collect::<Vec<_>>(),
+        vec!["sealed_b64"],
+        "§7.3 response envelope carries only sealed_b64"
+    );
+    let sealed = BASE64
+        .decode(object["sealed_b64"].as_str().unwrap())
+        .unwrap();
+    unseal_v3(client_secret, E2EE_CONTEXT_RESPONSE, model, None, &sealed).unwrap()
 }
 
 fn legacy_ecdsa_request(
@@ -541,25 +430,74 @@ fn legacy_ecdsa_request(
     (serde_json::to_vec(&body).unwrap(), headers)
 }
 
-fn sse_json_events(body: &[u8]) -> Vec<Value> {
-    let text = std::str::from_utf8(body).unwrap();
-    text.split("\n\n")
-        .filter_map(|event| {
-            let data = event
-                .lines()
-                .filter_map(|line| {
-                    line.strip_prefix("data:")
-                        .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() || data == "[DONE]" {
-                None
-            } else {
-                Some(serde_json::from_str::<Value>(&data).unwrap())
-            }
-        })
-        .collect()
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn aci_attestation_report_binds_nonce_and_serves_exact_keyset_bytes() {
+    let h = harness();
+    let resp = h
+        .requester
+        .get("/v1/aci/attestation?nonce=fresh-nonce_1", &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let report = json_body(&resp);
+    assert_eq!(report["api_version"], "aci/1");
+    // No legacy compatibility fields on the canonical report.
+    assert!(report.get("signing_address").is_none());
+    assert!(report.get("all_attestations").is_none());
+    assert!(report.get("workload_id").is_none());
+
+    // The decoded keyset bytes hash to the restated digest (§5.1).
+    let keyset_bytes = BASE64
+        .decode(
+            report["attestation"]["workload_keyset_b64"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        report["workload_keyset_digest"].as_str().unwrap(),
+        sha256_hex(&keyset_bytes)
+    );
+    assert_eq!(keyset_bytes, h.service.keyset_bytes());
+
+    // report_data = sha256 of the §4.2 statement for the supplied nonce.
+    let statement = private_ai_gateway::aci::identity::attestation_statement(
+        h.service.workload_keyset_digest(),
+        Some("fresh-nonce_1"),
+    )
+    .unwrap();
+    assert_eq!(
+        report["attestation"]["report_data"].as_str().unwrap(),
+        hex::encode(private_ai_gateway::aci::identity::report_data(&statement))
+    );
+}
+
+#[tokio::test]
+async fn aci_attestation_report_rejects_invalid_nonce_with_400() {
+    let h = harness();
+    for bad in ["with%20space", "quote%22here", "plus%2Bplus"] {
+        let resp = h
+            .requester
+            .get(&format!("/v1/aci/attestation?nonce={bad}"), &[])
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST, "nonce {bad}");
+    }
+    // 128 chars is the limit; 129 is rejected.
+    let long_ok = "a".repeat(128);
+    let resp = h
+        .requester
+        .get(&format!("/v1/aci/attestation?nonce={long_ok}"), &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let too_long = "a".repeat(129);
+    let resp = h
+        .requester
+        .get(&format!("/v1/aci/attestation?nonce={too_long}"), &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -577,7 +515,6 @@ async fn attestation_report_compat_query_params_are_service_scoped_noops() {
     assert_eq!(compat.status, StatusCode::OK);
     let baseline = json_body(&baseline);
     let compat = json_body(&compat);
-    assert_eq!(baseline["workload_id"], compat["workload_id"]);
     assert_eq!(
         baseline["workload_keyset_digest"],
         compat["workload_keyset_digest"]
@@ -591,10 +528,6 @@ async fn attestation_report_compat_query_params_are_service_scoped_noops() {
         baseline["all_attestations"][0]["signing_public_key"],
         baseline["signing_public_key"]
     );
-    assert_eq!(
-        baseline["all_attestations"][0]["workload_id"],
-        baseline["workload_id"]
-    );
 
     let ed = h
         .requester
@@ -607,6 +540,10 @@ async fn attestation_report_compat_query_params_are_service_scoped_noops() {
     assert_eq!(ed["signing_address"], ed["signing_public_key"]);
 }
 
+// ---------------------------------------------------------------------------
+// Receipts and response headers
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 async fn plaintext_chat_response_headers_and_receipt_binding_are_covered() {
     let h = harness();
@@ -614,13 +551,17 @@ async fn plaintext_chat_response_headers_and_receipt_binding_are_covered() {
         .requester
         .post("/v1/chat/completions", CHAT_REQUEST, &[])
         .await;
-    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
     assert_eq!(resp.body, CHAT_RESPONSE);
     assert_eq!(header(&resp.headers, "x-aci-version"), "aci/1");
-    assert_eq!(
-        header(&resp.headers, "x-aci-identity"),
-        h.service.workload_id()
-    );
+    assert!(resp.headers.get("x-aci-identity").is_none());
+    assert!(resp.headers.get("x-e2ee-algo").is_none());
+    assert!(resp.headers.get("x-e2ee-version").is_none());
     assert_eq!(
         header(&resp.headers, "x-aci-keyset-digest"),
         h.service.workload_keyset_digest()
@@ -630,14 +571,65 @@ async fn plaintext_chat_response_headers_and_receipt_binding_are_covered() {
     let receipt_id = header(&resp.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     assert_eq!(receipt.chat_id.as_deref(), Some("chat-aci-1"));
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["api_version"], "aci/1");
     assert_eq!(
-        receipt_event(&receipt, "request.received")["body_hash"],
+        payload["workload_keyset_digest"].as_str().unwrap(),
+        h.service.workload_keyset_digest()
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
         sha256_hex(CHAT_REQUEST)
     );
     assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
+        payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(CHAT_RESPONSE)
     );
+    // The verified event is slim (§8.5): a session citation, no inline detail.
+    let verified = payload_event(&payload, "upstream.verified");
+    assert_eq!(verified["result"], "verified");
+    assert!(verified["session_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
+    assert!(verified.get("channel_bindings").is_none());
+    assert!(verified.get("claims").is_none());
+    assert!(verified.get("evidence").is_none());
+}
+
+#[tokio::test]
+async fn aci_receipt_endpoint_serves_signed_bytes_envelope() {
+    let h = harness();
+    let chat = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    let receipt_id = header(&chat.headers, "x-receipt-id");
+
+    let resp = h
+        .requester
+        .get(&format!("/v1/aci/receipts/{receipt_id}"), &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let envelope = json_body(&resp);
+    let payload_bytes = BASE64
+        .decode(envelope["payload_b64"].as_str().unwrap())
+        .unwrap();
+    let signature = hex::decode(envelope["signature"].as_str().unwrap()).unwrap();
+    let key_id = envelope["key_id"].as_str().unwrap();
+    let receipt_key = h
+        .service
+        .keyset()
+        .receipt_signing_keys
+        .iter()
+        .find(|key| key.key_id == key_id)
+        .expect("envelope key_id resolves in the attested keyset");
+    assert_eq!(envelope["algo"].as_str().unwrap(), receipt_key.algo);
+    assert!(verify_receipt_signature(
+        receipt_key,
+        &payload_bytes,
+        &signature
+    ));
 }
 
 #[tokio::test]
@@ -653,8 +645,9 @@ async fn receipt_lookup_by_chat_id_returns_signature_wrapper() {
     assert_eq!(receipt.status, StatusCode::OK);
     let receipt_body = json_body(&receipt);
     assert_eq!(receipt_body["api_version"], "aci/1");
-    assert_eq!(receipt_body["receipt"]["chat_id"], "chat-aci-1");
     assert!(receipt_body["signature"].is_string());
+    // The embedded receipt is the §8.2 envelope.
+    assert!(receipt_body["receipt"]["payload_b64"].is_string());
 }
 
 #[tokio::test]
@@ -719,25 +712,22 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
         })
         .await
         .unwrap();
+    // A rewrite IS the hash pair differing (§8.4); nothing else records it and
+    // the gateway never stores the post-rewrite body.
+    let payload = receipt_payload(&result.receipt);
     assert_eq!(
-        receipt_event(&result.receipt, "request.received")["body_hash"],
+        payload_event(&payload, "request.received")["body_hash"],
         sha256_hex(original)
     );
     assert_eq!(
-        receipt_event(&result.receipt, "request.forwarded")["body_hash"],
+        payload_event(&payload, "request.forwarded")["body_hash"],
         sha256_hex(forwarded)
     );
-    assert_eq!(
-        receipt_event(&result.receipt, EVENT_TRANSPARENCY_REQUEST_MODIFIED),
-        &serde_json::json!({})
-    );
-    // The rewrite is committed by hash + the transparency event; the gateway
-    // never stores the post-rewrite body, so there is no body endpoint to read.
     assert_ne!(sha256_hex(original), sha256_hex(forwarded));
 }
 
 #[tokio::test]
-async fn empty_tool_calls_are_stripped_and_logged_as_request_modified() {
+async fn empty_tool_calls_are_stripped_and_visible_as_differing_hashes() {
     let h = harness();
     let request = br#"{"model":"aci-model","messages":[{"role":"assistant","content":"","tool_calls":[]},{"role":"user","content":"hello"}]}"#;
 
@@ -751,15 +741,109 @@ async fn empty_tool_calls_are_stripped_and_logged_as_request_modified() {
 
     let receipt_id = header(&resp.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(
-        receipt_event(&receipt, EVENT_TRANSPARENCY_REQUEST_MODIFIED),
-        &serde_json::json!({})
-    );
+    let payload = receipt_payload(&receipt);
     assert_ne!(
-        receipt_event(&receipt, "request.received")["body_hash"],
-        receipt_event(&receipt, "request.forwarded")["body_hash"]
+        payload_event(&payload, "request.received")["body_hash"],
+        payload_event(&payload, "request.forwarded")["body_hash"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fail-closed refusal (§8.5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn failed_upstream_verification_returns_502_with_refusal_receipt() {
+    let h = harness_with(RecordingUpstream::default(), Arc::new(AlwaysFailed), false);
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            CHAT_REQUEST,
+            &[("authorization", "Bearer requester-a")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error_type(&resp), "upstream_verification_failed");
+    // The prompt was not forwarded (§1.2).
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+
+    // The error carries X-Receipt-Id (§6.2) and the refusal receipt hashes the
+    // exact error body served, with the §8.5 failed form and no forwarding.
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(CHAT_REQUEST)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+    let verified = payload_event(&payload, "upstream.verified");
+    assert_eq!(verified["result"], "failed");
+    assert_eq!(verified["required"], true);
+    assert_eq!(verified["reason"], "quote verification failed");
+    assert!(verified.get("session_id").is_none());
+    assert!(payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["type"] != "request.forwarded"));
+
+    // The refusal receipt is credential-bound like any other (§8.6).
+    let unauthenticated = h
+        .requester
+        .get(&format!("/v1/aci/receipts/{receipt_id}"), &[])
+        .await;
+    assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
+    let original = h
+        .requester
+        .get(
+            &format!("/v1/aci/receipts/{receipt_id}"),
+            &[("authorization", "Bearer requester-a")],
+        )
+        .await;
+    assert_eq!(original.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn verified_result_with_no_channel_binding_is_refused() {
+    struct VerifiedWithoutBinding;
+    #[async_trait]
+    impl UpstreamVerifier for VerifiedWithoutBinding {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            UpstreamVerifiedEvent {
+                verifier_id: "surface-verifier/v1".to_string(),
+                channel_bindings: Vec::new(),
+                ..event_from_request(&request, VerificationResult::Verified)
+            }
+        }
+    }
+    let h = harness_with(
+        RecordingUpstream::default(),
+        Arc::new(VerifiedWithoutBinding),
+        false,
+    );
+    let resp = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error_type(&resp), "upstream_verification_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    let verified = payload_event(&payload, "upstream.verified");
+    assert_eq!(verified["result"], "failed");
+    assert_eq!(verified["reason"], "no enforceable channel binding");
+}
+
+// ---------------------------------------------------------------------------
+// E2EE gating and the §13 legacy mode
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
@@ -769,7 +853,7 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
         .post(
             "/v1/chat/completions",
             CHAT_REQUEST,
-            &[("x-e2ee-version", "2")],
+            &[("x-e2ee-version", "3")],
         )
         .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
@@ -778,215 +862,38 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 }
 
 #[tokio::test]
-async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire_separately() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = k256::SecretKey::from_slice(&[0x55; 32]).unwrap();
-    let nonce = hex_nonce("nonce-1");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
-
+async fn e2ee_v2_is_reserved_historical_and_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
     let resp = h
         .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-    assert_eq!(
-        header(&resp.headers, "x-e2ee-algo"),
-        h.service.keyset().e2ee_public_keys[0].algo
-    );
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&upstream_body).unwrap()["messages"][0]["content"],
-        "hello"
-    );
-    assert_ne!(resp.body, E2EE_CHAT_RESPONSE);
-    let encrypted_response = json_body(&resp);
-    let encrypted_content = encrypted_response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
-    let response_aad = e2ee_response_aad(&h, nonce, "chat-aci-1", "choices.0.message.content");
-    let decrypted_response =
-        decrypt_with_secret_key(&client_secret, encrypted_content, &response_aad).unwrap();
-    assert_eq!(decrypted_response, b"plain-answer");
-
-    let receipt_id = header(&resp.headers, "x-receipt-id");
-    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(
-        receipt_event(&receipt, "request.received")["body_hash"],
-        sha256_hex(&upstream_body)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        sha256_hex(E2EE_CHAT_RESPONSE)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
-        sha256_hex(&resp.body)
-    );
-    assert_ne!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        receipt_event(&receipt, "response.returned")["wire_hash"]
-    );
-    assert_eq!(
-        receipt_event(&receipt, EVENT_TRANSPARENCY_RESPONSE_MODIFIED),
-        &serde_json::json!({})
-    );
-}
-
-#[tokio::test]
-async fn e2ee_v2_x25519_suite_selected_by_model_key_round_trips() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = X25519SecretKey::from([0x71u8; 32]);
-    let nonce = hex_nonce("nonce-x25519");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    // The response header follows the suite selected by X-Model-Pub-Key (§7.4).
-    assert_eq!(
-        header(&resp.headers, "x-e2ee-algo"),
-        E2EE_ALGO_X25519_AESGCM
-    );
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&upstream_body).unwrap()["messages"][0]["content"],
-        "hello"
-    );
-
-    // The service encrypts the response back under X25519 to the client key.
-    let encrypted_response = json_body(&resp);
-    let encrypted_content = encrypted_response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
-    let response_aad = aci_response_aad(
-        E2EE_ALGO_X25519_AESGCM,
-        "aci-model",
-        "chat-aci-1",
-        "choices.0.message.content",
-        nonce,
-        1_700_000_000,
-    );
-    let decrypted =
-        decrypt_x25519_with_secret_key(&client_secret, encrypted_content, &response_aad).unwrap();
-    assert_eq!(decrypted, b"plain-answer");
-}
-
-#[tokio::test]
-async fn e2ee_v2_model_key_absent_from_keyset_is_rejected() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = X25519SecretKey::from([0x72u8; 32]);
-    let nonce = hex_nonce("nonce-x25519-stranger");
-    let nonce = nonce.as_str();
-    let (encrypted_body, mut headers) = e2ee_x25519_chat_request(&h, &client_secret, nonce);
-    // Well-formed X25519 key that is not one of the attested service keys.
-    let stranger = x25519_public_key_hex(&X25519SecretKey::from([0x99u8; 32]));
-    for header in headers.iter_mut() {
-        if header.0 == "x-model-pub-key" {
-            header.1 = stranger.clone();
-        }
-    }
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .post(
+            "/v1/chat/completions",
+            CHAT_REQUEST,
+            &[
+                ("x-e2ee-version", "2"),
+                ("x-client-pub-key", &"aa".repeat(32)),
+                ("x-model-pub-key", &"bb".repeat(32)),
+            ],
+        )
         .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_model_key_mismatch");
+    assert_eq!(error_type(&resp), "e2ee_invalid_version");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn e2ee_v2_response_aad_uses_request_model_not_upstream_response_model() {
-    let upstream_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"private-upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(upstream_response));
-    let client_secret = k256::SecretKey::from_slice(&[0x56; 32]).unwrap();
-    let nonce = hex_nonce("nonce-request-model-aad");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-
-    let encrypted_response = json_body(&resp);
-    let encrypted_content = encrypted_response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
-    let request_model_aad = e2ee_response_aad(&h, nonce, "chat-aci-1", "choices.0.message.content");
-    let decrypted_response =
-        decrypt_with_secret_key(&client_secret, encrypted_content, &request_model_aad).unwrap();
-    assert_eq!(decrypted_response, b"plain-answer");
-
-    // The response AAD binds the request model, so the upstream response model
-    // must not decrypt it.
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let wrong_aad = aci_response_aad(
-        &model_key.algo,
-        "private-upstream-model",
-        "chat-aci-1",
-        "choices.0.message.content",
-        nonce,
-        1_700_000_000,
-    );
-    assert!(decrypt_with_secret_key(&client_secret, encrypted_content, &wrong_aad).is_err());
-}
+// ---------------------------------------------------------------------------
+// ACI E2EE v3 (§7)
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn e2ee_v2_decrypts_multimodal_image_and_audio_parts() {
-    // Per-part decryption of `image_url.url` and `input_audio.data`
-    // alongside a text part (spec §7.2).
+async fn e2ee_v3_buffered_roundtrip_seals_whole_bodies_and_hashes_both_sides() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = k256::SecretKey::from_slice(&[0x64; 32]).unwrap();
-    let nonce = hex_nonce("nonce-multimodal");
-    let nonce = nonce.as_str();
-    let timestamp = 1_700_000_000u64;
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let algo = model_key.algo.clone();
-    let pub_key = model_key.public_key_hex.clone();
-
-    let enc = |field: &str, plaintext: &[u8]| {
-        let aad = aci_request_aad(&algo, "aci-model", field, nonce, timestamp);
-        encrypt_for_public_key(&pub_key, plaintext, &aad).unwrap()
-    };
-    let text_ct = enc("messages.0.content.0.text", b"look at this");
-    let image_ct = enc(
-        "messages.0.content.1.image_url.url",
-        b"data:image/png;base64,iVBORw0KGgo=",
-    );
-    let audio_ct = enc("messages.0.content.2.input_audio.data", b"UklGRAAAAABXQVZF");
-    let body = serde_json::json!({
-        "model": "aci-model",
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": text_ct},
-            {"type": "image_url", "image_url": {"url": image_ct}},
-            {"type": "input_audio", "input_audio": {"data": audio_ct, "format": "wav"}},
-        ]}],
-    });
-    let headers = vec![
-        ("x-client-pub-key", public_key_from_secret(&client_secret)),
-        ("x-model-pub-key", pub_key.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
+    let client_secret = x25519_secret_key_from_bytes(&[0x71; 32]).unwrap();
+    let (body, headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
 
     let resp = h
         .requester
-        .post_owned_headers(
-            "/v1/chat/completions",
-            &serde_json::to_vec(&body).unwrap(),
-            &headers,
-        )
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
         .await;
     assert_eq!(
         resp.status,
@@ -994,45 +901,347 @@ async fn e2ee_v2_decrypts_multimodal_image_and_audio_parts() {
         "{}",
         String::from_utf8_lossy(&resp.body)
     );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    assert_eq!(header(&resp.headers, "x-aci-version"), "aci/1");
 
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    let upstream: Value = serde_json::from_slice(&upstream_body).unwrap();
-    let content = &upstream["messages"][0]["content"];
-    assert_eq!(content[0]["text"], "look at this");
+    // The service unseals to the client's exact original bytes and forwards
+    // those (§7.2).
+    assert_eq!(h.upstream_calls.lock().unwrap()[0].body, CHAT_REQUEST);
+
+    // The response is one sealed unit to X-Client-Pub-Key, bound to the
+    // envelope model (§7.3).
     assert_eq!(
-        content[1]["image_url"]["url"],
-        "data:image/png;base64,iVBORw0KGgo="
+        v3_unseal_response(&client_secret, "aci-model", &resp.body),
+        E2EE_CHAT_RESPONSE
     );
-    assert_eq!(content[2]["input_audio"]["data"], "UklGRAAAAABXQVZF");
-    // Non-encrypted sibling members pass through untouched.
-    assert_eq!(content[2]["input_audio"]["format"], "wav");
+
+    // §8.4: request.received hashes the unsealed original client bytes;
+    // response.returned hashes the sealed envelope bytes on the wire.
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["model"], "aci-model");
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(CHAT_REQUEST)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(CHAT_REQUEST)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
 }
 
 #[tokio::test]
-async fn e2ee_v2_response_encrypts_message_audio_data() {
-    // Buffered chat responses encrypt `choices.{i}.message.audio.data` (§7.2).
-    let audio_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","audio":{"id":"audio-1","data":"QUJDMTIzYXVkaW8="}},"finish_reason":"stop"}]}"#;
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(audio_response));
-    let client_secret = k256::SecretKey::from_slice(&[0x65; 32]).unwrap();
-    let nonce = hex_nonce("nonce-response-audio");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_request(&h, &client_secret, nonce);
+async fn e2ee_v3_receipt_records_the_envelope_model() {
+    // §7.2 binds the envelope `model` into the AAD and §8.3 records it as the
+    // receipt model — even when the sealed original bytes name another model.
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = x25519_secret_key_from_bytes(&[0x72; 32]).unwrap();
+    let (body, headers) = v3_sealed_request(&h, "envelope-model", CHAT_REQUEST, &client_secret);
 
     let resp = h
         .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
         .await;
     assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        v3_unseal_response(&client_secret, "envelope-model", &resp.body),
+        E2EE_CHAT_RESPONSE
+    );
+
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(receipt_payload(&receipt)["model"], "envelope-model");
+}
+
+#[tokio::test]
+async fn e2ee_v3_streaming_seals_each_event_and_leaves_done_plaintext() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = x25519_secret_key_from_bytes(&[0x73; 32]).unwrap();
+    let streaming_request =
+        br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+    let (body, headers) = v3_sealed_request(&h, "aci-model", streaming_request, &client_secret);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "content-type"), "text/event-stream");
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
 
-    let encrypted_response = json_body(&resp);
-    let encrypted_audio = encrypted_response["choices"][0]["message"]["audio"]["data"]
-        .as_str()
-        .expect("message.audio.data must be an encrypted hex string");
-    assert_ne!(encrypted_audio, "QUJDMTIzYXVkaW8=");
-    let audio_aad = e2ee_response_aad(&h, nonce, "chat-aci-1", "choices.0.message.audio.data");
-    let decrypted = decrypt_with_secret_key(&client_secret, encrypted_audio, &audio_aad).unwrap();
-    assert_eq!(decrypted, b"QUJDMTIzYXVkaW8=");
+    // SSE framing stays plaintext; each event's data payload is one sealed
+    // unit; the [DONE] sentinel stays plaintext (§7.3).
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    let events: Vec<&str> = wire
+        .split("\n\n")
+        .filter(|event| !event.is_empty())
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2], "data: [DONE]");
+    let expected = [
+        br#"{"id":"chat-stream-1","delta":"hel"}"#.as_slice(),
+        br#"{"id":"chat-stream-1","delta":"lo"}"#.as_slice(),
+    ];
+    for (event, expected) in events[..2].iter().zip(expected) {
+        let payload = event.strip_prefix("data: ").unwrap();
+        assert_eq!(
+            v3_unseal_response(&client_secret, "aci-model", payload.as_bytes()),
+            expected
+        );
+    }
+
+    // The wire hash covers the sealed in-order stream including framing (§8.4).
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(streaming_request)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v3_embeddings_buffered_roundtrip() {
+    let embeddings_response = br#"{"object":"list","model":"aci-model","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}]}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(embeddings_response));
+    let client_secret = x25519_secret_key_from_bytes(&[0x74; 32]).unwrap();
+    let plaintext = br#"{"model":"aci-model","input":"hello"}"#;
+    let (body, headers) = v3_sealed_request(&h, "aci-model", plaintext, &client_secret);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/embeddings", &body, &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+    assert_eq!(h.upstream_calls.lock().unwrap()[0].body, plaintext);
+    assert_eq!(
+        v3_unseal_response(&client_secret, "aci-model", &resp.body),
+        embeddings_response
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v3_partial_headers_are_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_key = x25519_public_key_hex(&x25519_secret_key_from_bytes(&[0x75; 32]).unwrap());
+    let model_key = v3_model_public_key(&h);
+    let partial_sets: &[&[(&str, &str)]] = &[
+        &[("x-e2ee-version", "3")],
+        &[("x-e2ee-version", "3"), ("x-client-pub-key", &client_key)],
+        &[
+            ("x-client-pub-key", &client_key),
+            ("x-model-pub-key", &model_key),
+        ],
+    ];
+    for headers in partial_sets {
+        let resp = h
+            .requester
+            .post("/v1/chat/completions", CHAT_REQUEST, headers)
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST, "{headers:?}");
+        assert_eq!(error_type(&resp), "e2ee_header_missing", "{headers:?}");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v3_public_keys_must_parse_as_32_hex_bytes() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_key = x25519_public_key_hex(&x25519_secret_key_from_bytes(&[0x76; 32]).unwrap());
+    let model_key = v3_model_public_key(&h);
+    let prefixed_model_key = format!("0x{model_key}");
+    let bad_key_sets: &[&[(&str, &str)]] = &[
+        // Non-hex client key.
+        &[
+            ("x-e2ee-version", "3"),
+            ("x-client-pub-key", "not-hex-at-all"),
+            ("x-model-pub-key", &model_key),
+        ],
+        // Truncated (16-byte) client key.
+        &[
+            ("x-e2ee-version", "3"),
+            ("x-client-pub-key", "aabbccddeeff00112233445566778899"),
+            ("x-model-pub-key", &model_key),
+        ],
+        // Non-hex model key.
+        &[
+            ("x-e2ee-version", "3"),
+            ("x-client-pub-key", &client_key),
+            ("x-model-pub-key", "zz"),
+        ],
+        // §3: hex with no 0x prefix — the prefixed attested key is rejected.
+        &[
+            ("x-e2ee-version", "3"),
+            ("x-client-pub-key", &client_key),
+            ("x-model-pub-key", &prefixed_model_key),
+        ],
+    ];
+    for headers in bad_key_sets {
+        let resp = h
+            .requester
+            .post("/v1/chat/completions", CHAT_REQUEST, headers)
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST, "{headers:?}");
+        assert_eq!(error_type(&resp), "e2ee_invalid_public_key", "{headers:?}");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v3_unattested_model_key_is_rejected() {
+    // A well-formed X25519 key that is not in the attested keyset: the client
+    // must prove it encrypted to a key it could have verified (§7.4). The
+    // comparison is verbatim against the attested `public_key` string, so a
+    // re-cased variant of the attested key is a mismatch too.
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_key = x25519_public_key_hex(&x25519_secret_key_from_bytes(&[0x77; 32]).unwrap());
+    let uppercased_model_key = v3_model_public_key(&h).to_uppercase();
+    for model_key in [client_key.as_str(), uppercased_model_key.as_str()] {
+        let resp = h
+            .requester
+            .post(
+                "/v1/chat/completions",
+                CHAT_REQUEST,
+                &[
+                    ("x-e2ee-version", "3"),
+                    ("x-client-pub-key", &client_key),
+                    ("x-model-pub-key", model_key),
+                ],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&resp), "e2ee_model_key_mismatch");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v3_malformed_envelopes_are_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = x25519_secret_key_from_bytes(&[0x78; 32]).unwrap();
+    let (_, headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
+    let bad_bodies: &[&[u8]] = &[
+        // Not JSON.
+        b"not json",
+        // No model.
+        br#"{"sealed_b64":"AAAA"}"#,
+        // Non-string model.
+        br#"{"model":42,"sealed_b64":"AAAA"}"#,
+        // No sealed_b64.
+        br#"{"model":"aci-model"}"#,
+        // sealed_b64 is not base64.
+        br#"{"model":"aci-model","sealed_b64":"%%%"}"#,
+        // Decodes, but shorter than ephemeral key + nonce + tag.
+        br#"{"model":"aci-model","sealed_b64":"AAAAAAAAAAAAAA=="}"#,
+    ];
+    for body in bad_bodies {
+        let resp = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", body, &headers)
+            .await;
+        assert_eq!(
+            resp.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+        assert_eq!(
+            error_type(&resp),
+            "e2ee_decryption_failed",
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v3_aead_failures_are_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = x25519_secret_key_from_bytes(&[0x79; 32]).unwrap();
+
+    // Tampered ciphertext fails authentication.
+    let (body, headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
+    let mut envelope: Value = serde_json::from_slice(&body).unwrap();
+    let mut sealed = BASE64
+        .decode(envelope["sealed_b64"].as_str().unwrap())
+        .unwrap();
+    *sealed.last_mut().unwrap() ^= 0x01;
+    envelope["sealed_b64"] = Value::String(BASE64.encode(sealed));
+    let resp = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&envelope).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+
+    // A sealed body replayed under a different envelope model fails: the
+    // envelope model is bound into the AAD (§7.2).
+    let (body, headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
+    let mut envelope: Value = serde_json::from_slice(&body).unwrap();
+    envelope["model"] = Value::String("other-model".to_string());
+    let resp = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&envelope).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+
+    // The confidentiality attack E2EE stops: an intermediary replays the sealed
+    // request but swaps X-Client-Pub-Key (headers[1]) to reseal the response to
+    // itself. That key is bound into the request AAD (§7.2), so the unseal fails.
+    let (body, mut headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
+    headers[1].1 = x25519_public_key_hex(&x25519_secret_key_from_bytes(&[0x7b; 32]).unwrap());
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v3_headers_on_an_unsupported_endpoint_are_rejected() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let client_secret = x25519_secret_key_from_bytes(&[0x7a; 32]).unwrap();
+    let (body, headers) = v3_sealed_request(&h, "aci-model", CHAT_REQUEST, &client_secret);
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/responses", &body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_unsupported_endpoint");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1047,8 +1256,7 @@ async fn legacy_ecdsa_e2ee_v1_matches_vllm_proxy_no_aad_shape() {
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "1");
-    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ecdsa");
+    assert!(resp.headers.get("x-e2ee-algo").is_none());
 
     let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
     assert_eq!(
@@ -1065,16 +1273,14 @@ async fn legacy_ecdsa_e2ee_v1_matches_vllm_proxy_no_aad_shape() {
 }
 
 #[tokio::test]
-async fn legacy_signing_algo_with_nonce_is_rejected_as_removed_v2() {
-    // The AAD-bound legacy variant (LegacyV2) is removed: a legacy X-Signing-Algo
-    // request that carries a nonce/timestamp is rejected, rather than silently
-    // decrypted without AAD. Such clients must drop X-Signing-Algo and use the
-    // ACI path instead.
+async fn legacy_signing_algo_with_e2ee_version_is_rejected() {
+    // Only the no-AAD legacy v1 mode survives (§13): a legacy X-Signing-Algo
+    // request asking for a versioned scheme must drop X-Signing-Algo and use
+    // ACI v3 instead.
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x62; 32]).unwrap();
     let (body, mut headers) = legacy_ecdsa_request(&h, &client_secret);
-    headers.push(("x-e2ee-nonce", "any-nonce".to_string()));
-    headers.push(("x-e2ee-timestamp", "1700000000".to_string()));
+    headers.push(("x-e2ee-version", "2".to_string()));
 
     let resp = h
         .requester
@@ -1085,127 +1291,9 @@ async fn legacy_signing_algo_with_nonce_is_rejected_as_removed_v2() {
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn e2ee_v2_missing_headers_are_rejected_before_upstream() {
-    let h = harness_with_e2ee(RecordingUpstream::default());
-    let resp = h
-        .requester
-        .post(
-            "/v1/chat/completions",
-            CHAT_REQUEST,
-            &[("x-e2ee-version", "2")],
-        )
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_header_missing");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn e2ee_v2_invalid_version_is_rejected_before_upstream() {
-    let h = harness_with_e2ee(RecordingUpstream::default());
-    let client_secret = k256::SecretKey::from_slice(&[0x56; 32]).unwrap();
-    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-version"));
-    headers
-        .iter_mut()
-        .find(|(name, _)| *name == "x-e2ee-version")
-        .unwrap()
-        .1 = "3".to_string();
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", CHAT_REQUEST, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_invalid_version");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn e2ee_v2_invalid_timestamp_is_rejected_before_upstream() {
-    let h = harness_with_e2ee(RecordingUpstream::default());
-    let client_secret = k256::SecretKey::from_slice(&[0x57; 32]).unwrap();
-    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-timestamp"));
-    headers
-        .iter_mut()
-        .find(|(name, _)| *name == "x-e2ee-timestamp")
-        .unwrap()
-        .1 = "1".to_string();
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", CHAT_REQUEST, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_invalid_timestamp");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
-    let (body, headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-replay"));
-    let first = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &body, &headers)
-        .await;
-    assert_eq!(first.status, StatusCode::OK);
-
-    let second = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &body, &headers)
-        .await;
-    assert_eq!(second.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&second), "e2ee_replay_detected");
-}
-
-#[tokio::test]
-async fn e2ee_v2_invalid_payload_model_is_rejected_before_upstream() {
-    let h = harness_with_e2ee(RecordingUpstream::default());
-    let client_secret = k256::SecretKey::from_slice(&[0x59; 32]).unwrap();
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    // JCS AAD needs no escaping, so `model` is rejected only when it is absent
-    // or not a string (spec §7.3), never for its contents.
-    let invalid = br#"{"model":123,"messages":[]}"#;
-    let client_pub = public_key_from_secret(&client_secret);
-    let nonce = hex_nonce("payload-model");
-    let resp = h
-        .requester
-        .post(
-            "/v1/chat/completions",
-            invalid,
-            &[
-                ("x-client-pub-key", &client_pub),
-                ("x-model-pub-key", &model_key.public_key_hex),
-                ("x-e2ee-version", "2"),
-                ("x-e2ee-nonce", &nonce),
-                ("x-e2ee-timestamp", "1700000000"),
-            ],
-        )
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_invalid_payload_model");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn e2ee_v2_malformed_nonce_is_rejected_before_upstream() {
-    // §7.5: the nonce must be exactly 64 lowercase hex characters.
-    let h = harness_with_e2ee(RecordingUpstream::default());
-    let client_secret = k256::SecretKey::from_slice(&[0x60; 32]).unwrap();
-    let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("valid-nonce"));
-    headers
-        .iter_mut()
-        .find(|(name, _)| *name == "x-e2ee-nonce")
-        .unwrap()
-        .1 = "not-64-hex".to_string();
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", CHAT_REQUEST, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_invalid_nonce");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn streaming_chat_completion_hashes_complete_ordered_stream() {
@@ -1226,132 +1314,11 @@ async fn streaming_chat_completion_hashes_complete_ordered_stream() {
     );
     let receipt_id = header(&resp.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    // The wire hash covers the raw in-order stream including framing (§8.4).
     assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
+        payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(&resp.body)
-    );
-}
-
-#[tokio::test]
-async fn e2ee_v2_streaming_chat_encrypts_sse_events_and_hashes_cleartext_and_wire() {
-    let frame1 = format!(
-        "data: {}\n\n",
-        serde_json::json!({
-            "id": "chat-stream-1",
-            "object": "chat.completion.chunk",
-            "model": "private-upstream-model",
-            "choices": [{"index": 0, "delta": {"content": "hel"}}],
-        })
-    )
-    .into_bytes();
-    let frame2 = format!(
-        "data: {}\n\n",
-        serde_json::json!({
-            "id": "chat-stream-1",
-            "object": "chat.completion.chunk",
-            "model": "private-upstream-model",
-            "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}],
-        })
-    )
-    .into_bytes();
-    let frame3 = format!(
-        "data: {}\n\n",
-        serde_json::json!({
-            "id": "chat-stream-1",
-            "object": "chat.completion.chunk",
-            "model": "private-upstream-model",
-            "choices": [{"index": 0, "delta": {"content": ""}}],
-        })
-    )
-    .into_bytes();
-    let frame4 = b"data: [DONE]\n\n".to_vec();
-    let split = frame1.len() / 2;
-    let stream_chunks = vec![
-        Bytes::copy_from_slice(&frame1[..split]),
-        Bytes::copy_from_slice(&frame1[split..]),
-        Bytes::from(frame2),
-        Bytes::from(frame3),
-        Bytes::from(frame4),
-    ];
-    let cleartext_stream = stream_chunks
-        .iter()
-        .flat_map(|chunk| chunk.iter().copied())
-        .collect::<Vec<_>>();
-    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(stream_chunks));
-    let client_secret = k256::SecretKey::from_slice(&[0x5b; 32]).unwrap();
-    let nonce = hex_nonce("nonce-stream");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_stream_request(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-    assert_eq!(header(&resp.headers, "content-type"), "text/event-stream");
-    assert_ne!(resp.body, cleartext_stream);
-    assert!(std::str::from_utf8(&resp.body)
-        .unwrap()
-        .contains("data: [DONE]"));
-
-    let events = sse_json_events(&resp.body);
-    assert_eq!(events.len(), 3);
-    let encrypted_content = events[0]["choices"][0]["delta"]["content"]
-        .as_str()
-        .unwrap();
-    assert_ne!(encrypted_content, "hel");
-    let content_aad = e2ee_response_aad(&h, nonce, "chat-stream-1", "choices.0.delta.content");
-    let decrypted_content =
-        decrypt_with_secret_key(&client_secret, encrypted_content, &content_aad).unwrap();
-    assert_eq!(decrypted_content, b"hel");
-
-    let encrypted_reasoning = events[1]["choices"][0]["delta"]["reasoning_content"]
-        .as_str()
-        .unwrap();
-    let reasoning_aad = e2ee_response_aad(
-        &h,
-        nonce,
-        "chat-stream-1",
-        "choices.0.delta.reasoning_content",
-    );
-    let decrypted_reasoning =
-        decrypt_with_secret_key(&client_secret, encrypted_reasoning, &reasoning_aad).unwrap();
-    assert_eq!(decrypted_reasoning, b"think");
-    assert!(events[2]["choices"][0]["delta"].get("content").is_none());
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&upstream_body).unwrap()["messages"][0]["content"],
-        "hello"
-    );
-    let receipt_id = header(&resp.headers, "x-receipt-id");
-    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(receipt.chat_id.as_deref(), Some("chat-stream-1"));
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        sha256_hex(&cleartext_stream)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
-        sha256_hex(&resp.body)
-    );
-    assert_ne!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        receipt_event(&receipt, "response.returned")["wire_hash"]
-    );
-    assert_eq!(
-        receipt_event(&receipt, EVENT_TRANSPARENCY_RESPONSE_MODIFIED),
-        &serde_json::json!({})
-    );
-
-    let metrics = h.requester.get("/v1/metrics", &[]).await;
-    assert_eq!(metrics.status, StatusCode::OK);
-    let metrics_body = String::from_utf8(metrics.body).unwrap();
-    assert!(
-        metrics_body.contains("model_id=\"private-upstream-model\""),
-        "{metrics_body}"
     );
 }
 
@@ -1384,27 +1351,22 @@ async fn streaming_chat_completion_upstream_error_is_returned_without_sse_or_rec
     assert_eq!(response_data["error"]["type"], "invalid_request_error");
 }
 
+// ---------------------------------------------------------------------------
+// Keyset / TLS
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 async fn plaintext_https_keyset_publishes_configured_tls_spki() {
     let h = harness();
-    let report = h.service.attestation_report(None).await.unwrap();
-    let tls_keys = report.attestation.workload_keyset.tls_public_keys;
+    let tls_keys = &h.service.keyset().tls_public_keys;
     assert_eq!(tls_keys.len(), 1);
     assert_eq!(tls_keys[0].domain, None);
     assert_eq!(tls_keys[0].spki_sha256_hex, "configured-spki-sha256-hex");
 }
 
-#[tokio::test]
-#[ignore = "covered by tests/dstack_live.rs when a real dstack socket is available"]
-async fn replica_stable_identity_uses_kms_released_or_derived_keys() {
-    let h1 = harness();
-    let h2 = harness();
-    assert_eq!(h1.service.workload_id(), h2.service.workload_id());
-    assert_eq!(
-        h1.service.workload_keyset_digest(),
-        h2.service.workload_keyset_digest()
-    );
-}
+// ---------------------------------------------------------------------------
+// §13 legacy signature endpoint
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
@@ -1429,7 +1391,6 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
     assert!(body["signature"].as_str().unwrap().starts_with("0x"));
     assert!(body["signing_address"].as_str().unwrap().starts_with("0x"));
     assert_eq!(body["signing_algo"], "ecdsa");
-    assert_eq!(body["receipt"]["chat_id"], "chat-aci-1");
 
     let ed = h
         .requester
@@ -1449,114 +1410,13 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
     assert_eq!(error_type(&invalid), "invalid_signing_algo");
 }
 
-#[tokio::test]
-async fn completions_endpoint_supports_e2ee_as_optional_add_on() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
-        E2EE_COMPLETION_RESPONSE,
-    ));
-    let client_secret = k256::SecretKey::from_slice(&[0x5a; 32]).unwrap();
-    let nonce = hex_nonce("nonce-completion");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_completion_request(&h, &client_secret, nonce);
+// ---------------------------------------------------------------------------
+// /v1/completions and /v1/embeddings surfaces (plaintext)
+// ---------------------------------------------------------------------------
 
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&upstream_body).unwrap()["prompt"],
-        "hello"
-    );
-    assert_ne!(resp.body, E2EE_COMPLETION_RESPONSE);
-
-    let encrypted_response = json_body(&resp);
-    let encrypted_text = encrypted_response["choices"][0]["text"].as_str().unwrap();
-    let response_aad = e2ee_response_aad(&h, nonce, "cmpl-aci-1", "choices.0.text");
-    let decrypted_response =
-        decrypt_with_secret_key(&client_secret, encrypted_text, &response_aad).unwrap();
-    assert_eq!(decrypted_response, b"completion-answer");
-
-    let receipt_id = header(&resp.headers, "x-receipt-id");
-    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/completions");
-    assert_eq!(receipt.chat_id.as_deref(), Some("cmpl-aci-1"));
-    assert_eq!(
-        receipt_event(&receipt, "request.received")["body_hash"],
-        sha256_hex(&upstream_body)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        sha256_hex(E2EE_COMPLETION_RESPONSE)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
-        sha256_hex(&resp.body)
-    );
-}
-
-#[tokio::test]
-async fn completions_endpoint_streaming_supports_e2ee_as_optional_add_on() {
-    let frame = format!(
-        "data: {}\n\n",
-        serde_json::json!({
-            "id": "cmpl-stream-1",
-            "object": "text_completion",
-            "model": "private-upstream-model",
-            "choices": [{"index": 0, "text": "completion-stream"}],
-        })
-    )
-    .into_bytes();
-    let done = b"data: [DONE]\n\n".to_vec();
-    let stream_chunks = vec![Bytes::from(frame), Bytes::from(done)];
-    let cleartext_stream = stream_chunks
-        .iter()
-        .flat_map(|chunk| chunk.iter().copied())
-        .collect::<Vec<_>>();
-    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(stream_chunks));
-    let client_secret = k256::SecretKey::from_slice(&[0x5c; 32]).unwrap();
-    let nonce = hex_nonce("nonce-completion-stream");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_completion_stream_request(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/completions", &encrypted_body, &headers)
-        .await;
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "content-type"), "text/event-stream");
-    assert_ne!(resp.body, cleartext_stream);
-
-    let events = sse_json_events(&resp.body);
-    assert_eq!(events.len(), 1);
-    let encrypted_text = events[0]["choices"][0]["text"].as_str().unwrap();
-    let aad = e2ee_response_aad(&h, nonce, "cmpl-stream-1", "choices.0.text");
-    let decrypted_text = decrypt_with_secret_key(&client_secret, encrypted_text, &aad).unwrap();
-    assert_eq!(decrypted_text, b"completion-stream");
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&upstream_body).unwrap()["prompt"],
-        "hello"
-    );
-    let receipt_id = header(&resp.headers, "x-receipt-id").to_string();
-    let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/completions");
-    assert_eq!(receipt.chat_id.as_deref(), Some("cmpl-stream-1"));
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        sha256_hex(&cleartext_stream)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
-        sha256_hex(&resp.body)
-    );
-}
+const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
+const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
+    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
 
 #[tokio::test]
 async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
@@ -1577,14 +1437,15 @@ async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/completions");
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/completions");
     assert_eq!(receipt.chat_id.as_deref(), Some("chat-aci-1"));
     assert_eq!(
-        receipt_event(&receipt, "request.received")["body_hash"],
+        payload_event(&payload, "request.received")["body_hash"],
         sha256_hex(request)
     );
     assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
+        payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(CHAT_RESPONSE)
     );
 }
@@ -1603,110 +1464,17 @@ async fn completions_endpoint_streams_and_hashes_complete_response() {
         b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"id\":\"chat-stream-1\",\"delta\":\"lo\"}\n\ndata: [DONE]\n\n";
     assert_eq!(resp.body, expected_body);
 
-    {
-        let calls = h.upstream_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].path.as_deref(), Some("/v1/completions"));
-        assert_eq!(calls[0].body, request);
-    }
-
     let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/completions");
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/completions");
     assert_eq!(receipt.chat_id.as_deref(), Some("chat-stream-1"));
     assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
+        payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(expected_body)
     );
 
     let receipt_response = h.requester.get("/v1/signature/chat-stream-1", &[]).await;
     assert_eq!(receipt_response.status, StatusCode::OK);
-    assert_eq!(
-        json_body(&receipt_response)["receipt"]["receipt_id"],
-        receipt_id
-    );
-}
-
-// ---------------------------------------------------------------------------
-// /v1/embeddings surface
-// ---------------------------------------------------------------------------
-
-const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
-const E2EE_EMBEDDINGS_RESPONSE: &[u8] =
-    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25,1.0]}],"model":"aci-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
-const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
-    br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
-
-fn e2ee_embeddings_request_string(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let aad = aci_request_aad(&model_key.algo, model, "input", nonce, timestamp);
-    let encrypted_input =
-        encrypt_for_public_key(&model_key.public_key_hex, b"hello", &aad).unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "input": encrypted_input,
-    });
-    let headers = vec![
-        ("x-client-pub-key", public_key_from_secret(client_secret)),
-        ("x-model-pub-key", model_key.public_key_hex.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-fn e2ee_embeddings_request_array(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-    nonce: &str,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
-    let model_key = &h.service.keyset().e2ee_public_keys[0];
-    let aad_0 = aci_request_aad(&model_key.algo, model, "input.0", nonce, timestamp);
-    let aad_1 = aci_request_aad(&model_key.algo, model, "input.1", nonce, timestamp);
-    let enc_0 = encrypt_for_public_key(&model_key.public_key_hex, b"first", &aad_0).unwrap();
-    let enc_1 = encrypt_for_public_key(&model_key.public_key_hex, b"second", &aad_1).unwrap();
-    let body = serde_json::json!({
-        "model": model,
-        "input": [enc_0, enc_1],
-    });
-    let headers = vec![
-        ("x-client-pub-key", public_key_from_secret(client_secret)),
-        ("x-model-pub-key", model_key.public_key_hex.clone()),
-        ("x-e2ee-version", E2EE_VERSION_V2.to_string()),
-        ("x-e2ee-nonce", nonce.to_string()),
-        ("x-e2ee-timestamp", timestamp.to_string()),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
-}
-
-fn legacy_ecdsa_embeddings_request(
-    h: &Harness,
-    client_secret: &k256::SecretKey,
-) -> (Vec<u8>, Vec<(&'static str, String)>) {
-    let model_key = legacy_model_public_key(h, E2EE_ALGO_LEGACY_ECDSA);
-    let encrypted_input =
-        encrypt_legacy_for_public_key(E2EE_ALGO_LEGACY_ECDSA, &model_key, b"hello", None).unwrap();
-    let body = serde_json::json!({
-        "model": "aci-model",
-        "input": encrypted_input,
-    });
-    let headers = vec![
-        ("x-signing-algo", E2EE_ALGO_LEGACY_ECDSA.to_string()),
-        (
-            "x-client-pub-key",
-            legacy_ecdsa_public_key_from_secret(client_secret),
-        ),
-        ("x-model-pub-key", model_key),
-    ];
-    (serde_json::to_vec(&body).unwrap(), headers)
 }
 
 #[tokio::test]
@@ -1732,20 +1500,21 @@ async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/embeddings");
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/embeddings");
     // OpenAI embeddings responses carry no `id`; the gateway leaves
     // the receipt chat_id empty for those.
     assert!(receipt.chat_id.is_none());
     assert_eq!(
-        receipt_event(&receipt, "request.received")["body_hash"],
+        payload_event(&payload, "request.received")["body_hash"],
         sha256_hex(EMBEDDINGS_REQUEST)
     );
     assert_eq!(
-        receipt_event(&receipt, "request.forwarded")["body_hash"],
+        payload_event(&payload, "request.forwarded")["body_hash"],
         sha256_hex(EMBEDDINGS_REQUEST)
     );
     assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
+        payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(EMBEDDINGS_PLAIN_RESPONSE)
     );
 }
@@ -1772,16 +1541,22 @@ async fn embeddings_receipt_is_retrievable_by_receipt_id_over_http() {
         .await;
     assert_eq!(fetched.status, StatusCode::OK);
     let body = json_body(&fetched);
+    let payload: Value = serde_json::from_slice(
+        &BASE64
+            .decode(body["receipt"]["payload_b64"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        body["receipt"]["receipt_id"].as_str().unwrap(),
+        payload["receipt_id"].as_str().unwrap(),
         receipt_id,
         "receipt lookup by receipt_id must return the same receipt"
     );
     assert!(
-        body["receipt"]["chat_id"].is_null(),
+        payload["chat_id"].is_null(),
         "embeddings receipts have no chat_id"
     );
-    assert_eq!(body["receipt"]["endpoint"], "/v1/embeddings");
+    assert_eq!(payload["endpoint"], "/v1/embeddings");
 
     let unknown = h.requester.get("/v1/signature/rcpt-deadbeef", &[]).await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
@@ -1811,109 +1586,35 @@ async fn embeddings_endpoint_forces_buffered_even_when_client_sets_stream_true()
 }
 
 #[tokio::test]
-async fn embeddings_endpoint_supports_aci_v2_e2ee_with_string_input() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
-        E2EE_EMBEDDINGS_RESPONSE,
-    ));
-    let client_secret = k256::SecretKey::from_slice(&[0x71; 32]).unwrap();
-    let nonce = hex_nonce("nonce-embed-string");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_embeddings_request_string(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
-        .await;
-    assert_eq!(
-        resp.status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&resp.body)
-    );
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2");
-
-    // The forwarded body must be cleartext "hello".
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();
-    assert_eq!(upstream_json["input"], "hello");
-    assert_eq!(upstream_json["model"], "aci-model");
-
-    // The response embedding must be encrypted under the request model AAD.
-    assert_ne!(resp.body, E2EE_EMBEDDINGS_RESPONSE);
-    let encrypted_response = json_body(&resp);
-    let encrypted_embedding = encrypted_response["data"][0]["embedding"]
-        .as_str()
-        .expect("data[0].embedding must be encrypted hex string after E2EE");
-    let response_aad = e2ee_response_aad(&h, nonce, "", "data.0.embedding");
-    let decrypted =
-        decrypt_with_secret_key(&client_secret, encrypted_embedding, &response_aad).unwrap();
-    let decoded: Value = serde_json::from_slice(&decrypted).unwrap();
-    assert_eq!(decoded, serde_json::json!([0.5, -0.25, 1.0]));
-
-    // Receipt records cleartext + wire hashes of the response, like chat.
-    let receipt_id = header(&resp.headers, "x-receipt-id");
-    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    assert_eq!(receipt.endpoint, "/v1/embeddings");
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["cleartext_hash"],
-        sha256_hex(E2EE_EMBEDDINGS_RESPONSE)
-    );
-    assert_eq!(
-        receipt_event(&receipt, "response.returned")["wire_hash"],
-        sha256_hex(&resp.body)
-    );
-}
-
-#[tokio::test]
-async fn embeddings_endpoint_supports_aci_v2_e2ee_with_array_input() {
-    let response_with_two = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[1.0]},{"object":"embedding","index":1,"embedding":[2.0]}],"model":"aci-model","usage":{"prompt_tokens":4,"total_tokens":4}}"#;
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response_with_two));
-    let client_secret = k256::SecretKey::from_slice(&[0x72; 32]).unwrap();
-    let nonce = hex_nonce("nonce-embed-array");
-    let nonce = nonce.as_str();
-    let (encrypted_body, headers) = e2ee_embeddings_request_array(&h, &client_secret, nonce);
-
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
-        .await;
-    assert_eq!(
-        resp.status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&resp.body)
-    );
-    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-
-    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
-    let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();
-    assert_eq!(upstream_json["input"][0], "first");
-    assert_eq!(upstream_json["input"][1], "second");
-
-    let encrypted_response = json_body(&resp);
-    for (idx, expected) in [(0u64, [1.0]), (1u64, [2.0])] {
-        let ciphertext = encrypted_response["data"][idx as usize]["embedding"]
-            .as_str()
-            .unwrap();
-        let response_aad = e2ee_response_aad(&h, nonce, "", &format!("data.{idx}.embedding"));
-        let plaintext = decrypt_with_secret_key(&client_secret, ciphertext, &response_aad).unwrap();
-        let decoded: Value = serde_json::from_slice(&plaintext).unwrap();
-        assert_eq!(decoded, serde_json::json!(expected));
-    }
-}
-
-#[tokio::test]
 async fn embeddings_endpoint_supports_legacy_v1_e2ee() {
+    let e2ee_embeddings_response: &[u8] = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25,1.0]}],"model":"aci-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(
-        E2EE_EMBEDDINGS_RESPONSE,
+        e2ee_embeddings_response,
     ));
     let client_secret = k256::SecretKey::from_slice(&[0x73; 32]).unwrap();
-    let (encrypted_body, headers) = legacy_ecdsa_embeddings_request(&h, &client_secret);
+    let model_key = legacy_model_public_key(&h, E2EE_ALGO_LEGACY_ECDSA);
+    let encrypted_input =
+        encrypt_legacy_for_public_key(E2EE_ALGO_LEGACY_ECDSA, &model_key, b"hello", None).unwrap();
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "input": encrypted_input,
+    });
+    let headers = vec![
+        ("x-signing-algo", E2EE_ALGO_LEGACY_ECDSA.to_string()),
+        (
+            "x-client-pub-key",
+            legacy_ecdsa_public_key_from_secret(&client_secret),
+        ),
+        ("x-model-pub-key", model_key),
+    ];
 
     let resp = h
         .requester
-        .post_owned_headers("/v1/embeddings", &encrypted_body, &headers)
+        .post_owned_headers(
+            "/v1/embeddings",
+            &serde_json::to_vec(&body).unwrap(),
+            &headers,
+        )
         .await;
     assert_eq!(
         resp.status,
@@ -1922,8 +1623,6 @@ async fn embeddings_endpoint_supports_legacy_v1_e2ee() {
         String::from_utf8_lossy(&resp.body)
     );
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    assert_eq!(header(&resp.headers, "x-e2ee-version"), "1");
-    assert_eq!(header(&resp.headers, "x-e2ee-algo"), "ecdsa");
 
     let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
     let upstream_json: Value = serde_json::from_slice(&upstream_body).unwrap();

@@ -16,6 +16,13 @@ also the workload that
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher)
 can fetch, build, and run inside a dstack v2 application VM.
 
+Start here:
+
+- [ACI quickstart](spec/quickstart.md) — verify a live deployment yourself
+  with the `aci` CLI, then use it as a local OpenAI-compatible endpoint.
+- [ACI spec](spec/aci.md) — §1 is the trust model and what a client must
+  check; the §4 diagram is the whole identity chain on one screen.
+
 ## Audience
 
 - Security auditors should start with the claim, limits, request flow, and
@@ -42,8 +49,9 @@ these facts:
    the prompt.
 5. **Per-request evidence**: every provider-backed inference response carries
    `x-receipt-id`. The signed receipt records the user-visible request hash, the
-   selected provider route, upstream verification, provider-facing request hash,
-   response hash, and any request or response modification events.
+   selected provider route, upstream verification, the provider-facing request
+   hash (a service-side rewrite is that hash differing from the received hash),
+   and the response hash.
 
 ### Limits
 
@@ -82,8 +90,8 @@ flowchart LR
   backend <-->|"attested session"| upstream
 ```
 
-1. The user verifies `GET /v1/attestation/report` and accepts the gateway
-   workload identity and keyset.
+1. The user verifies `GET /v1/aci/attestation?nonce=<fresh nonce>` and accepts
+   the gateway workload keyset.
 2. The user sends an OpenAI-compatible request over ordinary TLS or ACI E2EE.
 3. The frontend records the user-facing request and downstream E2EE state.
 4. Optional middleware may handle auth, billing, routing, cache-aware logic, or
@@ -100,12 +108,12 @@ Use this checklist before treating a deployment as private inference.
 
 | Check | Evidence |
 | --- | --- |
-| Gateway identity is real | `GET /v1/attestation/report?nonce=<fresh nonce>` proves the TEE quote, workload id, and keyset. When source provenance is present, it must match the reviewed deployment. |
-| Keys are bound to the workload | The keyset in the report lists identity, receipt-signing, E2EE, and optional TLS SPKI keys endorsed by the workload identity. |
+| Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote and the attested keyset digest bound into it. When source provenance is present, it must match the reviewed deployment. |
+| Keys are bound to the workload | The keyset in the report lists receipt-signing, E2EE, and optional TLS SPKI keys. The quote binds the digest of the exact keyset bytes; there is no separate identity key or endorsement. |
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
-| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/aci/sessions/{session_id}`. The id is derived from the target, verifier, evidence digest, provider claims, and binding material. |
+| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/aci/sessions/{hex}`. The id is the SHA-256 of the exact served session document bytes, so the fetched record is provably the one the receipt cited. |
 | Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
 | Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
 | Provider is admissible | Review the provider's `docs/providers/<provider>/review.md` against `docs/providers/audit-criteria.md`. |
@@ -119,23 +127,26 @@ verification facts.
 You can talk to the gateway with normal OpenAI-compatible clients. The
 additional ACI artifacts are:
 
-- `GET /v1/attestation/report`: proves which gateway workload you are talking
-  to.
+- `GET /v1/aci/attestation?nonce=<n>`: proves which gateway workload you are
+  talking to.
 - `x-receipt-id`: returned on provider-backed inference responses.
 - `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
-- `GET /v1/aci/sessions/{session_id}`: fetches an attested-session audit
+- `GET /v1/aci/sessions/{hex}`: fetches an attested-session audit
   record referenced by a receipt.
-- Optional ACI E2EE headers: encrypt selected request/response fields when the
-  client wants application-level encryption in addition to TLS.
+- Optional ACI E2EE headers: seal the whole request and response bodies to an
+  attested key when the client wants application-level encryption in addition
+  to TLS.
 
 Useful terms:
 
 - **TEE**: trusted execution environment. In this project, the gateway relies on
   dstack/TDX evidence to prove where the workload is running.
-- **E2EE**: end-to-end field encryption between a client and the verified
-  gateway workload, used when TLS alone is not enough for the client.
-- **Workload identity**: the gateway identity proven by attestation and used to
-  endorse receipt-signing and E2EE keys.
+- **E2EE**: end-to-end encryption of whole request and response bodies between
+  a client and the verified gateway workload, used when TLS alone is not
+  enough for the client.
+- **Workload keyset**: the attested document listing the gateway's
+  receipt-signing, E2EE, and TLS keys. The TEE quote binds its digest, making
+  the keyset the unit of workload identity.
 - **dstack KMS**: the dstack key-release service used by this implementation to
   obtain stable workload keys inside an approved TEE workload.
 - **TDX quote / DCAP**: Intel TDX attestation evidence and the verification
@@ -174,8 +185,8 @@ container.
 
 | Area | Status |
 | --- | --- |
-| Workload identity, keyset digest, attestation report | Implemented |
-| Signed receipts and transparency event log | Implemented |
+| Workload keyset, quote-bound keyset digest, attestation report | Implemented |
+| Signed receipts | Implemented |
 | Chat/completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
 | Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
 | Runtime upstream config file and admin API | Implemented |
@@ -186,8 +197,8 @@ container.
 | Receipt store | In-memory; receipt TTL is configurable. The gateway never stores request bodies (receipts hold hashes, not content). |
 | Public transparency log | Not implemented |
 
-The binary has no ephemeral-key or stub-quote startup mode. It loads identity,
-receipt-signing, and E2EE keys from dstack KMS through the Rust `dstack-sdk`,
+The binary has no ephemeral-key or stub-quote startup mode. It loads
+receipt-signing and E2EE keys from dstack KMS through the Rust `dstack-sdk`,
 and it uses the same SDK for TDX quotes.
 
 ## Quick Start For New Users
@@ -235,7 +246,7 @@ In another terminal:
 
 ```bash
 curl -sS http://127.0.0.1:8086/
-curl -sS 'http://127.0.0.1:8086/v1/attestation/report?nonce=test'
+curl -sS 'http://127.0.0.1:8086/v1/aci/attestation?nonce=test'
 ```
 
 To exercise actual inference behavior without provider API keys, run the local
@@ -253,9 +264,9 @@ verification events, and metrics.
 ## Verify A Response
 
 A relying party verifies the gateway identity first, then verifies that a
-receipt was signed by a key endorsed by that identity.
+receipt was signed by a key listed in the attested keyset.
 
-1. Fetch `GET /v1/attestation/report?nonce=<fresh nonce>`.
+1. Fetch `GET /v1/aci/attestation?nonce=<fresh nonce>`.
 2. Send the inference request and save the response body plus the
    `x-receipt-id` response header.
 3. Fetch `GET /v1/aci/receipts/{id}` with that receipt id.
@@ -272,14 +283,18 @@ uv run python scripts/live_e2e/user_verify.py \
 ```
 
 The script's `--chat-id` argument accepts either a chat id or a receipt id. To
-verify already captured artifacts, run the Rust verifier directly:
+verify already captured artifacts, run the `aci` CLI offline:
 
 ```bash
-cargo run --quiet --example verify_aci_artifacts -- \
+cargo run --bin aci -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE"
 ```
+
+The full walkthrough against a live deployment — one-command verification, a
+local verifying proxy, and end-to-end receipt checking — is
+[spec/quickstart.md](spec/quickstart.md).
 
 ## Configure Upstreams
 
@@ -325,7 +340,7 @@ Supported `provider` values:
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
 
 ACI service verification policy is set on the upstream entry with
-`accepted_workload_ids`, `accepted_image_digests`,
+`accepted_subjects`, `accepted_image_digests`,
 `accepted_dstack_kms_root_public_keys`, and `pccs_url`.
 
 Tinfoil, NEAR AI, Chutes, and PhalaDirect use the vendored provider verifier
@@ -406,14 +421,14 @@ config; see the [configuration reference](docs/configuration-reference.md#middle
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /` | Basic ACI version, workload id, and keyset digest. |
+| `GET /` | Basic ACI version and keyset digest. |
 | `GET /v1/models` | OpenAI-compatible model list from backend or middleware. |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
 | `POST /v1/completions` | OpenAI-compatible legacy completions. |
 | `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
-| `GET /v1/aci/attestation?nonce=<n>` | Gateway workload identity and keyset evidence. |
+| `GET /v1/aci/attestation?nonce=<n>` | Gateway attestation report: quote, keyset, provenance. |
 | `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
-| `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
+| `GET /v1/aci/sessions/{hex}` | Attested-session record referenced by a receipt. |
 | `GET /v1/aci/sessions?upstream_name=&model=` | List a provider's imported attested sessions. |
 | `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. |
 | `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
@@ -480,14 +495,14 @@ The component in front of the gateway must forward the original HTTP `Host`.
 Clients should request the attestation report through the same public hostname
 they will use for gateway traffic. For example, a frontend pinned to
 `https://chat.example.com` should fetch
-`https://chat.example.com/v1/attestation/report`; the gateway will bind
-`chat.example.com` to the SPKI derived from `/run/certs/chat.pem`.
+`https://chat.example.com/v1/aci/attestation`; the attested keyset scopes the
+SPKI derived from `/run/certs/chat.pem` to `chat.example.com`.
 
-When domain bindings are configured,
-`GET /v1/attestation/report` uses the request `Host` to add the matching
-`attestation.evidence.downstream_tls_binding` entry while keeping all configured
-TLS keys in the attested keyset. Requests whose `Host` does not match a
-configured domain binding fail closed instead of returning an unbound report.
+When domain bindings are configured, the attestation report uses the request
+`Host` to add the matching `attestation.evidence.downstream_tls_binding` entry
+while keeping all configured TLS keys in the attested keyset. Requests whose
+`Host` does not match a configured domain binding fail closed instead of
+returning an unbound report.
 
 `dstack_endpoint` accepts HTTP(S) endpoints and Unix socket endpoints such as
 `unix:/var/run/dstack.sock`.
@@ -537,10 +552,12 @@ events, and metrics model ids.
 ```text
 src/main.rs                    binary entrypoint and runtime config
 src/dstack.rs                  dstack SDK KMS key provider and quote provider
-src/aci/                       ACI wire types, canonical JSON, keys, receipts, upstreams
+src/aci/                       ACI wire types, keys, receipts, upstreams
 src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
+src/bin/aci/                   `aci` verifier CLI: verify, audit, chat, serve
+clients/                       verifier-ts verifier library (browser + node)
 docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples
 examples/                      cargo example binaries + a reference control plane (control-plane/)
@@ -550,6 +567,8 @@ tests/                         unit and integration coverage
 
 ## More Docs
 
+- [ACI spec, quickstart, and test vectors](spec/README.md)
+- [Client verifiers](clients/README.md)
 - [Deployment guide](deploy/README.md)
 - [Configuration reference](docs/configuration-reference.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)

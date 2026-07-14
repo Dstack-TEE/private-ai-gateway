@@ -7,7 +7,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::aggregator::service::{E2eeError, ServiceError, UpstreamVerificationError};
+use crate::aggregator::service::{E2eeError, ServiceError};
 use crate::aggregator::upstream_config::UpstreamConfigError;
 
 pub(super) fn unsupported_e2ee_response() -> Response {
@@ -54,26 +54,6 @@ pub(super) fn e2ee_error_response(err: E2eeError) -> Response {
             "e2ee_model_key_mismatch",
             err.to_string(),
         ),
-        E2eeError::InvalidNonce => error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_invalid_nonce",
-            err.to_string(),
-        ),
-        E2eeError::ReplayDetected => error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_replay_detected",
-            err.to_string(),
-        ),
-        E2eeError::InvalidTimestamp => error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_invalid_timestamp",
-            err.to_string(),
-        ),
-        E2eeError::InvalidPayloadModel => error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_invalid_payload_model",
-            err.to_string(),
-        ),
         E2eeError::DecryptionFailed => error_response(
             StatusCode::BAD_REQUEST,
             "e2ee_decryption_failed",
@@ -112,27 +92,22 @@ pub(super) fn upstream_config_error_response(err: UpstreamConfigError) -> Respon
     }
 }
 
-pub(super) fn upstream_verification_error_response(err: UpstreamVerificationError) -> Response {
-    let message = err.to_string();
-    error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "upstream_verification_failed",
-        message,
-    )
+/// The exact §11 `upstream_verification_failed` body bytes. Built once so the
+/// refusal receipt's `response.returned` hash covers the bytes actually served.
+pub(super) fn upstream_verification_error_body(reason: &str) -> Vec<u8> {
+    let body = json!({
+        "error": {
+            "message": format!("upstream verification failed: {reason}"),
+            "type": "upstream_verification_failed",
+            "code": Value::Null,
+            "param": Value::Null,
+        }
+    });
+    serde_json::to_vec(&body).unwrap_or_default()
 }
 
 pub(super) fn unknown_downstream_host_response(err: ServiceError) -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", err.to_string())
-}
-
-/// The current keyset has been revoked (§4.7); the service refuses to serve
-/// reports or inference under it until it rotates to a fresh epoch on restart.
-pub(super) fn keyset_revoked_response() -> Response {
-    error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "keyset_revoked",
-        "the current workload keyset has been revoked; the service is not serving it",
-    )
 }
 
 pub(super) fn error_response(

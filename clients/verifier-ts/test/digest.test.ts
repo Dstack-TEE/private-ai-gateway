@@ -1,84 +1,73 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeWorkloadId,
-  computeKeysetDigest,
   attestationStatement,
   computeReportData,
-  canonicalize,
-  receiptSigningBytes,
+  computeKeysetDigest,
   computeSessionId,
-  sessionMaterial,
+  checkSessionApiVersion,
+  checkSessionEvidence,
+  sha256Hex,
   sha256Prefixed,
+  AciFormatError,
 } from '../src/index.js';
 import * as fx from './fixtures.js';
 
-const enc = (s: string) => new TextEncoder().encode(s);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
-test('§1 workload_id = sha256(JCS(public_key))', async () => {
-  assert.equal(await computeWorkloadId(fx.IDENTITY_PUBLIC_KEY_OBJ), fx.WORKLOAD_ID);
-});
-
-test('§1 workload_id JCS byte string matches the vector', () => {
+test('§4.2 attestation statement: exact bytes, fixed member order, no whitespace', () => {
+  const statement = attestationStatement(fx.KEYSET_DIGEST, 'test-nonce');
   assert.equal(
-    canonicalize({ algo: 'ed25519', public_key: fx.IDENTITY_PUBLIC_KEY }),
-    `{"algo":"ed25519","public_key":"${fx.IDENTITY_PUBLIC_KEY}"}`,
+    dec.decode(statement),
+    `{"keyset_digest":"${fx.KEYSET_DIGEST}","nonce":"test-nonce","purpose":"aci.report_data.v1"}`,
   );
 });
 
-test('§2 workload_keyset_digest = sha256(JCS(keyset))', async () => {
-  assert.equal(await computeKeysetDigest(fx.KEYSET), fx.KEYSET_DIGEST);
+test('§4.2 omitted nonce is the JSON literal null, without quotes', () => {
+  const expected = `{"keyset_digest":"${fx.KEYSET_DIGEST}","nonce":null,"purpose":"aci.report_data.v1"}`;
+  assert.equal(dec.decode(attestationStatement(fx.KEYSET_DIGEST, null)), expected);
+  assert.equal(dec.decode(attestationStatement(fx.KEYSET_DIGEST, undefined)), expected);
 });
 
-test('§3 attestation statement JCS matches the vector', () => {
-  assert.equal(
-    canonicalize(attestationStatement(fx.WORKLOAD_ID, fx.KEYSET_DIGEST, fx.ATTESTATION_NONCE)),
-    `{"nonce":"test-nonce","purpose":"aci.report_data.v1","workload_id":"${fx.WORKLOAD_ID}","workload_keyset_digest":"${fx.KEYSET_DIGEST}"}`,
-  );
+test('§4.2 the template rejects inputs that would need escaping', () => {
+  assert.throws(() => attestationStatement(fx.KEYSET_DIGEST, 'bad nonce'), AciFormatError);
+  assert.throws(() => attestationStatement(fx.KEYSET_DIGEST, '"quoted"'), AciFormatError);
+  assert.throws(() => attestationStatement(fx.KEYSET_DIGEST, ''), AciFormatError);
+  assert.throws(() => attestationStatement(fx.KEYSET_DIGEST, 'a'.repeat(129)), AciFormatError);
+  assert.throws(() => attestationStatement('not-a-digest', 'ok'), AciFormatError);
+  assert.throws(() => attestationStatement('sha256:' + 'A'.repeat(64), 'ok'), AciFormatError);
 });
 
-test('§3 report_data (nonce present)', async () => {
-  assert.equal(
-    await computeReportData(fx.WORKLOAD_ID, fx.KEYSET_DIGEST, fx.ATTESTATION_NONCE),
-    fx.REPORT_DATA_WITH_NONCE,
-  );
+test('§4.2 report_data is the bare-hex SHA-256 of the statement bytes', async () => {
+  const expected = await sha256Hex(attestationStatement(fx.KEYSET_DIGEST, fx.NONCE));
+  assert.equal(await computeReportData(fx.KEYSET_DIGEST, fx.NONCE), expected);
+  assert.ok(!expected.startsWith('sha256:'));
+  assert.equal(expected.length, 64);
 });
 
-test('§3 report_data (nonce omitted → null, not the string "null")', async () => {
-  assert.equal(
-    await computeReportData(fx.WORKLOAD_ID, fx.KEYSET_DIGEST, undefined),
-    fx.REPORT_DATA_NONCE_OMITTED,
-  );
-  assert.equal(
-    await computeReportData(fx.WORKLOAD_ID, fx.KEYSET_DIGEST, null),
-    fx.REPORT_DATA_NONCE_OMITTED,
-  );
+test('§4.1 keyset digest and §9 session id hash the exact served bytes', async () => {
+  assert.equal(await computeKeysetDigest(fx.KEYSET_BYTES), await sha256Prefixed(fx.KEYSET_BYTES));
+  assert.equal(await computeSessionId(fx.SESSION_BYTES), await sha256Prefixed(fx.SESSION_BYTES));
+  // One changed byte is a different artifact.
+  const tampered = enc.encode(dec.decode(fx.SESSION_BYTES) + ' ');
+  assert.notEqual(await computeSessionId(tampered), fx.SESSION_ID);
 });
 
-test('§5 evidence.digest = sha256(evidence bytes)', async () => {
-  assert.equal(await sha256Prefixed(enc(fx.EVIDENCE_BYTES)), fx.EVIDENCE_DIGEST);
+test('§10.3(4) session evidence data URI decodes and hashes to its digest', async () => {
+  assert.equal(await checkSessionEvidence(fx.SESSION.evidence), true);
+
+  const wrongDigest = { ...fx.SESSION.evidence, digest: 'sha256:' + '00'.repeat(32) };
+  assert.equal(await checkSessionEvidence(wrongDigest), false);
+
+  const notDataUri = { ...fx.SESSION.evidence, data: 'https://example.com/evidence' };
+  assert.equal(await checkSessionEvidence(notDataUri), false);
+
+  const noData = { digest: fx.SESSION.evidence.digest };
+  assert.equal(await checkSessionEvidence(noData), false);
 });
 
-test('§5 session material JCS matches the vector (identity restored to null)', () => {
-  assert.equal(
-    canonicalize(sessionMaterial(fx.SESSION_RECORD)),
-    `{"channel_binding":[{"origin":"https://upstream.example.com","spki_sha256":"${'d1'.repeat(32)}","type":"tls_spki_sha256"}],"claims":{"gpu_attested":{"status":"unknown"},"model_weights_provenance":{"status":"unknown"},"os_known_good":{"status":"unknown"},"serving_software_known_good":{"status":"unknown"},"tcb_up_to_date":{"status":"unknown"},"tee_attested":{"reason":"example quote verified","source":"hardware_proven","status":"asserted"}},"endpoint":"https://upstream.example.com","evidence_digest":"${fx.EVIDENCE_DIGEST}","identity":null,"upstream_name":"demo-upstream","verifier_id":"example/1"}`,
-  );
-});
-
-test('§5 session_id = as_ + sha256(JCS(material))', async () => {
-  assert.equal(await computeSessionId(fx.SESSION_RECORD), fx.SESSION_ID);
-});
-
-test('§6 request/response body hashes', async () => {
-  assert.equal(await sha256Prefixed(enc(fx.REQUEST_BODY)), fx.REQUEST_BODY_HASH);
-  assert.equal(await sha256Prefixed(enc(fx.RESPONSE_BODY)), fx.RESPONSE_BODY_HASH);
-});
-
-test('§6 receipt canonical signing bytes match the vector and hash', async () => {
-  const canonical = new TextDecoder().decode(receiptSigningBytes(fx.RECEIPT));
-  // signature.value is dropped; algo and key_id stay.
-  assert.equal(canonical.includes('"signature":{"algo":"ed25519","key_id":"receipt-1"}'), true);
-  assert.equal(canonical.includes(fx.RECEIPT_SIGNATURE), false);
-  assert.equal(await sha256Prefixed(receiptSigningBytes(fx.RECEIPT)), `sha256:${fx.RECEIPT_CANONICAL_SHA256}`);
+test('Appendix A: session documents with a foreign api_version are rejected', () => {
+  assert.equal(checkSessionApiVersion(fx.SESSION), true);
+  assert.equal(checkSessionApiVersion({ ...fx.SESSION, api_version: 'aci/2' }), false);
 });

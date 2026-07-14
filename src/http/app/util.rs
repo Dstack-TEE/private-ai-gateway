@@ -60,8 +60,6 @@ pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
         "x-client-pub-key",
         "x-model-pub-key",
         "x-e2ee-version",
-        "x-e2ee-nonce",
-        "x-e2ee-timestamp",
     ]
     .into_iter()
     .any(|name| headers.contains_key(name))

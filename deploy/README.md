@@ -176,7 +176,7 @@ hostnames in the static gateway config:
 }
 ```
 
-When a client requests `/v1/attestation/report` through `chat.example.com`, the
+When a client requests `/v1/aci/attestation` through `chat.example.com`, the
 gateway selects the `chat.example.com` certificate SPKI for
 `attestation.evidence.downstream_tls_binding`. A request with an unknown `Host`
 returns `404 not_found` instead of an attestation report.
@@ -222,7 +222,7 @@ Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
 `near-ai`, `chutes`, and `phala-direct`.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
-`/v1/attestation/report`. The router fetches the report through normal TLS,
+`/v1/aci/attestation`. The router fetches the report through normal TLS,
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.
 
@@ -255,7 +255,7 @@ A verifier checks:
 | Gateway config | `gateway-config` matches the reviewed startup policy, including TLS certificate bindings, state directory, dstack endpoint, admin token, and read-only input paths. |
 | Runtime env | Service `environment:` points at the reviewed gateway config and cache location. |
 | Upstream seed | `gateway-upstreams` is the reviewed initial provider policy. |
-| Gateway report | `/v1/attestation/report` binds the dstack KMS identity, ACI keyset, TLS SPKI if configured, and the git-launcher source provenance when present. |
+| Gateway report | `/v1/aci/attestation` binds the ACI keyset (with dstack KMS custody evidence), the TLS SPKI if configured, and the git-launcher source provenance when present. |
 
 The launcher image digest alone does not identify the workload; the compose
 config is part of the trust surface.

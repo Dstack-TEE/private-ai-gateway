@@ -1,31 +1,25 @@
-//! Receipt construction, event ordering, and signing-bytes tests
-//! (ACI §9).
+//! Receipt construction, event ordering, and signed-bytes tests (ACI §8)
+//! against the shared test key provider.
 
 mod common;
 
-use private_ai_gateway::aci::canonical;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
-use private_ai_gateway::aci::receipt::{
-    canonical_bytes_for_signing, ChannelBinding, ReceiptBuilder, ReceiptError,
-    TransparencyEventKind, UpstreamVerifiedEvent, EVENT_TRANSPARENCY_REQUEST_MODIFIED,
-};
+use private_ai_gateway::aci::receipt::{ChannelBinding, ReceiptBuilder, ReceiptError};
 
-use common::{verified_event, StaticKeyProvider};
+use common::StaticKeyProvider;
 
 fn keys() -> StaticKeyProvider {
     StaticKeyProvider::default()
 }
 
-fn builder(_keys: &StaticKeyProvider) -> ReceiptBuilder {
+fn builder() -> ReceiptBuilder {
     ReceiptBuilder::new(
         "rcpt-test-1".to_string(),
         Some("chat-xyz".to_string()),
         Some("demo-model".to_string()),
-        format!(
-            "sha256:{}",
-            "deadbeef".repeat(8) // fake but valid-shaped digest
-        ),
-        format!("sha256:{}", "feedface".repeat(8)),
+        format!("sha256:{}", "deadbeef".repeat(8)),
         "/v1/chat/completions".to_string(),
         "POST".to_string(),
         1_700_000_500,
@@ -36,271 +30,154 @@ fn builder(_keys: &StaticKeyProvider) -> ReceiptBuilder {
 fn signed_receipt_verifies_under_keyset_receipt_key() {
     let keys = keys();
     let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
+    let mut b = builder();
     b.add_request_received(br#"{"model":"x","messages":[]}"#)
         .unwrap();
     b.add_request_forwarded(br#"{"model":"x","messages":[]}"#)
         .unwrap();
-    b.add_response_returned(br#"{"id":"chat-xyz"}"#, br#"{"id":"chat-xyz"}"#)
-        .unwrap();
+    b.add_response_returned(br#"{"id":"chat-xyz"}"#).unwrap();
 
     let receipt = b.finalize(&keys, &key_id).unwrap();
-    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
-    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
-
-    let receipt_keys = keys.receipt_keys();
-    assert!(verify_receipt_signature(
-        &receipt_keys[0],
-        &canonical_bytes,
-        &sig
-    ));
-}
-
-#[test]
-fn default_receipt_signature_is_ed25519() {
-    let keys = keys();
-    // The default receipt key id is the first listed key (§8.5 RECOMMENDED).
-    let key_id = keys.receipt_keys()[0].key_id.clone();
-    let mut b = builder(&keys);
-    b.add_request_received(b"a").unwrap();
-    b.add_request_forwarded(b"a").unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
-
-    let receipt = b.finalize(&keys, &key_id).unwrap();
-    assert_eq!(receipt.signature.algo, "ed25519");
-    // Ed25519 signatures are a raw 64-byte RFC 8032 pair.
-    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
+    // The signature covers the exact stored payload bytes (§8.2); Ed25519
+    // signatures are a raw 64-byte RFC 8032 pair.
+    assert_eq!(receipt.algo, "ed25519");
+    let sig = hex::decode(&receipt.signature_hex).unwrap();
     assert_eq!(sig.len(), 64);
-    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
     assert!(verify_receipt_signature(
         &keys.receipt_keys()[0],
-        &canonical_bytes,
+        &receipt.payload,
         &sig
     ));
-}
 
-#[test]
-fn secp256k1_receipt_key_stays_functional() {
-    let keys = keys();
-    let key_id = keys.secp256k1_receipt_key_id().to_string();
-    let mut b = builder(&keys);
-    b.add_request_received(b"a").unwrap();
-    b.add_request_forwarded(b"a").unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
-
-    let receipt = b.finalize(&keys, &key_id).unwrap();
-    assert_eq!(receipt.signature.algo, "ecdsa-secp256k1");
-    // Recoverable r||s||v is exactly 65 bytes (§8.5).
-    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
-    assert_eq!(sig.len(), 65);
-    let secp256k1_key = keys
-        .receipt_keys()
-        .into_iter()
-        .find(|k| k.key_id == key_id)
+    // The served envelope round-trips to the same bytes.
+    let envelope = receipt.envelope();
+    let decoded = BASE64
+        .decode(envelope["payload_b64"].as_str().unwrap())
         .unwrap();
-    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
-    assert!(verify_receipt_signature(
-        &secp256k1_key,
-        &canonical_bytes,
-        &sig
-    ));
+    assert_eq!(decoded, receipt.payload);
+    assert_eq!(envelope["key_id"].as_str().unwrap(), key_id);
+    assert_eq!(envelope["algo"], "ed25519");
 }
 
 #[test]
-fn signed_receipt_canonical_bytes_omit_signature_value() {
+fn event_order_is_array_order_and_first_is_request_received() {
     let keys = keys();
     let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
+    let mut b = builder();
     b.add_request_received(b"a").unwrap();
     b.add_request_forwarded(b"a").unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
-    let receipt = b.finalize(&keys, &key_id).unwrap();
-
-    let with_value = canonical::canonicalize(&receipt.to_canonical_value(true)).unwrap();
-    let without_value = canonical_bytes_for_signing(&receipt).unwrap();
-    assert_ne!(with_value, without_value);
-    assert!(!without_value.windows(8).any(|w| w == br#""value":"#));
-    assert!(with_value.windows(8).any(|w| w == br#""value":"#));
-}
-
-#[test]
-fn event_seqs_strictly_increasing_and_first_is_request_received() {
-    let keys = keys();
-    let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
-    b.add_request_received(b"a").unwrap();
-    b.add_request_forwarded(b"a").unwrap();
-    b.add_upstream_verified(UpstreamVerifiedEvent {
-        url_origin: Some("http://upstream".to_string()),
-        verifier_id: "verifier-stub-1".to_string(),
-        ..verified_event("openai-compatible", "x")
-    })
+    b.add_upstream_verified_with_session(
+        &common::verified_event("openai-compatible", "x"),
+        &format!("sha256:{}", "cd".repeat(32)),
+    )
     .unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
+    b.add_response_returned(b"b").unwrap();
     let receipt = b.finalize(&keys, &key_id).unwrap();
 
-    let seqs: Vec<u64> = receipt.event_log.iter().map(|e| e.seq).collect();
-    let mut sorted = seqs.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(seqs, sorted);
-    assert_eq!(receipt.event_log[0].event_type, "request.received");
-}
-
-#[test]
-fn upstream_verified_event_records_channel_bindings() {
-    let keys = keys();
-    let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
-    b.add_request_received(b"a").unwrap();
-    b.add_request_forwarded(b"a").unwrap();
-    b.add_upstream_verified(UpstreamVerifiedEvent {
-        url_origin: Some("https://upstream.example".to_string()),
-        verifier_id: "external/verifier/v1".to_string(),
-        channel_bindings: vec![
-            ChannelBinding::TlsSpkiSha256 {
-                origin: "https://upstream.example".to_string(),
-                spki_sha256: "aa".repeat(32),
-            },
-            ChannelBinding::TlsCertificateSha256 {
-                origin: "https://upstream.example".to_string(),
-                certificate_sha256: "bb".repeat(32),
-            },
-            ChannelBinding::E2eePublicKeySha256 {
-                provider: "chutes".to_string(),
-                key_id: Some("instance-a".to_string()),
-                algorithm: "chutes-ml-kem-768".to_string(),
-                public_key_sha256: "cc".repeat(32),
-            },
-        ],
-        provider_claims: Some(serde_json::json!({
-            "trust_boundary": "fixture",
-            "model_evidence_present": true,
-        })),
-        ..verified_event("openai-compatible", "x")
-    })
-    .unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
-    let receipt = b.finalize(&keys, &key_id).unwrap();
-    let upstream = receipt
-        .event_log
+    let payload = receipt.payload_json().unwrap();
+    let types: Vec<&str> = payload["event_log"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|event| event.event_type == "upstream.verified")
-        .unwrap();
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        upstream.fields["channel_bindings"][0]["type"],
-        "tls_spki_sha256"
+        types,
+        [
+            "request.received",
+            "request.forwarded",
+            "upstream.verified",
+            "response.returned"
+        ]
     );
-    assert_eq!(
-        upstream.fields["channel_bindings"][0]["spki_sha256"],
-        "aa".repeat(32)
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][1]["type"],
-        "tls_certificate_sha256"
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][1]["certificate_sha256"],
-        "bb".repeat(32)
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][2]["type"],
-        "e2ee_public_key_sha256"
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][2]["public_key_sha256"],
-        "cc".repeat(32)
-    );
-    assert_eq!(
-        upstream.fields["provider_claims"]["trust_boundary"],
-        "fixture"
-    );
+    // Events carry no seq: the array order is the event order (§8.3).
+    assert!(payload["event_log"][0].get("seq").is_none());
+}
+
+#[test]
+fn channel_binding_shapes_serialize_to_spec_wire_form() {
+    // The §9.2 binding shapes are flat, self-describing objects; they land in
+    // session documents, so their serde form is part of the wire contract.
+    let bindings = vec![
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://upstream.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+        ChannelBinding::TlsCertificateSha256 {
+            origin: "https://upstream.example".to_string(),
+            certificate_sha256: "bb".repeat(32),
+        },
+        ChannelBinding::E2eePublicKeySha256 {
+            provider: "chutes".to_string(),
+            key_id: Some("instance-a".to_string()),
+            algorithm: "chutes-ml-kem-768".to_string(),
+            public_key_sha256: "cc".repeat(32),
+        },
+    ];
+    let value = serde_json::to_value(&bindings).unwrap();
+    assert_eq!(value[0]["type"], "tls_spki_sha256");
+    assert_eq!(value[0]["spki_sha256"], "aa".repeat(32));
+    assert_eq!(value[1]["type"], "tls_certificate_sha256");
+    assert_eq!(value[1]["certificate_sha256"], "bb".repeat(32));
+    assert_eq!(value[2]["type"], "e2ee_public_key_sha256");
+    assert_eq!(value[2]["public_key_sha256"], "cc".repeat(32));
 }
 
 #[test]
 fn first_event_must_be_request_received() {
-    let keys = keys();
-    let mut b = builder(&keys);
+    let mut b = builder();
     let err = b.add_request_forwarded(b"a").unwrap_err();
-    matches!(err, ReceiptError::FirstEventMustBeRequestReceived(_));
+    assert!(matches!(
+        err,
+        ReceiptError::FirstEventMustBeRequestReceived(_)
+    ));
 }
 
 #[test]
 fn finalize_requires_required_events() {
     let keys = keys();
     let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
+    let mut b = builder();
     b.add_request_received(b"a").unwrap();
     let err = b.finalize(&keys, &key_id).unwrap_err();
-    matches!(err, ReceiptError::MissingRequiredEvent(_));
+    assert!(matches!(err, ReceiptError::MissingRequiredEvent(_)));
 }
 
 #[test]
 fn request_received_hash_matches_observed_bytes() {
     let keys = keys();
     let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
+    let mut b = builder();
     let body = br#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#;
     b.add_request_received(body).unwrap();
     b.add_request_forwarded(body).unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
+    b.add_response_returned(b"b").unwrap();
     let receipt = b.finalize(&keys, &key_id).unwrap();
 
-    let received_event = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "request.received")
-        .unwrap();
-    let expected = canonical::sha256_hex(body);
+    let payload = receipt.payload_json().unwrap();
     assert_eq!(
-        received_event
-            .fields
-            .get("body_hash")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        expected
+        payload["event_log"][0]["body_hash"].as_str().unwrap(),
+        sha256_hex(body)
     );
 }
 
 #[test]
 fn extension_event_cannot_collide_with_required_type() {
-    let keys = keys();
-    let mut b = builder(&keys);
+    let mut b = builder();
     b.add_request_received(b"a").unwrap();
     let err = b
-        .add_extension_event("request.received", serde_json::json!({ "x": 1 }))
+        .add_extension_event("request.received", serde_json::Map::new())
         .unwrap_err();
-    matches!(err, ReceiptError::ReservedEventType(_));
-}
-
-#[test]
-fn transparency_event_names_operation_without_parameters() {
-    let keys = keys();
-    let key_id = keys.receipt_key_id().to_string();
-    let mut b = builder(&keys);
-    b.add_request_received(b"a").unwrap();
-    b.add_request_forwarded(b"b").unwrap();
-    b.add_transparency_event(TransparencyEventKind::RequestModified)
-        .unwrap();
-    b.add_response_returned(b"c", b"c").unwrap();
-    let receipt = b.finalize(&keys, &key_id).unwrap();
-
-    let transparency = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == EVENT_TRANSPARENCY_REQUEST_MODIFIED)
-        .unwrap();
-    assert_eq!(transparency.fields, serde_json::json!({}));
+    assert!(matches!(err, ReceiptError::ReservedEventType(_)));
 }
 
 #[test]
 fn unknown_receipt_key_id_is_rejected_at_finalize() {
     let keys = keys();
-    let mut b = builder(&keys);
+    let mut b = builder();
     b.add_request_received(b"a").unwrap();
     b.add_request_forwarded(b"a").unwrap();
-    b.add_response_returned(b"b", b"b").unwrap();
+    b.add_response_returned(b"b").unwrap();
     let err = b.finalize(&keys, "nonexistent").unwrap_err();
-    matches!(err, ReceiptError::Key(_));
+    assert!(matches!(err, ReceiptError::Key(_)));
 }

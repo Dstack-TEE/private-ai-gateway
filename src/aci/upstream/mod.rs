@@ -37,6 +37,7 @@ pub use chutes::{
 };
 pub use openai::OpenAICompatibleBackend;
 pub use router::{ModelRoute, ModelRouterBackend};
+pub use tls::{observing_webpki_client, SpkiObservations};
 
 use openai::request_model_id;
 

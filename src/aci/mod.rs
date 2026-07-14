@@ -6,11 +6,12 @@
 //! source of ACI digest formulas, attestation binding, and receipt
 //! construction.
 
-pub mod canonical;
+pub mod digest;
 pub mod e2ee;
 pub mod identity;
 pub mod keys;
 pub mod receipt;
+pub mod tee;
 pub mod types;
 pub mod upstream;
 pub mod verifier;

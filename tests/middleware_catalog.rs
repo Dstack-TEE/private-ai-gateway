@@ -42,7 +42,7 @@ fn temp_config_path() -> std::path::PathBuf {
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
-        accepted_workload_ids: vec![],
+        accepted_subjects: vec![],
         accepted_image_digests: vec![],
         accepted_dstack_kms_root_public_keys: vec![],
         pccs_url: None,
@@ -63,7 +63,7 @@ fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
             manager.backend(),
             manager.verifier(),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),

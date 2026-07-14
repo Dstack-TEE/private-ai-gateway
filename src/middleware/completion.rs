@@ -18,9 +18,9 @@ use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
-    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, ForwardCandidate,
-    GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner,
-    ServiceError, ServiceResponseStream,
+    AciService, ChatCompletionRequest, E2eeRequestContext, ForwardCandidate, GatewayRequestContext,
+    MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
+    ServiceResponseStream,
 };
 
 use super::control::ControlClient;
@@ -293,7 +293,7 @@ pub async fn run(
                     let mut headers =
                         response_headers(&forward.upstream_headers, "application/json");
                     insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
-                    apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
+                    apply_e2ee_headers(&mut headers, finalized.e2ee_applied, true);
                     (status, headers, finalized.wire_body).into_response()
                 }
                 // The receipt finalizer consumed the E2EE context, so a generated
@@ -372,9 +372,9 @@ pub async fn run(
                     match &receipt_id {
                         Some(receipt_id) => {
                             insert_header(&mut headers, "x-receipt-id", receipt_id);
-                            apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
+                            apply_e2ee_headers(&mut headers, finalized.e2ee_applied, true);
                         }
-                        None => apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), false),
+                        None => apply_e2ee_headers(&mut headers, finalized.e2ee_applied, false),
                     }
                     headers.insert(
                         HeaderName::from_static("x-accel-buffering"),
@@ -409,6 +409,23 @@ pub async fn run(
             meter.upstream_error(reported_status(status, forward.upstream_status));
             finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
         }
+        // Fail-closed refusal (§8.5): every candidate failed verification (or the
+        // highest-priority failure across candidates was a verification one). The
+        // error response is finalized into a refusal receipt and carries its id.
+        Err(ServiceError::UpstreamVerification(uv)) => {
+            meter.gateway_failure(502, ErrorSource::Upstream, &uv.to_string(), stream);
+            upstream_verification_failed_response(
+                surface,
+                endpoint_path,
+                service,
+                &request_id,
+                model.map(str::to_string),
+                &received_body,
+                requester,
+                e2ee,
+                uv,
+            )
+        }
         // All candidates failed. Record an upstream-attributed failure so the
         // request is visible to billing/health (per-attempt rows are not
         // recoverable from the typed error). Client-attributable errors (E2EE/4xx)
@@ -421,6 +438,63 @@ pub async fn run(
             service_error_response(surface, endpoint_path, service, &request_id, err, e2ee)
         }
     }
+}
+
+/// The fail-closed §8.5 outcome on the middleware path: a 502
+/// `upstream_verification_failed` error (sealed for E2EE clients) whose exact
+/// wire bytes are finalized into a refusal receipt served via `X-Receipt-Id`.
+#[allow(clippy::too_many_arguments)]
+fn upstream_verification_failed_response(
+    surface: Surface,
+    endpoint_path: &str,
+    service: &AciService,
+    request_id: &str,
+    model: Option<String>,
+    received_body: &[u8],
+    requester: Option<ReceiptOwner>,
+    e2ee: Option<E2eeRequestContext>,
+    uv: crate::aggregator::service::UpstreamVerificationError,
+) -> Response {
+    let body = errors::envelope_bytes(
+        surface,
+        "upstream_verification_failed",
+        &uv.to_string(),
+        Some(request_id),
+    );
+    let finalized = match service.finalize_middleware_generated_response(
+        endpoint_path,
+        &body,
+        Some("application/json"),
+        e2ee,
+    ) {
+        Ok(finalized) => finalized,
+        // Fail-closed: never return the cleartext body when E2EE was requested.
+        Err(err) => {
+            tracing::error!(error = %err, "E2EE refusal-response finalization failed");
+            return errors::error_response(
+                surface,
+                500,
+                errors::error_type(surface, 500),
+                "response finalization failed",
+                None,
+            );
+        }
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    apply_e2ee_headers(&mut headers, finalized.e2ee_applied, false);
+    match service.issue_upstream_refusal_receipt(
+        endpoint_path,
+        model,
+        received_body,
+        &uv.event,
+        &finalized.wire_body,
+        requester,
+    ) {
+        Ok(receipt) => insert_header(&mut headers, "x-receipt-id", &receipt.receipt_id),
+        Err(err) => tracing::error!(error = %err, "failed to issue upstream refusal receipt"),
+    }
+    (StatusCode::BAD_GATEWAY, headers, finalized.wire_body).into_response()
 }
 
 // Posts usage reports to the control plane (fire-and-forget). Buffered reports
@@ -541,7 +615,6 @@ fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
         ServiceError::E2ee(_) => 400,
-        ServiceError::UpstreamVerification(_) => 503,
         ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
         _ => 502,
     }
@@ -597,7 +670,7 @@ fn finalize_generated(
         e2ee,
     ) {
         Ok(finalized) => {
-            apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), false);
+            apply_e2ee_headers(&mut headers, finalized.e2ee_applied, false);
             (status_code, headers, finalized.wire_body).into_response()
         }
         // Fail-closed: never return the cleartext body when E2EE was requested.
@@ -669,27 +742,17 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-fn apply_e2ee_headers(
-    headers: &mut HeaderMap,
-    e2ee: Option<&E2eeResponseInfo>,
-    include_plain_false: bool,
-) {
-    match e2ee {
-        Some(info) => {
-            headers.insert(
-                HeaderName::from_static("x-e2ee-applied"),
-                HeaderValue::from_static("true"),
-            );
-            insert_header(headers, "x-e2ee-version", &info.version);
-            insert_header(headers, "x-e2ee-algo", &info.algo);
-        }
-        None if include_plain_false => {
-            headers.insert(
-                HeaderName::from_static("x-e2ee-applied"),
-                HeaderValue::from_static("false"),
-            );
-        }
-        None => {}
+fn apply_e2ee_headers(headers: &mut HeaderMap, e2ee_applied: bool, include_plain_false: bool) {
+    if e2ee_applied {
+        headers.insert(
+            HeaderName::from_static("x-e2ee-applied"),
+            HeaderValue::from_static("true"),
+        );
+    } else if include_plain_false {
+        headers.insert(
+            HeaderName::from_static("x-e2ee-applied"),
+            HeaderValue::from_static("false"),
+        );
     }
 }
 

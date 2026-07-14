@@ -14,10 +14,10 @@ adapters that fail closed when binding material cannot be enforced.
 | Area | Status | Notes |
 | --- | --- | --- |
 | OpenAI-compatible chat/completions surface | Done | `/v1/chat/completions`, `/v1/completions`, streaming, E2EE addon, legacy aliases, and vLLM-compatible error behavior are covered by tests. |
-| OpenAI-compatible embeddings surface | Done | `/v1/embeddings` forwards through the same receipt/attestation pipeline as chat. Buffered-only (client-sent `stream:true` is forced back to buffered). ACI v2 + dstack-vllm-proxy legacy v1/v2 E2EE encrypt the `input` request field and each `data[].embedding` response field; AAD shape mirrors completions (`field=input` / `field=input.{N}` request, `data={index}|field=embedding` response). Provider adapters in this slice: openai-compatible only — Chutes embeddings (TEI native paths, not `/v1/embeddings`) and Tinfoil/NEAR-AI embedding routes still need adapter work. |
+| OpenAI-compatible embeddings surface | Done | `/v1/embeddings` forwards through the same receipt/attestation pipeline as chat. Buffered-only (client-sent `stream:true` is forced back to buffered). ACI E2EE v3 seals the whole request and response bodies, same as completions. Provider adapters in this slice: openai-compatible only — Chutes embeddings (TEI native paths, not `/v1/embeddings`) and Tinfoil/NEAR-AI embedding routes still need adapter work. |
 | Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing in no-middleware mode. Production upstream policy should live in this config file, not in broad process-level allowlist env vars. |
-| ACI identity and self-attestation | In progress | dstack KMS-backed identity, keyset endorsement, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
-| Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
+| ACI identity and self-attestation | In progress | dstack KMS-backed keys, the quote-bound keyset digest, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
+| Receipts | In progress | Request/response body hashes, streaming hashing, upstream verification events, extension route events, and the legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI service upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
@@ -59,7 +59,8 @@ An attested session is a verified secure channel, and we never create more than
 one session per channel. The channel boundary a provider attests is a first-class
 property, `UpstreamProvider::attestation_scope()` → `AttestationScope`: per E2EE
 instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
-(NEAR AI) or model router (Tinfoil), where one channel fronts many models. The
+(NEAR AI) or model router (Tinfoil), where one channel fronts
+many models. The
 scope is the single source of truth: it drives channel-keyed verification (the
 model is dropped from the verifier cache key for routers, so every model resolves
 to one verified channel and one attested session) and is enforced fail-closed at
@@ -167,8 +168,8 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   section in `docs/upstream-verification-lifecycle.md`): Chutes (DCAP +
   `report_data`↔`nonce‖e2e_pubkey`), NEAR AI (`report_data` binding now enforced),
   Tinfoil (official `tinfoil` SDK: AMD signature chain + Sigstore provenance + TLS
-  binding), and AciService (TLS keys covered by the keyset digest bound into `report_data`
-  and the keyset endorsement). Live tamper tests confirm rejection.
+  binding), and AciService (TLS keys covered by the keyset digest bound into
+  `report_data`). Live tamper tests confirm rejection.
 - Follow-up (defense-in-depth, not a forgeable hole): verify the NVIDIA NRAS GPU JWT
   signature against NRAS' JWKS. Today the GPU tokens are fetched online from NRAS over
   TLS and the request nonce is checked (Chutes via `eat_nonce`, NEAR AI via the

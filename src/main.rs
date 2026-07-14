@@ -14,9 +14,8 @@
 //! | Gateway config path | `PRIVATE_AI_GATEWAY_CONFIG_PATH` |
 //!
 //! Gateway-owned writable files are derived from `state_dir` in the static
-//! config: the active upstream database `upstreams.json`, the attested-session
-//! log `sessions.jsonl`, the managed keyset-epoch state `keyset-epoch.json`
-//! (§4.2), and the issued keyset revocations `revocations.json` (§4.7).
+//! config: the active upstream database `upstreams.json` and the
+//! attested-session log `sessions.jsonl`.
 //!
 //! When the static config includes a `middleware` section, the gateway runs the
 //! middleware: it consults the control plane at `middleware.control_url`
@@ -29,17 +28,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
-use private_ai_gateway::aci::types::{
-    KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki, WorkloadIdentity, WorkloadKeyset,
-};
+use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
     DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
-use private_ai_gateway::aggregator::keyset_epoch::{self, DEFAULT_KEYSET_EPOCH_WINDOW_SECONDS};
-use private_ai_gateway::aggregator::revocation_store::RevocationStore;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
+    DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
@@ -72,9 +68,12 @@ struct GatewayConfigFile {
     state_dir: Option<String>,
     upstream_config_seed_path: Option<String>,
     admin_token: Option<String>,
-    /// Bounded keyset-epoch validity window in seconds (§4.7). Defaults to
-    /// [`DEFAULT_KEYSET_EPOCH_WINDOW_SECONDS`] (~4 weeks).
-    keyset_epoch_window_seconds: Option<u64>,
+    /// Keyset lifetime in seconds: `not_after` = launch time + this (§4.4).
+    /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
+    keyset_not_after_seconds: Option<u64>,
+    /// Optional profile-interpreted keyset `subject` (§4.1) — e.g. a dstack
+    /// app-id URI. Never trusted by generic verifiers.
+    subject: Option<String>,
     tls: GatewayTlsConfig,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
@@ -118,14 +117,6 @@ fn upstream_config_path(state_dir: &Path) -> PathBuf {
 
 fn session_log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions.jsonl")
-}
-
-fn keyset_epoch_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("keyset-epoch.json")
-}
-
-fn revocations_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("revocations.json")
 }
 
 fn resolve_source_provenance() -> Result<SourceProvenance, String> {
@@ -367,7 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         upstream_config_path.clone(),
         UpstreamRuntimeOptions {
             verifier_mode: UpstreamVerifierMode::None,
-            accepted_workload_ids: Vec::new(),
+            accepted_subjects: Vec::new(),
             accepted_image_digests: Vec::new(),
             accepted_dstack_kms_root_public_keys: Vec::new(),
             pccs_url: None,
@@ -381,62 +372,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
 
-    // Issued keyset revocations persist in the state dir: a service that
-    // repudiated a keyset must not silently resume serving it after a restart.
-    let revocation_store = Arc::new(
-        RevocationStore::open(revocations_path(&state_dir)).map_err(|err| {
-            invalid_input(format!("failed to open gateway revocation store: {err}"))
-        })?,
-    );
-
-    // Resolve the managed keyset epoch before assembling the keyset. The service
-    // builds the same keyset from these parts plus `config.keyset_epoch`, so the
-    // epoch and digest agree.
-    let keyset_epoch_window_seconds = gateway_config
-        .keyset_epoch_window_seconds
-        .unwrap_or(DEFAULT_KEYSET_EPOCH_WINDOW_SECONDS);
-    if keyset_epoch_window_seconds == 0 {
-        return Err(invalid_input("keyset_epoch_window_seconds must be greater than zero").into());
+    // Keyset lifetime (§4.4): launch time plus a configurable duration. The
+    // keyset is sealed once by the service with this absolute expiry; replacing
+    // keys ahead of it means restarting with a fresh keyset and quote.
+    let keyset_not_after_seconds = gateway_config
+        .keyset_not_after_seconds
+        .unwrap_or(DEFAULT_KEYSET_NOT_AFTER_SECONDS);
+    if keyset_not_after_seconds == 0 {
+        return Err(invalid_input("keyset_not_after_seconds must be greater than zero").into());
     }
-    let identity_subject: Option<String> = None;
-    let keyset_identity = WorkloadIdentity {
-        public_key: keys.identity_public_key(),
-        subject: identity_subject.clone(),
-    };
-    let keyset_receipt_keys = keys.receipt_keys();
-    let keyset_e2ee_keys = keys.e2ee_keys();
-    let keyset_tls_public_keys = tls_public_keys.clone().unwrap_or_else(|| keys.tls_spkis());
-    let make_keyset = |epoch: KeysetEpoch| WorkloadKeyset {
-        workload_identity: keyset_identity.clone(),
-        keyset_epoch: epoch,
-        receipt_signing_keys: keyset_receipt_keys.clone(),
-        e2ee_public_keys: keyset_e2ee_keys.clone(),
-        tls_public_keys: keyset_tls_public_keys.clone(),
-    };
-    let keyset_epoch = keyset_epoch::resolve_launcher_epoch(
-        &keyset_epoch_path(&state_dir),
-        make_keyset,
-        &revocation_store,
-        SystemClock.now_secs(),
-        keyset_epoch_window_seconds,
-    )
-    .map_err(|err| invalid_input(format!("failed to resolve managed keyset epoch: {err}")))?;
-    tracing::info!(
-        version = keyset_epoch.version,
-        not_after = keyset_epoch.not_after,
-        "resolved managed keyset epoch"
-    );
+    let keyset_not_after = SystemClock
+        .now_secs()
+        .saturating_add(keyset_not_after_seconds);
 
     let config = AciServiceConfig {
-        vendor: "private-ai-gateway-dev".to_string(),
         tee_type: "tdx".to_string(),
         source_provenance,
-        keyset_epoch,
-        identity_subject,
+        keyset_not_after,
+        subject: gateway_config.subject.clone(),
         service_capabilities: ServiceCapabilities {
-            supported_e2ee_versions: vec!["2".to_string()],
+            supported_e2ee_versions: vec!["3".to_string()],
         },
-        freshness_seconds: 3600,
         receipt_ttl_seconds: 3600,
         upstream_required_default: true,
         allow_test_keys: false,
@@ -475,10 +431,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "compacted attested-session log on startup"
     );
     spawn_session_log_compaction(session_store.clone(), session_log_path.clone());
-    let service_inner = service_inner
-        .with_session_store(session_store)
-        .with_revocation_store(revocation_store);
+    let service_inner = service_inner.with_session_store(session_store);
     let service = Arc::new(service_inner);
+    tracing::info!(
+        workload_keyset_digest = %service.workload_keyset_digest(),
+        not_after = keyset_not_after,
+        "sealed workload keyset"
+    );
     if service.supported_e2ee_versions().is_empty() {
         // The spec requires E2EE on chat completions; a deployment that
         // advertises no versions rejects every E2EE request and is not
@@ -629,8 +588,8 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        keyset_epoch_path, load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
-        revocations_path, seed_upstream_config_if_empty, session_log_path,
+        load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
+        seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
     };
 
@@ -735,6 +694,10 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             (
                 "tls-certificate-paths",
                 r#"{"tls": {"certificate_paths": ["/cert.pem"]}}"#,
+            ),
+            (
+                "keyset-epoch-window",
+                r#"{"keyset_epoch_window_seconds": 1209600}"#,
             ),
         ] {
             let config_path = temp_path(name);
@@ -842,29 +805,22 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             session_log_path(&state_dir),
             state_dir.join("sessions.jsonl")
         );
-        assert_eq!(
-            keyset_epoch_path(&state_dir),
-            state_dir.join("keyset-epoch.json")
-        );
-        assert_eq!(
-            revocations_path(&state_dir),
-            state_dir.join("revocations.json")
-        );
         assert!(resolve_state_dir(Some("  ")).is_err());
     }
 
     #[test]
-    fn gateway_config_parses_keyset_epoch_window() {
-        let config_path = temp_path("gateway-config-keyset-window");
+    fn gateway_config_parses_keyset_not_after_and_subject() {
+        let config_path = temp_path("gateway-config-keyset-not-after");
         std::fs::write(
             &config_path,
-            r#"{ "keyset_epoch_window_seconds": 1209600 }"#,
+            r#"{ "keyset_not_after_seconds": 1209600, "subject": "app-id:0x1234" }"#,
         )
         .unwrap();
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
-        assert_eq!(config.keyset_epoch_window_seconds, Some(1_209_600));
+        assert_eq!(config.keyset_not_after_seconds, Some(1_209_600));
+        assert_eq!(config.subject.as_deref(), Some("app-id:0x1234"));
         let _ = std::fs::remove_file(config_path);
     }
 
@@ -878,7 +834,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                     "models": {
                         "public-a": "upstream-a"
                     },
-                    "accepted_workload_ids": ["aci:workload:a"],
+                    "accepted_subjects": ["app-id:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
                     "accepted_dstack_kms_root_public_keys": ["02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
                 }
             ]"#,

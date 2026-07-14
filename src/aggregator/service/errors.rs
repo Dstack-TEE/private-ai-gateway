@@ -1,6 +1,6 @@
-use crate::aci::canonical::CanonicalError;
+use crate::aci::identity::InvalidNonce;
 use crate::aci::keys::KeyError;
-use crate::aci::receipt::ReceiptError;
+use crate::aci::receipt::{ReceiptError, UpstreamVerifiedEvent};
 use crate::aci::upstream::UpstreamError;
 
 #[derive(Debug, thiserror::Error)]
@@ -15,12 +15,14 @@ pub enum ServiceError {
          runtime source provenance is loaded from git-launcher or omitted when unknown"
     )]
     InvalidSourceProvenance,
+    #[error("failed to seal workload keyset: {0}")]
+    Keyset(String),
+    #[error("invalid attestation nonce: {0}")]
+    InvalidNonce(#[from] InvalidNonce),
     #[error("upstream verification failed: {0}")]
     UpstreamVerification(#[from] UpstreamVerificationError),
     #[error("E2EE request failed: {0}")]
     E2ee(#[from] E2eeError),
-    #[error("canonicalisation error: {0}")]
-    Canonical(#[from] CanonicalError),
     #[error("key provider error: {0}")]
     Key(#[from] KeyError),
     #[error("receipt builder error: {0}")]
@@ -29,10 +31,6 @@ pub enum ServiceError {
     Upstream(#[from] UpstreamError),
     #[error("attested session store error: {0}")]
     SessionStore(String),
-    #[error("revocation store error: {0}")]
-    RevocationStore(String),
-    #[error("the current workload keyset has been revoked (§4.7); refusing to serve it")]
-    KeysetRevoked,
     #[error("metrics error: {0}")]
     Metrics(String),
     #[error("missing receipt signing key in keyset")]
@@ -43,12 +41,15 @@ pub enum ServiceError {
     DownstreamTlsDomainUnknown(String),
 }
 
+/// The fail-closed refusal (§1.2): verification was required and did not
+/// produce an enforceable verified binding, so the prompt was not forwarded.
+/// Carries the §8.5 failed-form event so the response layer can finalize the
+/// refusal receipt the `upstream_verification_failed` error cites (§8.5).
 #[derive(Debug, thiserror::Error, Clone)]
-pub enum UpstreamVerificationError {
-    #[error("upstream verification required but no verifier result supplied")]
-    NoVerifierResult,
-    #[error("upstream verifier reported failed: {0}")]
-    VerifierFailed(String),
+#[error("upstream verification failed: {reason}")]
+pub struct UpstreamVerificationError {
+    pub reason: String,
+    pub event: Box<UpstreamVerifiedEvent>,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -63,14 +64,6 @@ pub enum E2eeError {
     InvalidPublicKey,
     #[error("X-Model-Pub-Key does not match this ACI service")]
     ModelKeyMismatch,
-    #[error("invalid E2EE nonce")]
-    InvalidNonce,
-    #[error("E2EE replay detected")]
-    ReplayDetected,
-    #[error("invalid E2EE timestamp")]
-    InvalidTimestamp,
-    #[error("invalid E2EE payload model")]
-    InvalidPayloadModel,
     #[error("E2EE decryption failed")]
     DecryptionFailed,
     #[error("E2EE encryption failed")]

@@ -125,8 +125,9 @@ For multi-domain listening, use `tls.domain_certificates`:
 Raw SPKI digest inputs are not supported. The gateway reads mounted leaf
 certificates, computes `sha256(SPKI)`, and publishes those digests in the
 attested keyset. When `tls.domain_certificates` is configured, the request
-`Host` selects the matching downstream TLS binding for
-`/v1/attestation/report`. Unknown hosts return `404 not_found`.
+`Host` selects the matching downstream TLS binding for attestation reports
+(`/v1/aci/attestation` and the legacy alias). Unknown hosts return
+`404 not_found`.
 
 ## Upstream Config
 
@@ -144,7 +145,7 @@ the admin API.
     "models": {
       "public-model": "provider-model"
     },
-    "accepted_workload_ids": ["<workload-id>"],
+    "accepted_subjects": ["<keyset-subject>"],
     "accepted_dstack_kms_root_public_keys": ["<kms-root-public-key>"]
   }
 ]
@@ -162,11 +163,11 @@ Supported `provider` values:
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
 
 Provider verification policy belongs on the upstream entry. For ACI service
-routes, configure accepted workload ids, image digests, or dstack KMS root
-public keys on that entry.
+routes, configure accepted keyset subjects, image digests, and dstack KMS
+root public keys on that entry.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
-`/v1/attestation/report`. The router fetches the report through normal TLS,
+`/v1/aci/attestation`. The router fetches the report through normal TLS,
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.
 

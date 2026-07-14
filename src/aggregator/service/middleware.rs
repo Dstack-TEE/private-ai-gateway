@@ -12,16 +12,15 @@ use super::streaming::{
     MiddlewareResponseFinalizingStream, SseChatIdParser,
 };
 use super::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    ForwardCandidate, MiddlewareForwardResult, MiddlewareForwarded,
-    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
-    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
-    ReceiptOwner, ServiceError, ServiceResponseStream, StreamingUpstreamError,
+    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, ForwardCandidate,
+    MiddlewareForwardResult, MiddlewareForwarded, MiddlewareGeneratedFinalization,
+    MiddlewareReceiptDraft, MiddlewareReceiptFinalization, MiddlewareReceiptJournal,
+    MiddlewareStreamFinalization, MiddlewareStreamingForwarded, ReceiptOwner, ServiceError,
+    ServiceResponseStream, StreamingUpstreamError,
 };
-use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
+use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
-use crate::aggregator::session::SessionClaims;
 use std::collections::HashMap;
 
 // Provider statuses that make this candidate worth abandoning for the next one.
@@ -73,7 +72,7 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
     pub selected_route_id: &'a str,
     pub forwarded_body: &'a [u8],
     pub recorded_event: UpstreamVerifiedEvent,
-    pub recorded: Option<(String, SessionClaims)>,
+    pub recorded: Option<String>,
 }
 
 impl AciService {
@@ -98,8 +97,7 @@ impl AciService {
             receipt_id.to_string(),
             chat_id,
             model,
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
+            self.keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -108,10 +106,7 @@ impl AciService {
         builder.add_middleware_forwarded(middleware_forwarded_body)?;
         builder.add_route_selected(selected_route_id)?;
         builder.add_request_forwarded(forwarded_body)?;
-        if received_body != forwarded_body {
-            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
-        }
-        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
+        Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
         Ok(builder)
     }
 
@@ -311,7 +306,7 @@ impl AciService {
                 let sealed = self.record_attested_upstream_session(&recorded_event)?;
                 let recorded =
                     cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-                let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+                let session_id = recorded.clone();
                 let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                     receipt_id: &receipt_id,
                     chat_id: None,
@@ -418,7 +413,7 @@ impl AciService {
             let sealed = self.record_attested_upstream_session(&recorded_event)?;
             let recorded =
                 cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-            let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+            let session_id = recorded.clone();
             let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                 receipt_id: &receipt_id,
                 chat_id,
@@ -435,7 +430,7 @@ impl AciService {
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's upstream.verified.
             builder.set_upstream_verified_model_id(response_model.clone());
-            let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
+            builder.add_response_received(&upstream_response.body)?;
 
             return Ok(MiddlewareForwardResult::Forwarded(Box::new(
                 MiddlewareForwarded {
@@ -443,7 +438,6 @@ impl AciService {
                     receipt: MiddlewareReceiptDraft {
                         receipt_id: receipt_id.clone(),
                         builder,
-                        provider_response_hash,
                         endpoint_path: endpoint_path.to_string(),
                         request_mode: RequestMode::Buffered,
                         response_model,
@@ -499,21 +493,9 @@ impl AciService {
             )?,
             None => final_cleartext_body.to_vec(),
         };
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
-            version: ctx.version.clone(),
-            algo: ctx.algo.clone(),
-        });
+        let e2ee_applied = e2ee.is_some();
 
-        let final_cleartext_hash = crate::aci::canonical::sha256_hex(final_cleartext_body);
-        if draft.provider_response_hash != final_cleartext_hash || wire_body != final_cleartext_body
-        {
-            draft
-                .builder
-                .add_transparency_event(TransparencyEventKind::ResponseModified)?;
-        }
-        draft
-            .builder
-            .add_response_returned(final_cleartext_body, &wire_body)?;
+        draft.builder.add_response_returned(&wire_body)?;
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
@@ -527,7 +509,7 @@ impl AciService {
         Ok(MiddlewareReceiptFinalization {
             receipt,
             wire_body,
-            e2ee: e2ee_response,
+            e2ee_applied,
         })
     }
 
@@ -543,13 +525,9 @@ impl AciService {
             Some(ctx) => encrypt_e2ee_final_response(cleartext_body, ctx, endpoint_path, is_sse)?,
             None => cleartext_body.to_vec(),
         };
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
-            version: ctx.version.clone(),
-            algo: ctx.algo.clone(),
-        });
         Ok(MiddlewareGeneratedFinalization {
             wire_body,
-            e2ee: e2ee_response,
+            e2ee_applied: e2ee.is_some(),
         })
     }
 
@@ -566,10 +544,7 @@ impl AciService {
         if e2ee.is_some() && !is_sse {
             return Err(E2eeError::EncryptionFailed.into());
         }
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
-            version: ctx.version.clone(),
-            algo: ctx.algo.clone(),
-        });
+        let e2ee_applied = e2ee.is_some();
         let e2ee_transformer = e2ee
             .clone()
             .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
@@ -580,11 +555,10 @@ impl AciService {
             requester,
             endpoint_path.to_string(),
             e2ee_transformer,
-            e2ee_response.is_some(),
         );
         Ok(MiddlewareStreamFinalization {
             body: Box::pin(body),
-            e2ee: e2ee_response,
+            e2ee_applied,
         })
     }
 }

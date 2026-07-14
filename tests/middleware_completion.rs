@@ -12,14 +12,21 @@ mod common;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::{body::to_bytes, routing::post, Json, Router};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::StreamExt;
+use private_ai_gateway::aci::digest::sha256_hex;
+use private_ai_gateway::aci::e2ee::{
+    seal_v3, unseal_v3, x25519_public_key_from_hex, x25519_public_key_hex,
+    x25519_secret_key_from_bytes, E2EE_ALGO_X25519_AESGCM, E2EE_CONTEXT_REQUEST,
+    E2EE_CONTEXT_RESPONSE,
+};
 use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
     UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceResponseStream,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    AciService, AciServiceConfig, E2eeRequestParts, FixedClock, InMemoryReceiptStore,
+    ServiceResponseStream, UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
@@ -34,10 +41,12 @@ use tokio::net::TcpListener;
 
 use common::{event_from_request, StaticKeyProvider, StubQuoter};
 
-// A mock upstream that returns a fixed response for any forward.
+// A mock upstream that returns a fixed response for any forward, and fixed
+// SSE chunks (when given) for any streaming forward.
 struct MockUpstream {
     status: u16,
     body: Vec<u8>,
+    stream_chunks: Vec<Bytes>,
 }
 
 #[async_trait]
@@ -47,6 +56,33 @@ impl UpstreamBackend for MockUpstream {
     }
     fn url_origin(&self) -> Option<&str> {
         Some("https://mock-upstream.example")
+    }
+    async fn forward_stream(
+        &self,
+        req: UpstreamRequest,
+    ) -> Result<private_ai_gateway::aci::upstream::UpstreamStreamResponse, UpstreamError> {
+        if self.stream_chunks.is_empty() {
+            // Fall back to the buffered adapter, matching the trait default.
+            let response = self.forward(req).await?;
+            return Ok(private_ai_gateway::aci::upstream::UpstreamStreamResponse {
+                status_code: response.status_code,
+                headers: response.headers,
+                body: Box::pin(futures_util::stream::once(async move {
+                    Ok(Bytes::from(response.body))
+                })),
+                served_instance_id: None,
+            });
+        }
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        Ok(private_ai_gateway::aci::upstream::UpstreamStreamResponse {
+            status_code: self.status,
+            headers,
+            body: Box::pin(futures_util::stream::iter(
+                self.stream_chunks.clone().into_iter().map(Ok),
+            )),
+            served_instance_id: None,
+        })
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
@@ -65,6 +101,24 @@ impl UpstreamBackend for MockUpstream {
             headers: HashMap::new(),
             served_instance_id: None,
         })
+    }
+
+    // The mock stands in for a backend that enforces the verifier's channel
+    // binding on its connection (the trait default fails closed).
+    async fn forward_verified_prepared(
+        &self,
+        req: private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<private_ai_gateway::aci::upstream::UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
     }
 }
 
@@ -94,10 +148,11 @@ fn build_service_failing_verify() -> Arc<AciService> {
             Arc::new(MockUpstream {
                 status: 200,
                 body: b"{}".to_vec(),
+                stream_chunks: Vec::new(),
             }),
             Arc::new(FailVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -105,14 +160,22 @@ fn build_service_failing_verify() -> Arc<AciService> {
 }
 
 fn build_service_with_upstream(status: u16, body: Vec<u8>) -> Arc<AciService> {
+    build_service_with_mock_upstream(MockUpstream {
+        status,
+        body,
+        stream_chunks: Vec::new(),
+    })
+}
+
+fn build_service_with_mock_upstream(upstream: MockUpstream) -> Arc<AciService> {
     Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(MockUpstream { status, body }),
+            Arc::new(upstream),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -133,7 +196,7 @@ fn temp_config_path() -> std::path::PathBuf {
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
-        accepted_workload_ids: vec![],
+        accepted_subjects: vec![],
         accepted_image_digests: vec![],
         accepted_dstack_kms_root_public_keys: vec![],
         pccs_url: None,
@@ -154,7 +217,7 @@ fn build_service() -> Arc<AciService> {
             manager.backend(),
             manager.verifier(),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -259,6 +322,63 @@ fn chat_input() -> CompletionInput {
     }
 }
 
+/// Seal `plaintext` per §7.2 and terminate it through the service's own E2EE
+/// front door, returning the input the HTTP handler would hand the middleware.
+fn e2ee_v3_input(
+    service: &AciService,
+    client_secret: &x25519_dalek::StaticSecret,
+    model: &str,
+    plaintext: &[u8],
+    stream: bool,
+) -> CompletionInput {
+    let model_key = service
+        .keyset()
+        .e2ee_public_keys
+        .iter()
+        .find(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+        .unwrap()
+        .public_key_hex
+        .clone();
+    let recipient = x25519_public_key_from_hex(&model_key).unwrap();
+    let client_public_key = x25519_public_key_hex(client_secret);
+    let ctx = E2EE_CONTEXT_REQUEST;
+    let sealed = seal_v3(&recipient, ctx, model, Some(&client_public_key), plaintext).unwrap();
+    let envelope =
+        serde_json::to_vec(&json!({ "model": model, "sealed_b64": BASE64.encode(sealed) }))
+            .unwrap();
+    let prepared = service
+        .prepare_e2ee_request(
+            E2eeRequestParts {
+                signing_algo: None,
+                client_public_key: Some(&client_public_key),
+                model_public_key: Some(&model_key),
+                version: Some("3"),
+            },
+            &envelope,
+            "/v1/chat/completions",
+        )
+        .unwrap();
+    assert_eq!(prepared.decrypted_body, plaintext);
+
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.params = serde_json::from_slice(&prepared.decrypted_body).unwrap();
+    input.received_body = prepared.decrypted_body;
+    input.e2ee = Some(prepared.context);
+    input.user_model = Some(model.to_string());
+    input.stream = stream;
+    input
+}
+
+/// Unseal one §7.3 response envelope (a buffered body or one SSE data payload).
+fn e2ee_v3_unseal(client_secret: &x25519_dalek::StaticSecret, model: &str, wire: &[u8]) -> Vec<u8> {
+    let envelope: Value = serde_json::from_slice(wire).unwrap();
+    let sealed = BASE64
+        .decode(envelope["sealed_b64"].as_str().unwrap())
+        .unwrap();
+    unseal_v3(client_secret, E2EE_CONTEXT_RESPONSE, model, None, &sealed).unwrap()
+}
+
 async fn response_parts(response: axum::response::Response) -> (u16, axum::http::HeaderMap, Value) {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
@@ -342,6 +462,123 @@ async fn allow_forwards_and_finalizes_receipt() {
         "buffered success must carry a receipt id"
     );
     assert_eq!(body["id"], json!("chat-1"));
+}
+
+#[tokio::test]
+async fn e2ee_v3_buffered_middleware_seals_wire_body_and_receipt_hashes_it() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "openai:gpt-test", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let upstream_body = br#"{"id":"chat-1","object":"chat.completion","choices":[]}"#.to_vec();
+    let service = build_service_with_upstream(200, upstream_body);
+
+    let client_secret = x25519_secret_key_from_bytes(&[0x7b; 32]).unwrap();
+    let plaintext = br#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#;
+    let input = e2ee_v3_input(&service, &client_secret, "gpt-test", plaintext, false);
+
+    let response = mw.handle_completion(&service, input).await;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let wire = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&wire));
+    assert_eq!(headers.get("x-e2ee-applied").unwrap(), "true");
+
+    // The wire body is one sealed §7.3 envelope over the final client body.
+    let client_body: Value =
+        serde_json::from_slice(&e2ee_v3_unseal(&client_secret, "gpt-test", &wire)).unwrap();
+    assert_eq!(client_body["id"], json!("chat-1"));
+
+    // §8.4: request.received hashes the unsealed original bytes;
+    // response.returned hashes the sealed wire bytes.
+    let receipt_id = headers.get("x-receipt-id").unwrap().to_str().unwrap();
+    let receipt = service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt.payload_json().unwrap();
+    let event = |event_type: &str| {
+        payload["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == event_type)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(payload["model"], "gpt-test");
+    assert_eq!(
+        event("request.received")["body_hash"],
+        sha256_hex(plaintext)
+    );
+    assert_eq!(event("response.returned")["body_hash"], sha256_hex(&wire));
+}
+
+#[tokio::test]
+async fn e2ee_v3_streaming_middleware_seals_each_event_and_finalizes_receipt() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "openai:gpt-test", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_mock_upstream(MockUpstream {
+        status: 200,
+        body: Vec::new(),
+        stream_chunks: vec![
+            Bytes::from_static(
+                b"data: {\"id\":\"chat-s1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            ),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ],
+    });
+
+    let client_secret = x25519_secret_key_from_bytes(&[0x7c; 32]).unwrap();
+    let plaintext =
+        br#"{"model":"gpt-test","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let input = e2ee_v3_input(&service, &client_secret, "gpt-test", plaintext, true);
+
+    let response = mw.handle_completion(&service, input).await;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let wire = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&wire));
+    assert_eq!(headers.get("x-e2ee-applied").unwrap(), "true");
+    assert_eq!(headers.get("content-type").unwrap(), "text/event-stream");
+
+    // Each event's data payload is sealed; [DONE] stays plaintext (§7.3).
+    let text = String::from_utf8(wire.to_vec()).unwrap();
+    let events: Vec<&str> = text
+        .split("\n\n")
+        .filter(|event| !event.is_empty())
+        .collect();
+    assert_eq!(events.len(), 2, "{text}");
+    let payload = events[0].strip_prefix("data: ").unwrap();
+    let unsealed: Value = serde_json::from_slice(&e2ee_v3_unseal(
+        &client_secret,
+        "gpt-test",
+        payload.as_bytes(),
+    ))
+    .unwrap();
+    assert_eq!(unsealed["id"], json!("chat-s1"));
+    assert_eq!(events[1], "data: [DONE]");
+
+    // The streaming receipt is finalized over the sealed wire stream (§8.4).
+    let receipt_id = headers.get("x-receipt-id").unwrap().to_str().unwrap();
+    let receipt = service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt.payload_json().unwrap();
+    let returned = payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "response.returned")
+        .unwrap();
+    assert_eq!(returned["body_hash"], sha256_hex(&wire));
 }
 
 #[tokio::test]
@@ -492,11 +729,14 @@ async fn total_forward_failure_reports_upstream_failure() {
     let mut input = chat_input();
     input.upstream_required = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
-    assert_eq!(status, 503);
+    let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 502, "spec §11: upstream_verification_failed is 502");
+    assert_eq!(body["error"]["type"], json!("upstream_verification_failed"));
+    // The refusal is receipt-backed (§8.5).
+    assert!(headers.get("x-receipt-id").is_some());
 
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
-    assert_eq!(report["status"].as_i64(), Some(503));
+    assert_eq!(report["status"].as_i64(), Some(502));
     assert_eq!(report["selectedRouteId"], Value::Null);
 }
 

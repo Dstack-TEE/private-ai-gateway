@@ -5,9 +5,7 @@
 //! upstream backend. The HTTP layer ([`crate::http`]) dispatches
 //! request work to a single `AciService` instance.
 
-pub mod keyset_epoch;
 pub mod metrics;
-pub mod revocation_store;
 pub mod service;
 pub mod session;
 pub mod session_store;

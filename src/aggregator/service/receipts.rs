@@ -1,23 +1,25 @@
 use super::helpers::legacy_signature_text;
 use super::{AciService, LegacySignatureResult, ReceiptOwner, ServiceError};
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
-use crate::aci::receipt::{ReceiptError, EVENT_RESPONSE_RETURNED};
-use crate::aci::types::Receipt;
+use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 use crate::aggregator::session::AttestedSession;
 
 impl AciService {
-    pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<Receipt> {
+    pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<SignedReceipt> {
         self.receipt_store
             .get_by_receipt_id(id, self.clock.now_secs())
     }
 
-    pub fn get_receipt_by_chat_id(&self, id: &str) -> Option<Receipt> {
+    pub fn get_receipt_by_chat_id(&self, id: &str) -> Option<SignedReceipt> {
         self.receipt_store.get_by_chat_id(id, self.clock.now_secs())
     }
 
+    /// §13 legacy `/v1/signature/{chat_id}` wrapper: sign
+    /// `request_hash:response_hash` (bare hex) lifted from the stored receipt
+    /// payload with the legacy signing key.
     pub fn legacy_signature_for_receipt(
         &self,
-        receipt: &Receipt,
+        receipt: &SignedReceipt,
         signing_algo: Option<&str>,
     ) -> Result<LegacySignatureResult, ServiceError> {
         let Some(text) = legacy_signature_text(receipt) else {
@@ -44,12 +46,13 @@ impl AciService {
             .owner_of(receipt_id, self.clock.now_secs())
     }
 
+    /// Resolve a session by its full `sha256:<hex>` id (retention window).
     pub fn get_attested_session(&self, session_id: &str) -> Option<AttestedSession> {
         self.session_store
             .get_session(session_id, self.clock.now_secs())
     }
 
-    /// List attested sessions (TEE channels), optionally filtered by
+    /// List current attested sessions (TEE channels), optionally filtered by
     /// `upstream_name` (the operator's upstream config name). A model→channel
     /// lookup belongs to the caller, since a session is per-channel, not
     /// per-model.
@@ -61,5 +64,11 @@ impl AciService {
     /// E2EE protocol versions this workload has actually wired.
     pub fn supported_e2ee_versions(&self) -> &[String] {
         &self.config.service_capabilities.supported_e2ee_versions
+    }
+
+    /// §13 legacy `X-Signing-Algo` keys, for the legacy report/signature
+    /// surfaces. Never part of the ACI keyset.
+    pub fn legacy_e2ee_keys(&self) -> Vec<crate::aci::types::KeyedPublicKey> {
+        self.keys.legacy_e2ee_keys()
     }
 }

@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 """Regenerate the deterministic values in spec/test-vectors.md.
 
-Every value in the test-vectors doc is reproduced here from first principles,
-so the doc and the reference implementation can be cross-checked against an
-independent construction. Run with no arguments to self-verify the
-naming-independent sections (1-4, 7) against the doc's published constants and
-print the full set of values (including the content-addressed session id and
-receipt signature that change with field-name choices).
+Every value in the test-vectors doc is reproduced here from first principles —
+an implementation independent of the Rust reference — so the doc, the
+reference implementation (`tests/spec_vectors.rs`), and this script can be
+cross-checked against each other. Run with no arguments to verify every
+published constant and print the full set of values with intermediates.
 
-Requires: python3 stdlib + `cryptography` (Ed25519).
+Requires: python3 stdlib + `cryptography` (Ed25519, X25519, HKDF, AES-GCM).
 
-JCS: the vectors are ASCII + integers only, so RFC 8785 canonical JSON is
-exactly `json.dumps(v, sort_keys=True, separators=(",", ":"))`.
+The artifact bytes below are the exact bytes the reference implementation
+serves for this fixture content. Consumers hash and verify these bytes as-is
+(spec §3); JCS is just a producer-side way to emit deterministic output. JSON
+here is compact (`separators=(",", ":")`), insertion-ordered, ASCII, matching
+the reference implementation's wire order.
 """
 
 import hashlib
 import json
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+import base64
 
 
-def jcs(value) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+def dump(value) -> bytes:
+    """Compact, insertion-ordered JSON bytes (the reference wire form)."""
+    return json.dumps(value, separators=(",", ":")).encode("ascii")
 
 
 def sha256_hex(data: bytes) -> str:
@@ -33,6 +45,10 @@ def sha256_prefixed(data: bytes) -> str:
     return "sha256:" + sha256_hex(data)
 
 
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
 def ed25519_from_seed(seed: bytes):
     key = Ed25519PrivateKey.from_private_bytes(seed)
     pub = key.public_key().public_bytes(
@@ -41,30 +57,32 @@ def ed25519_from_seed(seed: bytes):
     return key, pub.hex()
 
 
-# ---- Fixed keys (spec §"Fixed keys") -------------------------------------
-IDENTITY_KEY, IDENTITY_PUB = ed25519_from_seed(bytes([0x01]) * 32)
-RECEIPT_KEY, RECEIPT_PUB = ed25519_from_seed(bytes([0x02]) * 32)
+def x25519_from_seed(seed: bytes):
+    key = X25519PrivateKey.from_private_bytes(seed)
+    pub = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return key, pub.hex()
 
-# Placeholder material (not valid curve points / SPKIs; digests don't need it).
-E2EE_PUB = "ab" * 32
+
+# ---- Fixed keys ------------------------------------------------------------
+RECEIPT_KEY, RECEIPT_PUB = ed25519_from_seed(bytes([0x02]) * 32)
+E2EE_KEY, E2EE_PUB = x25519_from_seed(bytes([0x03]) * 32)
+CLIENT_KEY, CLIENT_PUB = x25519_from_seed(bytes([0x04]) * 32)
+EPH_REQUEST_KEY, EPH_REQUEST_PUB = x25519_from_seed(bytes([0x05]) * 32)
+EPH_RESPONSE_KEY, EPH_RESPONSE_PUB = x25519_from_seed(bytes([0x06]) * 32)
+EPH_SSE_KEY, EPH_SSE_PUB = x25519_from_seed(bytes([0x07]) * 32)
+
 TLS_SPKI = "c0" * 32
 CHANNEL_SPKI = "d1" * 32
 
 ALGO_ED25519 = "ed25519"
 E2EE_ALGO = "x25519-aes-256-gcm-hkdf-sha256"
 
-
-# ---- §1 workload_id -------------------------------------------------------
-identity_pubkey_obj = {"algo": ALGO_ED25519, "public_key": IDENTITY_PUB}
-workload_id = sha256_prefixed(jcs(identity_pubkey_obj))
-
-# ---- §2 workload keyset digest -------------------------------------------
-keyset = {
-    "workload_identity": {
-        "public_key": {"algo": ALGO_ED25519, "public_key": IDENTITY_PUB},
-        "subject": None,
-    },
-    "keyset_epoch": {"version": 1, "not_after": 1800000000},
+# ---- §1 workload keyset (spec §4.1) ----------------------------------------
+KEYSET = {
+    "subject": "dstack-app://example-app",
+    "not_after": 1800000000,
     "receipt_signing_keys": [
         {"key_id": "receipt-1", "algo": ALGO_ED25519, "public_key": RECEIPT_PUB}
     ],
@@ -73,233 +91,251 @@ keyset = {
     ],
     "tls_public_keys": [{"spki_sha256": TLS_SPKI, "domain": "api.example.com"}],
 }
-workload_keyset_digest = sha256_prefixed(jcs(keyset))
-
-# ---- §3 attestation report_data ------------------------------------------
-def report_data(nonce):
-    statement = {
-        "purpose": "aci.report_data.v1",
-        "workload_id": workload_id,
-        "workload_keyset_digest": workload_keyset_digest,
-        "nonce": nonce,
-    }
-    return jcs(statement), sha256_hex(jcs(statement))
+KEYSET_BYTES = dump(KEYSET)
+KEYSET_DIGEST = sha256_prefixed(KEYSET_BYTES)
+KEYSET_B64 = b64(KEYSET_BYTES)
 
 
-report_data_bytes, report_data_nonce = report_data("test-nonce")
-_, report_data_null = report_data(None)
+# ---- §2 attestation statement and report_data (spec §4.2) -------------------
+def statement(nonce) -> bytes:
+    nonce_member = "null" if nonce is None else f'"{nonce}"'
+    return (
+        '{"keyset_digest":"%s","nonce":%s,"purpose":"aci.report_data.v1"}'
+        % (KEYSET_DIGEST, nonce_member)
+    ).encode("ascii")
 
-# ---- §4 keyset endorsement and revocation --------------------------------
-endorsement_payload = jcs(
-    {
-        "purpose": "aci.keyset.endorsement.v1",
-        "workload_keyset_digest": workload_keyset_digest,
-    }
-)
-endorsement_sig = IDENTITY_KEY.sign(endorsement_payload).hex()
 
-revocation_payload = jcs(
-    {
-        "purpose": "aci.keyset.revocation.v1",
-        "workload_keyset_digest": workload_keyset_digest,
-    }
-)
-revocation_sig = IDENTITY_KEY.sign(revocation_payload).hex()
+STATEMENT_NONCE = statement("test-nonce")
+STATEMENT_NULL = statement(None)
+REPORT_DATA_NONCE = sha256_hex(STATEMENT_NONCE)
+REPORT_DATA_NULL = sha256_hex(STATEMENT_NULL)
+REPORT_DATA_SLOT = REPORT_DATA_NONCE + "00" * 32
 
-# ---- §5 attested session --------------------------------------------------
+# ---- §3 attested session (spec §9) ------------------------------------------
 EVIDENCE_BYTES = b"example-evidence"
-evidence_digest = sha256_prefixed(EVIDENCE_BYTES)
+EVIDENCE_DIGEST = sha256_prefixed(EVIDENCE_BYTES)
+EVIDENCE_DATA_URI = "data:text/plain;base64," + b64(EVIDENCE_BYTES)
 
-CLAIMS = {
-    "tee_attested": {
-        "status": "asserted",
-        "source": "hardware_proven",
-        "reason": "example quote verified",
+SESSION = {
+    "api_version": "aci/1",
+    "upstream_name": "demo-upstream",
+    "endpoint": "https://upstream.example.com",
+    "verifier_id": "example/1",
+    "established_at": 1750000000,
+    "expires_at": 1750003600,
+    "channel_binding": [
+        {
+            "type": "tls_spki_sha256",
+            "origin": "https://upstream.example.com",
+            "spki_sha256": CHANNEL_SPKI,
+        }
+    ],
+    "claims": {
+        "tee_attested": {
+            "status": "asserted",
+            "source": "hardware_proven",
+            "reason": "example quote verified",
+        },
+        "gpu_attested": {"status": "unknown"},
+        "tcb_up_to_date": {"status": "unknown"},
+        "os_known_good": {"status": "unknown"},
+        "serving_software_known_good": {"status": "unknown"},
+        "model_weights_provenance": {"status": "unknown"},
+        # `extra` keys in ascending order (the reference stores them sorted).
+        "extra": {"gpu_arch": "HOPPER", "tcb_status": "UpToDate"},
     },
-    "gpu_attested": {"status": "unknown"},
-    "tcb_up_to_date": {"status": "unknown"},
-    "os_known_good": {"status": "unknown"},
-    "serving_software_known_good": {"status": "unknown"},
-    "model_weights_provenance": {"status": "unknown"},
+    "evidence": {"digest": EVIDENCE_DIGEST, "data": EVIDENCE_DATA_URI},
 }
-CHANNEL_BINDING = [
-    {
-        "type": "tls_spki_sha256",
-        "origin": "https://upstream.example.com",
-        "spki_sha256": CHANNEL_SPKI,
-    }
-]
+SESSION_BYTES = dump(SESSION)
+SESSION_ID = sha256_prefixed(SESSION_BYTES)
 
-
-def session_material(upstream_label_key):
-    """The content-addressing material (§9.2). `upstream_label_key` selects the
-    field name for the operator's upstream label ("upstream_name" now,
-    "provider" before the pre-launch rename)."""
-    return {
-        upstream_label_key: "demo-upstream",
-        "endpoint": "https://upstream.example.com",
-        "verifier_id": "example/1",
-        "identity": None,
-        "channel_binding": CHANNEL_BINDING,
-        "claims": CLAIMS,
-        "evidence_digest": evidence_digest,
-    }
-
-
-def session_id(upstream_label_key):
-    return "as_" + sha256_hex(jcs(session_material(upstream_label_key)))
-
-
-SESSION_MATERIAL = jcs(session_material("upstream_name"))
-SESSION_ID = session_id("upstream_name")
-
-# ---- §6 receipt signing ---------------------------------------------------
+# ---- §4 receipt (spec §8) ----------------------------------------------------
 REQUEST_BODY = b'{"messages":[{"content":"hi","role":"user"}],"model":"demo-model"}'
 RESPONSE_BODY = b'{"choices":[],"id":"chatcmpl-123"}'
-request_body_hash = sha256_prefixed(REQUEST_BODY)
-response_body_hash = sha256_prefixed(RESPONSE_BODY)
+REQUEST_BODY_HASH = sha256_prefixed(REQUEST_BODY)
+RESPONSE_BODY_HASH = sha256_prefixed(RESPONSE_BODY)
+
+RECEIPT_PAYLOAD = {
+    "api_version": "aci/1",
+    "receipt_id": "rcpt-0001",
+    "chat_id": "chatcmpl-123",
+    "model": "demo-model",
+    "workload_keyset_digest": KEYSET_DIGEST,
+    "endpoint": "/v1/chat/completions",
+    "method": "POST",
+    "served_at": 1750000000,
+    "event_log": [
+        {"type": "request.received", "body_hash": REQUEST_BODY_HASH},
+        {"type": "request.forwarded", "body_hash": REQUEST_BODY_HASH},
+        {
+            "type": "upstream.verified",
+            "result": "verified",
+            "required": True,
+            "model_id": "demo-model",
+            "session_id": SESSION_ID,
+        },
+        {"type": "response.returned", "body_hash": RESPONSE_BODY_HASH},
+    ],
+}
+PAYLOAD_BYTES = dump(RECEIPT_PAYLOAD)
+PAYLOAD_SHA256 = sha256_hex(PAYLOAD_BYTES)
+PAYLOAD_B64 = b64(PAYLOAD_BYTES)
+RECEIPT_SIG = RECEIPT_KEY.sign(PAYLOAD_BYTES).hex()
+
+ENVELOPE = {
+    "payload_b64": PAYLOAD_B64,
+    "key_id": "receipt-1",
+    "algo": ALGO_ED25519,
+    "signature": RECEIPT_SIG,
+}
+
+# ---- §5 E2EE v3 (spec §7.1) ---------------------------------------------------
+CONTEXT_REQUEST = "aci.e2ee.v3.request"
+CONTEXT_RESPONSE = "aci.e2ee.v3.response"
+ENVELOPE_MODEL = "demo-model"
 
 
-def upstream_verified_event(provider_type_key, sid):
-    """The `upstream.verified` event. `provider_type_key` selects the field name
-    for the verifier adapter type ("provider_type" now, "provider" before the
-    rename); the operator label is always `upstream_name`."""
-    return {
-        "seq": 2,
-        "type": "upstream.verified",
-        "upstream_name": "demo-upstream",
-        provider_type_key: None,
-        "model_id": "demo-model",
-        "url_origin": "https://upstream.example.com",
-        "verifier_id": "example/1",
-        "result": "verified",
-        "required": True,
-        "reason": None,
-        "channel_bindings": CHANNEL_BINDING,
-        "provider_claims": None,
-        "session_id": sid,
-        "claims": CLAIMS,
-    }
+def aad(context: str, model: str, client_public_key_hex: str | None = None) -> bytes:
+    """§7.1 AAD; the request appends the 0x00-delimited client key hex (§7.2)."""
+    tail = b"" if client_public_key_hex is None else b"\x00" + client_public_key_hex.encode()
+    return context.encode() + b"\x00" + model.encode() + tail
 
 
-def receipt(provider_type_key, sid):
-    return {
-        "api_version": "aci/1",
-        "receipt_id": "rcpt-0001",
-        "chat_id": "chatcmpl-123",
-        "model": "demo-model",
-        "workload_id": workload_id,
-        "workload_keyset_digest": workload_keyset_digest,
-        "endpoint": "/v1/chat/completions",
-        "method": "POST",
-        "served_at": 1750000000,
-        "event_log": [
-            {"seq": 0, "type": "request.received", "body_hash": request_body_hash},
-            {"seq": 1, "type": "request.forwarded", "body_hash": request_body_hash},
-            upstream_verified_event(provider_type_key, sid),
-            {
-                "seq": 3,
-                "type": "response.returned",
-                "cleartext_hash": response_body_hash,
-                "wire_hash": response_body_hash,
-            },
-        ],
-        "signature": {"algo": ALGO_ED25519, "key_id": "receipt-1"},
-    }
+def seal(ephemeral: X25519PrivateKey, recipient_pub_hex: str, context: str,
+         model: str, gcm_nonce: bytes, plaintext: bytes,
+         client_public_key_hex: str | None = None):
+    """The §7.1 sealing with pinned ephemeral key and GCM nonce. Returns
+    (shared_secret, aes_key, sealed_bytes)."""
+    recipient = X25519PublicKey.from_public_bytes(bytes.fromhex(recipient_pub_hex))
+    shared = ephemeral.exchange(recipient)
+    key = HKDF(algorithm=SHA256(), length=32, salt=None,
+               info=context.encode()).derive(shared)
+    ct = AESGCM(key).encrypt(gcm_nonce, plaintext,
+                             aad(context, model, client_public_key_hex))
+    eph_pub = ephemeral.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return shared, key, eph_pub + gcm_nonce + ct
 
 
-RECEIPT_CANONICAL = jcs(receipt("provider_type", SESSION_ID))
-RECEIPT_SHA256 = sha256_hex(RECEIPT_CANONICAL)
-RECEIPT_SIG = RECEIPT_KEY.sign(RECEIPT_CANONICAL).hex()
+REQUEST_GCM_NONCE = bytes.fromhex("000102030405060708090a0b")
+RESPONSE_GCM_NONCE = bytes.fromhex("101112131415161718191a1b")
+SSE_GCM_NONCE = bytes.fromhex("202122232425262728292a2b")
 
-# ---- §7 E2EE AAD ----------------------------------------------------------
-request_aad = jcs(
-    {
-        "purpose": "aci.e2ee.request.v2",
-        "algo": E2EE_ALGO,
-        "field": "messages.0.content",
-        "model": "demo-model",
-        "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "ts": 1750000000,
-    }
+REQUEST_SHARED, REQUEST_AES_KEY, REQUEST_SEALED = seal(
+    EPH_REQUEST_KEY, E2EE_PUB, CONTEXT_REQUEST, ENVELOPE_MODEL,
+    REQUEST_GCM_NONCE, REQUEST_BODY, CLIENT_PUB,
 )
-response_aad = jcs(
-    {
-        "purpose": "aci.e2ee.response.v2",
-        "algo": E2EE_ALGO,
-        "field": "choices.0.message.content",
-        "id": "chatcmpl-123",
-        "model": "demo-model",
-        "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "ts": 1750000000,
-    }
+REQUEST_ENVELOPE = {"model": ENVELOPE_MODEL, "sealed_b64": b64(REQUEST_SEALED)}
+
+RESPONSE_SHARED, RESPONSE_AES_KEY, RESPONSE_SEALED = seal(
+    EPH_RESPONSE_KEY, CLIENT_PUB, CONTEXT_RESPONSE, ENVELOPE_MODEL,
+    RESPONSE_GCM_NONCE, RESPONSE_BODY,
 )
+RESPONSE_ENVELOPE = {"sealed_b64": b64(RESPONSE_SEALED)}
 
+SSE_EVENT_BODY = (
+    b'{"id":"chatcmpl-123","object":"chat.completion.chunk",'
+    b'"choices":[{"index":0,"delta":{"content":"hi"}}]}'
+)
+SSE_SHARED, SSE_AES_KEY, SSE_SEALED = seal(
+    EPH_SSE_KEY, CLIENT_PUB, CONTEXT_RESPONSE, ENVELOPE_MODEL,
+    SSE_GCM_NONCE, SSE_EVENT_BODY,
+)
+SSE_WIRE = b"data: " + dump({"sealed_b64": b64(SSE_SEALED)}) + b"\n\ndata: [DONE]\n\n"
 
-def _check(label, got, want):
-    status = "ok" if got == want else "MISMATCH"
-    if got != want:
-        print(f"[{status}] {label}\n    got:  {got}\n    want: {want}")
-    return got == want
+# ---- Published constants (must match spec/test-vectors.md) -------------------
+PINNED = {
+    "receipt-1 public key": (RECEIPT_PUB,
+        "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
+    "e2ee-1 public key": (E2EE_PUB,
+        "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22"),
+    "client public key": (CLIENT_PUB,
+        "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b"),
+    "§1 workload_keyset_digest": (KEYSET_DIGEST,
+        "sha256:1319a457f6abf587cd9c823bce5f467cedbde84c1b1ed9fef53c9cf0a3c2f1f4"),
+    "§2 report_data (test-nonce)": (REPORT_DATA_NONCE,
+        "8b899aae55437dec4d1d0d435920e112aca2a74d17595eeb601a7764d901ea07"),
+    "§2 report_data (null)": (REPORT_DATA_NULL,
+        "a98b0e34ef2ce05cf7d3fd64d86889deaf6836b8aa4e5d8baa9dd437fea07987"),
+    "§3 session_id": (SESSION_ID,
+        "sha256:a595d269728e15fe8236af46586fe84f220696c0d7d4e647eed36922b7b20cb6"),
+    "§4 sha256(payload)": (PAYLOAD_SHA256,
+        "5a04d7ce350a09a9faa4f32e5a21790cd1080a46239039538bac98c798dc2dab"),
+    "§4 signature": (RECEIPT_SIG,
+        "b0b2c830be73d6b6ad9a90b75b9c347a930e6a918e6e4f70ad1c3ce0d3dbfe67"
+        "89504be5f7d317d24ba9eb84cd8bf634d58e898de89baa7fc939abd12e1b7400"),
+    "§5 request sealed sha256": (sha256_hex(REQUEST_SEALED),
+        "f659d87733296175e98b40662bacc965179bfa43d036b73d9790ea643c817afa"),
+    "§5 response sealed sha256": (sha256_hex(RESPONSE_SEALED),
+        "24fea6abf43c6db9675a6de63e2f3c9412a03afc7114a7c184ebe418347fbc6a"),
+    "§5 sse sealed sha256": (sha256_hex(SSE_SEALED),
+        "49947db6b84eef6b1ee1ceb1d63623f991de81c73dc9a9b26f7dc4224a9a1ecc"),
+}
 
 
 def main():
-    # Naming-independent published constants (unchanged by the pre-launch
-    # rename): reproducing these proves the crypto/JCS constructions are right.
     ok = True
-    ok &= _check("§ identity public key", IDENTITY_PUB,
-                 "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c")
-    ok &= _check("§ receipt public key", RECEIPT_PUB,
-                 "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394")
-    ok &= _check("§1 workload_id", workload_id,
-                 "sha256:57c2c8fa98bcf11441f1eff9ef087db67a5560a026082e96903e15365677b8c0")
-    ok &= _check("§2 workload_keyset_digest", workload_keyset_digest,
-                 "sha256:f2fba7e1b1451e0c0231df624f293407692ef939d3e0e55bca723131bea3f1ff")
-    ok &= _check("§3 report_data (nonce)", report_data_nonce,
-                 "0b8cc28d7e989a88b1e969af20aa2b224afdc2c99f24c97c31a4af330c964ecf")
-    ok &= _check("§3 report_data (null)", report_data_null,
-                 "e1818eadad3c28375c625e2fa2d2ffd983d2760c84ce17f8527ddcac884c21b9")
-    ok &= _check("§4 endorsement sig", endorsement_sig,
-                 "64e0a4f5d7af28dfdacc102d14c13470b4ddbd90708e190fc0e787f07b36f20e"
-                 "da0ef1f42ea96b8a7f290eb64a918574dc914ce06b6ea023d2153275f06fd201")
-    ok &= _check("§4 revocation sig", revocation_sig,
-                 "5f30e02aa53bb628c7f6410636e9f5e33402d2b0b416a6ed278ea3e6e40b48a9"
-                 "af6ba6e5e55abb89a7ad4627eca444a73cad9d25e22bf239c9c6b362d48ed50f")
-    ok &= _check("§5 evidence digest", evidence_digest,
-                 "sha256:80d70e44d0ae1e829fd5f37c3ee4a60dfbea8d3aa18407ea3f34cf7ec91da34d")
-    ok &= _check("§7 request AAD", request_aad.decode(),
-                 '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content",'
-                 '"model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
-                 '"purpose":"aci.e2ee.request.v2","ts":1750000000}')
-    ok &= _check("§7 response AAD", response_aad.decode(),
-                 '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content",'
-                 '"id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
-                 '"purpose":"aci.e2ee.response.v2","ts":1750000000}')
-
-    # Cross-check that the ONLY thing the rename changes is the field name: the
-    # pre-rename ("provider") material/receipt must still reproduce the prior
-    # published id/hash/signature.
-    ok &= _check("§5 session_id (pre-rename provider)", session_id("provider"),
-                 "as_d850af230a623da93279f86922f2d15aeb0a05c3c448feac9198c5b2b0a3b9c3")
-    pre_canonical = jcs(receipt("provider", session_id("provider")))
-    ok &= _check("§6 receipt sha256 (pre-rename provider)", sha256_hex(pre_canonical),
-                 "167f07a49364efbc74649e7b05555248f46f944262a96934a4b4e5f359f95cfa")
-    ok &= _check("§6 receipt sig (pre-rename provider)", RECEIPT_KEY.sign(pre_canonical).hex(),
-                 "84568f9eed0981d275407e3ea9b03d7f6c9a428923ac99c45b9ef94aa8bada6a"
-                 "39b5a63410fb48eb8057a6d4f8d2fb5a2ba28bc8f94d3c707e7fb7f360f39d00")
-
-    print("SELF-CHECK:", "all published constants reproduced" if ok else "FAILURES ABOVE")
+    for label, (got, want) in PINNED.items():
+        if got != want:
+            print(f"[MISMATCH] {label}\n    got:  {got}\n    want: {want}")
+            ok = False
+    print("SELF-CHECK:", "all published constants reproduced" if ok
+          else "FAILURES ABOVE")
     print()
-    print("== Regenerated values (post-rename: upstream_name / provider_type) ==")
-    print("§1 workload_id =", workload_id)
-    print("§2 workload_keyset_digest =", workload_keyset_digest)
-    print("§5 session material =", SESSION_MATERIAL.decode())
-    print("§5 session_id =", SESSION_ID)
-    print("§6 request body_hash =", request_body_hash)
-    print("§6 response body_hash =", response_body_hash)
-    print("§6 receipt canonical =", RECEIPT_CANONICAL.decode())
-    print("§6 sha256(canonical) =", RECEIPT_SHA256)
-    print("§6 signature.value =", RECEIPT_SIG)
+    print("== Fixed keys ==")
+    print("receipt-1 (ed25519, seed 02*32) pub =", RECEIPT_PUB)
+    print("e2ee-1 (x25519, seed 03*32) pub =", E2EE_PUB)
+    print("client (x25519, seed 04*32) pub =", CLIENT_PUB)
+    print("request ephemeral (seed 05*32) pub =", EPH_REQUEST_PUB)
+    print("response ephemeral (seed 06*32) pub =", EPH_RESPONSE_PUB)
+    print("sse ephemeral (seed 07*32) pub =", EPH_SSE_PUB)
+    print()
+    print("== §1 workload keyset ==")
+    print("keyset bytes =", KEYSET_BYTES.decode())
+    print("workload_keyset_b64 =", KEYSET_B64)
+    print("workload_keyset_digest =", KEYSET_DIGEST)
+    print()
+    print("== §2 attestation statement / report_data ==")
+    print("statement (test-nonce) =", STATEMENT_NONCE.decode())
+    print("report_data (test-nonce) =", REPORT_DATA_NONCE)
+    print("statement (null) =", STATEMENT_NULL.decode())
+    print("report_data (null) =", REPORT_DATA_NULL)
+    print("report-data slot (64 bytes) =", REPORT_DATA_SLOT)
+    print()
+    print("== §3 attested session ==")
+    print("evidence digest =", EVIDENCE_DIGEST)
+    print("evidence data URI =", EVIDENCE_DATA_URI)
+    print("session bytes =", SESSION_BYTES.decode())
+    print("session_id =", SESSION_ID)
+    print()
+    print("== §4 receipt ==")
+    print("request body_hash =", REQUEST_BODY_HASH)
+    print("response body_hash =", RESPONSE_BODY_HASH)
+    print("payload bytes =", PAYLOAD_BYTES.decode())
+    print("sha256(payload) =", PAYLOAD_SHA256)
+    print("payload_b64 =", PAYLOAD_B64)
+    print("signature =", RECEIPT_SIG)
+    print("envelope =", dump(ENVELOPE).decode())
+    print()
+    print("== §5 E2EE v3 ==")
+    print("request AAD hex =", aad(CONTEXT_REQUEST, ENVELOPE_MODEL, CLIENT_PUB).hex())
+    print("request shared_secret =", REQUEST_SHARED.hex())
+    print("request AES key =", REQUEST_AES_KEY.hex())
+    print("request sealed hex =", REQUEST_SEALED.hex())
+    print("request envelope =", dump(REQUEST_ENVELOPE).decode())
+    print()
+    print("response AAD hex =", aad(CONTEXT_RESPONSE, ENVELOPE_MODEL).hex())
+    print("response shared_secret =", RESPONSE_SHARED.hex())
+    print("response AES key =", RESPONSE_AES_KEY.hex())
+    print("response sealed hex =", RESPONSE_SEALED.hex())
+    print("response body =", dump(RESPONSE_ENVELOPE).decode())
+    print()
+    print("sse event body =", SSE_EVENT_BODY.decode())
+    print("sse shared_secret =", SSE_SHARED.hex())
+    print("sse AES key =", SSE_AES_KEY.hex())
+    print("sse sealed hex =", SSE_SEALED.hex())
+    print("sse wire bytes =", SSE_WIRE.decode(), end="")
     return 0 if ok else 1
 
 

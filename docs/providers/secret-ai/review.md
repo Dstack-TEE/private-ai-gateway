@@ -138,7 +138,7 @@ P0 TODOs before strict-release inclusion:
 P1 TODOs:
 
 - Record the bound TLS cert digest, `Measurement`, `Family ID`, and
-  `artifacts_ver` in receipt provider claims.
+  `artifacts_ver` in the session's `claims.extra` facts.
 - Add a negative test that swaps `docker-compose.yaml` content (or its served
   bytes) and confirms the adapter refuses to issue a lease because the
   cmdline-embedded compose hash no longer matches.

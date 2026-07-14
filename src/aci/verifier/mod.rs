@@ -40,8 +40,10 @@ mod simple;
 mod tests;
 
 pub use aci_service::{
-    AciServiceUpstreamVerifier, AciServiceVerifierConfigError, AciServiceVerifierPolicy,
+    dcap_report_data, AciServiceUpstreamVerifier, AciServiceVerifierConfigError,
+    AciServiceVerifierPolicy,
 };
+pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,

@@ -94,7 +94,9 @@ fn envelope(surface: Surface, error_type: &str, message: &str, request_id: Optio
             }
             value
         }
-        Surface::Openai => json!({ "error": { "message": message, "type": error_type } }),
+        Surface::Openai => json!({
+            "error": { "message": message, "type": error_type, "code": null, "param": null },
+        }),
     }
 }
 
@@ -428,7 +430,14 @@ mod tests {
         assert_eq!(status, 400);
         assert_eq!(
             body,
-            json!({ "error": { "message": "bad", "type": "invalid_request_error" } })
+            json!({
+                "error": {
+                    "message": "bad",
+                    "type": "invalid_request_error",
+                    "code": null,
+                    "param": null,
+                },
+            })
         );
     }
 

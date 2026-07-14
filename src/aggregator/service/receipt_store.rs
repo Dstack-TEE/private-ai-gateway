@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::RwLock;
 
 use super::ReceiptOwner;
-use crate::aci::types::Receipt;
+use crate::aci::receipt::SignedReceipt;
 
 /// stores request bodies — only the receipt (which holds hashes, not content).
 pub trait ReceiptStore: Send + Sync {
@@ -12,9 +12,9 @@ pub trait ReceiptStore: Send + Sync {
     /// `owner` is the requester's hashed bearer credential, or `None` for
     /// anonymous calls. The store MUST keep the owner alongside the receipt so
     /// lookups can authenticate.
-    fn put(&self, receipt: Receipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64);
-    fn get_by_receipt_id(&self, receipt_id: &str, now: u64) -> Option<Receipt>;
-    fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<Receipt>;
+    fn put(&self, receipt: SignedReceipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64);
+    fn get_by_receipt_id(&self, receipt_id: &str, now: u64) -> Option<SignedReceipt>;
+    fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<SignedReceipt>;
     /// Return the owner recorded at `put` time, if any.
     fn owner_of(&self, receipt_id: &str, now: u64) -> Option<ReceiptOwner>;
 }
@@ -40,13 +40,13 @@ struct InMemoryReceiptStoreInner {
 }
 
 struct StoredReceipt {
-    receipt: Receipt,
+    receipt: SignedReceipt,
     owner: Option<ReceiptOwner>,
     expires_at: u64,
 }
 
 impl InMemoryReceiptStoreInner {
-    fn insert(&mut self, receipt: Receipt, owner: Option<ReceiptOwner>, expires_at: u64) {
+    fn insert(&mut self, receipt: SignedReceipt, owner: Option<ReceiptOwner>, expires_at: u64) {
         let receipt_id = receipt.receipt_id.clone();
         // Receipt ids are unique in practice, but drop any prior entry first so a
         // collision can never leave a dangling expiry hint.
@@ -119,13 +119,13 @@ impl InMemoryReceiptStoreInner {
 }
 
 impl ReceiptStore for InMemoryReceiptStore {
-    fn put(&self, receipt: Receipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64) {
+    fn put(&self, receipt: SignedReceipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64) {
         let mut guard = self.inner.write().expect("receipt store poisoned");
         guard.evict_expired(now);
         guard.insert(receipt, owner, expires_at);
     }
 
-    fn get_by_receipt_id(&self, receipt_id: &str, now: u64) -> Option<Receipt> {
+    fn get_by_receipt_id(&self, receipt_id: &str, now: u64) -> Option<SignedReceipt> {
         let mut guard = self.inner.write().expect("receipt store poisoned");
         let expires_at = guard.by_receipt.get(receipt_id)?.expires_at;
         if now >= expires_at {
@@ -138,7 +138,7 @@ impl ReceiptStore for InMemoryReceiptStore {
             .map(|entry| entry.receipt.clone())
     }
 
-    fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<Receipt> {
+    fn get_by_chat_id(&self, chat_id: &str, now: u64) -> Option<SignedReceipt> {
         let mut guard = self.inner.write().expect("receipt store poisoned");
         let receipt_id = guard.by_chat.get(chat_id)?.clone();
         let expires_at = guard.by_receipt.get(&receipt_id)?.expires_at;
@@ -169,25 +169,15 @@ impl ReceiptStore for InMemoryReceiptStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aci::types::{Receipt, ReceiptSignature};
 
-    fn receipt(id: &str, chat_id: &str) -> Receipt {
-        Receipt {
-            api_version: "aci/1".to_string(),
+    fn receipt(id: &str, chat_id: &str) -> SignedReceipt {
+        SignedReceipt {
             receipt_id: id.to_string(),
             chat_id: Some(chat_id.to_string()),
-            model: None,
-            workload_id: "wl".to_string(),
-            workload_keyset_digest: "sha256:0".to_string(),
-            endpoint: "/v1/chat/completions".to_string(),
-            method: "POST".to_string(),
-            served_at: 0,
-            event_log: vec![],
-            signature: ReceiptSignature {
-                algo: "ed25519".to_string(),
-                key_id: "k".to_string(),
-                value_hex: "00".to_string(),
-            },
+            payload: b"{}".to_vec(),
+            key_id: "k".to_string(),
+            algo: "ed25519".to_string(),
+            signature_hex: "00".to_string(),
         }
     }
 

@@ -8,20 +8,17 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::Router;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
-use k256::EncodedPoint;
-use private_ai_gateway::aci::canonical::sha256_hex;
+use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::identity;
-use private_ai_gateway::aci::keys::{
-    verify_keyset_endorsement, verify_receipt_signature, KeyProvider, Quoter, ALGO_ECDSA_SECP256K1,
-    ALGO_ED25519,
-};
+use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider, Quoter, ALGO_ED25519};
 use private_ai_gateway::aci::receipt::{
-    canonical_bytes_for_signing, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
+    SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
 };
-use private_ai_gateway::aci::types::{KeysetEpoch, ServiceCapabilities, SourceProvenance, TlsSpki};
+use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, PreverifiedUpstreamVerifier,
@@ -34,6 +31,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::build_router;
 use serde::Deserialize;
+use serde_json::Value;
 use sha3::{Digest as Sha3Digest, Keccak256};
 
 const CHAT_REQUEST: &[u8] =
@@ -83,18 +81,24 @@ impl UpstreamBackend for LiveStubUpstream {
             served_instance_id: None,
         })
     }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &private_ai_gateway::aci::receipt::UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
 }
 
-fn event<'a>(
-    receipt: &'a private_ai_gateway::aci::types::Receipt,
-    event_type: &str,
-) -> &'a serde_json::Value {
-    &receipt
-        .event_log
-        .iter()
-        .find(|event| event.event_type == event_type)
+fn event(receipt: &SignedReceipt, event_type: &str) -> Value {
+    receipt.payload_json().unwrap()["event_log"]
+        .as_array()
         .unwrap()
-        .fields
+        .iter()
+        .find(|event| event["type"] == event_type)
+        .unwrap_or_else(|| panic!("receipt must carry {event_type}"))
+        .clone()
 }
 
 #[derive(Deserialize)]
@@ -114,14 +118,6 @@ fn app_id_from_event_log(event_log: &str) -> Vec<u8> {
     hex::decode(&app_id.event_payload).unwrap()
 }
 
-fn compressed_k256_public_key_hex(public_key_hex: &str) -> String {
-    let public_key =
-        hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex)).unwrap();
-    let point = EncodedPoint::from_bytes(public_key).unwrap();
-    let key = K256VerifyingKey::from_encoded_point(&point).unwrap();
-    hex::encode(key.to_sec1_bytes())
-}
-
 fn recover_k256_public_key(message: &[u8], signature_hex: &str) -> K256VerifyingKey {
     let signature = hex::decode(signature_hex).unwrap();
     assert_eq!(signature.len(), 65);
@@ -135,16 +131,19 @@ fn recover_k256_public_key(message: &[u8], signature_hex: &str) -> K256Verifying
     K256VerifyingKey::recover_from_digest(digest, &sig, recid).unwrap()
 }
 
+/// Recover the KMS root from the receipt-key custody chain: the chain covers
+/// `"{purpose}:{kms_public_key}"` (the k256 counterpart of the released
+/// scalar), then `dstack-kms-issued:{app_id}{app_public_key}`.
 fn accepted_kms_root_from_provider(provider: &DstackAciProvider, app_id: &[u8]) -> String {
     let evidence = provider.key_custody_evidence();
     let keys = evidence["keys"].as_array().unwrap();
-    let identity = keys.iter().find(|key| key["role"] == "identity").unwrap();
-    let purpose = identity["purpose"].as_str().unwrap();
-    let public_key = identity["public_key"].as_str().unwrap();
-    let signature_chain = identity["signature_chain"].as_array().unwrap();
+    let receipt = keys.iter().find(|key| key["role"] == "receipt").unwrap();
+    let purpose = receipt["purpose"].as_str().unwrap();
+    let kms_public_key = receipt["kms_public_key"].as_str().unwrap();
+    let signature_chain = receipt["signature_chain"].as_array().unwrap();
     assert_eq!(signature_chain.len(), 2);
 
-    let purpose_message = format!("{purpose}:{}", compressed_k256_public_key_hex(public_key));
+    let purpose_message = format!("{purpose}:{kms_public_key}");
     let app_public_key = recover_k256_public_key(
         purpose_message.as_bytes(),
         signature_chain[0].as_str().unwrap(),
@@ -178,47 +177,41 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
         .await
         .unwrap();
 
-    let identity = provider.identity_public_key();
-    assert_eq!(identity.algo, ALGO_ECDSA_SECP256K1);
-    assert_eq!(identity.public_key_hex.len(), 130);
-
+    // One attested receipt key (Ed25519) and one attested E2EE suite key.
     let receipt_keys = provider.receipt_keys();
-    assert_eq!(receipt_keys.len(), 2);
-    // Ed25519 is the default (first) receipt signer; secp256k1 stays listed.
+    assert_eq!(receipt_keys.len(), 1);
     assert_eq!(receipt_keys[0].algo, ALGO_ED25519);
     assert_eq!(receipt_keys[0].public_key_hex.len(), 64);
-    assert_eq!(receipt_keys[1].algo, ALGO_ECDSA_SECP256K1);
-    assert_eq!(receipt_keys[1].public_key_hex.len(), 130);
 
     let e2ee_keys = provider.e2ee_keys();
-    assert_eq!(e2ee_keys.len(), 4);
+    assert_eq!(e2ee_keys.len(), 1);
     assert_eq!(
         e2ee_keys[0].algo,
-        private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM
-    );
-    assert_eq!(e2ee_keys[0].public_key_hex.len(), 130);
-    assert_eq!(
-        e2ee_keys[1].algo,
         private_ai_gateway::aci::e2ee::E2EE_ALGO_X25519_AESGCM
     );
-    assert_eq!(e2ee_keys[1].public_key_hex.len(), 64);
-    assert_eq!(e2ee_keys[2].algo, "ecdsa");
-    assert_eq!(e2ee_keys[2].public_key_hex.len(), 128);
-    assert_eq!(e2ee_keys[3].algo, "ed25519");
-    assert_eq!(e2ee_keys[3].public_key_hex.len(), 64);
+    assert_eq!(e2ee_keys[0].public_key_hex.len(), 64);
+
+    // §13 legacy keys stay outside the keyset.
+    let legacy_keys = provider.legacy_e2ee_keys();
+    assert_eq!(legacy_keys.len(), 2);
+    assert_eq!(legacy_keys[0].algo, "ecdsa");
+    assert_eq!(legacy_keys[0].public_key_hex.len(), 128);
+    assert_eq!(legacy_keys[1].algo, "ed25519");
+    assert_eq!(legacy_keys[1].public_key_hex.len(), 64);
 
     let evidence = provider.key_custody_evidence();
     assert_eq!(evidence["provider"], "dstack-kms");
-    assert_eq!(evidence["keys"].as_array().unwrap().len(), 6);
+    assert_eq!(evidence["keys"].as_array().unwrap().len(), 4);
     assert!(evidence["keys"][0]["signature_chain"]
         .as_array()
         .is_some_and(|chain| !chain.is_empty()));
+    assert!(evidence["keys"][0]["kms_public_key"].is_string());
 
     let aci_report_data = [0xa5u8; 32];
     let quote = provider.get_quote(aci_report_data).await.unwrap();
     assert_eq!(
         quote.report_data,
-        DstackAciProvider::dstack_report_data(aci_report_data)
+        identity::report_data_slot(aci_report_data)
     );
     assert!(quote.raw_quote.len() > 1024);
     assert!(quote.event_log.as_str().is_some_and(|s| !s.is_empty()));
@@ -235,9 +228,9 @@ async fn dstack_live_provider_keys_are_stable_for_same_paths() {
         .await
         .unwrap();
 
-    assert_eq!(a.identity_public_key(), b.identity_public_key());
     assert_eq!(a.receipt_keys(), b.receipt_keys());
     assert_eq!(a.e2ee_keys(), b.e2ee_keys());
+    assert_eq!(a.legacy_e2ee_keys(), b.legacy_e2ee_keys());
 }
 
 #[tokio::test]
@@ -252,21 +245,17 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     let quoter: Arc<dyn Quoter> = provider;
     let (upstream, upstream_calls) = LiveStubUpstream::new();
 
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
-    cfg.vendor = "phala".to_string();
+    let mut cfg = AciServiceConfig::for_test();
     cfg.tee_type = "tdx".to_string();
     cfg.source_provenance = SourceProvenance {
         repo_url: Some("https://github.com/Dstack-TEE/private-ai-gateway".to_string()),
-        repo_commit: Some("live-test".to_string()),
+        repo_commit: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
         image_digest: None,
         image_provenance: None,
     };
-    cfg.keyset_epoch = KeysetEpoch {
-        version: 1,
-        not_after: u64::MAX,
-    };
+    cfg.keyset_not_after = u64::MAX;
     cfg.service_capabilities = ServiceCapabilities {
-        supported_e2ee_versions: vec!["2".to_string()],
+        supported_e2ee_versions: vec!["3".to_string()],
     };
     cfg.allow_test_keys = false;
 
@@ -282,33 +271,25 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     .unwrap();
 
     let report = service
-        .attestation_report(Some("live nonce".to_string()))
+        .attestation_report(Some("live-nonce".to_string()))
         .await
         .unwrap();
 
-    assert_eq!(report.attestation.vendor, "phala");
     assert_eq!(report.attestation.tee_type, "tdx");
     assert_ne!(report.attestation.evidence["vm_config"]["stub"], true);
 
-    let endorsement_payload =
-        identity::keyset_endorsement_payload(&report.attestation.workload_keyset).unwrap();
-    let endorsement_sig = hex::decode(&report.attestation.keyset_endorsement.value_hex).unwrap();
-    assert!(verify_keyset_endorsement(
-        &report
-            .attestation
-            .workload_keyset
-            .workload_identity
-            .public_key,
-        &endorsement_payload,
-        &endorsement_sig
-    ));
-
-    let statement = identity::attestation_statement(
-        &report.attestation.workload_keyset,
-        Some("live nonce".to_string()),
-    )
-    .unwrap();
-    let aci_report_data = identity::report_data(&statement).unwrap();
+    // Recompute the §10.1 binding chain from the served bytes.
+    let keyset_bytes = BASE64
+        .decode(&report.attestation.workload_keyset_b64)
+        .unwrap();
+    assert_eq!(
+        identity::workload_keyset_digest(&keyset_bytes),
+        report.workload_keyset_digest
+    );
+    let statement =
+        identity::attestation_statement(&report.workload_keyset_digest, Some("live-nonce"))
+            .unwrap();
+    let aci_report_data = identity::report_data(&statement);
     assert_eq!(
         report.attestation.report_data_hex,
         hex::encode(aci_report_data)
@@ -322,7 +303,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     .unwrap();
     assert_eq!(
         quote_report_data,
-        DstackAciProvider::dstack_report_data(aci_report_data)
+        identity::report_data_slot(aci_report_data)
     );
     assert!(report.attestation.evidence["quote"]
         .as_str()
@@ -334,7 +315,9 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: CHAT_REQUEST,
             forwarded_body: None,
-            upstream_required: Some(true),
+            // The preverified event has no enforceable binding; forward it as
+            // not-required and let the receipt record the honest failed form.
+            upstream_required: Some(false),
             upstream_verification_event: None,
             requester: None,
             e2ee: None,
@@ -342,9 +325,9 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
         .await
         .unwrap();
 
-    assert_eq!(result.receipt.workload_id, report.workload_id);
+    let payload = result.receipt.payload_json().unwrap();
     assert_eq!(
-        result.receipt.workload_keyset_digest,
+        payload["workload_keyset_digest"],
         report.workload_keyset_digest
     );
     assert_eq!(
@@ -352,23 +335,22 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
         sha256_hex(CHAT_REQUEST)
     );
     assert_eq!(
-        event(&result.receipt, EVENT_RESPONSE_RETURNED)["wire_hash"],
+        event(&result.receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(CHAT_RESPONSE)
     );
     assert_eq!(upstream_calls.lock().unwrap().len(), 1);
 
-    let receipt_key = report
-        .attestation
-        .workload_keyset
+    let keyset: private_ai_gateway::aci::types::WorkloadKeyset =
+        serde_json::from_slice(&keyset_bytes).unwrap();
+    let receipt_key = keyset
         .receipt_signing_keys
         .iter()
-        .find(|key| key.key_id == result.receipt.signature.key_id)
+        .find(|key| key.key_id == result.receipt.key_id)
         .unwrap();
-    let canonical_bytes = canonical_bytes_for_signing(&result.receipt).unwrap();
-    let receipt_sig = hex::decode(&result.receipt.signature.value_hex).unwrap();
+    let receipt_sig = hex::decode(&result.receipt.signature_hex).unwrap();
     assert!(verify_receipt_signature(
         receipt_key,
-        &canonical_bytes,
+        &result.receipt.payload,
         &receipt_sig
     ));
 }
@@ -390,11 +372,12 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
     let quoter: Arc<dyn Quoter> = provider;
     let (upstream, _upstream_calls) = LiveStubUpstream::new();
 
-    let mut cfg = AciServiceConfig::for_test("phala");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.allow_test_keys = false;
+    cfg.subject = Some("app-id:live-test".to_string());
     cfg.source_provenance = SourceProvenance {
         repo_url: Some("https://github.com/Dstack-TEE/private-ai-gateway".to_string()),
-        repo_commit: Some("live-test".to_string()),
+        repo_commit: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
         image_digest: None,
         image_provenance: None,
     };
@@ -416,7 +399,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
     );
     let base_url = serve_aci_report(service.clone()).await;
     let policy = AciServiceVerifierPolicy::new(
-        vec![service.workload_id().to_string()],
+        vec!["app-id:live-test".to_string()],
         Vec::new(),
         vec![accepted_kms_root],
     )

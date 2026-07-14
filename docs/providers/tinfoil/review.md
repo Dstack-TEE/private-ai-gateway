@@ -72,7 +72,7 @@ P0 TODOs before strict-release inclusion:
 
 P1 TODOs:
 
-- Record `Tinfoil-Enclave` in receipt provider claims or transparency events.
+- Record `Tinfoil-Enclave` in the session's `claims.extra` facts.
 - Add live tests that verify the selected enclave belongs to the advertised
   model enclave set.
 - Keep cache locality marked unclaimed unless Tinfoil adds observable
