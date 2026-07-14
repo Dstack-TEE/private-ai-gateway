@@ -3,10 +3,11 @@
 //! Reaches the control plane at `control_url` with an optional bearer token. The
 //! pre-request consult gates authorization and fails closed: any failure blocks
 //! the request rather than letting it through unauthorized. The post-request
-//! report is best-effort and never retried. Connections are kept alive and
-//! reused (default pooling); the idempotent consult and catalog requests retry
-//! once on a connection-level failure, so a keep-alive connection the control
-//! plane closed does not surface as a spurious denial.
+//! report is best-effort: it never fails the already-served response.
+//! Connections are kept alive and reused (default pooling); every request here
+//! retries once on a connection-level failure, so a keep-alive connection the
+//! control plane closed does not surface as a spurious denial or a dropped
+//! usage report.
 
 use std::time::Duration;
 
@@ -100,14 +101,17 @@ impl ControlClient {
         }
     }
 
-    /// Send an idempotent request (the pre-consult decision query or a catalog
-    /// GET), rebuilding it per attempt. Retries once on a connection-level
-    /// failure: a keep-alive connection the control plane closed surfaces as a
-    /// broken send that a fresh connection succeeds on. It does not retry a
-    /// timeout (the control plane is genuinely slow; a retry would only double
-    /// the wait) or a connect failure (the control plane is unreachable; a retry
-    /// cannot help). The consult is a decision query with no persisted side
-    /// effect, so repeating it is safe.
+    /// Send an idempotent request, rebuilding it per attempt. Retries once on a
+    /// connection-level failure: a keep-alive connection the control plane
+    /// closed surfaces as a broken send that a fresh connection succeeds on. It
+    /// does not retry a timeout (the control plane is genuinely slow; a retry
+    /// would only double the wait) or a connect failure (the control plane is
+    /// unreachable; a retry cannot help).
+    ///
+    /// Every request routed through here must be safe to repeat. consult_pre and
+    /// the catalog GETs are decision queries with no persisted side effect.
+    /// consult_post carries a `request_id` so that a control plane can recognize
+    /// a replay; the contract requires it to ingest usage idempotently.
     async fn send_idempotent(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
@@ -190,13 +194,19 @@ impl ControlClient {
     }
 
     /// Post-request usage report. Best-effort: a control-plane hiccup must never
-    /// fail the already-served response, and the report is never retried.
+    /// fail the already-served response. Retried once on a broken pooled
+    /// connection, like the consult — otherwise a keep-alive connection the peer
+    /// has closed silently drops the report. A broken send cannot tell us whether
+    /// the report was already processed, so the replay relies on the contract's
+    /// idempotent-ingest requirement: the report carries a `request_id` for
+    /// exactly that purpose.
     pub async fn consult_post(&self, report: &PostReport) {
-        let request = self
-            .authorize(self.client.post(self.url("/consult/post")))
-            .timeout(self.post_timeout)
-            .json(report);
-        if let Err(err) = request.send().await {
+        let build = || {
+            self.authorize(self.client.post(self.url("/consult/post")))
+                .timeout(self.post_timeout)
+                .json(report)
+        };
+        if let Err(err) = self.send_idempotent(build).await {
             tracing::error!(error = %err, "consult_post request failed");
         }
     }
