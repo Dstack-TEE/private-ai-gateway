@@ -59,11 +59,9 @@ A channel is ACI-verifiable only when it is bound to the attested keyset:
 - **E2EE** — the service key is listed in `e2ee_public_keys` (§4.1).
 - **Receipts** — signed by a key listed in `receipt_signing_keys` (§4.1).
 
-If plaintext HTTPS terminates outside the accepted workload, a valid WebPKI
-certificate proves nothing about the workload. An ordinary OpenAI SDK
-client that checks none of this gets plain WebPKI assurance; it gains ACI
-assurance through a verifier SDK, an agent runtime, or a local verifying
-proxy.
+A WebPKI certificate alone proves none of this, since TLS may terminate
+outside the workload. A plain OpenAI SDK client gets these checks from a
+verifier SDK, an agent runtime, or a local verifying proxy.
 
 SPKI pinning is the required baseline because it works with ordinary HTTPS
 stacks; attested-TLS (IETF SEAT) MAY later serve as a stronger transport
@@ -81,11 +79,11 @@ surface**, not its routing policy:
 - Before forwarding a prompt, the aggregator MUST verify the selected
   upstream and obtain an enforceable channel binding: a TLS key pin or an
   upstream E2EE key.
-- If verification is required and fails, the aggregator MUST NOT forward
-  the prompt (fail closed; §11: `upstream_verification_failed`). Whether a
-  route requires verification is service configuration, not a request
-  parameter; the receipt records the requirement and the outcome, so a
-  client can reject unverified serving.
+- If required verification fails, the aggregator MUST NOT forward the
+  prompt (fail closed; §11: `upstream_verification_failed`). Service
+  configuration decides which upstreams require verification; the receipt
+  records the requirement and the outcome, so a client can reject
+  unverified serving.
 - Each receipt records the verification outcome in an `upstream.verified`
   event (§8.5).
 - Each successful verification is captured as an immutable, content-addressed
@@ -97,18 +95,17 @@ recorded claims name their source (§9.3).
 
 ### 1.3 Verifier profiles
 
-An ACI service publishes one report plus evidence. It does not negotiate
-trust. The relying party selects a **verifier profile** — a concrete
-composition of TEE quote verification, source-provenance policy, key-custody
-checks, and any platform-specific checks (for example dstack KMS validation).
-A report is accepted if a profile the relying party trusts verifies it
-completely.
+An ACI service publishes one report plus evidence; it does not negotiate
+trust. Each relying party decides what convinces it: which TEE quotes it
+accepts, what source provenance it requires, how it checks key custody, and
+any platform-specific checks (for example dstack KMS validation). That
+bundle of decisions is a **verifier profile**. A report is accepted when a
+profile the relying party trusts verifies it completely.
 
-A profile defines where each piece of required evidence comes from: inline
-in the report, digest-bound and fetched from a profile-defined location,
-directly observed by the verifier, or supplied by local policy. Missing
-required evidence fails closed. A profile can add checks but MUST NOT relax
-the §10 minimum.
+A profile also states where each piece of evidence comes from (in the
+report, fetched by digest, observed directly, or local policy) and fails
+closed when required evidence is missing. Profiles can add checks but MUST
+NOT relax the §10 minimum.
 
 In RATS terms (RFC 9334): the service is the Attester, the report carries
 Evidence, the relying party (or a Verifier it trusts) appraises it, and the
@@ -127,8 +124,9 @@ An ACI-conformant service MUST:
    code or build artifacts (§5.1).
 4. Keep every listed private key in TEE custody (§4.3), and bind any
    plaintext-HTTPS endpoint's TLS key into the keyset (§4.1).
-5. Support E2EE on `POST /v1/chat/completions`, non-streaming and
-   streaming (§7).
+5. Support E2EE on its prompt endpoints: required on
+   `POST /v1/chat/completions`, non-streaming and streaming, and
+   recommended on the rest (§7).
 6. Compute receipt hashes inside the TEE from observed bytes, sign receipt
    payloads with an attested key, and serve them at
    `GET /v1/aci/receipts/{id}` (§8).
@@ -149,8 +147,8 @@ the end user) MUST:
 10. Send sensitive data only over channels bound to the attested keyset: a
     pinned TLS SPKI or an attested E2EE key (§1.1).
 11. Use fresh randomness where the protocol binds it: the attestation
-    `nonce`, and a fresh ephemeral key and GCM nonce per sealed unit
-    (§7.1).
+    `nonce`, and a fresh ephemeral key and GCM nonce for every body it
+    seals (§7.1).
 
 An ACI verifier MUST implement at least the §10.1 checks for the profile it
 applies and fail closed on missing required evidence (§1.3).
@@ -165,9 +163,8 @@ applies and fail closed on missing required evidence (§1.3).
   current operational public keys (receipt signing, E2EE, TLS), an optional
   `subject` name, and an expiry. The keyset is the unit of workload
   identity (§4).
-- **Attestation statement** — the fixed byte template, hashed into the TEE
-  quote's report data, that binds the keyset digest and a client nonce
-  (§4.2).
+- **Attestation statement** — the one-line JSON naming the keyset digest
+  and the client nonce; its SHA-256 is the quote's `report_data` (§4.2).
 - **Attestation report** — the service's current evidence for its keyset
   (§5).
 - **Inference receipt** — a signed per-request event log (§8).
@@ -183,8 +180,8 @@ Two rules cover every hash and signature in ACI:
    signature-checked exactly as served (after base64 transport decoding).
    A verifier consumes them without normalization.
 2. **A verifier builds only two payloads itself:** the attestation
-   statement (§4.2) and the E2EE AAD (§7.1). Both use fixed templates whose
-   inputs never need JSON escaping.
+   statement (§4.2) and the E2EE AAD (§7.1). Both are fixed templates
+   filled by plain string concatenation.
 
 Conventions:
 
@@ -194,10 +191,10 @@ Conventions:
   `_sha256` carry bare hex. Fields with the `_b64` suffix: standard base64
   (RFC 4648 §4, with padding) of the exact underlying bytes. Public keys
   and signatures: lowercase hex, no `0x` prefix.
-- A service can serialize however it likes, as long as it serves each
-  artifact's bytes consistently. JCS (JSON Canonicalization Scheme,
-  RFC 8785) is the recommended way: the service can regenerate an artifact
-  instead of storing it, and independent producers emit identical bytes.
+- Services SHOULD serialize artifacts with JCS (JSON Canonicalization
+  Scheme, RFC 8785): normalized output can be regenerated on demand instead
+  of stored. Verifiers don't care how the bytes were made; rule 1 checks
+  what was served.
 - Domain separation: each verifier-constructed payload embeds its purpose —
   the `aci.report_data.v1` tag in the attestation statement, and the
   `aci.e2ee.v3.request` / `aci.e2ee.v3.response` context in the E2EE HKDF
@@ -230,17 +227,10 @@ Conventions:
 
 ## 4. Workload Identity
 
-ACI has no service identity keypair. A relying party anchors on what a
-workload cannot shed:
-
-- **source provenance** — the attested code and build lineage (§5.1),
-- the optional keyset **`subject`** — a profile-interpreted name attested
-  with the keyset (§4.1), and
-- the **domain** that serves the API.
-
-The **keyset is the unit of identity**: the hardware quote binds the digest
-of the current keyset, and every keyset change requires a fresh quote.
-Everything else in the protocol chains off it:
+The **keyset is the unit of identity**; there is no separate long-lived
+service keypair. The hardware quote binds the digest of the current keyset,
+and every keyset change requires a fresh quote. Everything else in the
+protocol chains off it:
 
 ```text
 TEE hardware root of trust
@@ -264,6 +254,14 @@ attestation quote ── binds ──► report_data
 A verifier checks the quote once. After that, every receipt, sealed body,
 and TLS connection can be checked offline against keys in the attested
 keyset.
+
+Keysets change, so recognizing the same service over time anchors on what
+a workload cannot shed:
+
+- **source provenance** — the attested code and build lineage (§5.1),
+- the optional keyset **`subject`** — a profile-interpreted name attested
+  with the keyset (§4.1), and
+- the **domain** that serves the API.
 
 ### 4.1 Workload keyset
 
@@ -465,17 +463,17 @@ one for the hostname it actually uses.
 
 ## 6. Inference Endpoints
 
-ACI v1 covers OpenAI-compatible completion-style endpoints. Plaintext
-requests and responses follow the OpenAI API unchanged; ACI adds headers
-and artifacts. E2EE requests and responses carry the §7.2 envelope as the
-body.
+ACI v1 covers prompt endpoints: OpenAI-compatible completions and similar
+formats such as Anthropic messages. Plaintext requests and responses follow
+the underlying API unchanged; ACI adds headers and artifacts. E2EE requests
+and responses carry the §7.2 envelope as the body.
 
 | Endpoint | Status |
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
-| Other completion-style endpoints (e.g. Anthropic-format `/v1/messages`) | OPTIONAL |
+| Other prompt endpoints (e.g. Anthropic-format `/v1/messages`) | OPTIONAL |
 | `GET /v1/models` | OpenAI-compatible; ACI adds no required fields |
 
 Trust metadata is service-level and lives in the attestation report. Clients
@@ -499,23 +497,21 @@ MUST NOT infer trust from `/v1/models` entries.
 | `X-Receipt-Id` | inference responses; `upstream_verification_failed` errors (§8.5) | Lookup id for the signed receipt. |
 | `X-E2EE-Applied: true \| false` | inference responses | Whether the response body is sealed. |
 
-Headers are unauthenticated routing hints. A changed `X-ACI-Keyset-Digest`
-means the keyset changed; the client SHOULD re-fetch and re-verify the
-attestation report before sending further sensitive data. The authenticated
-bindings are always the attested keyset and the signed receipt, never the
-headers.
+Headers are unauthenticated hints; what binds is always the attested
+keyset and the signed receipt. On a changed `X-ACI-Keyset-Digest`, the
+client SHOULD re-verify the attestation report before sending further
+sensitive data.
 
 ## 7. End-to-End Encryption (E2EE)
 
-E2EE seals the whole request and response bodies between the client and the
-attested workload, on top of TLS. It exists so that clients can bind their
-plaintext to a key proven to live inside the TEE even when TLS terminates
-elsewhere (load balancers, CDNs; §1.1), and so the decryption capability
-itself is attested.
+E2EE seals whole request and response bodies between the client and the
+attested workload, on top of TLS. Plaintext then reaches only a key proven
+to live inside the TEE, even when TLS terminates elsewhere (load balancers,
+CDNs; §1.1).
 
 A service MUST support E2EE on `POST /v1/chat/completions` for both
 non-streaming and streaming responses, and SHOULD support it on the other
-completion-style endpoints it serves. `X-E2EE-Version` selects the scheme;
+prompt endpoints it serves. `X-E2EE-Version` selects the scheme;
 this document defines version `3`. Versions `1` and `2` are reserved by
 historical implementations and are not part of ACI.
 
@@ -714,9 +710,9 @@ appear). Its two forms:
   "reason": "<failure reason>", "upstream_name": "<optional label>" }
 ```
 
-- `required` records whether service policy required verification for this
-  route. When `required` is `true` and `result` is `"failed"`, the prompt
-  was not forwarded (§1.2): such a receipt accompanies an
+- `required` records whether service configuration required verification
+  for this upstream. When `required` is `true` and `result` is `"failed"`,
+  the prompt was not forwarded (§1.2): such a receipt accompanies an
   `upstream_verification_failed` error, not an inference response, and the
   error response carries `X-Receipt-Id` (§6.2) so the client can fetch it.
 - A verified event carries `session_id` — the content address of the
@@ -778,11 +774,11 @@ prefix). Sessions carry only verification material — no request or response
 content — and MAY be served without authentication as transparency
 artifacts.
 
-The list endpoint is a convenience **preflight survey**: a client can
-inspect the verified identity, channel binding, and claims for a model
-before sending any data. List entries add a `session_id` member for lookup
-and omit the raw `evidence.data`, keeping `evidence.digest`. Only the full
-record's served bytes hash to the session id.
+The list endpoint is a convenience: a client can inspect the verified
+identity, channel binding, and claims for a model before sending any data.
+List entries add a `session_id` member for lookup and omit the raw
+`evidence.data`, keeping `evidence.digest`. Only the full record's served
+bytes hash to the session id.
 
 ### 9.2 Session record
 
@@ -860,8 +856,8 @@ Receipts do not embed claims; they cite the session that carries them
 
 ## 10. Verification Procedure
 
-Verification is adoptable in increasing depth. An SDK or integration SHOULD
-state the highest level it implements:
+Verification comes in three levels. An SDK or integration SHOULD state the
+highest level it implements:
 
 - **Level 1 — receipt verification.** Verify receipts (§10.2) against a
   keyset established earlier, or published by a party the client trusts.
