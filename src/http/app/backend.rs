@@ -13,14 +13,14 @@ use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
-    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
-    ReceiptOwner, ServiceError, StreamingForwardResult,
+    AciService, ChatCompletionRequest, E2eeRequestContext, GatewayRequestContext, ReceiptOwner,
+    ServiceError, StreamingForwardResult, UpstreamVerificationError,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 
 use super::error_responses::{
     e2ee_error_response, error_response, insert_str_header, internal_error_response,
-    upstream_verification_error_response,
+    upstream_verification_error_body,
 };
 
 pub(super) struct BackendForwardInput {
@@ -38,6 +38,11 @@ pub(super) async fn forward_to_backend(
     service: Arc<AciService>,
     input: BackendForwardInput,
 ) -> Response {
+    // Kept for the refusal-receipt path (§8.5): the forward moves the
+    // requester/model into the request, but a fail-closed verification error
+    // still needs them to finalize the receipt the error response cites.
+    let user_model = input.context.user_model.clone();
+    let requester = input.requester.clone();
     if input.stream {
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
@@ -57,7 +62,7 @@ pub(super) async fn forward_to_backend(
                     &forward.receipt_id,
                     &forward.upstream_headers,
                     "text/event-stream",
-                    forward.e2ee.as_ref(),
+                    forward.e2ee_applied,
                 );
                 resp_headers.insert(
                     HeaderName::from_static("x-accel-buffering"),
@@ -95,7 +100,14 @@ pub(super) async fn forward_to_backend(
                     }
                 }
             }
-            Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_error_response(uv),
+            Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_failed_response(
+                &service,
+                input.endpoint_path,
+                user_model,
+                &input.received_body,
+                requester,
+                uv,
+            ),
             Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
             Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
                 routing_error_response(message)
@@ -125,19 +137,59 @@ pub(super) async fn forward_to_backend(
                 &forward.receipt.receipt_id,
                 &forward.upstream_headers,
                 "application/json",
-                forward.e2ee.as_ref(),
+                forward.e2ee_applied,
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
             (status, resp_headers, forward.upstream_body).into_response()
         }
-        Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_error_response(uv),
+        Err(ServiceError::UpstreamVerification(uv)) => upstream_verification_failed_response(
+            &service,
+            input.endpoint_path,
+            user_model,
+            &input.received_body,
+            requester,
+            uv,
+        ),
         Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
         Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
             routing_error_response(message)
         }
         Err(other) => internal_error_response(other),
     }
+}
+
+/// The fail-closed §8.5 outcome: a 502 `upstream_verification_failed` error
+/// whose body is finalized into a refusal receipt, served with `X-Receipt-Id`
+/// so the client can fetch the signed record of the refusal.
+fn upstream_verification_failed_response(
+    service: &AciService,
+    endpoint_path: &'static str,
+    user_model: Option<String>,
+    received_body: &[u8],
+    requester: Option<ReceiptOwner>,
+    uv: UpstreamVerificationError,
+) -> Response {
+    let body = upstream_verification_error_body(&uv.reason);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    match service.issue_upstream_refusal_receipt(
+        endpoint_path,
+        user_model,
+        received_body,
+        &uv.event,
+        &body,
+        requester,
+    ) {
+        Ok(receipt) => insert_str_header(&mut headers, "x-receipt-id", &receipt.receipt_id),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to issue upstream refusal receipt");
+        }
+    }
+    (StatusCode::BAD_GATEWAY, headers, body).into_response()
 }
 
 pub(super) fn strip_empty_tool_calls(mut payload: Value) -> (Value, bool) {
@@ -173,26 +225,18 @@ pub(super) fn chat_response_headers(
     receipt_id: &str,
     upstream_headers: &std::collections::HashMap<String, String>,
     default_content_type: &'static str,
-    e2ee: Option<&E2eeResponseInfo>,
+    e2ee_applied: bool,
 ) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
     insert_str_header(&mut resp_headers, "x-receipt-id", receipt_id);
-    match e2ee {
-        Some(info) => {
-            resp_headers.insert(
-                HeaderName::from_static("x-e2ee-applied"),
-                HeaderValue::from_static("true"),
-            );
-            insert_str_header(&mut resp_headers, "x-e2ee-version", &info.version);
-            insert_str_header(&mut resp_headers, "x-e2ee-algo", &info.algo);
-        }
-        None => {
-            resp_headers.insert(
-                HeaderName::from_static("x-e2ee-applied"),
-                HeaderValue::from_static("false"),
-            );
-        }
-    }
+    resp_headers.insert(
+        HeaderName::from_static("x-e2ee-applied"),
+        if e2ee_applied {
+            HeaderValue::from_static("true")
+        } else {
+            HeaderValue::from_static("false")
+        },
+    );
 
     let content_type = upstream_headers
         .get("content-type")

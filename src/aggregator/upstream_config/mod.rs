@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::aci::canonical;
+use crate::aci::digest;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
@@ -51,7 +51,7 @@ pub struct UpstreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_workload_ids: Option<Vec<String>>,
+    pub accepted_subjects: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,7 +90,7 @@ pub struct PublicUpstreamConfig {
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub accepted_workload_ids: Option<Vec<String>>,
+    pub accepted_subjects: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,7 +128,7 @@ impl UpstreamConfig {
             path: self.path.clone(),
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
-            accepted_workload_ids: self.accepted_workload_ids.clone(),
+            accepted_subjects: self.accepted_subjects.clone(),
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),
             pccs_url: self.pccs_url.clone(),
@@ -242,7 +242,7 @@ impl UpstreamVerifierMode {
 #[derive(Debug, Clone)]
 pub struct UpstreamRuntimeOptions {
     pub verifier_mode: UpstreamVerifierMode,
-    pub accepted_workload_ids: Vec<String>,
+    pub accepted_subjects: Vec<String>,
     pub accepted_image_digests: Vec<String>,
     pub accepted_dstack_kms_root_public_keys: Vec<String>,
     pub pccs_url: Option<String>,
@@ -504,7 +504,7 @@ impl UpstreamConfigManager {
                 upstream_name: target.upstream_name.clone(),
                 url_origin: target.url_origin.clone(),
                 model_id: target.model_id.clone(),
-                forwarded_body_hash: canonical::sha256_hex(b""),
+                forwarded_body_hash: digest::sha256_hex(b""),
                 required: true,
             };
             let event = if refresh {
@@ -575,7 +575,7 @@ impl UpstreamConfigManager {
                     upstream_name: cfg.name.clone(),
                     url_origin: url_origin.clone(),
                     model_id: model_id.clone(),
-                    forwarded_body_hash: canonical::sha256_hex(b""),
+                    forwarded_body_hash: digest::sha256_hex(b""),
                     required: true,
                 };
                 let event = verifier.verify(request.clone()).await;
@@ -643,13 +643,16 @@ struct ProviderSessionRegistry {
 }
 
 impl ProviderSessionRegistry {
-    fn new(config: &[UpstreamConfig]) -> Self {
+    fn new(
+        config: &[UpstreamConfig],
+        _options: &UpstreamRuntimeOptions,
+    ) -> Result<Self, UpstreamConfigError> {
         let chutes = config
             .iter()
             .filter(|cfg| cfg.provider == UpstreamProvider::Chutes)
             .map(|cfg| (cfg.name.clone(), Arc::new(ChutesSessionStore::new())))
             .collect();
-        Self { chutes }
+        Ok(Self { chutes })
     }
 
     fn chutes(&self, upstream_name: &str) -> Option<Arc<ChutesSessionStore>> {

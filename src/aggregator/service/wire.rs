@@ -6,8 +6,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
-use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
-use crate::aci::types::Receipt;
+use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
 
 pub struct E2eeRequestParts<'a> {
@@ -15,8 +14,6 @@ pub struct E2eeRequestParts<'a> {
     pub client_public_key: Option<&'a str>,
     pub model_public_key: Option<&'a str>,
     pub version: Option<&'a str>,
-    pub nonce: Option<&'a str>,
-    pub timestamp: Option<&'a str>,
 }
 
 pub struct E2eePreparedRequest {
@@ -26,45 +23,39 @@ pub struct E2eePreparedRequest {
 
 #[derive(Debug, Clone)]
 pub struct E2eeRequestContext {
-    pub(super) version: String,
     pub(super) algo: String,
-    pub(super) aad_mode: E2eeAadMode,
+    pub(super) mode: E2eeMode,
     pub(super) request_model: String,
     pub(super) client_public_key_hex: String,
-    pub(super) nonce: Option<String>,
-    pub(super) timestamp: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum E2eeAadMode {
-    /// The spec ACI v2 path: JCS AAD (§7.3).
-    AciV2,
-    /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): no AAD (§13).
-    LegacyV1,
-}
-
-impl E2eeAadMode {
-    /// The spec ACI v2 path (JCS AAD, §7.3), as opposed to the no-AAD legacy
-    /// X-Signing-Algo compatibility mode. Per-part multimodal field paths
-    /// (§7.2) exist only here.
-    pub(super) fn is_aci(self) -> bool {
-        matches!(self, Self::AciV2)
+impl E2eeRequestContext {
+    /// The §7.2 envelope `model`: bound into the AAD and recorded as the
+    /// receipt `model` (§8.3).
+    pub fn request_model(&self) -> &str {
+        &self.request_model
     }
 }
 
-pub(super) enum E2eeDecryptor<'a> {
-    AciV2 { key_id: &'a str },
-    Legacy { signing_algo: &'a str },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum E2eeMode {
+    /// ACI E2EE v3 (§7): whole-body sealing.
+    V3,
+    /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): per-field
+    /// hex ciphertexts, no AAD (§13).
+    LegacyV1,
 }
+
 #[derive(Debug, Clone)]
 pub struct ForwardResult {
-    pub receipt: Receipt,
+    pub receipt: SignedReceipt,
     /// Client-facing status: the upstream's, or 400 when the service remapped a
     /// client image-URL fetch failure. The receipt attests the matching body.
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
-    pub e2ee: Option<E2eeResponseInfo>,
+    /// Whether `upstream_body` is a sealed §7.3 envelope (`X-E2EE-Applied`).
+    pub e2ee_applied: bool,
 }
 
 pub enum MiddlewareForwardResult {
@@ -109,7 +100,6 @@ pub struct MiddlewareStreamingForwarded {
 pub struct MiddlewareReceiptDraft {
     pub(super) receipt_id: String,
     pub(super) builder: ReceiptBuilder,
-    pub(super) provider_response_hash: String,
     pub(super) endpoint_path: String,
     pub(super) request_mode: RequestMode,
     pub(super) response_model: Option<String>,
@@ -161,27 +151,21 @@ impl MiddlewareReceiptJournal {
 }
 
 pub struct MiddlewareReceiptFinalization {
-    pub receipt: Receipt,
+    pub receipt: SignedReceipt,
     pub wire_body: Vec<u8>,
-    pub e2ee: Option<E2eeResponseInfo>,
+    pub e2ee_applied: bool,
 }
 
 pub type ServiceResponseStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServiceError>> + Send>>;
 
 pub struct MiddlewareStreamFinalization {
     pub body: ServiceResponseStream,
-    pub e2ee: Option<E2eeResponseInfo>,
+    pub e2ee_applied: bool,
 }
 
 pub struct MiddlewareGeneratedFinalization {
     pub wire_body: Vec<u8>,
-    pub e2ee: Option<E2eeResponseInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct E2eeResponseInfo {
-    pub version: String,
-    pub algo: String,
+    pub e2ee_applied: bool,
 }
 
 /// Returned by [`AciService::forward_chat_completion_stream_request`].
@@ -197,7 +181,8 @@ pub struct StreamingForwardStream {
     pub receipt_id: String,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
-    pub e2ee: Option<E2eeResponseInfo>,
+    /// Whether each SSE event payload is sealed (§7.3; `X-E2EE-Applied`).
+    pub e2ee_applied: bool,
     pub body: Pin<Box<dyn Stream<Item = Result<Bytes, ServiceError>> + Send>>,
 }
 

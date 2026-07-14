@@ -11,13 +11,11 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::aci::e2ee::{
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM,
-};
+use crate::aci::e2ee::{E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519};
 use crate::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
-use crate::aci::types::AttestationReport;
+use crate::aci::types::{AttestationReport, KeyedPublicKey};
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
     COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
@@ -32,8 +30,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, keyset_revoked_response,
-    unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
+    unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
@@ -71,7 +69,6 @@ pub(super) async fn health() -> Json<Value> {
 pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "api_version": "aci/1",
-        "workload_id": state.service.workload_id(),
         "workload_keyset_digest": state.service.workload_keyset_digest(),
     }))
 }
@@ -201,39 +198,6 @@ pub(super) async fn admin_put_upstreams(
     }
 }
 
-/// Revoke the current workload keyset (§4.7). Guarded by the admin token: the
-/// service signs the revocation payload with the identity key, persists the
-/// statement, and stops serving reports/inference under this keyset. On the
-/// next restart the launcher rolls to a fresh epoch so it can serve again,
-/// while the revoked digest stays listed at `GET /v1/aci/revocations`.
-pub(super) async fn admin_revoke_keyset(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Some(resp) = enforce_admin(&state, &headers) {
-        return resp;
-    }
-    match state.service.revoke_current_keyset() {
-        Ok(statement) => Json(json!({
-            "api_version": "aci/1",
-            "revoked": statement,
-        }))
-        .into_response(),
-        Err(e) => internal_error_response(e),
-    }
-}
-
-/// Public transparency surface: every keyset revocation statement this service
-/// has issued (§4.7), so a verifier can reject reports and receipts under a
-/// revoked digest. Unauthenticated, like the attested-session endpoints.
-pub(super) async fn aci_revocations(State(state): State<AppState>) -> Response {
-    Json(json!({
-        "api_version": "aci/1",
-        "revocations": state.service.revocations(),
-    }))
-    .into_response()
-}
-
 pub(super) async fn attestation_report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -303,6 +267,7 @@ pub(super) async fn attestation_report(
                 report,
                 q.signing_algo.as_deref(),
                 nvidia_payload,
+                &state.service.legacy_e2ee_keys(),
             ) {
                 Ok(value) => Json(value).into_response(),
                 Err(e) => internal_error_response(e),
@@ -358,7 +323,11 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
-        Err(ServiceError::KeysetRevoked) => keyset_revoked_response(),
+        Err(ServiceError::InvalidNonce(e)) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            e.to_string(),
+        ),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -370,11 +339,13 @@ pub(super) async fn aci_attestation_report(
 /// Place the legacy dstack-vllm-proxy compatibility fields on a gateway
 /// attestation report. `nvidia_payload` is supplied by the caller — the
 /// handler decides whether it carries real upstream GPU evidence or an empty
-/// placeholder — so this function only shapes/positions the fields.
+/// placeholder. `legacy_keys` are the §13 legacy keys from the key provider
+/// (the ACI keyset no longer lists them).
 pub(super) fn report_with_legacy_attestation_fields(
     report: AttestationReport,
     signing_algo: Option<&str>,
     nvidia_payload: Value,
+    legacy_keys: &[KeyedPublicKey],
 ) -> Result<Value, ServiceError> {
     let mut value = serde_json::to_value(report)
         .map_err(|e| ServiceError::Key(KeyError::Crypto(format!("serialize report: {e}"))))?;
@@ -385,28 +356,14 @@ pub(super) fn report_with_legacy_attestation_fields(
     let signing_algo = signing_algo
         .unwrap_or(LEGACY_ALGO_ECDSA)
         .to_ascii_lowercase();
-    let legacy_e2ee = obj
-        .get("attestation")
-        .and_then(|v| v.get("workload_keyset"))
-        .and_then(|v| v.get("e2ee_public_keys"))
-        .and_then(Value::as_array)
-        .and_then(|keys| {
-            keys.iter().find_map(|key| {
-                let e2ee_key = key.as_object()?;
-                let algo = e2ee_key.get("algo").and_then(Value::as_str)?;
-                let public_key = e2ee_key.get("public_key").and_then(Value::as_str)?;
-                let matches = match signing_algo.as_str() {
-                    LEGACY_ALGO_ECDSA => {
-                        algo == E2EE_ALGO_LEGACY_ECDSA || algo == E2EE_ALGO_SECP256K1_AESGCM
-                    }
-                    LEGACY_ALGO_ED25519 => algo == E2EE_ALGO_LEGACY_ED25519,
-                    _ => false,
-                };
-                matches.then(|| public_key.to_string())
-            })
-        });
+    let legacy_algo = match signing_algo.as_str() {
+        LEGACY_ALGO_ECDSA => E2EE_ALGO_LEGACY_ECDSA,
+        LEGACY_ALGO_ED25519 => E2EE_ALGO_LEGACY_ED25519,
+        _ => return Err(ServiceError::Key(KeyError::UnsupportedAlgo(signing_algo))),
+    };
 
-    if let Some(public_key) = legacy_e2ee {
+    if let Some(key) = legacy_keys.iter().find(|key| key.algo == legacy_algo) {
+        let public_key = key.public_key_hex.clone();
         let signing_address = if signing_algo == LEGACY_ALGO_ED25519 {
             public_key.clone()
         } else {
@@ -418,36 +375,6 @@ pub(super) fn report_with_legacy_attestation_fields(
             "signing_address".to_string(),
             Value::String(signing_address),
         );
-    } else if !matches!(
-        signing_algo.as_str(),
-        LEGACY_ALGO_ECDSA | LEGACY_ALGO_ED25519
-    ) {
-        return Err(ServiceError::Key(KeyError::UnsupportedAlgo(signing_algo)));
-    } else {
-        let legacy_e2ee = obj
-            .get("attestation")
-            .and_then(|v| v.get("workload_keyset"))
-            .and_then(|v| v.get("e2ee_public_keys"))
-            .and_then(Value::as_array)
-            .and_then(|keys| keys.first())
-            .and_then(Value::as_object)
-            .and_then(|e2ee_key| {
-                let algo = e2ee_key.get("algo").and_then(Value::as_str)?;
-                let public_key = e2ee_key.get("public_key").and_then(Value::as_str)?;
-                (algo == E2EE_ALGO_SECP256K1_AESGCM).then(|| public_key.to_string())
-            });
-        if let Some(public_key) = legacy_e2ee {
-            let signing_address = ethereum_address_from_uncompressed_public_key(&public_key)?;
-            obj.insert("signing_public_key".to_string(), Value::String(public_key));
-            obj.insert(
-                "signing_algo".to_string(),
-                Value::String(LEGACY_ALGO_ECDSA.to_string()),
-            );
-            obj.insert(
-                "signing_address".to_string(),
-                Value::String(signing_address),
-            );
-        }
     }
 
     // Legacy dstack-vllm-proxy compatibility fields. Old clients read these from
@@ -530,26 +457,18 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
-    // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
-    // request would use; stop serving inference under it (§4.7).
-    if state.service.is_keyset_revoked() {
-        return keyset_revoked_response();
-    }
-
     let has_e2ee = has_e2ee_headers(&headers);
     if has_e2ee && state.service.supported_e2ee_versions().is_empty() {
         return unsupported_e2ee_response();
     }
 
     let (service_body, e2ee) = if has_e2ee {
-        match state.service.prepare_e2ee_v2_request(
+        match state.service.prepare_e2ee_request(
             E2eeRequestParts {
                 signing_algo: header_str(&headers, "x-signing-algo"),
                 client_public_key: header_str(&headers, "x-client-pub-key"),
                 model_public_key: header_str(&headers, "x-model-pub-key"),
                 version: header_str(&headers, "x-e2ee-version"),
-                nonce: header_str(&headers, "x-e2ee-nonce"),
-                timestamp: header_str(&headers, "x-e2ee-timestamp"),
             },
             body.as_ref(),
             endpoint_path,
@@ -588,30 +507,26 @@ pub(super) async fn openai_completion_endpoint(
         (normalized, false) => (normalized, None),
     };
 
-    let upstream_required = match headers
-        .get("x-upstream-verification")
-        .and_then(|v| v.to_str().ok())
-    {
-        None | Some("required") => true,
-        Some("none") => false,
-        Some(other) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("invalid X-Upstream-Verification: {other}"),
-            );
-        }
-    };
+    // Verification policy is service-owned and fail-closed (§1.2); clients
+    // cannot downgrade it per request.
+    let upstream_required = state.service.upstream_required_default();
 
     let requester = extract_bearer(&headers)
         .as_deref()
         .map(ReceiptOwner::from_bearer);
     let context = GatewayRequestContext {
         request_id: generate_request_id(),
-        user_model: parsed
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        // The receipt `model` is the model the client requested: under E2EE
+        // the §7.2 envelope `model` (§8.3), otherwise the body's.
+        user_model: e2ee
+            .as_ref()
+            .map(|ctx| ctx.request_model().to_string())
+            .or_else(|| {
+                parsed
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
         target_route_id: None,
         // Populated from the x-user-tier header on the internal-forward path.
         user_tier: None,
@@ -676,10 +591,9 @@ pub(super) async fn completions(
     openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH, false).await
 }
 
-/// Canonical ACI receipt — the bare signed receipt (JCS canonical value), not
-/// the legacy dstack-vllm-proxy signature wrapper. `id` accepts the gateway
-/// `receipt_id` (preferred; on the `x-receipt-id` header) or the upstream
-/// `chat_id`.
+/// Canonical ACI receipt — the §8.2 signed-bytes envelope. `id` accepts the
+/// gateway `receipt_id` (preferred; on the `x-receipt-id` header) or the
+/// upstream `chat_id`.
 pub(super) async fn aci_receipt(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -693,13 +607,13 @@ pub(super) async fn aci_receipt(
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Receipt id (receipt_id or chat_id) not found or expired",
+            "receipt id (receipt_id or chat_id) not found or expired",
         );
     };
     if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
         return resp;
     }
-    Json(receipt.to_canonical_value(true)).into_response()
+    Json(receipt.envelope()).into_response()
 }
 
 /// List the attested TEE channels (one per upstream endpoint), optionally
@@ -721,7 +635,7 @@ pub(super) async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let mut sessions = match q.model.as_deref() {
+    let sessions = match q.model.as_deref() {
         // Resolve the model to the upstream(s) serving it, then list each
         // channel's sessions (honoring an upstream_name filter if both are given).
         Some(model) => {
@@ -745,11 +659,25 @@ pub(super) async fn aci_list_sessions(
             .service
             .list_attested_sessions(q.upstream_name.as_deref()),
     };
-    // Keep the digest as the integrity anchor; drop the data-URI bytes from the
-    // broad listing.
-    for s in &mut sessions {
-        s.evidence.data_uri = None;
-    }
+    // List entries add a `session_id` member for lookup and keep the digest as
+    // the integrity anchor while dropping the raw evidence `data` (§9.1). Only
+    // the full record's served bytes hash to the session id.
+    let sessions: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            let mut value = serde_json::to_value(s.document()).unwrap_or(Value::Null);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "session_id".to_string(),
+                    Value::String(s.session_id().to_string()),
+                );
+                if let Some(evidence) = obj.get_mut("evidence").and_then(Value::as_object_mut) {
+                    evidence.remove("data");
+                }
+            }
+            value
+        })
+        .collect();
     Json(json!({
         "api_version": "aci/1",
         "sessions": sessions,
@@ -771,7 +699,7 @@ pub(super) async fn receipt_by_chat_id(
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Receipt id (chat_id or receipt_id) not found or expired",
+            "receipt id (chat_id or receipt_id) not found or expired",
         );
     };
     if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
@@ -787,7 +715,7 @@ pub(super) async fn receipt_by_chat_id(
             "signature": sig.signature,
             "signing_address": sig.signing_address,
             "signing_algo": sig.signing_algo,
-            "receipt": receipt.to_canonical_value(true),
+            "receipt": receipt.envelope(),
         }))
         .into_response(),
         Err(ServiceError::Key(KeyError::UnsupportedAlgo(_))) => invalid_signing_algo_response(),
@@ -795,16 +723,30 @@ pub(super) async fn receipt_by_chat_id(
     }
 }
 
+/// Serve one attested session as its **exact sealed bytes** (§9): the client
+/// recomputes `sha256:` over the body and compares it to the id a receipt
+/// cited. `{id}` is the 64-hex digest (the id without the `sha256:` prefix);
+/// the prefixed form is accepted too.
 pub(super) async fn attested_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let Some(session) = state.service.get_attested_session(&session_id) else {
+    let hex_id = session_id
+        .strip_prefix("sha256:")
+        .unwrap_or(session_id.as_str());
+    let Some(session) = state
+        .service
+        .get_attested_session(&format!("sha256:{hex_id}"))
+    else {
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Attested session not found or expired",
+            "attested session not found or expired",
         );
     };
-    Json(session).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        session.bytes().to_vec(),
+    )
+        .into_response()
 }

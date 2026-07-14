@@ -2,10 +2,6 @@
 //!
 //! Endpoints:
 //!
-//! * `GET  /v1/attestation/report` - service-scoped report; an
-//!   optional `?nonce=...` query parameter is bound into
-//!   `report_data` (URL-decoded UTF-8 string, or JSON `null` when
-//!   absent).
 //! * `POST /v1/chat/completions` - OpenAI-shaped chat-completion
 //!   forwarding with ACI-side hashing and receipt signing. An
 //!   optional `Authorization: Bearer <token>` is recorded on the
@@ -17,9 +13,7 @@
 //! * `POST /v1/embeddings` - OpenAI-shaped embeddings forwarding.
 //!   Buffered-only; any client-sent `stream:true` is forced back to
 //!   buffered before forwarding. The aggregator hashes the body and
-//!   issues a receipt the same way as `/v1/chat/completions`; ACI
-//!   E2EE is supported and operates on the `input` request field and
-//!   each `data[].embedding` response field.
+//!   issues a receipt the same way as `/v1/chat/completions`.
 //! * `GET  /v1/models` - proxy the upstream OpenAI-compatible model list.
 //! * `GET  /v1/models/*` - relay model sub-catalogs to the middleware, which
 //!   owns the routing: `/v1/models/:namespace` (alias-prefix catalog) and
@@ -34,10 +28,6 @@
 //!   current upstream config, with secrets redacted.
 //! * `PUT  /v1/admin/upstreams` - authenticated admin replacement of
 //!   the single upstream config file.
-//! * `POST /v1/admin/revoke-keyset` - authenticated admin revocation of the
-//!   current workload keyset (§4.7). Signs and persists the revocation
-//!   statement, after which the service stops serving reports/inference under
-//!   the revoked keyset.
 //!
 //! ACI verification artifacts live under the `/v1/aci/` namespace so they do
 //! not pollute the OpenAI surface. The id parameter accepts the gateway
@@ -45,13 +35,12 @@
 //! the only handle for `/v1/embeddings` receipts which have no chat_id) or the
 //! upstream `chat_id`.
 //!
-//! * `GET  /v1/aci/attestation` - the bare ACI attestation report.
-//! * `GET  /v1/aci/receipts/{id}` - the signed ACI receipt (canonical value).
-//! * `GET  /v1/aci/sessions/{session_id}` - the attested-session record a
-//!   receipt references.
-//! * `GET  /v1/aci/sessions?upstream_name=&model=` - list attested sessions.
-//! * `GET  /v1/aci/revocations` - all issued keyset revocation statements
-//!   (§4.7), a public transparency surface.
+//! * `GET  /v1/aci/attestation` - the ACI attestation report (§5), optionally
+//!   nonce-bound (`?nonce=`, §4.2 charset).
+//! * `GET  /v1/aci/receipts/{id}` - the §8.2 signed-bytes receipt envelope.
+//! * `GET  /v1/aci/sessions/{hex}` - the attested-session record a receipt
+//!   cites, served as its exact sealed bytes (§9).
+//! * `GET  /v1/aci/sessions?upstream_name=&model=` - list current sessions.
 //!
 //! Legacy aliases for dstack-vllm-proxy compatibility:
 //! * `GET  /v1/attestation/report` - report plus legacy e2ee/`signing_address`
@@ -65,9 +54,8 @@
 //!   (`text`/`signature`/`signing_address`) with the signed ACI receipt
 //!   carried in `receipt`.
 //!
-//! The router installs a middleware that emits `X-ACI-Version`,
-//! `X-ACI-Identity`, and `X-ACI-Keyset-Digest` on every response,
-//! including error paths.
+//! The router installs a middleware that emits `X-ACI-Version` and
+//! `X-ACI-Keyset-Digest` on every response, including error paths.
 
 use std::sync::Arc;
 
@@ -91,10 +79,10 @@ mod handlers;
 mod util;
 
 use handlers::{
-    aci_attestation_report, aci_list_sessions, aci_receipt, aci_revocations, admin_get_upstreams,
-    admin_put_upstreams, admin_revoke_keyset, attestation_report, attested_session,
-    chat_completions, completions, embeddings, embeddings_models, health, messages, metrics,
-    models, models_subpath, receipt_by_chat_id, responses, root,
+    aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
+    admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
+    embeddings, embeddings_models, health, messages, metrics, models, models_subpath,
+    receipt_by_chat_id, responses, root,
 };
 
 #[derive(Clone)]
@@ -163,13 +151,11 @@ fn build_router_inner(
             "/v1/admin/upstreams",
             get(admin_get_upstreams).put(admin_put_upstreams),
         )
-        .route("/v1/admin/revoke-keyset", post(admin_revoke_keyset))
         // Canonical ACI verification surface (clean shapes).
         .route("/v1/aci/attestation", get(aci_attestation_report))
         .route("/v1/aci/receipts/:id", get(aci_receipt))
         .route("/v1/aci/sessions", get(aci_list_sessions))
         .route("/v1/aci/sessions/:session_id", get(attested_session))
-        .route("/v1/aci/revocations", get(aci_revocations))
         // Legacy dstack-vllm-proxy aliases (vllm-proxy response shapes only;
         // we owe no back-compat to earlier private-ai-gateway paths).
         .route("/v1/attestation/report", get(attestation_report))
@@ -185,11 +171,10 @@ fn build_router_inner(
         .with_state(state)
 }
 
-/// Middleware that stamps `X-ACI-Version`, `X-ACI-Identity`, and
-/// `X-ACI-Keyset-Digest` on every response, including errors. A
-/// relying party can therefore confirm the workload identity that
-/// served any HTTP path, not just the success path of
-/// `POST /v1/chat/completions`.
+/// Middleware that stamps `X-ACI-Version` and `X-ACI-Keyset-Digest` on every
+/// response, including errors (§6.2). Unauthenticated routing hints: a
+/// changed digest tells the client to re-fetch and re-verify the attestation
+/// report.
 async fn aci_headers_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -201,9 +186,6 @@ async fn aci_headers_middleware(
         HeaderName::from_static("x-aci-version"),
         HeaderValue::from_static("aci/1"),
     );
-    if let Ok(v) = HeaderValue::from_str(state.service.workload_id()) {
-        headers.insert(HeaderName::from_static("x-aci-identity"), v);
-    }
     if let Ok(v) = HeaderValue::from_str(state.service.workload_keyset_digest()) {
         headers.insert(HeaderName::from_static("x-aci-keyset-digest"), v);
     }

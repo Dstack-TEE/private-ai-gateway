@@ -94,18 +94,21 @@ cannot extend trust after verification expires.
 Attested session record:
 
 A separate, read-only audit artifact written when a verified upstream event is
-recorded (`record_attested_upstream_session`). It content-addresses the verified
-binding, verifier id, target, and evidence digest into a stable `session_id`, stores
-the matching `AttestedSessionRecord`, and attaches that id to the receipt. A relying
-party fetches it back from `/v1/aci/sessions/{session_id}` and confirms the record's
-target, verifier id, evidence digest, and channel bindings match the receipt event.
+recorded (`record_attested_upstream_session`). The verified material — upstream
+name, endpoint, verifier id, identity, channel bindings, typed claims, and
+evidence — is serialized once; the served bytes are stored, and `session_id` is
+their SHA-256 (spec §9). The id is attached to the receipt. A relying party
+fetches the record from `/v1/aci/sessions/{hex}` and recomputes the hash to
+confirm it is exactly what the receipt cited.
 
-Its `expires_at` is deliberately the receipt TTL, not the verification lease TTL. The
-record is a per-receipt historical attestation, so it must stay resolvable for as long
-as the receipt that cites it; expiring it with the ~300 s lease would strand
-`session_id`s in still-valid receipts. The record is not a claim that the binding is
-still live now — `established_at` records when it was verified, and the forwarding path
-only ever uses a binding from a fresh verification lease.
+Its `expires_at` ends the validity period for new forwarding decisions, not the
+retention obligation: the record stays resolvable at least as long as any
+receipt citing it (the validity period reuses the receipt TTL, and retention
+extends per citation). Expiring it with the ~300 s verification lease would
+strand `session_id`s in still-valid receipts. The record is not a claim that
+the binding is still live now — `established_at` records when it was verified,
+and the forwarding path only ever uses a binding from a fresh verification
+lease.
 
 ## Current No-Middleware Lifecycle
 

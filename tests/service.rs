@@ -1,5 +1,5 @@
 //! Service composition tests: fail-closed defaults, source
-//! provenance, capability default, X-Upstream-Verification semantics.
+//! provenance, capability default, upstream-verification semantics.
 
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +21,20 @@ use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
+/// Find one event object in a signed receipt's payload.
+fn payload_event(
+    receipt: &private_ai_gateway::aci::receipt::SignedReceipt,
+    event_type: &str,
+) -> serde_json::Value {
+    receipt.payload_json().unwrap()["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == event_type)
+        .unwrap_or_else(|| panic!("receipt must carry {event_type}"))
+        .clone()
+}
+
 type ReceivedBody = Arc<Mutex<Option<Vec<u8>>>>;
 
 struct StubUpstream {
@@ -31,7 +45,13 @@ struct StubUpstream {
 struct FailingSessionStore;
 
 impl SessionStore for FailingSessionStore {
-    fn put_session(&self, _session: AttestedSession, _ts: u64) -> std::io::Result<u64> {
+    fn put_session(
+        &self,
+        _fingerprint: &str,
+        _session: AttestedSession,
+        _retention_until: u64,
+        _now: u64,
+    ) -> std::io::Result<u64> {
         Err(std::io::Error::other("session store unavailable"))
     }
 
@@ -39,9 +59,14 @@ impl SessionStore for FailingSessionStore {
         None
     }
 
-    fn renew_session(&self, _session_id: &str, _new_expires_at: u64, _now: u64) -> bool {
+    fn current_session(
+        &self,
+        _fingerprint: &str,
+        _retention_until: u64,
+        _now: u64,
+    ) -> Option<AttestedSession> {
         // Always a miss, so the caller falls through to the failing `put_session`.
-        false
+        None
     }
 
     fn list_sessions(&self, _provider: Option<&str>, _now: u64) -> Vec<AttestedSession> {
@@ -95,7 +120,7 @@ fn make_service_raw(body: &[u8], upstream_required_default: bool) -> (AciService
     let (upstream, received) = StubUpstream::new(body);
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.upstream_required_default = upstream_required_default;
     // Do not advertise unwired E2EE.
     cfg.service_capabilities = ServiceCapabilities {
@@ -125,15 +150,18 @@ async fn default_required_with_no_verifier_fails_closed_before_forwarding() {
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, None)
         .await
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ServiceError::UpstreamVerification(UpstreamVerificationError::NoVerifierResult)
-    ));
+    match err {
+        ServiceError::UpstreamVerification(UpstreamVerificationError { reason, event }) => {
+            assert!(reason.contains("no upstream verifier"), "{reason:?}");
+            assert!(event.required);
+        }
+        other => panic!("expected UpstreamVerification, got {other:?}"),
+    }
     assert!(received.lock().unwrap().is_none());
 }
 
 #[tokio::test]
-async fn x_upstream_verification_none_forwards_and_records_failed_event() {
+async fn verification_opt_out_forwards_and_records_failed_event() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
     let result = svc
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, Some(false), None)
@@ -145,19 +173,10 @@ async fn x_upstream_verification_none_forwards_and_records_failed_event() {
     // Aggregator receipts always carry upstream.verified. The opt-out
     // path records a synthesised failed event so a downstream
     // verifier sees the actual state.
-    let uv = result
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .expect("opt-out must still record upstream.verified");
-    assert_eq!(uv.fields.get("result").unwrap().as_str().unwrap(), "failed");
-    assert!(!uv.fields.get("required").unwrap().as_bool().unwrap());
-    assert_eq!(
-        uv.fields.get("verifier_id").unwrap().as_str().unwrap(),
-        "none"
-    );
-    let reason = uv.fields.get("reason").unwrap().as_str().unwrap();
+    let uv = payload_event(&result.receipt, "upstream.verified");
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], false);
+    let reason = uv["reason"].as_str().unwrap();
     assert!(
         reason.contains("no upstream verifier"),
         "reason should explain why result is failed, got {reason:?}"
@@ -177,20 +196,15 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
         .forward_chat_completion(body, None, Some(false), None)
         .await
         .unwrap();
-    let received = result
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "request.received")
-        .unwrap();
-    let actual = received.fields.get("body_hash").unwrap().as_str().unwrap();
+    let received = payload_event(&result.receipt, "request.received");
+    let actual = received["body_hash"].as_str().unwrap();
     // Hash of the empty body: an attacker pre-computes this and
     // would supply it via X-Request-Hash. The service must NEVER
     // surface that value.
-    let attacker_hash = private_ai_gateway::aci::canonical::sha256_hex(b"");
+    let attacker_hash = private_ai_gateway::aci::digest::sha256_hex(b"");
     assert_ne!(actual, attacker_hash);
 
-    let expected = private_ai_gateway::aci::canonical::sha256_hex(body);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(body);
     assert_eq!(actual, expected);
 }
 
@@ -206,20 +220,11 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
         .await
         .unwrap();
-    let uv = result
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .expect("must emit upstream.verified");
-    assert_eq!(
-        uv.fields.get("result").unwrap().as_str().unwrap(),
-        "verified"
-    );
-    assert_eq!(
-        uv.fields.get("verifier_id").unwrap().as_str().unwrap(),
-        "stub-verifier-1"
-    );
+    let uv = payload_event(&result.receipt, "upstream.verified");
+    assert_eq!(uv["result"], "verified");
+    // The event is slim (§8.5): verification detail lives in the cited session.
+    assert!(uv.get("verifier_id").is_none());
+    assert!(uv["session_id"].as_str().unwrap().starts_with("sha256:"));
 }
 
 #[tokio::test]
@@ -247,63 +252,58 @@ async fn verified_upstream_binding_creates_attested_session() {
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
         .await
         .unwrap();
-    let uv = result
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .expect("must emit upstream.verified");
-    let session_id = uv
-        .fields
-        .get("session_id")
-        .and_then(|v| v.as_str())
+    let uv = payload_event(&result.receipt, "upstream.verified");
+    let session_id = uv["session_id"]
+        .as_str()
         .expect("verified binding should produce a session id");
     let session = svc
         .get_attested_session(session_id)
         .expect("session audit record should be queryable");
-    assert_eq!(session.session_id, session_id);
-    assert_eq!(session.api_version, "aci/1");
-    assert_eq!(session.upstream_name, "stub-upstream");
-    assert_eq!(session.endpoint.as_deref(), Some("https://stub-upstream"));
-    assert_eq!(session.verifier_id, "stub-verifier-1");
+    // The id is the hash of the exact served bytes (§9), never stored inside.
+    assert_eq!(session.session_id(), session_id);
+    assert_eq!(
+        session_id,
+        format!(
+            "sha256:{}",
+            hex::encode(private_ai_gateway::aci::digest::sha256_raw(session.bytes()))
+        )
+    );
+    let document = session.document();
+    assert_eq!(document.api_version, "aci/1");
+    assert_eq!(document.upstream_name, "stub-upstream");
+    assert_eq!(document.endpoint.as_deref(), Some("https://stub-upstream"));
+    assert_eq!(document.verifier_id, "stub-verifier-1");
     // provider_claims are folded verbatim into claims.extra; typed claims beyond
     // tee_attested stay Unknown until a per-provider mapping populates them.
     assert_eq!(
-        session.claims.extra.get("release").and_then(|v| v.as_str()),
+        document
+            .claims
+            .extra
+            .get("release")
+            .and_then(|v| v.as_str()),
         Some("fixture")
     );
-    assert_eq!(session.channel_binding.len(), 1);
-    let binding = serde_json::to_value(&session.channel_binding[0]).unwrap();
+    assert_eq!(document.channel_binding.len(), 1);
+    let binding = serde_json::to_value(&document.channel_binding[0]).unwrap();
     assert_eq!(binding["type"], "tls_spki_sha256");
     assert_eq!(
         binding["spki_sha256"],
         serde_json::Value::String("aa".repeat(32))
     );
 
-    // Shallow audit: the receipt's upstream.verified carries the typed claim
-    // verdicts inline. A verified result asserts tee_attested (verifier-derived).
-    let receipt_claims = uv
-        .fields
-        .get("claims")
-        .expect("upstream.verified must carry typed claim verdicts");
-    assert_eq!(receipt_claims["tee_attested"]["status"], "asserted");
-    assert_eq!(receipt_claims["tee_attested"]["source"], "verifier_derived");
-    assert_eq!(receipt_claims["tcb_up_to_date"]["status"], "unknown");
+    // The receipt event stays slim (§8.5): no inline claims or evidence — the
+    // content-addressed session carries every verification detail.
+    assert!(uv.get("claims").is_none());
+    assert!(uv.get("evidence").is_none());
+    assert!(uv.get("channel_bindings").is_none());
 
-    // The receipt must NOT inline the (potentially large) evidence: the
-    // content-addressed session_id commits to it, and the session store is its
-    // system of record. Inlining it in every retained receipt is what grew the
-    // in-memory receipt store under load.
-    assert!(
-        uv.fields.get("evidence").is_none(),
-        "verified receipt must reference evidence via session_id, not inline it"
-    );
-
-    // Deep audit: the persisted session carries the same verdicts plus evidence.
-    let session_claims = serde_json::to_value(&session.claims).unwrap();
+    // Deep audit: the persisted session carries the verdicts plus evidence.
+    let session_claims = serde_json::to_value(&document.claims).unwrap();
     assert_eq!(session_claims["tee_attested"]["status"], "asserted");
+    assert_eq!(session_claims["tee_attested"]["source"], "verifier_derived");
+    assert_eq!(session_claims["tcb_up_to_date"]["status"], "unknown");
     assert_eq!(
-        session.evidence.digest.as_deref(),
+        document.evidence.digest.as_deref(),
         Some(format!("sha256:{}", "11".repeat(32)).as_str())
     );
 }
@@ -356,13 +356,8 @@ async fn session_is_per_tee_channel_not_per_model() {
         ..verified_event("stub-upstream", model)
     };
     let session_id_of = |result: &private_ai_gateway::aggregator::service::ForwardResult| {
-        result
-            .receipt
-            .event_log
-            .iter()
-            .find(|e| e.event_type == "upstream.verified")
-            .and_then(|e| e.fields.get("session_id"))
-            .and_then(|v| v.as_str())
+        payload_event(&result.receipt, "upstream.verified")["session_id"]
+            .as_str()
             .map(str::to_string)
     };
 
@@ -433,21 +428,13 @@ async fn attested_session_id_changes_when_verification_material_changes() {
         .await
         .unwrap();
 
-    let first_session_id = first
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .and_then(|e| e.fields.get("session_id"))
-        .and_then(|v| v.as_str())
+    let first_event = payload_event(&first.receipt, "upstream.verified");
+    let first_session_id = first_event["session_id"]
+        .as_str()
         .expect("first verified binding should produce a session id");
-    let second_session_id = second
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .and_then(|e| e.fields.get("session_id"))
-        .and_then(|v| v.as_str())
+    let second_event = payload_event(&second.receipt, "upstream.verified");
+    let second_session_id = second_event["session_id"]
+        .as_str()
         .expect("second verified binding should produce a session id");
 
     assert_ne!(first_session_id, second_session_id);
@@ -460,11 +447,11 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let first_digest = format!("sha256:{}", "11".repeat(32));
     let second_digest = format!("sha256:{}", "22".repeat(32));
     assert_eq!(
-        first_session.evidence.digest.as_deref(),
+        first_session.document().evidence.digest.as_deref(),
         Some(first_digest.as_str())
     );
     assert_eq!(
-        second_session.evidence.digest.as_deref(),
+        second_session.document().evidence.digest.as_deref(),
         Some(second_digest.as_str())
     );
 }
@@ -487,10 +474,11 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
         .await
         .unwrap_err();
     match err {
-        ServiceError::UpstreamVerification(UpstreamVerificationError::VerifierFailed(reason)) => {
+        ServiceError::UpstreamVerification(UpstreamVerificationError { reason, event }) => {
             assert!(reason.contains("quote did not match"));
+            assert_eq!(event.upstream_name, "stub-upstream");
         }
-        other => panic!("expected VerifierFailed, got {other:?}"),
+        other => panic!("expected UpstreamVerification, got {other:?}"),
     }
     assert!(received.lock().unwrap().is_none());
 }
@@ -502,7 +490,7 @@ fn service_init_accepts_unknown_source_provenance() {
     let (upstream, _) = StubUpstream::new(b"{}");
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("x");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.source_provenance = SourceProvenance::default();
     AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0))).unwrap();
 }
@@ -528,7 +516,7 @@ fn service_init_rejects_partial_repo_provenance() {
         let (upstream, _) = StubUpstream::new(b"{}");
         let upstream = Arc::new(upstream);
         let store = Arc::new(InMemoryReceiptStore::default());
-        let mut cfg = AciServiceConfig::for_test("x");
+        let mut cfg = AciServiceConfig::for_test();
         cfg.source_provenance = sp;
         let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
             .err()
@@ -544,7 +532,7 @@ fn service_init_accepts_image_digest_only_provenance() {
     let (upstream, _) = StubUpstream::new(b"{}");
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("x");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.source_provenance = SourceProvenance {
         repo_url: None,
         repo_commit: None,
@@ -554,6 +542,78 @@ fn service_init_accepts_image_digest_only_provenance() {
     AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0))).unwrap();
 }
 
+/// A key provider whose keyset violates §4.1: no E2EE entries, and (for the
+/// role-separation case) the receipt key republished as an E2EE key.
+struct MisshapenKeyProvider {
+    inner: StaticKeyProvider,
+    e2ee_keys: Vec<private_ai_gateway::aci::types::KeyedPublicKey>,
+}
+
+impl private_ai_gateway::aci::keys::KeyProvider for MisshapenKeyProvider {
+    fn receipt_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+        self.inner.receipt_keys()
+    }
+    fn sign_receipt(
+        &self,
+        key_id: &str,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, private_ai_gateway::aci::keys::KeyError> {
+        self.inner.sign_receipt(key_id, payload)
+    }
+    fn e2ee_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+        self.e2ee_keys.clone()
+    }
+    fn tls_spkis(&self) -> Vec<private_ai_gateway::aci::types::TlsSpki> {
+        self.inner.tls_spkis()
+    }
+    fn is_test_only(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn service_init_requires_an_e2ee_key_when_e2ee_is_advertised() {
+    let keys = Arc::new(MisshapenKeyProvider {
+        inner: StaticKeyProvider::default(),
+        e2ee_keys: Vec::new(),
+    });
+    let quoter = Arc::new(StubQuoter::default());
+    let (upstream, _) = StubUpstream::new(b"{}");
+    let upstream = Arc::new(upstream);
+    let store = Arc::new(InMemoryReceiptStore::default());
+    let mut cfg = AciServiceConfig::for_test();
+    cfg.service_capabilities = ServiceCapabilities {
+        supported_e2ee_versions: vec!["3".to_string()],
+    };
+    let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
+        .err()
+        .expect("must fail");
+    assert!(matches!(err, ServiceError::Keyset(_)), "{err:?}");
+    assert!(err.to_string().contains("e2ee_public_keys"), "{err}");
+}
+
+#[test]
+fn service_init_rejects_a_receipt_key_reused_as_e2ee_key() {
+    use private_ai_gateway::aci::keys::KeyProvider as _;
+    let inner = StaticKeyProvider::default();
+    let mut reused = inner.receipt_keys().remove(0);
+    reused.algo = "x25519-aes-256-gcm-hkdf-sha256".to_string();
+    let keys = Arc::new(MisshapenKeyProvider {
+        inner,
+        e2ee_keys: vec![reused],
+    });
+    let quoter = Arc::new(StubQuoter::default());
+    let (upstream, _) = StubUpstream::new(b"{}");
+    let upstream = Arc::new(upstream);
+    let store = Arc::new(InMemoryReceiptStore::default());
+    let cfg = AciServiceConfig::for_test();
+    let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
+        .err()
+        .expect("must fail");
+    assert!(matches!(err, ServiceError::Keyset(_)), "{err:?}");
+    assert!(err.to_string().contains("distinct"), "{err}");
+}
+
 #[test]
 fn service_refuses_test_keys_in_production_mode() {
     let keys = Arc::new(StaticKeyProvider::default());
@@ -561,7 +621,7 @@ fn service_refuses_test_keys_in_production_mode() {
     let (upstream, _) = StubUpstream::new(b"{}");
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("x");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.allow_test_keys = false;
     let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
         .err()
@@ -605,23 +665,24 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
     let listed = service.list_attested_sessions(Some("preflight-upstream"));
     assert_eq!(listed.len(), 1);
     let session = &listed[0];
-    assert_eq!(session.upstream_name, "preflight-upstream");
+    let document = session.document();
+    assert_eq!(document.upstream_name, "preflight-upstream");
     assert_eq!(
-        session.endpoint.as_deref(),
+        document.endpoint.as_deref(),
         Some("https://preflight-upstream")
     );
     // Typed claims are populated from the provider mapping (tinfoil + UpToDate).
-    assert_eq!(session.claims.tee_attested.status, ClaimStatus::Asserted);
-    assert_eq!(session.claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+    assert_eq!(document.claims.tee_attested.status, ClaimStatus::Asserted);
+    assert_eq!(document.claims.tcb_up_to_date.status, ClaimStatus::Asserted);
     // Resolvable by its content-addressed id too.
-    assert!(service.get_attested_session(&session.session_id).is_some());
+    assert!(service.get_attested_session(session.session_id()).is_some());
 
-    // Re-verifying the unchanged endpoint is idempotent: content-addressing
-    // means refresh writes the same record and never churns the store (and a
+    // Re-verifying the unchanged channel is idempotent: the store's channel
+    // dedup returns the live session instead of sealing a new document (and a
     // later completion path references this same session rather than copying).
-    let id = session.session_id.clone();
+    let id = session.session_id().to_string();
     service.record_session(&event);
     let after = service.list_attested_sessions(Some("preflight-upstream"));
     assert_eq!(after.len(), 1);
-    assert_eq!(after[0].session_id, id);
+    assert_eq!(after[0].session_id(), id);
 }

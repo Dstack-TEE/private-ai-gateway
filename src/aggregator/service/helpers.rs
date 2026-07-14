@@ -2,8 +2,7 @@ use futures_util::StreamExt;
 use rand::RngCore;
 
 use super::ServiceError;
-use crate::aci::receipt::{EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED};
-use crate::aci::types::Receipt;
+use crate::aci::receipt::{SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED};
 use crate::aci::upstream::UpstreamBodyStream;
 
 pub(super) async fn collect_upstream_body(
@@ -48,23 +47,20 @@ pub(super) fn accepted_response_model(status_code: u16, body: &[u8]) -> Option<S
     parsed.get("model")?.as_str().map(str::to_string)
 }
 
-pub(super) fn legacy_signature_text(receipt: &Receipt) -> Option<String> {
-    let request_hash = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == EVENT_REQUEST_RECEIVED)?
-        .fields
-        .get("body_hash")?
-        .as_str()
-        .and_then(strip_sha256_prefix)?;
-    let response_hash = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == EVENT_RESPONSE_RETURNED)?
-        .fields
-        .get("wire_hash")?
-        .as_str()
-        .and_then(strip_sha256_prefix)?;
+pub(super) fn legacy_signature_text(receipt: &SignedReceipt) -> Option<String> {
+    let payload = receipt.payload_json().ok()?;
+    let events = payload.get("event_log")?.as_array()?;
+    let body_hash = |event_type: &str| {
+        events
+            .iter()
+            .find(|e| e.get("type").and_then(serde_json::Value::as_str) == Some(event_type))?
+            .get("body_hash")?
+            .as_str()
+            .and_then(strip_sha256_prefix)
+            .map(str::to_string)
+    };
+    let request_hash = body_hash(EVENT_REQUEST_RECEIVED)?;
+    let response_hash = body_hash(EVENT_RESPONSE_RETURNED)?;
     Some(format!("{request_hash}:{response_hash}"))
 }
 

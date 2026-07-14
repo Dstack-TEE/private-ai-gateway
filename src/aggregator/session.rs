@@ -1,22 +1,18 @@
-//! Immutable, provider-owned attested-session records.
+//! Immutable, content-addressed attested-session records (ACI §9).
 //!
-//! An *attested session* captures **one** verified state of an upstream
-//! workload — its identity, the enforceable channel binding, the typed claims a
-//! verifier asserted about it, and the supporting evidence. A session is never
-//! mutated: its [`AttestedSession::session_id`] is content-addressed over that
-//! material, so identical verifications dedup to one id while *any* change in
-//! the verified material (a rotated TLS SPKI, a new measurement, a changed
-//! claim) yields a different id — a new, separate session. A receipt references
-//! the exact session it used, so the security context behind a receipt can
-//! never silently change.
+//! An *attested session* records **one** verified upstream TEE channel for
+//! one validity period: identity, enforceable channel binding, typed claims,
+//! and evidence. The served bytes are the artifact — the document is
+//! serialized exactly once when sealed, the store keeps those bytes, and
 //!
-//! "One provider owns many sessions" follows naturally: one per verified TEE
-//! channel (endpoint), plus a new one whenever a channel's verified material
-//! changes. A router fronting many models behind one TEE is a single session.
+//! ```text
+//! session_id = "sha256:" || hex(sha256(exact served session document bytes))
+//! ```
 //!
-//! Source-code-level provenance is the verifier's responsibility, not a schema
-//! here: the verifier asserts the `serving_software_known_good` / `os_known_good`
-//! claims with a plain `reason`. See `docs/attested-session-system.md`.
+//! The id is not inside the document; the signed receipt commits to it, so a
+//! relying party recomputes the hash of the fetched bytes to prove the record
+//! is exactly what the receipt cited. Sessions are never updated in place —
+//! re-verification produces a new document, period, and id.
 
 use std::collections::BTreeMap;
 
@@ -24,11 +20,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::aci::canonical::{self, CanonicalError};
+use crate::aci::digest;
 use crate::aci::receipt::ChannelBinding;
 
-/// `api_version` stamped on persisted session records — `aci/1`, uniform with
-/// the rest of the ACI surface.
+/// `api_version` stamped on session documents — `aci/1`, uniform with the
+/// rest of the ACI surface.
 pub const SESSION_API_VERSION: &str = "aci/1";
 
 /// Tri-state truth value for a claim. Missing evidence is [`ClaimStatus::Unknown`]
@@ -60,14 +56,14 @@ pub enum ClaimSource {
 
 /// One claim about a verified workload, as asserted by a verifier. `source` and
 /// `reason` are populated only when the claim is [`ClaimStatus::Asserted`] or
-/// [`ClaimStatus::Refuted`]; an `Unknown` claim carries neither.
+/// [`ClaimStatus::Refuted`]; an `Unknown` claim carries neither (§9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
     pub status: ClaimStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ClaimSource>,
     /// The verifier's plain reason, e.g. "matches hard-coded known measurements".
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
@@ -104,45 +100,41 @@ impl Claim {
     }
 }
 
-/// The typed claim vocabulary, mapped to `docs/providers/audit-criteria.md`.
-/// Every field defaults to [`Claim::unknown`]; `extra` holds provider-owned
-/// scope facts without widening the fixed vocabulary.
+/// The §9.3 typed claim vocabulary. Every field defaults to
+/// [`Claim::unknown`]; `extra` carries the raw provider facts verbatim — its
+/// key names are a stable contract for a given verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SessionClaims {
-    /// §1 — a genuine CPU TEE, with the workload identity bound.
+    /// A genuine CPU TEE, with the recorded identity bound to the channel.
     pub tee_attested: Claim,
     /// The provider's NVIDIA confidential-computing GPU attestation, when
-    /// verified and nonce-bound: asserted `VerifierDerived` — it attests a
-    /// genuine CC GPU, not (on its own) that GPU's binding to the serving CPU
-    /// TEE, which would need a measured-software check inside the CPU quote.
+    /// verified and nonce-bound. Attests a genuine CC GPU, not (on its own)
+    /// that GPU's binding to the serving CPU TEE.
     pub gpu_attested: Claim,
-    /// §14 — platform TCB freshness (TDX/SGX `TcbStatus`, SEV reported TCB).
+    /// Platform TCB freshness (TDX/SGX `TcbStatus`, SEV reported TCB).
     pub tcb_up_to_date: Claim,
-    /// §13 — platform/OS provenance (guest OS, kernel, firmware).
+    /// Platform/OS provenance (guest OS, kernel, firmware).
     pub os_known_good: Claim,
-    /// §13 — software provenance (serving/app/gateway code), verifier-asserted.
+    /// Serving-software provenance, verifier-asserted.
     pub serving_software_known_good: Claim,
-    /// §4 — served weights / quantization honesty.
+    /// Served weights / quantization honesty.
     pub model_weights_provenance: Claim,
-    /// Provider-owned scope facts, recorded verbatim from the verifier's
-    /// `provider_claims` (e.g. `trust_boundary`, `gpu_verified`, `gpu_arch`).
-    /// Not typed claims; the fixed vocabulary above is derived from these.
+    /// Raw provider facts, recorded verbatim from the verifier's
+    /// `provider_claims`. Inputs to the typed claims, not claims themselves.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
 
-/// The common evidence object (audit-criteria §11): a `sha256:` digest over the
-/// decoded verifier-input bytes plus a data URI that preserves those bytes. A
-/// multipart bundle (e.g. several raw HTTP responses) is carried as a single
-/// `data:multipart/mixed;boundary=...;base64,...` URI, with the digest taken
-/// over the whole decoded payload — so this stays one `{digest, data}` pair
-/// regardless of how many parts it contains.
+/// The §9.2 evidence object: a `sha256:` digest over the decoded
+/// verifier-input bytes plus a data URI preserving those bytes. A multipart
+/// bundle is carried as a single `data:multipart/mixed;...;base64,...` URI
+/// with the digest over the whole decoded payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EvidenceRef {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     /// `data:` URI carrying the exact bytes and content type.
-    #[serde(rename = "data", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "data", default, skip_serializing_if = "Option::is_none")]
     pub data_uri: Option<String>,
 }
 
@@ -162,11 +154,9 @@ impl EvidenceRef {
         }
     }
 
-    /// True when there is nothing to verify (no `data_uri`, or a `data_uri` shape
-    /// we do not produce) or the `data_uri`'s decoded bytes hash to `digest`.
-    /// The content id commits to `digest`, not the bytes, so this guards against
-    /// a persisted record whose evidence `data` was substituted for bytes that
-    /// do not match the digest the receipt is signed over.
+    /// True when there is nothing to verify (no `data_uri`, or a `data_uri`
+    /// shape we do not produce) or the decoded bytes hash to `digest`. §9.2:
+    /// a record whose `data` does not hash to `digest` MUST be rejected.
     pub fn digest_matches_data(&self) -> bool {
         let (Some(digest), Some(data_uri)) = (self.digest.as_deref(), self.data_uri.as_deref())
         else {
@@ -178,19 +168,19 @@ impl EvidenceRef {
             return true;
         };
         match BASE64.decode(b64.as_bytes()) {
-            Ok(bytes) => canonical::sha256_hex(&bytes) == digest,
+            Ok(bytes) => digest::sha256_hex(&bytes) == digest,
             Err(_) => false, // claims a digest but the data is not decodable
         }
     }
 }
 
-/// Verified identity keys captured into a session. For dstack-vllm-proxy this
-/// records the response-signing `signing_address`; the TLS SPKI lives in the
-/// channel binding, not here.
+/// Verified identity keys captured into a session (§9.2 `identity`). For
+/// dstack-vllm-proxy upstreams this records the response-signing
+/// `signing_address`; the TLS SPKI lives in the channel binding, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkloadIdentityRef {
     /// secp256k1 response-signing address (e.g. vllm-proxy `/v1/signature`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_address: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
@@ -202,31 +192,23 @@ impl WorkloadIdentityRef {
     }
 }
 
-/// One immutable, verified **TEE channel** — the attested remote service a
-/// request can be bound to, identified by its endpoint + channel binding +
-/// evidence, not by model. Content-addressed; never mutated. A router-based
-/// upstream that serves many models behind one TEE therefore yields **one**
-/// session (no per-model duplication); the specific model served is recorded on
-/// the receipt's `upstream.verified` event, not here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttestedSession {
+/// The §9.2 session document — exactly the members the served bytes carry.
+/// The session id is NOT part of the document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDocument {
     pub api_version: String,
-    /// `"as_" + hex(sha256(JCS(verified material)))`.
-    pub session_id: String,
     /// The upstream this channel belongs to (the operator's upstream config
-    /// `name`) — the same label the receipt's `upstream.verified` event carries.
+    /// `name`) — the label a failed `upstream.verified` event would carry.
     pub upstream_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Verified upstream origin, or `null` when the verifier established none.
     pub endpoint: Option<String>,
     pub verifier_id: String,
-    /// When this material was verified.
+    /// When this material was verified — the start of the validity period.
     pub established_at: u64,
-    /// Retention deadline: roughly the TTL of receipts that cite this session
-    /// (sealed just before its receipt, so it expires up to one sub-second
-    /// request interval sooner). A retention window, not a binding-validity
-    /// deadline.
+    /// End of the validity period for new forwarding decisions. Retention
+    /// (serving the record to relying parties) outlives this (§9).
     pub expires_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<WorkloadIdentityRef>,
     /// Enforceable channel binding(s).
     pub channel_binding: Vec<ChannelBinding>,
@@ -234,73 +216,53 @@ pub struct AttestedSession {
     pub evidence: EvidenceRef,
 }
 
+/// A session frozen to its exact served bytes. Sealed once; the store keeps
+/// and serves `bytes` verbatim, and `session_id` is the §9 content address
+/// over them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttestedSession {
+    session_id: String,
+    bytes: Vec<u8>,
+    document: SessionDocument,
+}
+
 impl AttestedSession {
-    /// Seal an immutable session, computing its content-addressed id over the
-    /// verified material. Timestamps are excluded from the id so identical
-    /// material dedups to one session.
-    #[allow(clippy::too_many_arguments)]
-    pub fn seal(
-        upstream_name: impl Into<String>,
-        endpoint: Option<String>,
-        verifier_id: impl Into<String>,
-        identity: Option<WorkloadIdentityRef>,
-        channel_binding: Vec<ChannelBinding>,
-        claims: SessionClaims,
-        evidence: EvidenceRef,
-        established_at: u64,
-        expires_at: u64,
-    ) -> Result<Self, CanonicalError> {
-        let mut session = Self {
-            api_version: SESSION_API_VERSION.to_string(),
-            session_id: String::new(),
-            upstream_name: upstream_name.into(),
-            endpoint,
-            verifier_id: verifier_id.into(),
-            established_at,
-            expires_at,
-            identity,
-            channel_binding,
-            claims,
-            evidence,
-        };
-        session.session_id = session.content_id()?;
-        Ok(session)
+    /// Serialize `document` once and freeze the bytes and content address.
+    pub fn seal(document: SessionDocument) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(&document)?;
+        let session_id = digest::sha256_hex(&bytes);
+        Ok(Self {
+            session_id,
+            bytes,
+            document,
+        })
     }
 
-    /// Recompute the content-addressed id from the verified material. The id is
-    /// `"as_" + sha256(JCS(material))` over the immutable subset (timestamps
-    /// excluded, so identical material dedups). A relying party — and the store
-    /// on replay — calls this to confirm a record's `session_id` matches its
-    /// contents; that recomputation, not any stored signature, is what makes the
-    /// record tamper-evident.
-    pub fn content_id(&self) -> Result<String, CanonicalError> {
-        /// The immutable subset the content id commits to. Timestamps are
-        /// excluded so identical material dedups to one session; field names
-        /// here are load-bearing (they feed the canonical hash).
-        #[derive(Serialize)]
-        struct ContentMaterial<'a> {
-            upstream_name: &'a str,
-            endpoint: &'a Option<String>,
-            verifier_id: &'a str,
-            identity: &'a Option<WorkloadIdentityRef>,
-            channel_binding: &'a [ChannelBinding],
-            claims: &'a SessionClaims,
-            evidence_digest: &'a Option<String>,
-        }
-        let material = serde_json::to_value(ContentMaterial {
-            upstream_name: &self.upstream_name,
-            endpoint: &self.endpoint,
-            verifier_id: &self.verifier_id,
-            identity: &self.identity,
-            channel_binding: &self.channel_binding,
-            claims: &self.claims,
-            evidence_digest: &self.evidence.digest,
-        })?;
-        let digest = canonical::jcs_sha256_hex(&material)?;
-        Ok(format!(
-            "as_{}",
-            digest.strip_prefix("sha256:").unwrap_or(digest.as_str())
-        ))
+    /// Adopt served/persisted bytes: parse the document and recompute the id
+    /// from the exact bytes. This recomputation — not any stored id — is what
+    /// makes a persisted record tamper-evident.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, serde_json::Error> {
+        let document: SessionDocument = serde_json::from_slice(&bytes)?;
+        let session_id = digest::sha256_hex(&bytes);
+        Ok(Self {
+            session_id,
+            bytes,
+            document,
+        })
+    }
+
+    /// `"sha256:" || hex` over [`Self::bytes`].
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// The exact bytes `GET /v1/aci/sessions/{hex}` must serve.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn document(&self) -> &SessionDocument {
+        &self.document
     }
 }
 
@@ -316,81 +278,74 @@ mod tests {
         }
     }
 
-    fn seal_with(endpoint: &str, spki: &str, claims: SessionClaims) -> AttestedSession {
-        AttestedSession::seal(
-            "phala-direct",
-            Some(endpoint.to_string()),
-            "phala-direct/1",
-            None,
-            vec![binding(spki)],
+    pub(crate) fn document(endpoint: &str, spki: &str, claims: SessionClaims) -> SessionDocument {
+        SessionDocument {
+            api_version: SESSION_API_VERSION.to_string(),
+            upstream_name: "phala-direct".to_string(),
+            endpoint: Some(endpoint.to_string()),
+            verifier_id: "phala-direct/1".to_string(),
+            established_at: 1_700_000_000,
+            expires_at: 1_700_086_400,
+            identity: None,
+            channel_binding: vec![binding(spki)],
             claims,
-            EvidenceRef::default(),
-            1_700_000_000,
-            1_700_086_400,
-        )
-        .unwrap()
+            evidence: EvidenceRef::default(),
+        }
     }
 
     #[test]
-    fn session_id_is_content_addressed_and_dedups() {
-        let a = seal_with("https://node-7.example.net", "aa", SessionClaims::default());
-        let b = seal_with("https://node-7.example.net", "aa", SessionClaims::default());
-        assert!(a.session_id.starts_with("as_"));
-        assert_eq!(a.session_id.len(), 3 + 64, "as_ + 64 hex chars");
-        // Identical verified material → identical id, regardless of timestamps
-        // being equal here; the id excludes them.
-        assert_eq!(a.session_id, b.session_id);
-    }
-
-    #[test]
-    fn session_id_changes_when_verified_material_changes() {
-        let base = seal_with("https://node-7.example.net", "aa", SessionClaims::default());
-
-        // Rotated SPKI ⇒ new session (the cert-renewal case).
-        let rotated = seal_with("https://node-7.example.net", "bb", SessionClaims::default());
-        assert_ne!(base.session_id, rotated.session_id);
-
-        // Different endpoint ⇒ new session.
-        let other_endpoint =
-            seal_with("https://node-8.example.net", "aa", SessionClaims::default());
-        assert_ne!(base.session_id, other_endpoint.session_id);
-
-        // Different claims ⇒ new session.
-        let claims = SessionClaims {
-            tee_attested: Claim::asserted(ClaimSource::HardwareProven, "dcap verified"),
-            ..Default::default()
-        };
-        let other_claims = seal_with("https://node-7.example.net", "aa", claims);
-        assert_ne!(base.session_id, other_claims.session_id);
-    }
-
-    #[test]
-    fn id_ignores_timestamps() {
-        let a = AttestedSession::seal(
-            "p",
-            None,
-            "v/1",
-            None,
-            vec![],
+    fn session_id_is_the_hash_of_the_served_bytes() {
+        let session = AttestedSession::seal(document(
+            "https://node-7.example.net",
+            "aa",
             SessionClaims::default(),
-            EvidenceRef::default(),
-            100,
-            400,
-        )
+        ))
         .unwrap();
-        let b = AttestedSession::seal(
-            "p",
-            None,
-            "v/1",
-            None,
-            vec![],
+        assert_eq!(
+            session.session_id(),
+            digest::sha256_hex(session.bytes()),
+            "id must be sha256:<hex> over the exact document bytes"
+        );
+        assert!(session.session_id().starts_with("sha256:"));
+        assert_eq!(session.session_id().len(), 7 + 64);
+
+        // The id is not inside the document bytes.
+        let value: Value = serde_json::from_slice(session.bytes()).unwrap();
+        assert!(value.get("session_id").is_none());
+        assert_eq!(value["api_version"], "aci/1");
+        assert_eq!(value["endpoint"], "https://node-7.example.net");
+    }
+
+    #[test]
+    fn any_document_change_changes_the_id() {
+        let base = AttestedSession::seal(document(
+            "https://node-7.example.net",
+            "aa",
             SessionClaims::default(),
-            EvidenceRef::default(),
-            999,
-            9999,
-        )
+        ))
         .unwrap();
-        assert_eq!(a.session_id, b.session_id);
+
+        let rotated = AttestedSession::seal(document(
+            "https://node-7.example.net",
+            "bb",
+            SessionClaims::default(),
+        ))
+        .unwrap();
+        assert_ne!(base.session_id(), rotated.session_id());
+
+        // A new validity period is a new session (§9): timestamps are in the bytes.
+        let mut doc = document("https://node-7.example.net", "aa", SessionClaims::default());
+        doc.expires_at += 1;
+        let renewed = AttestedSession::seal(doc).unwrap();
+        assert_ne!(base.session_id(), renewed.session_id());
+    }
+
+    #[test]
+    fn from_bytes_round_trips_exactly() {
+        let sealed =
+            AttestedSession::seal(document("https://x", "aa", SessionClaims::default())).unwrap();
+        let adopted = AttestedSession::from_bytes(sealed.bytes().to_vec()).unwrap();
+        assert_eq!(adopted, sealed);
     }
 
     #[test]
@@ -418,32 +373,24 @@ mod tests {
 
     #[test]
     fn evidence_digest_matches_data_guards_a_swapped_payload() {
-        let digest = canonical::sha256_hex(b"abc"); // "sha256:..."
-                                                    // base64("abc") = "YWJj" — matches the digest.
+        let digest_value = digest::sha256_hex(b"abc"); // "sha256:..."
+                                                       // base64("abc") = "YWJj" — matches the digest.
         let ok = EvidenceRef {
-            digest: Some(digest.clone()),
+            digest: Some(digest_value.clone()),
             data_uri: Some("data:text/plain;base64,YWJj".to_string()),
         };
         assert!(ok.digest_matches_data());
         // base64("xyz") = "eHl6" — does NOT match the digest of "abc".
         let swapped = EvidenceRef {
-            digest: Some(digest.clone()),
+            digest: Some(digest_value.clone()),
             data_uri: Some("data:text/plain;base64,eHl6".to_string()),
         };
         assert!(!swapped.digest_matches_data());
         // No data to check against ⇒ nothing to verify.
         let no_data = EvidenceRef {
-            digest: Some(digest),
+            digest: Some(digest_value),
             data_uri: None,
         };
         assert!(no_data.digest_matches_data());
-    }
-
-    #[test]
-    fn session_round_trips_through_serde() {
-        let session = seal_with("https://node-7.example.net", "aa", SessionClaims::default());
-        let back: AttestedSession =
-            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
-        assert_eq!(session, back);
     }
 }

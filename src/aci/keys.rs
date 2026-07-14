@@ -1,33 +1,27 @@
 //! Key-provider and quote-provider abstractions for ACI.
 //!
-//! An ACI service must hold private keys for the workload identity,
-//! receipt signing, E2EE termination, and the TLS endpoint. The ACI
-//! draft requires that every listed public key correspond to a
-//! private key generated inside the attested workload, sealed
-//! exclusively to it, or released by an attestation-gated mechanism
+//! An ACI service holds private keys for receipt signing, E2EE termination,
+//! and (via the deployment) the TLS endpoint. Every listed public key must
+//! satisfy the §4.3 custody rules: generated inside the attested workload,
+//! sealed exclusively to it, or released by an attestation-gated mechanism
 //! such as a dstack KMS path.
 //!
 //! Hard constraints:
 //!
 //! * The aggregator service never holds raw private bytes.
-//!   [`KeyProvider`] is the only thing that signs.
-//! * dstack-specific key custody lives outside this pure ACI module
-//!   and uses the Rust dstack SDK.
-//! * Test-only providers live in the integration test tree, not in
-//!   the runtime library.
+//!   [`KeyProvider`] is the only thing that signs or decrypts.
+//! * dstack-specific key custody lives outside this pure ACI module.
+//! * Test-only providers live in the test tree, not the runtime library.
 
 use async_trait::async_trait;
 use ed25519_dalek::VerifyingKey;
-use k256::ecdsa::Signature as K256Signature;
-use k256::EncodedPoint;
-use sha2::{Digest, Sha256};
-use sha3::Keccak256;
+use sha3::{Digest, Keccak256};
 
-use super::types::{KeyedPublicKey, PublicKeyMaterial, TlsSpki};
+use super::types::{KeyedPublicKey, TlsSpki};
 
-/// Wire algorithm names matching ACI §4.1.
+/// The one ACI v1 signature algorithm (§8.2, Appendix A).
 pub const ALGO_ED25519: &str = "ed25519";
-pub const ALGO_ECDSA_SECP256K1: &str = "ecdsa-secp256k1";
+/// §13 legacy `X-Signing-Algo` labels (not ACI algorithm names).
 pub const LEGACY_ALGO_ED25519: &str = "ed25519";
 pub const LEGACY_ALGO_ECDSA: &str = "ecdsa";
 
@@ -66,14 +60,16 @@ pub struct Quote {
     /// VM / TCB configuration metadata. Serialised verbatim into the
     /// attestation envelope `evidence.vm_config`.
     pub vm_config: serde_json::Value,
+    /// Raw app-compose.json the CVM booted, for the §10.1(4) compose check:
+    /// `sha256(app_compose)` must equal the RTMR3 `compose-hash` event.
+    pub app_compose: serde_json::Value,
 }
 
 /// Produces a TEE quote binding caller-supplied report-data.
 #[async_trait]
 pub trait Quoter: Send + Sync {
-    /// Return a fresh quote whose report-data slot binds the supplied 32
-    /// bytes (the vendor profile decides any padding to the native slot
-    /// width). Used by the canonical ACI report.
+    /// Return a fresh quote binding the 32-byte ACI `report_data`, placed in
+    /// the vendor report-data slot per §4.2 (zero-padded to the slot width).
     async fn get_quote(&self, report_data: [u8; 32]) -> Result<Quote, KeyError>;
 
     /// Return a fresh quote whose report-data slot equals the supplied 64
@@ -85,48 +81,41 @@ pub trait Quoter: Send + Sync {
 
 /// The set of ACI private-key operations the aggregator needs.
 pub trait KeyProvider: Send + Sync {
-    fn identity_public_key(&self) -> PublicKeyMaterial;
-
-    /// Sign the JCS-canonicalised endorsement payload from
-    /// [`super::identity::keyset_endorsement_payload`]. The algorithm
-    /// MUST match [`KeyProvider::identity_public_key`]`.algo`.
-    fn sign_keyset_endorsement(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError>;
-
-    /// Sign the JCS-canonicalised revocation payload from
-    /// [`super::identity::keyset_revocation_payload`] (§4.7). Uses the same
-    /// identity key and signature encoding as
-    /// [`KeyProvider::sign_keyset_endorsement`]; only the signed payload's
-    /// purpose tag differs.
-    fn sign_keyset_revocation(&self, payload: &[u8]) -> Result<Vec<u8>, KeyError>;
-
+    /// Attested Ed25519 receipt signing keys (§4.1).
     fn receipt_keys(&self) -> Vec<KeyedPublicKey>;
 
-    /// Sign the JCS canonical bytes of the receipt minus
-    /// `signature.value` (ACI §9.4).
-    ///
-    /// * `ed25519`: raw 64-byte RFC 8032 signature over
-    ///   `canonical_bytes`.
-    /// * `ecdsa-secp256k1`: 65-byte recoverable signature over
-    ///   `sha256(canonical_bytes)`, encoded as `r || s || v`.
-    fn sign_receipt(&self, key_id: &str, canonical_bytes: &[u8]) -> Result<Vec<u8>, KeyError>;
+    /// Sign the exact receipt payload bytes (§8.2): a raw 64-byte RFC 8032
+    /// Ed25519 signature over `payload`.
+    fn sign_receipt(&self, key_id: &str, payload: &[u8]) -> Result<Vec<u8>, KeyError>;
 
+    /// Attested E2EE keys (§4.1) — spec-shaped suite entries only.
     fn e2ee_keys(&self) -> Vec<KeyedPublicKey>;
 
-    /// Decrypt an ACI E2EE v2 field using a key listed in
-    /// [`KeyProvider::e2ee_keys`].
+    /// Unseal one ACI E2EE v3 request unit (§7.1) with the keyset key named by
+    /// `key_id`. `context` and `model`, plus `client_public_key_hex` (the
+    /// normalized `X-Client-Pub-Key`), reproduce the request AAD (§7.2).
     fn decrypt_e2ee(
         &self,
         key_id: &str,
-        ciphertext_hex: &str,
-        aad: &[u8],
+        sealed: &[u8],
+        context: &str,
+        model: &str,
+        client_public_key_hex: &str,
     ) -> Result<Vec<u8>, KeyError> {
-        let _ = (ciphertext_hex, aad);
+        let _ = (sealed, context, model, client_public_key_hex);
         Err(KeyError::UnknownE2eeKeyId(key_id.to_string()))
     }
 
+    /// §13 legacy `X-Signing-Algo` compatibility keys (`ecdsa` / `ed25519`
+    /// labels). These never appear in the ACI keyset; the legacy report and
+    /// E2EE surfaces resolve them here.
+    fn legacy_e2ee_keys(&self) -> Vec<KeyedPublicKey> {
+        Vec::new()
+    }
+
     /// Decrypt inherited dstack-vllm-proxy E2EE payloads selected by
-    /// `X-Signing-Algo`. `aad == None` is legacy v1; `Some` is the
-    /// legacy v2 AAD string.
+    /// `X-Signing-Algo` (§13). `aad` is always `None` for the surviving v1
+    /// mode; the parameter stays for signature stability with old payloads.
     fn decrypt_legacy_e2ee(
         &self,
         signing_algo: &str,
@@ -139,9 +128,8 @@ pub trait KeyProvider: Send + Sync {
 
     fn tls_spkis(&self) -> Vec<TlsSpki>;
 
-    /// Sign the legacy dstack-vllm-proxy `/v1/signature/{chat_id}`
-    /// payload. This is a compatibility profile, separate from ACI
-    /// receipt signing.
+    /// Sign the legacy dstack-vllm-proxy `/v1/signature/{chat_id}` payload
+    /// (§13). A compatibility profile, separate from ACI receipt signing.
     fn sign_legacy_message(
         &self,
         signing_algo: &str,
@@ -151,9 +139,9 @@ pub trait KeyProvider: Send + Sync {
         Err(KeyError::UnsupportedAlgo(signing_algo.to_string()))
     }
 
-    /// Optional provider-specific proof of key custody or key release.
-    /// dstack implementations use this to publish KMS signature chains
-    /// for the released keys.
+    /// Optional provider-specific proof of key custody or key release (§4.3).
+    /// dstack implementations publish KMS signature chains for the released
+    /// keys.
     fn key_custody_evidence(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
@@ -182,126 +170,29 @@ pub fn ethereum_address_from_uncompressed_public_key(
     Ok(format!("0x{}", hex::encode(&digest[12..])))
 }
 
-// ---------- Verifiers (used by tests; useful as reference) ----------
-
-/// Verify a keyset endorsement signature under the identity key.
-///
-/// `ed25519`: 64-byte RFC 8032 signature over `payload`.
-/// `ecdsa-secp256k1`: 64-byte `r || s` signature over `sha256(payload)`,
-/// matching the in-process signer above. (ACI §4.2 leaves identity
-/// endorsement encoding implementation-defined; receipts are the
-/// path that mandates the 65-byte recoverable shape.)
-pub fn verify_keyset_endorsement(
-    identity: &PublicKeyMaterial,
+/// Verify an ACI receipt signature (§10.2): a raw RFC 8032 Ed25519 signature
+/// over the exact decoded payload bytes. The attested keyset entry decides
+/// the algorithm; anything but `ed25519` fails.
+pub fn verify_receipt_signature(
+    receipt_key: &KeyedPublicKey,
     payload: &[u8],
     signature: &[u8],
 ) -> bool {
-    match identity.algo.as_str() {
-        ALGO_ED25519 => {
-            let Ok(pub_bytes) = hex::decode(&identity.public_key_hex) else {
-                return false;
-            };
-            let Ok(arr) = <[u8; 32]>::try_from(pub_bytes.as_slice()) else {
-                return false;
-            };
-            let Ok(vk) = VerifyingKey::from_bytes(&arr) else {
-                return false;
-            };
-            let Ok(sig_arr) = <[u8; 64]>::try_from(signature) else {
-                return false;
-            };
-            let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-            vk.verify_strict(payload, &sig).is_ok()
-        }
-        ALGO_ECDSA_SECP256K1 => {
-            if signature.len() != 64 {
-                return false;
-            }
-            let Ok(pub_bytes) = hex::decode(&identity.public_key_hex) else {
-                return false;
-            };
-            let Ok(pt) = EncodedPoint::from_bytes(&pub_bytes) else {
-                return false;
-            };
-            let vk = match k256::ecdsa::VerifyingKey::from_encoded_point(&pt) {
-                Ok(v) => v,
-                Err(_) => return false,
-            };
-            let sig = match K256Signature::from_slice(signature) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            use k256::ecdsa::signature::Verifier;
-            vk.verify(payload, &sig).is_ok()
-        }
-        _ => false,
+    if receipt_key.algo != ALGO_ED25519 {
+        return false;
     }
-}
-
-/// Verify an ACI receipt signature per §9.4.
-///
-/// * `ed25519`: raw RFC 8032 signature over `canonical_bytes`.
-/// * `ecdsa-secp256k1`: exactly 65 bytes encoded `r || s || v` (32 +
-///   32 + 1) over `sha256(canonical_bytes)`. `v` must recover the
-///   listed receipt public key. Bare 64-byte `r || s` shapes are
-///   rejected: that is the JOSE ES256K form which ACI §9.4
-///   explicitly excludes.
-pub fn verify_receipt_signature(
-    receipt_key: &KeyedPublicKey,
-    canonical_bytes: &[u8],
-    signature: &[u8],
-) -> bool {
-    match receipt_key.algo.as_str() {
-        ALGO_ED25519 => {
-            let Ok(pub_bytes) = hex::decode(&receipt_key.public_key_hex) else {
-                return false;
-            };
-            let Ok(arr) = <[u8; 32]>::try_from(pub_bytes.as_slice()) else {
-                return false;
-            };
-            let Ok(vk) = VerifyingKey::from_bytes(&arr) else {
-                return false;
-            };
-            let Ok(sig_arr) = <[u8; 64]>::try_from(signature) else {
-                return false;
-            };
-            let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-            vk.verify_strict(canonical_bytes, &sig).is_ok()
-        }
-        ALGO_ECDSA_SECP256K1 => {
-            if signature.len() != 65 {
-                return false;
-            }
-            let mut v = signature[64];
-            if (27..=30).contains(&v) {
-                v -= 27;
-            }
-            let Some(recid) = k256::ecdsa::RecoveryId::from_byte(v) else {
-                return false;
-            };
-            let r_s = &signature[..64];
-            let Ok(pub_bytes) = hex::decode(&receipt_key.public_key_hex) else {
-                return false;
-            };
-            let Ok(pt) = EncodedPoint::from_bytes(&pub_bytes) else {
-                return false;
-            };
-            let expected_vk = match k256::ecdsa::VerifyingKey::from_encoded_point(&pt) {
-                Ok(vk) => vk,
-                Err(_) => return false,
-            };
-            let sig = match K256Signature::from_slice(r_s) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            let prehash: [u8; 32] = Sha256::digest(canonical_bytes).into();
-            let Ok(recovered_vk) =
-                k256::ecdsa::VerifyingKey::recover_from_prehash(&prehash, &sig, recid)
-            else {
-                return false;
-            };
-            recovered_vk == expected_vk
-        }
-        _ => false,
-    }
+    let Ok(pub_bytes) = hex::decode(&receipt_key.public_key_hex) else {
+        return false;
+    };
+    let Ok(arr) = <[u8; 32]>::try_from(pub_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(vk) = VerifyingKey::from_bytes(&arr) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+    vk.verify_strict(payload, &sig).is_ok()
 }

@@ -49,19 +49,19 @@ partition from Redpill tenant identity.
 
 ## The shared verification model
 
-**A session binding is only trustworthy if it is bound into a verified attestation.**
-Every provider produces exactly one kind of binding, and in every case the bound value
-lives inside (or is digested into) the quote/report whose signature is verified. Each
-`verification.md` states plainly *what is bound* and *what a tamper rejects*.
+**A session binding is only trustworthy if it is bound into a verified attestation or
+an attestation-gated key-release protocol.** Every provider produces exactly one kind
+of binding. The bound value either lives inside the signed quote/report or identifies
+the attested policy that gates the provider's encryption secret. Each `verification.md`
+states plainly *what is bound* and *what a tamper rejects*.
 
-The two binding types:
+The binding types:
 
 - **`tls_spki_sha256`** — SHA-256 fingerprint of the upstream's TLS public key; the
   backend enforces it against the actual upstream HTTPS connection before forwarding.
 - **`e2ee_public_key_sha256`** — SHA-256 of the upstream's end-to-end public key; the
   backend encrypts the request body to that key, so only the attested enclave can
   decrypt.
-
 ### Invariant: verified ⟹ enforceable binding
 
 A "verified" result that carries no enforceable channel binding is rejected
@@ -73,20 +73,24 @@ A provider can never be "verified but unpinned."
 ### The attested session record
 
 When an upstream is verified, `record_attested_upstream_session`
-(`src/aggregator/service.rs`) content-addresses the verified binding, verifier id,
-target, and evidence digest into a stable `session_id` (`as_<sha256>`), stores an
-`AttestedSession` served by `GET /v1/aci/sessions/{session_id}`, and attaches
-that `session_id` to the receipt's `upstream.verified` event. Retention is the receipt
-TTL — a retention window, not a binding-validity deadline (see
+(`src/aggregator/service/forward.rs`) seals the verified material — upstream
+name, endpoint, verifier id, identity, channel bindings, typed claims, and
+evidence — into an immutable session document. The served bytes are the
+artifact: `session_id` is `sha256:` + their SHA-256 (spec §9). The record is
+served by `GET /v1/aci/sessions/{hex}`, and the id is attached to the receipt's
+`upstream.verified` event. The session's `expires_at` ends its validity period
+for new forwarding decisions; the record stays resolvable at least as long as
+any receipt citing it (see
 [../upstream-verification-lifecycle.md](../upstream-verification-lifecycle.md)).
 
 ### How a relying party verifies it end-to-end
 
-1. `GET /v1/attestation/report?nonce=<random>` — verify the gateway's own ACI report.
+1. `GET /v1/aci/attestation?nonce=<random>` — verify the gateway's own ACI report.
 2. `GET /v1/aci/receipts/{chat_id}` — verify the receipt signature under the attested keyset.
-3. Read `upstream.verified.session_id`; `GET /v1/aci/sessions/{id}`.
-4. Confirm the record's `target`, `verifier_id`, `evidence.digest`, and `session_binding`
-   match the receipt event (nothing the middleware can forge).
+3. Read `upstream.verified.session_id`; `GET /v1/aci/sessions/{hex}`.
+4. Recompute the SHA-256 of the fetched session bytes and confirm it equals the
+   cited `session_id` (nothing the middleware can forge), then audit the
+   record's channel bindings, claims, and evidence digest.
 5. The gateway has already enforced that binding on the wire before forwarding.
 
 `scripts/live_e2e/user_verify.py` and `scripts/live_e2e/cases/attested_sessions.py`

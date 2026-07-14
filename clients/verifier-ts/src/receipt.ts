@@ -1,92 +1,136 @@
 /**
- * Level 1 receipt verification (§10.2 checks 1–2) and helpers for the body-hash
- * checks (§10.2 checks 3–4). "Established identity and keyset" means a keyset the
- * caller already trusts — from a Level 2 report verification, or published by a
- * party the client trusts. The recomputed `workload_id` and keyset digest of
- * that keyset are the values the receipt must match.
+ * Receipt verification (§8, §10.2). The envelope serves the payload as exact
+ * bytes (`payload_b64`); the signature is Ed25519 over those decoded bytes
+ * under a key the established keyset lists. "Established" means a keyset whose
+ * digest the caller verified — through {@link verifyReportBinding}, or
+ * published by a party the client trusts (Level 1, §10).
  */
 
-import { receiptSigningBytes, computeWorkloadId, computeKeysetDigest } from './digest.js';
-import { verifySignature, sha256Prefixed } from './crypto.js';
-import { fromHex } from './crypto.js';
-import type { Receipt, ReceiptEvent, WorkloadKeyset, Check, ReceiptVerification } from './types.js';
+import { verifyEd25519, sha256Prefixed, fromBase64, fromHex } from './crypto.js';
+import type {
+  Check,
+  ReceiptEnvelope,
+  ReceiptEvent,
+  ReceiptPayload,
+  ReceiptVerification,
+  WorkloadKeyset,
+} from './types.js';
 
 /**
- * Verify a receipt against an established keyset — §10.2 checks 1 and 2:
+ * §10.2 checks 1–2: the envelope signature verifies over the decoded payload
+ * bytes under the keyset entry `key_id` names (whose `algo` the envelope must
+ * match — the attested entry decides the algorithm, §3), and the payload's
+ * `workload_keyset_digest` equals the established digest. Payloads whose
+ * `api_version` is not `aci/1` are rejected (Appendix A).
  *
- * 1. `signature.key_id` names a key in the keyset's `receipt_signing_keys`,
- *    `signature.algo` matches that key, and the signature verifies over the
- *    §8.5 canonical bytes under that key.
- * 2. The receipt's `workload_id` and `workload_keyset_digest` equal the values
- *    recomputed from the established keyset (§4.1, §4.2).
- *
- * Returns a per-check result — a failed check is `ok: false`, never thrown.
- * Throws {@link UnsupportedAlgorithmError} only when the signing algorithm is
- * outside Web Crypto scope (e.g. `ecdsa-secp256k1`).
+ * Returns per-check results and the parsed payload for the body-hash checks;
+ * a failed check is `ok: false`, never thrown.
  */
 export async function verifyReceipt(
-  receipt: Receipt,
+  envelope: ReceiptEnvelope,
   keyset: WorkloadKeyset,
+  establishedDigest: string,
 ): Promise<ReceiptVerification> {
   const checks: Check[] = [];
 
-  const establishedWorkloadId = await computeWorkloadId(keyset.workload_identity.public_key);
-  const establishedDigest = await computeKeysetDigest(keyset);
+  let payloadBytes: Uint8Array | undefined;
+  try {
+    payloadBytes = fromBase64(envelope.payload_b64);
+  } catch {
+    // Handled below: without the payload bytes neither check can run.
+  }
+  if (payloadBytes === undefined) {
+    const detail = 'payload_b64 does not decode as base64';
+    checks.push({ name: 'signature', ok: false, detail });
+    checks.push({ name: 'workload_keyset_digest', ok: false, detail });
+    return { ok: false, checks };
+  }
 
-  // Check 2: self-described identity matches the established keyset.
-  checks.push({
-    name: 'workload_id',
-    ok: receipt.workload_id === establishedWorkloadId,
-    ...(receipt.workload_id === establishedWorkloadId
-      ? {}
-      : { detail: `receipt ${receipt.workload_id} != established ${establishedWorkloadId}` }),
-  });
-  checks.push({
-    name: 'workload_keyset_digest',
-    ok: receipt.workload_keyset_digest === establishedDigest,
-    ...(receipt.workload_keyset_digest === establishedDigest
-      ? {}
-      : { detail: `receipt ${receipt.workload_keyset_digest} != established ${establishedDigest}` }),
-  });
-
-  // Check 1: signature under a named receipt signing key.
-  const keyEntry = keyset.receipt_signing_keys.find((k) => k.key_id === receipt.signature.key_id);
+  // §10.2 check 1: Ed25519 over the served payload bytes.
+  const keyEntry = keyset.receipt_signing_keys.find((k) => k.key_id === envelope.key_id);
   if (!keyEntry) {
     checks.push({
       name: 'signature',
       ok: false,
-      detail: `signature.key_id "${receipt.signature.key_id}" not in receipt_signing_keys`,
+      detail: `key_id "${envelope.key_id}" not in receipt_signing_keys`,
     });
-  } else if (receipt.signature.algo !== keyEntry.algo) {
-    // §3.1: the attested key decides the algorithm; the receipt may not override it.
+  } else if (envelope.algo !== keyEntry.algo) {
     checks.push({
       name: 'signature',
       ok: false,
-      detail: `signature.algo "${receipt.signature.algo}" != keyset entry algo "${keyEntry.algo}"`,
+      detail: `envelope algo "${envelope.algo}" != keyset entry algo "${keyEntry.algo}"`,
+    });
+  } else if (keyEntry.algo !== 'ed25519') {
+    // Appendix A: ed25519 is the only defined signature algorithm; reject others.
+    checks.push({
+      name: 'signature',
+      ok: false,
+      detail: `unsupported signature algo "${keyEntry.algo}"`,
     });
   } else {
-    const message = receiptSigningBytes(receipt);
-    const ok = await verifySignature(
-      keyEntry.algo,
-      fromHex(keyEntry.public_key),
-      fromHex(receipt.signature.value),
-      message,
-      'receipt signature (§8.5)',
-    );
-    checks.push({ name: 'signature', ok, ...(ok ? {} : { detail: 'Ed25519 verification failed' }) });
+    let ok = false;
+    try {
+      ok = await verifyEd25519(
+        fromHex(keyEntry.public_key),
+        fromHex(envelope.signature),
+        payloadBytes,
+      );
+    } catch {
+      // Malformed hex is a failed verification, not a thrown one.
+    }
+    checks.push({
+      name: 'signature',
+      ok,
+      ...(ok ? {} : { detail: `ed25519 verification failed under "${envelope.key_id}"` }),
+    });
   }
 
-  return { ok: checks.every((c) => c.ok), checks };
+  // §10.2 check 2: the payload binds back to the established keyset.
+  let payload: ReceiptPayload | undefined;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(payloadBytes)) as ReceiptPayload;
+  } catch {
+    // Handled below.
+  }
+  if (payload === undefined) {
+    checks.push({
+      name: 'workload_keyset_digest',
+      ok: false,
+      detail: 'payload bytes are not valid JSON',
+    });
+  } else {
+    // Appendix A: reject receipt payloads with a foreign api_version.
+    const versionOk = payload.api_version === 'aci/1';
+    checks.push({
+      name: 'api_version',
+      ok: versionOk,
+      ...(versionOk ? {} : { detail: `payload api_version "${payload.api_version}" is not "aci/1"` }),
+    });
+    const ok = payload.workload_keyset_digest === establishedDigest;
+    checks.push({
+      name: 'workload_keyset_digest',
+      ok,
+      ...(ok
+        ? {}
+        : { detail: `payload ${payload.workload_keyset_digest} != established ${establishedDigest}` }),
+    });
+  }
+
+  return {
+    ok: checks.every((c) => c.ok),
+    checks,
+    ...(payload !== undefined ? { payload } : {}),
+  };
 }
 
-/** Find the first event of a given type in a receipt's event log. */
-export function findEvent(receipt: Receipt, type: string): ReceiptEvent | undefined {
-  return receipt.event_log.find((e) => e.type === type);
+/** Find the first event of a given type in a receipt payload's event log. */
+export function findEvent(payload: ReceiptPayload, type: string): ReceiptEvent | undefined {
+  return payload.event_log.find((e) => e.type === type);
 }
 
 /**
- * `sha256:<hex>` of raw body bytes — the form ACI body hashes use (§3). Accepts a
- * string (UTF-8 encoded) or raw bytes.
+ * `sha256:<hex>` of raw body bytes — the form ACI body hashes use (§3). Accepts
+ * a string (UTF-8 encoded) or raw bytes.
  */
 export async function hashBody(body: Uint8Array | string): Promise<string> {
   const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : body;
@@ -94,46 +138,36 @@ export async function hashBody(body: Uint8Array | string): Promise<string> {
 }
 
 /**
- * §10.2 check 3: the request bytes the client sent match `request.received.body_hash`.
- * For E2EE requests, pass the decrypted body as the service observed it (§8.3, §12).
- * Returns false when the event or its hash is absent.
+ * §10.2 check 3: `request.received.body_hash` matches the request bytes this
+ * client sent — the wire body for plaintext, the original body it sealed for
+ * E2EE (§8.4). Returns false when the event or its hash is absent.
  */
 export async function checkRequestBodyHash(
-  receipt: Receipt,
+  payload: ReceiptPayload,
   requestBody: Uint8Array | string,
 ): Promise<boolean> {
-  const event = findEvent(receipt, 'request.received');
-  const expected = event?.body_hash;
-  if (typeof expected !== 'string') return false;
-  return (await hashBody(requestBody)) === expected;
+  return eventHashMatches(payload, 'request.received', requestBody);
 }
 
 /**
- * §10.2 check 4: the response bytes the client received match
- * `response.returned.wire_hash` — for a stream, the in-order raw SSE bytes.
- * Returns false when the event or its hash is absent.
+ * §10.2 check 4: `response.returned.body_hash` matches the response bytes this
+ * client received off the wire — the in-order raw SSE bytes for a stream, the
+ * sealed envelope bytes for E2EE (§8.4). Returns false when the event or its
+ * hash is absent.
  */
-export async function checkResponseWireHash(
-  receipt: Receipt,
+export async function checkResponseBodyHash(
+  payload: ReceiptPayload,
   responseBody: Uint8Array | string,
 ): Promise<boolean> {
-  const event = findEvent(receipt, 'response.returned');
-  const expected = event?.wire_hash;
-  if (typeof expected !== 'string') return false;
-  return (await hashBody(responseBody)) === expected;
+  return eventHashMatches(payload, 'response.returned', responseBody);
 }
 
-/**
- * For E2EE responses, check the decrypted response bytes match
- * `response.returned.cleartext_hash` (§10.2 check 4, §12). Only meaningful when
- * the client can reproduce the service's pre-encryption serialization.
- */
-export async function checkResponseCleartextHash(
-  receipt: Receipt,
-  cleartextBody: Uint8Array | string,
+async function eventHashMatches(
+  payload: ReceiptPayload,
+  type: string,
+  body: Uint8Array | string,
 ): Promise<boolean> {
-  const event = findEvent(receipt, 'response.returned');
-  const expected = event?.cleartext_hash;
+  const expected = findEvent(payload, type)?.body_hash;
   if (typeof expected !== 'string') return false;
-  return (await hashBody(cleartextBody)) === expected;
+  return (await hashBody(body)) === expected;
 }

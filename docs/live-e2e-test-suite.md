@@ -63,8 +63,6 @@ scripts/live_e2e/
     near-ai.json
     chutes.json
     aci-service.json
-examples/
-  verify_aci_artifacts.rs
 ```
 
 The current tree still has some older helper names, such as
@@ -87,7 +85,7 @@ uv run python scripts/live_e2e/user_verify.py \
   --chat-id chatcmpl-... \
   --request-body request.json \
   --response-body response.json
-cargo run --example verify_aci_artifacts -- \
+cargo run --bin aci -- audit \
   --report report.json \
   --receipt receipt.json \
   --nonce nonce-used-for-report \
@@ -204,8 +202,8 @@ Provider-specific rules:
   for the binding enforced by the transport. Strict production entries should
   pin upstream model ids to concrete `chute_id` UUIDs with `chutes_chute_ids`;
   the verifier and upstream config use the same pins.
-- ACI service: verify `/v1/attestation/report?nonce=...`, quote report data,
-  dstack KMS identity custody, accepted workload id or image digest, accepted
+- ACI service: verify `/v1/aci/attestation?nonce=...`, quote report data,
+  dstack KMS key custody, accepted keyset subject or image digest, accepted
   KMS root, and attested TLS SPKI.
 
 Reference updates must be reviewed. The script may print a proposed diff with
@@ -253,10 +251,10 @@ exit because it contains live bearer tokens.
 Checks:
 
 - `GET /v1/models` returns only public aliases.
-- `GET /v1/attestation/report?nonce=<random>` verifies:
-  - workload id equals hash of the attested identity public key,
-  - keyset endorsement verifies,
-  - quote report data binds the ACI attestation statement,
+- `GET /v1/aci/attestation?nonce=<random>` verifies:
+  - the keyset digest recomputes over the decoded `workload_keyset_b64` bytes,
+  - quote report data binds the §4.2 attestation statement for the nonce,
+  - the keyset is not expired,
   - dstack KMS custody verifies when using dstack,
   - source provenance is absent when unknown, or matches the git-launcher
     repo/commit pin when present,
@@ -269,20 +267,20 @@ For each provider and enabled request mode:
 - Send request through the gateway.
 - Assert response status and OpenAI-compatible shape.
 - Fetch `/v1/aci/receipts/{chat_id}` with the original bearer token.
-- Verify receipt signature using the receipt key from the attested keyset.
-- Verify receipt workload id and keyset digest match the attestation report.
-- Verify `request.received` hash equals the exact client body.
-- Verify `request.forwarded` hash equals the model-rewritten upstream body.
-- Verify `transparency.request_modified` exists when model alias rewriting
-  happened.
-- Verify `upstream.verified` is `verified`, `required == true`, has evidence
-  digest/ref, and has enforceable binding material.
-- Verify `response.returned.cleartext_hash` equals the response body for
-  non-streaming requests or the reassembled ordered SSE bytes for streaming.
+- Verify the receipt envelope signature using the receipt key from the
+  attested keyset.
+- Verify the payload's keyset digest matches the attestation report.
+- Verify `request.received.body_hash` equals the exact client body.
+- Verify `request.forwarded.body_hash` equals the model-rewritten upstream
+  body (a rewrite is this hash differing from `request.received`).
+- Verify `upstream.verified` is `verified`, `required == true`, and cites a
+  `session_id` whose fetched bytes hash to it.
+- Verify `response.returned.body_hash` equals the response body for
+  non-streaming requests or the raw ordered SSE wire bytes for streaming.
 
 The first runnable slice covers the non-streaming lifecycle and relying-party
-verification path. The verifier intentionally uses the Rust protocol code for
-ACI canonicalization, keyset binding, and receipt signature checks instead of
+verification path. The verifier intentionally uses the Rust protocol code
+(`aci audit`) for keyset binding and receipt signature checks instead of
 reimplementing those rules in Python.
 
 ### 32 Embeddings
@@ -296,9 +294,9 @@ Capability-gated on `embeddings`. For each provider that lists it, the runner:
   the lookup id, since OpenAI embeddings responses carry no `id` field. The
   gateway's receipt endpoint accepts either `chat_id` or `receipt_id` as the
   path parameter.
-- Runs the same `verify_aci_artifacts` example against the receipt + request +
-  response bodies to confirm canonical request/forwarded/response hashes,
-  receipt signature, and channel binding.
+- Runs the same `aci audit` offline verification against the receipt +
+  request + response bodies to confirm the request/forwarded/response hashes
+  and the receipt signature.
 - Asserts `receipt.endpoint == "/v1/embeddings"` and that `upstream.verified`
   carries the provider's declared binding (e.g. `e2ee_public_key_sha256` for
   Chutes embeddings).
@@ -458,41 +456,28 @@ Inputs:
 - Chat id or receipt id.
 - Original request body, optional.
 - Response body or captured stream bytes, optional.
-- Optional expected repo commit, image digest, TLS SPKI, or workload id.
 
-Procedure:
+Procedure (delegated to `aci audit`):
 
-1. Fetch `GET /v1/attestation/report?nonce=<random>`.
-2. Verify the report binding, quote, keyset endorsement, source provenance,
-   and optional TLS SPKI.
+1. Fetch `GET /v1/aci/attestation?nonce=<random>`.
+2. Verify the report binding chain (keyset bytes → digest → statement →
+   report_data) and keyset expiry.
 3. Fetch `GET /v1/aci/receipts/{chat_id}`.
-4. Verify receipt signature under the attested receipt key.
-5. Verify receipt workload id and keyset digest match the verified report.
-6. Verify request/response hashes when bodies are supplied.
-7. Inspect `upstream.verified` and show provider, model id, verifier id,
-   evidence digest, evidence data URI content type, result, and binding type.
-8. For every `upstream.verified.session_id`, fetch
-   `GET /v1/aci/sessions/{session_id}` and confirm the audit record matches
-   the receipt event's provider, model id, endpoint origin, verifier id,
-   evidence digest, session binding material, and verified claim tags.
+4. Verify the envelope signature under the attested receipt key and the
+   payload's keyset digest against the verified report.
+5. Verify request/response hashes when bodies are supplied.
+6. Fetch the cited `GET /v1/aci/sessions/{hex}`, recompute the session id
+   from the fetched bytes, check the receipt's `served_at` falls in the
+   validity window and the evidence data hashes to its digest, and show the
+   typed claims.
 
 The final output should be a human-readable summary plus a machine-readable
 JSON result. The verifier should omit `source_provenance` when the gateway
 report omits it because the git-launcher pin is unavailable.
 
-```json
-{
-  "verified": true,
-  "workload_id": "sha256:...",
-  "receipt": {"chat_id": "...", "signature_valid": true},
-  "upstream": {
-    "vendor": "chutes-live",
-    "model_id": "moonshotai/Kimi-K2.5-TEE",
-    "verifier_id": "private-ai-verifier/chutes/v1",
-    "binding": "e2ee_public_key_sha256"
-  }
-}
-```
+The output is the `aci audit --json` transcript: a `checks` array (id,
+section, status, detail) and a `verdict` object carrying `verified`, the
+pass/fail/skip counts, and the established `workload_keyset_digest`.
 
 ## OpenRouter-Derived Fidelity Checklist
 

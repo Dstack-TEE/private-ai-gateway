@@ -254,12 +254,11 @@ Every forwarded request should be traceable to the verified lease.
 
 Receipts should record:
 
-- provider id and canonical provider model id
-- lease or evidence digest
-- channel-binding type and digest
-- provider-specific claim summary
-- request and response hashes
-- transparency-log events for request or response rewrites
+- the upstream and canonical provider model id
+- the content-addressed session id of the verified channel (the session
+  holds the channel binding, typed claims, provider facts, and evidence)
+- request and response hashes; a rewrite is `request.forwarded.body_hash`
+  differing from `request.received.body_hash`
 
 Receipts should not require users to understand every provider's native
 attestation format. Detailed verifier evidence should use the common evidence

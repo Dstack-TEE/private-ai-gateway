@@ -1,102 +1,118 @@
-# @dstack/aci-verifier
+# @phala/aci-verifier
 
-A zero-dependency TypeScript verifier for [Attested Confidential Inference
-(ACI)](../../spec/aci.md). It implements **Level 1 — receipt verification**
-(spec §10.2) and the cryptographic-binding subset of **Level 2** (§10.1 checks
-2–6), using only the Web Crypto API (Ed25519, SHA-256) plus a small built-in
-JCS canonicalizer. The same code runs in a browser and in Node 20+; nothing in
-`src/` uses a Node-only API.
+A TypeScript verifier for [Attested Confidential Inference
+(ACI)](../../spec/aci.md), for the browser and Node 20+. `verifyService(url)`
+fetches a service's report with a fresh nonce and returns a full §10.1
+transcript — **including the hardware quote**, verified with
+[`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against the
+Phala PCCS. Every other check is Web Crypto — Ed25519, X25519, HKDF, AES-GCM,
+SHA-256. A prebuilt ESM bundle (`npm run build:bundle`) drops into a
+`<script type="module">`.
 
-Every construction is checked byte-for-byte against
-[spec/test-vectors.md](../../spec/test-vectors.md) — `workload_id`, the keyset
-digest, `report_data`, keyset endorsement and revocation signatures,
-`session_id`, the receipt canonical bytes and signature, and the E2EE AAD
-strings.
+ACI has no canonical JSON form: artifacts verify as the exact bytes the
+service served (spec §3). The only payloads this library constructs are the
+two fixed byte templates the spec pins — the attestation statement (§4.2) and
+the E2EE AAD (§7.1).
 
 ## What it verifies
 
-- **Receipts (Level 1, §10.2 checks 1–2):** `verifyReceipt(receipt, keyset)`
-  checks the receipt signature under a key in the established keyset's
-  `receipt_signing_keys`, that `signature.algo` matches that key, and that the
-  receipt's `workload_id` / `workload_keyset_digest` match the established
-  keyset. Body-hash helpers (`checkRequestBodyHash`, `checkResponseWireHash`,
-  `checkResponseCleartextHash`) cover checks 3–4.
-- **Report binding (Level 2, §10.1 checks 2–6, no hardware quote):**
-  `verifyReportBinding(report, nonce)` recomputes `workload_id`, the keyset
-  digest, and `report_data` for the supplied nonce, verifies the keyset
-  endorsement under the identity key, and checks epoch freshness.
-- **Digest & canonicalization primitives:** JCS canonicalization,
-  `computeWorkloadId`, `computeKeysetDigest`, `computeReportData`,
-  `computeSessionId`, `receiptSigningBytes`, and the endorsement/revocation
-  payload builders.
-- **E2EE AAD builders (§7.3):** `requestAad` / `responseAad` for clients that
-  encrypt request/response fields.
+- **A whole service (§10.1):** `verifyService(url)` fetches the report with a
+  fresh nonce and runs the transcript — the quote to the Intel vendor root
+  (check 1, via `@phala/dcap-qvl`), the binding chain (checks 2–3), and the
+  compose measurement (check 4) when the service publishes `app_compose`.
+  Returns `{ verdict, lines, verification }`. `verifyQuote` and
+  `verifyComposeMeasurement` are the individual checks.
+- **Report binding (§10.1 checks 2–3):** `verifyReportBinding(report, nonce)`
+  base64-decodes `workload_keyset_b64`, recomputes the keyset digest over
+  those exact bytes, rebuilds the attestation statement for the nonce you
+  supplied, checks it hashes to `report_data`, and checks the keyset is not
+  expired. The result carries the established keyset (digest, bytes, parsed
+  form) for every later check.
+- **Receipts (§10.2):** `verifyReceipt(envelope, keyset, establishedDigest)`
+  verifies the Ed25519 envelope signature over the decoded `payload_b64`
+  bytes under the keyset entry `key_id` names (the attested entry decides the
+  algorithm), and that the payload binds to the established keyset digest.
+  `checkRequestBodyHash` / `checkResponseBodyHash` cover checks 3–4.
+- **Sessions (§9, §10.3):** `computeSessionId` hashes the exact fetched
+  session document bytes for comparison against the id a signed receipt
+  committed to; `checkSessionEvidence` checks `evidence.data` hashes to
+  `evidence.digest`.
+- **E2EE v3 (§7):** `openE2eeChannel` seals whole request bodies to the
+  attested X25519 key and opens sealed responses, buffered or streamed. It
+  refuses a report whose binding did not verify; verify the quote too
+  (`verifyService`, or the `aci` CLI) before releasing a prompt to the key.
 
 ## What it does not do
 
-- **No hardware quote verification.** §10.1 check 1 (the TDX/SEV-SNP quote
-  verifies to the vendor root) and the "hardware evidence binds `report_data`"
-  half of check 4 are verifier-profile / Level 2 territory and need primitives
-  outside the Web Crypto API. `verifyReportBinding` proves only the
-  cryptographic *binding* of the report; compose it with a quote verifier and
-  the custody / provenance / channel checks (§10.1 checks 1, 7–10) for full
-  Level 2.
-- **No `ecdsa-secp256k1`.** The curve is not in the Web Crypto API, so any
-  secp256k1 signature or identity key raises `UnsupportedAlgorithmError` — verify
-  those against the reference implementation or a Level 2 profile.
-- **No upstream/session deep audit** (Level 3, §10.3) beyond `computeSessionId`,
-  which lets you recompute and compare a session id a receipt committed to.
+- **No custody or TLS-pin check in a plain browser.** §10.1 checks 5–6 are
+  verifier-profile / transport territory: key custody (the dstack KMS chain,
+  which the `aci` CLI checks) and the observed server-certificate SPKI, which a
+  browser cannot see — a pinned channel needs the CLI or the `aci serve` proxy.
 
 Verification failures are reported as `{ ok: false, checks }` — never thrown —
-so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only for
-malformed input or an out-of-scope algorithm.
+so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
+for malformed input.
 
 ## Usage
 
+One call verifies a whole service:
+
 ```ts
-import { verifyReceipt, checkResponseWireHash } from '@dstack/aci-verifier';
+import { verifyService } from '@phala/aci-verifier';
 
-// `keyset` is a WorkloadKeyset you already trust — from a Level 2 report
-// verification, or published by a party you trust. `receipt` and `responseBytes`
-// come from the inference response you received.
-const result = await verifyReceipt(receipt, keyset);
-if (!result.ok) {
-  throw new Error('receipt failed: ' + JSON.stringify(result.checks));
-}
+const { verdict, lines } = await verifyService('https://api.redpill.ai');
+console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
+for (const l of lines) console.log(l.status, l.id, l.title);
+```
 
-// §10.2 checks 3–4: the response bytes you saw match what the receipt commits to.
-if (!(await checkResponseWireHash(receipt, responseBytes))) {
+Or drive the individual checks:
+
+```ts
+import {
+  verifyReportBinding,
+  verifyReceipt,
+  checkResponseBodyHash,
+  openE2eeChannel,
+} from '@phala/aci-verifier';
+
+// Establish the workload identity for a fresh nonce (§10.1 checks 2–3).
+const nonce = crypto.randomUUID().replaceAll('-', '');
+const report = await (await fetch(`${base}/v1/aci/attestation?nonce=${nonce}`)).json();
+const v = await verifyReportBinding(report, nonce);
+if (!v.ok) throw new Error('report failed: ' + JSON.stringify(v.checks));
+
+// Verify an inference receipt (§10.2). The envelope comes from
+// GET /v1/aci/receipts/{id}, with {id} from the X-Receipt-Id response header.
+const result = await verifyReceipt(envelope, v.keyset!, v.workloadKeysetDigest!);
+if (!result.ok) throw new Error('receipt failed: ' + JSON.stringify(result.checks));
+
+// Checks 3–4: the bytes you sent and received match what the receipt commits to.
+if (!(await checkResponseBodyHash(result.payload!, responseBytes))) {
   throw new Error('response bytes do not match the receipt');
 }
 ```
 
 ### E2EE (§7)
 
-Encrypt request fields to a *verified* workload. `openE2eeChannel` refuses
-unless the report passed `verifyReportBinding`, so you can only encrypt to an
-attested, endorsed key (X25519 suite; secp256k1 is a separate extension).
+Seal the entire request body to the verified workload's attested X25519 key.
+The service unseals your exact bytes, so the receipt's `request.received`
+hash is reproducible from what you sealed.
 
 ```ts
-import { verifyReportBinding, openE2eeChannel } from '@dstack/aci-verifier';
+const chan = await openE2eeChannel(v);
+const sealed = await chan.seal(JSON.stringify({ model, messages }));
+// ...POST sealed.body with sealed.headers to /v1/chat/completions...
 
-const v = await verifyReportBinding(report, attestationNonce);
-if (!v.ok) throw new Error('workload failed verification');
-
-const chan = await openE2eeChannel(report, v);
-const { body, headers } = await chan.seal({ model, messages }); // encrypts content, sets X-E2EE-*
-// ...POST body + headers to /v1/chat/completions...
-const reply = await chan.open(responseJson);                    // buffered reply
-// For a streamed (SSE) response, decrypt each event's chunk instead:
-//   const chunk = await chan.openChunk(JSON.parse(sseEvent.data));
+const replyBytes = await sealed.open(responseBody);      // buffered reply
+// For a streamed (SSE) response, open each event's data payload instead;
+// the [DONE] sentinel passes through:
+//   const eventJson = await sealed.openStreamEvent(sseEvent.data);
 ```
-
-`seal` also covers `/v1/completions` (`prompt`) and `/v1/embeddings` (`input`);
-`open` covers `message.audio.data`, completion `text`, and embedding vectors.
 
 ## Development
 
 ```sh
 npm install
-npm test     # tsc + node:test against every spec vector
+npm test      # tsc + node:test, self-consistency suite
 npm run build # emit dist/ (ESM + .d.ts)
 ```

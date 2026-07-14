@@ -188,7 +188,7 @@ fn build_service(
             backend,
             verifier,
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("forward-binding-reverify-test"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),

@@ -11,6 +11,10 @@ declare module 'node:test' {
   export function it(name: string, fn: TestFn): void;
 }
 
+declare module 'node:fs' {
+  export function readFileSync(path: string | URL, encoding: 'utf8'): string;
+}
+
 declare module 'node:assert/strict' {
   interface AssertStrict {
     (value: unknown, message?: string): asserts value;
@@ -18,6 +22,7 @@ declare module 'node:assert/strict' {
     equal(actual: unknown, expected: unknown, message?: string): void;
     notEqual(actual: unknown, expected: unknown, message?: string): void;
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
+    notDeepEqual(actual: unknown, expected: unknown, message?: string): void;
     throws(fn: () => unknown, error?: unknown, message?: string): void;
     rejects(fn: () => Promise<unknown>, error?: unknown, message?: string): Promise<void>;
   }

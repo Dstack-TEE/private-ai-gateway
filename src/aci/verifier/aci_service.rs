@@ -10,21 +10,21 @@ use rand::RngCore;
 use serde_json::Value;
 
 use super::dstack::{
-    compressed_k256_public_key_hex, verify_dstack_event_log_and_app_id,
-    verify_dstack_kms_identity_custody,
+    compressed_k256_public_key_hex, dstack_rtmr3_event, verify_dstack_event_log,
+    verify_dstack_kms_receipt_custody,
 };
 use super::report::{validate_aci_report_binding, AciReportValidationError, ValidatedAciReport};
 use super::{
     decode_hex, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::types::AttestationReport;
+use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AciServiceVerifierConfigError {
     #[error(
-        "ACI service upstream verifier requires at least one accepted workload id or image digest"
+        "ACI service upstream verifier requires at least one accepted subject or image digest"
     )]
     EmptyPolicy,
     #[error(
@@ -43,18 +43,18 @@ pub enum AciServiceVerifierConfigError {
 
 #[derive(Debug, Clone)]
 pub struct AciServiceVerifierPolicy {
-    accepted_workload_ids: BTreeSet<String>,
+    accepted_subjects: BTreeSet<String>,
     accepted_image_digests: BTreeSet<String>,
     pub(super) accepted_kms_root_public_keys: BTreeSet<String>,
 }
 
 impl AciServiceVerifierPolicy {
     pub fn new(
-        accepted_workload_ids: impl IntoIterator<Item = String>,
+        accepted_subjects: impl IntoIterator<Item = String>,
         accepted_image_digests: impl IntoIterator<Item = String>,
         accepted_kms_root_public_keys: impl IntoIterator<Item = String>,
     ) -> Result<Self, AciServiceVerifierConfigError> {
-        let accepted_workload_ids = accepted_workload_ids
+        let accepted_subjects = accepted_subjects
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<BTreeSet<_>>();
@@ -69,24 +69,27 @@ impl AciServiceVerifierPolicy {
                     .map_err(AciServiceVerifierConfigError::InvalidKmsRootPublicKey)
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        if accepted_workload_ids.is_empty() && accepted_image_digests.is_empty() {
+        if accepted_subjects.is_empty() && accepted_image_digests.is_empty() {
             return Err(AciServiceVerifierConfigError::EmptyPolicy);
         }
         if accepted_kms_root_public_keys.is_empty() {
             return Err(AciServiceVerifierConfigError::EmptyKmsRootPolicy);
         }
         Ok(Self {
-            accepted_workload_ids,
+            accepted_subjects,
             accepted_image_digests,
             accepted_kms_root_public_keys,
         })
     }
 
-    fn accepts(&self, report: &AttestationReport) -> bool {
-        self.accepted_workload_ids.contains(&report.workload_id)
-            || report
-                .attestation
-                .source_provenance
+    /// §4 identity anchors: the attested keyset `subject` or the report's
+    /// source-provenance image digest.
+    fn accepts(&self, keyset: &WorkloadKeyset, provenance: &SourceProvenance) -> bool {
+        keyset
+            .subject
+            .as_ref()
+            .is_some_and(|subject| self.accepted_subjects.contains(subject))
+            || provenance
                 .image_digest
                 .as_ref()
                 .is_some_and(|digest| self.accepted_image_digests.contains(digest))
@@ -123,12 +126,8 @@ pub(super) enum AciServiceVerificationError {
     TeeTypeMismatch { reported: String, verified: String },
     #[error("verified quote report_data does not bind the ACI report_data")]
     QuoteReportDataMismatch,
-    #[error("missing dstack event_log evidence")]
-    MissingEventLog,
     #[error("invalid dstack event_log evidence: {0}")]
     InvalidEventLog(String),
-    #[error("dstack event_log RTMR3 does not match verified quote")]
-    EventLogRtmrMismatch,
     #[error("dstack app-id event missing from verified event log")]
     MissingAppId,
     #[error("missing dstack KMS key custody evidence")]
@@ -137,11 +136,11 @@ pub(super) enum AciServiceVerificationError {
     UnsupportedKeyCustodyProvider(String),
     #[error("invalid dstack KMS key custody evidence: {0}")]
     InvalidKeyCustody(String),
-    #[error("missing dstack KMS identity key custody evidence")]
-    MissingIdentityKeyCustody,
-    #[error("dstack KMS identity key custody public key does not match workload identity")]
-    IdentityKeyCustodyMismatch,
-    #[error("dstack KMS identity signature chain verification failed: {0}")]
+    #[error("missing dstack KMS receipt key custody evidence")]
+    MissingReceiptKeyCustody,
+    #[error("dstack KMS receipt key custody public key does not match the attested keyset")]
+    ReceiptKeyCustodyMismatch,
+    #[error("dstack KMS signature chain verification failed: {0}")]
     KmsSignatureChain(String),
     #[error("dstack KMS root public key is not accepted by verifier policy")]
     KmsRootRejected,
@@ -162,7 +161,6 @@ pub(super) enum AciServiceVerificationError {
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
     pub(super) expires_at: u64,
-    pub(super) vendor: String,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
 }
@@ -174,7 +172,7 @@ impl CachedAciServiceVerification {
         verifier_id: &str,
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            upstream_name: self.vendor.clone(),
+            upstream_name: request.upstream_name,
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
@@ -194,10 +192,11 @@ struct SelectedDownstreamTlsBinding {
 }
 
 pub(super) fn aci_report_tls_channel_bindings(
-    report: &AttestationReport,
+    keyset: &WorkloadKeyset,
+    evidence: &Value,
     origin: &str,
 ) -> Result<Vec<ChannelBinding>, AciServiceVerificationError> {
-    let tls_public_keys = &report.attestation.workload_keyset.tls_public_keys;
+    let tls_public_keys = &keyset.tls_public_keys;
     if tls_public_keys.is_empty() {
         return Err(AciServiceVerificationError::MissingTlsSpkiBinding);
     }
@@ -219,7 +218,7 @@ pub(super) fn aci_report_tls_channel_bindings(
             .collect();
     }
 
-    let selected = selected_downstream_tls_binding(&report.attestation.evidence)?;
+    let selected = selected_downstream_tls_binding(evidence)?;
     let origin_domain = origin_host_domain(origin)?;
     if selected.domain != origin_domain {
         return Err(
@@ -427,8 +426,8 @@ impl AciServiceUpstreamVerifier {
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
         let nonce = random_nonce_hex();
         // Canonical report, not the legacy alias: the binding check below expects
-        // `report_data = sha256(JCS(statement))`, which only the canonical report
-        // carries (the legacy alias binds `identity ‖ nonce`).
+        // `report_data = sha256(statement bytes)` (§4.2), which only the canonical
+        // report carries (the legacy alias binds `identity ‖ nonce`).
         let report_url = format!("{}/v1/aci/attestation", self.report_base_url);
         let url = format!("{report_url}?nonce={nonce}");
         let response = self
@@ -454,19 +453,27 @@ impl AciServiceUpstreamVerifier {
         let verified_at = now_secs();
         let validated =
             validate_aci_report_binding(&report, Some(&nonce), verified_at, Some(&body))?;
-        if !self.policy.accepts(&report) {
+        if !self
+            .policy
+            .accepts(&validated.keyset, &report.attestation.source_provenance)
+        {
             return Err(AciServiceVerificationError::PolicyRejected);
         }
         self.verify_dcap_quote(&report, &validated, verified_at)
             .await?;
+        // Recency of a cached verification is bounded by the cache TTL and the
+        // keyset's own expiry — the report carries no other freshness metadata.
         let expires_at = verified_at
             .saturating_add(self.cache_ttl_seconds)
-            .min(report.attestation.freshness.stale_after);
-        let channel_bindings = aci_report_tls_channel_bindings(&report, &self.report_base_url)?;
+            .min(validated.keyset.not_after);
+        let channel_bindings = aci_report_tls_channel_bindings(
+            &validated.keyset,
+            &report.attestation.evidence,
+            &self.report_base_url,
+        )?;
 
         Ok(CachedAciServiceVerification {
             expires_at,
-            vendor: report.attestation.vendor,
             evidence: validated.evidence,
             channel_bindings,
         })
@@ -519,12 +526,23 @@ impl AciServiceUpstreamVerifier {
             }
         }
 
-        if quote_report_data != expected_dcap_report_data(validated.report_data).as_slice() {
+        if quote_report_data
+            != crate::aci::identity::report_data_slot(validated.report_data).as_slice()
+        {
             return Err(AciServiceVerificationError::QuoteReportDataMismatch);
         }
-        let app_id =
-            verify_dstack_event_log_and_app_id(&report.attestation.evidence, &verified.report)?;
-        verify_dstack_kms_identity_custody(report, &app_id, &self.policy)?;
+        let events = verify_dstack_event_log(&report.attestation.evidence, &verified.report)
+            .map_err(AciServiceVerificationError::InvalidEventLog)?;
+        let app_id_event = dstack_rtmr3_event(&events, "app-id")
+            .ok_or(AciServiceVerificationError::MissingAppId)?;
+        let app_id = decode_hex(&app_id_event.event_payload)
+            .map_err(AciServiceVerificationError::InvalidEventLog)?;
+        verify_dstack_kms_receipt_custody(
+            &report.attestation.evidence,
+            &validated.keyset,
+            &app_id,
+            &self.policy,
+        )?;
         Ok(())
     }
 }
@@ -586,13 +604,8 @@ fn now_secs() -> u64 {
         .expect("system time is before UNIX_EPOCH")
 }
 
-fn expected_dcap_report_data(report_data: [u8; 32]) -> [u8; 64] {
-    let mut out = [0u8; 64];
-    out[..32].copy_from_slice(&report_data);
-    out
-}
-
-fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
+/// The `report_data` field of a parsed DCAP quote, across report variants.
+pub fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
     match report {
         dcap_qvl::quote::Report::SgxEnclave(report) => &report.report_data,
         dcap_qvl::quote::Report::TD10(report) => &report.report_data,

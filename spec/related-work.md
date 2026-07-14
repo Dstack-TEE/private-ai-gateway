@@ -12,9 +12,9 @@ comparison:
 2. **Per-request signed receipts are rare.** Big-tech systems bind responses
    only implicitly to an attested session; among public APIs, only the
    dstack lineage (Phala vllm-proxy, NEAR AI, 0G, Redpill) and Nillion sign
-   individual responses. ACI's structured receipt — event log, transparency
-   events, upstream verification, session references — has no published
-   counterpart.
+   individual responses. ACI's structured receipt — an event log committing
+   to request, rewrite, upstream verification, and response — has no
+   published counterpart.
 
 ## Big-tech systems
 
@@ -50,10 +50,12 @@ per-response evidence a client can retain and re-verify.
 Two observations. First, the strongest independent designs (Tinfoil, NEAR)
 verify substantially the same facts ACI's report and verifier profiles
 cover: quote to vendor root, measured code linked to public source or
-Sigstore-logged builds, and a channel key bound into the evidence. ACI's
-`workload_id`/keyset indirection adds what those designs lack — a stable
-service identity that survives key rotation, and one attested document from
-which *all* channel and signing keys derive.
+Sigstore-logged builds, and a channel key bound into the evidence. What ACI
+adds is one attested document from which *all* channel and signing keys
+derive: the keyset is the unit of identity, every key change requires a
+fresh quote, and relying parties anchor continuity on what a workload
+cannot shed — source provenance, the keyset `subject`, and the domain
+(spec §4).
 
 Second, the per-chat signature convention that NEAR, 0G, OpenRouter-hosted
 Phala models, and this gateway's legacy surface share (`/v1/signature/{id}`
@@ -66,7 +68,7 @@ Two cautionary counterexamples. Atoma Network (since pivoted away from its
 decentralized offering) shipped request encryption whose key authenticity
 rested entirely on an unverified coordinator — its SDKs checked neither
 attestation nor response signatures, so the encryption reduced to trusting
-the routing proxy. ACI's rule that the client's chosen service key MUST
+the routing proxy. ACI's rule that the client's chosen service key must
 appear in the attested keyset (spec §7.4), and that the keyset itself is
 quote-bound, exists precisely to make that failure mode impossible for a
 conformant client. Super Protocol illustrates a second anti-pattern:
@@ -77,8 +79,8 @@ verifier-profile model keeps appraisal on the relying party's side by
 construction. A third, softer failure appears in systems whose response
 signatures use a key merely published beside the attestation rather than
 bound into it — the signature then proves less than it appears to. ACI's
-report-data binding (spec §4.4) and receipt key checks (§8.5) exist to
-close exactly that gap.
+report-data binding (spec §4.2) and receipt key checks (§8.2, §10.2) exist
+to close exactly that gap.
 
 **Aggregation is ACI's unique ground.** Fail-closed upstream verification
 with enforced channel bindings, recorded per request and backed by
@@ -125,12 +127,15 @@ what was checked.
   OpenSSF Model Signing is the emerging evidence format for the
   `model_weights_provenance` claim, which no system — ACI included —
   verifies today.
-- **Canonical JSON (RFC 8785).** ACI signs JCS bytes and constrains signed
-  objects to integer-only numbers, avoiding the known JCS number-formatting
-  pitfalls. Sessions sidestep canonicalization entirely by content-addressing.
-  COSE would align more closely with RATS/SCITT tooling at the cost of
-  human-readable artifacts; a COSE/JOSE binding remains a possible extension
-  (spec §4.6).
+- **Canonical JSON (RFC 8785).** ACI keeps canonicalization out of the
+  verification path: verifiers check artifacts as the exact bytes served,
+  and the only payloads they construct are two fixed, escape-free byte
+  templates (spec §3). JCS remains useful on the producer side for emitting
+  deterministic bytes, but no verifier re-runs it, so the classic
+  cross-implementation divergence points (number formatting,
+  re-serialization mismatches) never enter verification. COSE would align
+  more closely with RATS/SCITT tooling at the cost of human-readable
+  artifacts; a COSE/JOSE binding remains a possible extension (spec §14).
 
 ## Alternative integrity approaches (complements, not competitors)
 
@@ -151,10 +156,10 @@ in this survey — from Apple to the dstack lineage — is built on it.
 ## Position summary
 
 ACI's combination is not offered by any other published system: an
-OpenAI-compatible surface, a stable attested workload identity from which
-every channel and signing key derives, per-request signed receipts with
-transparency events, fail-closed verified aggregation with content-addressed
-audit records, and a spec that third parties can implement. Its deliberate
+OpenAI-compatible surface, one attested keyset from which every channel and
+signing key derives, per-request signed receipts, fail-closed verified
+aggregation with content-addressed audit records, and a spec that third
+parties can implement. Its deliberate
 scope cuts — metadata privacy to OHTTP, durable transparency to SCITT,
 build transparency to Sigstore — track exactly the standards the rest of
 the field is converging on.
