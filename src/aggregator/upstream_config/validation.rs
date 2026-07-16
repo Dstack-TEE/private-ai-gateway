@@ -167,6 +167,26 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if let Some(scheme) = upstream.authorization_scheme.as_deref() {
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "bearer" | "basic") {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} authorization_scheme must be bearer or basic",
+                    upstream.name
+                )));
+            }
+            if upstream.bearer_token.is_none() {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} authorization_scheme requires bearer_token",
+                    upstream.name
+                )));
+            }
+            if upstream.provider != UpstreamProvider::OpenAiCompatible {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} authorization_scheme is supported only for openai-compatible providers",
+                    upstream.name
+                )));
+            }
+        }
         for (field, value) in [
             ("connect_timeout_seconds", upstream.connect_timeout_seconds),
             ("read_timeout_seconds", upstream.read_timeout_seconds),

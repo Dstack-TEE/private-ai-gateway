@@ -127,6 +127,9 @@ fn build_provider_backend(
                     backend.with_bearer_token(token.clone())
                 };
             }
+            if let Some(scheme) = &cfg.authorization_scheme {
+                backend = backend.with_authorization_scheme(scheme.clone());
+            }
             Ok(Arc::new(backend))
         }
     }
