@@ -305,8 +305,13 @@ upstream:
 ```
 
 `models` maps public model ids to provider-facing upstream model ids. In
-no-middleware mode, the public model id is also the target route id. In
-middleware mode, middleware selects a backend target route of this form:
+no-middleware mode, the public model id is also the target route id. For scoped
+private OpenAI-compatible endpoints that require Basic authentication, keep the
+credential in `bearer_token` and set `"authorization_scheme": "basic"`.
+`authorization_scheme` accepts `bearer` or `basic`, defaults to `bearer`, and is
+available only for `openai-compatible` upstreams.
+
+In middleware mode, middleware selects a backend target route of this form:
 
 ```text
 <upstream name>:<public model id in upstream config>

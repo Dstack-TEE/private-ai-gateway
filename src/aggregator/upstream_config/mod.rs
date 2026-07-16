@@ -50,6 +50,10 @@ pub struct UpstreamConfig {
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
+    /// Authorization scheme used with `bearer_token`. Defaults to `bearer`.
+    /// `basic` supports scoped private OpenAI-compatible endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_scheme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +94,8 @@ pub struct PublicUpstreamConfig {
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
@@ -128,6 +134,7 @@ impl UpstreamConfig {
             path: self.path.clone(),
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
+            authorization_scheme: self.authorization_scheme.clone(),
             accepted_workload_ids: self.accepted_workload_ids.clone(),
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),

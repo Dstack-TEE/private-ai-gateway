@@ -17,7 +17,8 @@ use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
 /// The minimal forwarder.
 ///
 /// Sends `req.body` as the request body to `base_url + path`. Adds
-/// an `Authorization: Bearer <token>` header when configured.
+/// an `Authorization` header when configured. Bearer is the default; Basic is
+/// available for scoped private-endpoint credentials.
 ///
 /// This backend does *not* do upstream attestation. An aggregator
 /// that relies on it MUST run an attested per-upstream verifier
@@ -28,6 +29,7 @@ pub struct OpenAICompatibleBackend {
     base_url: String,
     path: String,
     bearer_token: Option<String>,
+    authorization_scheme: String,
     client: reqwest::Client,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
@@ -61,6 +63,7 @@ impl OpenAICompatibleBackend {
             base_url: base,
             path: "/v1/chat/completions".to_string(),
             bearer_token: None,
+            authorization_scheme: "Bearer".to_string(),
             client,
             connect_timeout_seconds,
             read_timeout_seconds,
@@ -83,6 +86,15 @@ impl OpenAICompatibleBackend {
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
+        self
+    }
+
+    pub fn with_authorization_scheme(mut self, scheme: impl AsRef<str>) -> Self {
+        self.authorization_scheme = if scheme.as_ref().eq_ignore_ascii_case("basic") {
+            "Basic".to_string()
+        } else {
+            "Bearer".to_string()
+        };
         self
     }
 }
@@ -331,7 +343,10 @@ impl OpenAICompatibleBackend {
             builder = builder.header(k, v);
         }
         if let Some(t) = &self.bearer_token {
-            builder = builder.header("authorization", format!("Bearer {t}"));
+            builder = builder.header(
+                "authorization",
+                format!("{} {t}", self.authorization_scheme),
+            );
         }
         builder
     }
@@ -340,7 +355,10 @@ impl OpenAICompatibleBackend {
         let url = format!("{}{}", self.base_url, path);
         let mut builder = self.client.get(&url).header("accept", accept);
         if let Some(t) = &self.bearer_token {
-            builder = builder.header("authorization", format!("Bearer {t}"));
+            builder = builder.header(
+                "authorization",
+                format!("{} {t}", self.authorization_scheme),
+            );
         }
         builder
     }
