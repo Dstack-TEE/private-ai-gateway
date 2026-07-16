@@ -306,37 +306,9 @@ upstream:
 ```
 
 `models` maps public model ids to provider-facing upstream model ids. In
-no-middleware mode, the public model id is also the target route id.
-
-A private Chutes deployment using the attested E2EE transport can be configured
-like this:
-
-```json
-[
-  {
-    "name": "private-chutes-uncensored-24b",
-    "provider": "chutes",
-    "base_url": "https://phala-agent-askvenice-venice-uncensored.chutes.ai",
-    "models": {
-      "phala/uncensored-24b": "AskVenice/venice-uncensored"
-    },
-    "bearer_token": "<admin-scoped-private-chute-credential>",
-    "basic_auth": true,
-    "chutes_e2ee_api_base": "https://api.chutes.ai",
-    "chutes_chute_ids": {
-      "AskVenice/venice-uncensored": "28d17d83-7036-5a8c-8ca1-f148c126bd89"
-    }
-  }
-]
-```
-
-`base_url` is the dedicated Chute origin. Each `chutes_chute_ids` key must match
-a provider-facing model id from `models`; its value pins that model to the
-private Chute UUID. The credential must be admin-scoped so the verifier can read
-attestation evidence in addition to invoking the Chute. `basic_auth: true`
-applies Basic authentication to discovery, evidence retrieval, and encrypted
-`/e2e/invoke` requests. `chutes_e2ee_api_base` is shown explicitly above and
-defaults to `https://api.chutes.ai`.
+no-middleware mode, the public model id is also the target route id. Private
+Chutes deployments that use Basic authentication and the attested E2EE transport
+are documented in [Private Chutes configuration](docs/providers/chutes/configuration.md).
 
 For other scoped private OpenAI-compatible endpoints that require Basic
 authentication, keep the credential in `bearer_token` and set
