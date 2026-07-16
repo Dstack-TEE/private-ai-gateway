@@ -964,6 +964,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         .unwrap()
         .with_name("chutes-provider")
         .with_bearer_token("chutes-secret")
+        .with_authorization_scheme("Basic")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         url_origin: Some(base_url),
@@ -994,7 +995,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
     assert_eq!(calls.len(), 1);
     let call = &calls[0];
     assert_eq!(call.path, "/e2e/invoke");
-    assert_eq!(call.authorization.as_deref(), Some("Bearer chutes-secret"));
+    assert_eq!(call.authorization.as_deref(), Some("Basic chutes-secret"));
     assert_eq!(
         call.content_type.as_deref(),
         Some("application/octet-stream")
