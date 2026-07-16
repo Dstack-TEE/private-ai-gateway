@@ -46,7 +46,9 @@ use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::http::{
+    build_router_with_admin_and_api, build_router_with_admin_api_and_middleware,
+};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -72,6 +74,7 @@ struct GatewayConfigFile {
     state_dir: Option<String>,
     upstream_config_seed_path: Option<String>,
     admin_token: Option<String>,
+    api_token: Option<String>,
     /// Bounded keyset-epoch validity window in seconds (§4.7). Defaults to
     /// [`DEFAULT_KEYSET_EPOCH_WINDOW_SECONDS`] (~4 weeks).
     keyset_epoch_window_seconds: Option<u64>,
@@ -352,6 +355,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_log_path = session_log_path(&state_dir);
     let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
     let admin_token = gateway_config.admin_token.clone();
+    let api_token = gateway_config
+        .api_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -500,12 +509,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = if let Some(middleware_config) = middleware_config {
         let middleware = Arc::new(Middleware::new(&middleware_config).map_err(invalid_input)?);
         tracing::info!(
-            control_url = %middleware_config.control_url,
+            mode = ?middleware_config.mode,
+            backend = middleware.name(),
             "private-ai-gateway middleware enabled"
         );
-        build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
+        build_router_with_admin_api_and_middleware(
+            service,
+            upstream_config,
+            admin_token,
+            api_token,
+            middleware,
+        )
     } else {
-        build_router_with_admin(service, upstream_config, admin_token)
+        build_router_with_admin_and_api(service, upstream_config, admin_token, api_token)
     };
 
     tracing::info!(%bind, "private-ai-gateway listening");
@@ -627,6 +643,7 @@ fn log_prewarm_results(
 #[cfg(test)]
 mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
+    use private_ai_gateway::middleware::MiddlewareMode;
 
     use super::{
         keyset_epoch_path, load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
@@ -713,10 +730,42 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         let middleware = config.middleware.expect("middleware section must parse");
-        assert_eq!(middleware.control_url, "https://control.example");
+        assert_eq!(
+            middleware.control_url.as_deref(),
+            Some("https://control.example")
+        );
         assert_eq!(middleware.control_token.as_deref(), Some("secret"));
         // Optional timeouts default to None and fall back inside the client.
         assert_eq!(middleware.control_timeout_ms, None);
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_parses_proxy_middleware_section() {
+        let config_path = temp_path("gateway-config-proxy-middleware");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "middleware": {
+                    "mode": "proxy",
+                    "proxy_url": "http://vllm-router:8100",
+                    "internal_token": "shared-secret",
+                    "proxy_timeout_ms": 1234
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+
+        let middleware = config.middleware.expect("middleware section must parse");
+        assert_eq!(middleware.mode, MiddlewareMode::Proxy);
+        assert_eq!(
+            middleware.proxy_url.as_deref(),
+            Some("http://vllm-router:8100")
+        );
+        assert_eq!(middleware.internal_token.as_deref(), Some("shared-secret"));
+        assert_eq!(middleware.proxy_timeout_ms, Some(1234));
         let _ = std::fs::remove_file(config_path);
     }
 

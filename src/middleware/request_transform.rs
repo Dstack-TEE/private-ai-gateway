@@ -1009,6 +1009,7 @@ fn openai_complete_config() -> ProviderConfig {
         ("user", vec![pc("user")]),
         ("seed", vec![pc("seed")]),
         ("suffix", vec![pc("suffix")]),
+        ("include_usage", vec![pc("include_usage")]),
     ]
 }
 
@@ -1217,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_options_injected_for_chat_but_not_responses() {
+    fn stream_options_injected_for_chat_and_completions_but_not_responses() {
         let chat_out = chat(
             ProviderFormat::Openai,
             json!({ "model": "m", "messages": [], "stream": true }),
@@ -1239,6 +1240,19 @@ mod tests {
             complete_out["stream_options"],
             json!({ "include_usage": true })
         );
+
+        let completions = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &json!({ "model": "m", "prompt": "hi", "stream": true, "include_usage": true }),
+            Endpoint::Complete,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            completions["stream_options"],
+            json!({ "include_usage": true })
+        );
+        assert_eq!(completions["include_usage"], json!(true));
 
         let responses = transform_to_provider_request(
             ProviderFormat::Openai,

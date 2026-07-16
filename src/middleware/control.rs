@@ -57,7 +57,11 @@ pub struct ControlClient {
 
 impl ControlClient {
     pub fn new(config: &MiddlewareConfig) -> Result<Self, String> {
-        let control_url = config.control_url.trim();
+        let control_url = config
+            .control_url
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
         if control_url.is_empty() {
             return Err("middleware.control_url must not be empty".to_string());
         }
@@ -257,14 +261,19 @@ fn truncate(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::config::MiddlewareMode;
 
     fn config(url: &str) -> MiddlewareConfig {
         MiddlewareConfig {
-            control_url: url.to_string(),
+            mode: MiddlewareMode::Control,
+            control_url: Some(url.to_string()),
             control_token: None,
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            proxy_url: None,
+            internal_token: None,
+            proxy_timeout_ms: None,
         }
     }
 

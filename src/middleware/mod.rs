@@ -5,16 +5,20 @@
 //! forwards completions through the service in-process, and it relays model
 //! catalogs from the control plane.
 
+pub mod backend;
 pub mod completion;
 pub mod config;
 pub mod control;
 pub mod errors;
 pub mod pricing;
+pub mod proxy;
 pub mod request_transform;
 pub mod response_transform;
 pub mod sse;
 pub mod stream_transform;
 pub mod types;
+
+use std::sync::Arc;
 
 use axum::{
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
@@ -22,30 +26,76 @@ use axum::{
 };
 
 pub use completion::CompletionInput;
-pub use config::MiddlewareConfig;
+pub use config::{MiddlewareConfig, MiddlewareMode};
 pub use control::{hash_api_key, ControlClient};
 
 use crate::aggregator::service::AciService;
+use backend::MiddlewareBackend;
 use errors::Surface;
+use proxy::ProxyBackend;
 
 /// Middleware handle held by the gateway's app state.
 pub struct Middleware {
-    control: ControlClient,
-    sse_keepalive_ms: Option<u64>,
+    backend: Arc<dyn MiddlewareBackend>,
 }
 
 impl Middleware {
     pub fn new(config: &MiddlewareConfig) -> Result<Self, String> {
-        Ok(Self {
-            control: ControlClient::new(config)?,
-            sse_keepalive_ms: config.sse_keepalive_ms,
-        })
+        let backend: Arc<dyn MiddlewareBackend> = match config.mode {
+            MiddlewareMode::Control => Arc::new(ControlBackend {
+                control: ControlClient::new(config)?,
+                sse_keepalive_ms: config.sse_keepalive_ms,
+            }),
+            MiddlewareMode::Proxy => Arc::new(ProxyBackend::new(config)?),
+        };
+        Ok(Self { backend })
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.backend.name()
     }
 
     /// Relay a `/v1/...` catalog request to the control plane, which serves
     /// catalogs without the `/v1` prefix. The control body is returned verbatim
     /// with its status and a forced JSON content type.
     pub async fn handle_catalog(&self, v1_path: &str) -> Response {
+        self.backend.handle_catalog(v1_path).await
+    }
+
+    /// Run the completion flow through the configured middleware backend.
+    pub async fn handle_completion(
+        &self,
+        service: &AciService,
+        input: CompletionInput,
+    ) -> Response {
+        self.backend.handle_completion(service, input).await
+    }
+
+    pub fn internal_token(&self) -> Option<&str> {
+        self.backend.internal_token()
+    }
+
+    pub async fn handle_internal_forward(
+        &self,
+        service: &AciService,
+        input: completion::InternalForwardRequest,
+    ) -> Response {
+        self.backend.handle_internal_forward(service, input).await
+    }
+}
+
+struct ControlBackend {
+    control: ControlClient,
+    sse_keepalive_ms: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl MiddlewareBackend for ControlBackend {
+    fn name(&self) -> &'static str {
+        "control"
+    }
+
+    async fn handle_catalog(&self, v1_path: &str) -> Response {
         let control_path = v1_path.strip_prefix("/v1").unwrap_or(v1_path);
         match self.control.catalog_get(control_path).await {
             Ok(catalog) => {
@@ -68,13 +118,7 @@ impl Middleware {
         }
     }
 
-    /// Run the completion flow: consult the control plane, shape
-    /// candidate bodies, forward through the service, and finalize the response.
-    pub async fn handle_completion(
-        &self,
-        service: &AciService,
-        input: CompletionInput,
-    ) -> Response {
+    async fn handle_completion(&self, service: &AciService, input: CompletionInput) -> Response {
         completion::run(&self.control, service, self.sse_keepalive_ms, input).await
     }
 }
@@ -104,11 +148,15 @@ mod tests {
     async fn handle_catalog_relays_control_response() {
         let base_url = spawn_stub_control().await;
         let middleware = Middleware::new(&MiddlewareConfig {
-            control_url: base_url,
+            mode: MiddlewareMode::Control,
+            control_url: Some(base_url),
             control_token: None,
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            proxy_url: None,
+            internal_token: None,
+            proxy_timeout_ms: None,
         })
         .unwrap();
 
@@ -129,11 +177,15 @@ mod tests {
     #[tokio::test]
     async fn handle_catalog_reports_control_unavailable() {
         let middleware = Middleware::new(&MiddlewareConfig {
-            control_url: "http://127.0.0.1:1".to_string(),
+            mode: MiddlewareMode::Control,
+            control_url: Some("http://127.0.0.1:1".to_string()),
             control_token: None,
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            proxy_url: None,
+            internal_token: None,
+            proxy_timeout_ms: None,
         })
         .unwrap();
 

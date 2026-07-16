@@ -21,7 +21,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, MiddlewareMode};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -112,11 +112,15 @@ async fn relays_catalogs_from_control() {
     let control_url = spawn_stub_control().await;
     let middleware = Arc::new(
         Middleware::new(&MiddlewareConfig {
-            control_url,
+            mode: MiddlewareMode::Control,
+            control_url: Some(control_url),
             control_token: None,
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            proxy_url: None,
+            internal_token: None,
+            proxy_timeout_ms: None,
         })
         .unwrap(),
     );

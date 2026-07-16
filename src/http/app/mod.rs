@@ -93,8 +93,8 @@ mod util;
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, aci_revocations, admin_get_upstreams,
     admin_put_upstreams, admin_revoke_keyset, attestation_report, attested_session,
-    chat_completions, completions, embeddings, embeddings_models, health, messages, metrics,
-    models, models_subpath, receipt_by_chat_id, responses, root,
+    chat_completions, completions, embeddings, embeddings_models, health, internal_forward,
+    messages, metrics, models, models_subpath, receipt_by_chat_id, responses, root,
 };
 
 #[derive(Clone)]
@@ -102,11 +102,12 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
+    pub api_token: Option<String>,
     middleware: Option<Arc<Middleware>>,
 }
 
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None)
+    build_router_inner(service, None, None, None, None)
 }
 
 pub fn build_router_with_admin(
@@ -114,7 +115,16 @@ pub fn build_router_with_admin(
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
 ) -> Router {
-    build_router_inner(service, Some(upstream_config), admin_token, None)
+    build_router_inner(service, Some(upstream_config), admin_token, None, None)
+}
+
+pub fn build_router_with_admin_and_api(
+    service: Arc<AciService>,
+    upstream_config: Arc<UpstreamConfigManager>,
+    admin_token: Option<String>,
+    api_token: Option<String>,
+) -> Router {
+    build_router_inner(service, Some(upstream_config), admin_token, api_token, None)
 }
 
 /// Build the gateway router with the middleware, which consults the
@@ -129,6 +139,23 @@ pub fn build_router_with_admin_and_middleware(
         service,
         Some(upstream_config),
         admin_token,
+        None,
+        Some(middleware),
+    )
+}
+
+pub fn build_router_with_admin_api_and_middleware(
+    service: Arc<AciService>,
+    upstream_config: Arc<UpstreamConfigManager>,
+    admin_token: Option<String>,
+    api_token: Option<String>,
+    middleware: Arc<Middleware>,
+) -> Router {
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        api_token,
         Some(middleware),
     )
 }
@@ -137,12 +164,14 @@ fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
+    api_token: Option<String>,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
+        api_token,
         middleware,
     };
     Router::new()
@@ -157,6 +186,7 @@ fn build_router_inner(
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
+        .route("/internal/forward", post(internal_forward))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(

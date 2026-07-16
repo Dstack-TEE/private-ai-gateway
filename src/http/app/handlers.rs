@@ -36,12 +36,23 @@ use super::error_responses::{
     unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
-    enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
+    enforce_admin, enforce_api, enforce_owner, extract_bearer, has_e2ee_headers, header_str,
+    request_host_domain,
 };
 use super::AppState;
+use crate::middleware::completion::InternalForwardRequest;
 use crate::middleware::errors::Surface;
+use crate::middleware::proxy::parse_target_format;
 use crate::middleware::request_transform::Endpoint;
+use crate::middleware::types::{Engine, RouteCandidate};
 use crate::middleware::{hash_api_key, CompletionInput};
+
+const INTERNAL_TOKEN_HEADER: &str = "x-private-ai-gateway-internal-token";
+const INTERNAL_REQUEST_ID_HEADER: &str = "x-private-ai-gateway-request-id";
+const INTERNAL_TARGETS_HEADER: &str = "x-private-ai-gateway-targets";
+const INTERNAL_TARGET_FORMAT_HEADER: &str = "x-private-ai-gateway-target-format";
+const INTERNAL_TARGET_ENGINE_HEADER: &str = "x-private-ai-gateway-target-engine";
+const USER_TIER_HEADER: &str = "x-user-tier";
 
 #[derive(Deserialize)]
 pub(super) struct AttestationQuery {
@@ -76,7 +87,10 @@ pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-pub(super) async fn models(State(state): State<AppState>) -> Response {
+pub(super) async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = enforce_api(&state, &headers) {
+        return response;
+    }
     if let Some(middleware) = state.middleware.clone() {
         return middleware.handle_catalog("/v1/models").await;
     }
@@ -92,8 +106,12 @@ pub(super) async fn models(State(state): State<AppState>) -> Response {
 // than enumerate routes here. Only meaningful in the middleware topology.
 pub(super) async fn models_subpath(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(rest): Path<String>,
 ) -> Response {
+    if let Some(response) = enforce_api(&state, &headers) {
+        return response;
+    }
     let Some(middleware) = state.middleware.clone() else {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -108,7 +126,13 @@ pub(super) async fn models_subpath(
 
 // Embedding model catalog. Only meaningful in the control-plane middleware
 // topology.
-pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response {
+pub(super) async fn embeddings_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = enforce_api(&state, &headers) {
+        return response;
+    }
     let Some(middleware) = state.middleware.clone() else {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -119,7 +143,10 @@ pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response
     middleware.handle_catalog("/v1/embeddings/models").await
 }
 
-pub(super) async fn metrics(State(state): State<AppState>) -> Response {
+pub(super) async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = enforce_api(&state, &headers) {
+        return response;
+    }
     match state.service.metrics() {
         Ok(snapshot) => {
             let mut headers = HeaderMap::new();
@@ -127,6 +154,100 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
             (StatusCode::OK, headers, snapshot.body).into_response()
         }
         Err(err) => internal_error_response(err),
+    }
+}
+
+pub(super) async fn internal_forward(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(middleware) = state.middleware.clone() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "internal middleware forwarding is not enabled",
+        );
+    };
+    let Some(expected) = middleware.internal_token() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "internal middleware forwarding is not enabled for this middleware backend",
+        );
+    };
+    if header_str(&headers, INTERNAL_TOKEN_HEADER) != Some(expected) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "invalid internal middleware token",
+        );
+    }
+    let Some(request_id) = header_str(&headers, INTERNAL_REQUEST_ID_HEADER)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "missing x-private-ai-gateway-request-id",
+        );
+    };
+    let Some(route_id) = header_str(&headers, INTERNAL_TARGETS_HEADER)
+        .and_then(first_header_value)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "missing x-private-ai-gateway-targets",
+        );
+    };
+    let selected_route = RouteCandidate {
+        route_id: route_id.to_string(),
+        format: parse_target_format(header_str(&headers, INTERNAL_TARGET_FORMAT_HEADER)),
+        engine: parse_target_engine(header_str(&headers, INTERNAL_TARGET_ENGINE_HEADER)),
+    };
+    let user_tier = header_str(&headers, USER_TIER_HEADER).and_then(normalize_user_tier);
+
+    middleware
+        .handle_internal_forward(
+            &state.service,
+            InternalForwardRequest {
+                request_id: request_id.to_string(),
+                selected_route,
+                user_tier,
+                body: body.to_vec(),
+            },
+        )
+        .await
+}
+
+fn first_header_value(value: &str) -> Option<&str> {
+    value.split(',').next().map(str::trim)
+}
+
+fn normalize_user_tier(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("premium") {
+        return Some("premium".to_string());
+    }
+    Some("basic".to_string())
+}
+
+fn parse_target_engine(value: Option<&str>) -> Option<Engine> {
+    match value
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "sglang" => Some(Engine::Sglang),
+        "vllm" => Some(Engine::Vllm),
+        _ => None,
     }
 }
 
@@ -530,6 +651,10 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    if let Some(response) = enforce_api(&state, &headers) {
+        return response;
+    }
+
     // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
     // request would use; stop serving inference under it (§4.7).
     if state.service.is_keyset_revoked() {
@@ -588,6 +713,26 @@ pub(super) async fn openai_completion_endpoint(
         (normalized, false) => (normalized, None),
     };
 
+    let user_model = if should_validate_public_model(&state) {
+        let requested_model = match requested_model_from_body(&parsed) {
+            Ok(model) => model,
+            Err(response) => return response,
+        };
+        if !public_model_is_configured(&state, requested_model) {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("Unknown model: {requested_model}"),
+            );
+        }
+        Some(requested_model.to_string())
+    } else {
+        parsed
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+
     let upstream_required = match headers
         .get("x-upstream-verification")
         .and_then(|v| v.to_str().ok())
@@ -606,15 +751,12 @@ pub(super) async fn openai_completion_endpoint(
     let requester = extract_bearer(&headers)
         .as_deref()
         .map(ReceiptOwner::from_bearer);
+    let user_tier = header_str(&headers, USER_TIER_HEADER).and_then(normalize_user_tier);
     let context = GatewayRequestContext {
         request_id: generate_request_id(),
-        user_model: parsed
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        user_model: user_model.clone(),
         target_route_id: None,
-        // Populated from the x-user-tier header on the internal-forward path.
-        user_tier: None,
+        user_tier: user_tier.clone(),
     };
 
     let stream = !force_buffered
@@ -648,6 +790,7 @@ pub(super) async fn openai_completion_endpoint(
             upstream_required,
             request_id: context.request_id,
             user_model: context.user_model,
+            user_tier,
             stream,
         };
         return middleware.handle_completion(&state.service, input).await;
@@ -668,6 +811,48 @@ pub(super) async fn openai_completion_endpoint(
     )
     .await
 }
+
+fn requested_model_from_body(parsed: &Value) -> Result<&str, Response> {
+    let Some(model) = parsed.get("model") else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Model parameter is required",
+        ));
+    };
+    let Some(model) = model
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Model parameter must be a non-empty string",
+        ));
+    };
+    Ok(model)
+}
+
+fn should_validate_public_model(state: &AppState) -> bool {
+    state.api_token.is_some()
+        || state
+            .middleware
+            .as_ref()
+            .map_or(false, |middleware| middleware.name() == "proxy")
+}
+
+fn public_model_is_configured(state: &AppState, model: &str) -> bool {
+    let Some(manager) = state.upstream_config.as_ref() else {
+        return true;
+    };
+    manager
+        .snapshot()
+        .upstreams
+        .iter()
+        .any(|upstream| upstream.models.contains_key(model))
+}
+
 pub(super) async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,

@@ -25,10 +25,10 @@ use crate::aggregator::service::{
 
 use super::control::ControlClient;
 use super::errors::{self, Surface};
-use super::request_transform::{build_candidates, Endpoint};
+use super::request_transform::{build_candidates, transform_to_provider_request, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::SseTransformStream;
-use super::types::{ErrorSource, PostReport, ProviderFormat, SpendMode};
+use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
 use super::{pricing, response_transform, stream_transform};
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -48,7 +48,59 @@ pub struct CompletionInput {
     pub upstream_required: bool,
     pub request_id: String,
     pub user_model: Option<String>,
+    pub user_tier: Option<String>,
     pub stream: bool,
+}
+
+/// Request context kept by a data-plane proxy middleware until it calls back
+/// into PAG with the selected route.
+#[derive(Clone)]
+pub struct PendingCompletion {
+    pub endpoint: Endpoint,
+    pub endpoint_path: &'static str,
+    pub surface: Surface,
+    pub params: Value,
+    pub received_body: Vec<u8>,
+    pub requester: Option<ReceiptOwner>,
+    pub e2ee: Option<E2eeRequestContext>,
+    pub upstream_required: bool,
+    pub request_id: String,
+    pub user_model: Option<String>,
+    pub user_tier: Option<String>,
+    pub stream: bool,
+}
+
+impl From<CompletionInput> for PendingCompletion {
+    fn from(input: CompletionInput) -> Self {
+        Self {
+            endpoint: input.endpoint,
+            endpoint_path: input.endpoint_path,
+            surface: input.surface,
+            params: input.params,
+            received_body: input.received_body,
+            requester: input.requester,
+            e2ee: input.e2ee,
+            upstream_required: input.upstream_required,
+            request_id: input.request_id,
+            user_model: input.user_model,
+            user_tier: input.user_tier,
+            stream: input.stream,
+        }
+    }
+}
+
+pub struct InternalForwardRequest {
+    pub request_id: String,
+    pub selected_route: RouteCandidate,
+    pub user_tier: Option<String>,
+    pub body: Vec<u8>,
+}
+
+pub struct InternalForwardInput {
+    pub pending: PendingCompletion,
+    pub selected_route: RouteCandidate,
+    pub user_tier: Option<String>,
+    pub body: Vec<u8>,
 }
 
 /// Run the completion flow and produce the client response.
@@ -70,6 +122,7 @@ pub async fn run(
         upstream_required,
         request_id,
         user_model,
+        user_tier,
         stream,
     } = input;
 
@@ -163,7 +216,7 @@ pub async fn run(
         request_id,
         user_model,
         target_route_id: None,
-        user_tier: consult.user_tier.clone(),
+        user_tier: consult.user_tier.clone().or(user_tier),
     };
 
     // The receipt-draft journal is only consumed by the streaming finalizer; the
@@ -420,6 +473,227 @@ pub async fn run(
             }
             service_error_response(surface, endpoint_path, service, &request_id, err, e2ee)
         }
+    }
+}
+
+pub async fn forward_selected(
+    service: &AciService,
+    sse_keepalive_ms: Option<u64>,
+    input: InternalForwardInput,
+) -> Response {
+    let InternalForwardInput {
+        pending,
+        selected_route,
+        user_tier,
+        body: _callback_body,
+    } = input;
+    let PendingCompletion {
+        endpoint,
+        endpoint_path,
+        surface,
+        params,
+        received_body,
+        requester,
+        e2ee,
+        upstream_required,
+        request_id,
+        user_model,
+        user_tier: pending_user_tier,
+        stream,
+    } = pending;
+    let user_tier = user_tier.or(pending_user_tier);
+
+    let selected_format = selected_route.format;
+    let selected_engine = selected_route.engine;
+    let selected_route_id = selected_route.route_id;
+    let body =
+        match transform_to_provider_request(selected_format, &params, endpoint, selected_engine) {
+            Ok(body) => serde_json::to_vec(&body).unwrap_or_default(),
+            Err(err) => {
+                let message = format!("failed to shape provider request: {err}");
+                let body = errors::envelope_bytes(
+                    surface,
+                    errors::error_type(surface, 500),
+                    &message,
+                    Some(&request_id),
+                );
+                return finalize_generated(surface, service, endpoint_path, 500, body, &[], e2ee);
+            }
+        };
+    let context = GatewayRequestContext {
+        request_id: request_id.clone(),
+        user_model,
+        target_route_id: None,
+        user_tier,
+    };
+    let forward_candidates = vec![ForwardCandidate {
+        route_id: selected_route_id.clone(),
+        body,
+    }];
+    let journal = MiddlewareReceiptJournal::default();
+    let result = service
+        .forward_chat_completion_for_middleware(
+            ChatCompletionRequest {
+                context,
+                endpoint_path,
+                received_body: &received_body,
+                forwarded_body: None,
+                upstream_required: Some(upstream_required),
+                upstream_verification_event: None,
+                requester: requester.clone(),
+                e2ee: e2ee.clone(),
+            },
+            forward_candidates,
+            stream,
+            journal.clone(),
+        )
+        .await;
+
+    match result {
+        Ok(MiddlewareForwardResult::Forwarded(forward)) => {
+            let upstream_status = forward.upstream_status;
+            let (client_status, final_body) = if (200..300).contains(&upstream_status) {
+                let upstream_json: Value = match serde_json::from_slice(&forward.upstream_body) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let message = "upstream returned a malformed success body";
+                        let body = errors::envelope_bytes(
+                            surface,
+                            errors::error_type(surface, 502),
+                            message,
+                            Some(&request_id),
+                        );
+                        return finalize_generated(
+                            surface,
+                            service,
+                            endpoint_path,
+                            502,
+                            body,
+                            &[],
+                            e2ee,
+                        );
+                    }
+                };
+                let transformed = response_transform::transform_response(
+                    selected_format,
+                    endpoint,
+                    upstream_json,
+                );
+                (
+                    upstream_status,
+                    serde_json::to_vec(&transformed).unwrap_or_default(),
+                )
+            } else {
+                let (mapped, body) = errors::normalize_upstream_error_parts(
+                    surface,
+                    upstream_status,
+                    &forward.upstream_body,
+                    &received_body,
+                    Some(&request_id),
+                );
+                (mapped, body)
+            };
+
+            match service.finalize_middleware_receipt(
+                forward.receipt,
+                &final_body,
+                Some("application/json"),
+                requester,
+                e2ee,
+            ) {
+                Ok(finalized) => {
+                    let status =
+                        StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
+                    let mut headers =
+                        response_headers(&forward.upstream_headers, "application/json");
+                    insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
+                    insert_header(
+                        &mut headers,
+                        "x-private-ai-gateway-selected-route",
+                        &selected_route_id,
+                    );
+                    apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
+                    (status, headers, finalized.wire_body).into_response()
+                }
+                Err(err) => {
+                    service_error_response(surface, endpoint_path, service, &request_id, err, None)
+                }
+            }
+        }
+        Ok(MiddlewareForwardResult::Stream(forward)) => {
+            let content_type = forward
+                .upstream_headers
+                .get("content-type")
+                .cloned()
+                .unwrap_or_else(|| "text/event-stream".to_string());
+            let upstream_status = forward.upstream_status;
+            let keepalive = match sse_keepalive_ms.unwrap_or(10_000) {
+                0 => None,
+                ms => Some(Duration::from_millis(ms)),
+            };
+            let response_header_map = response_headers(&forward.upstream_headers, &content_type);
+            let transformed: ServiceResponseStream =
+                match stream_transform::select_stream_transform(selected_format, endpoint) {
+                    Some(transform) => Box::pin(SseTransformStream::new(forward.body, transform)),
+                    None => forward.body,
+                };
+            let kept: ServiceResponseStream =
+                Box::pin(KeepAliveStream::new(transformed, keepalive));
+            let receipt_id = journal.peek_receipt_id();
+            match service.finalize_middleware_response_stream(
+                journal,
+                kept,
+                endpoint_path,
+                Some(&content_type),
+                requester,
+                e2ee,
+            ) {
+                Ok(finalized) => {
+                    let status =
+                        StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
+                    let mut headers = response_header_map;
+                    if let Some(receipt_id) = &receipt_id {
+                        insert_header(&mut headers, "x-receipt-id", receipt_id);
+                        apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
+                    } else {
+                        apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), false);
+                    }
+                    insert_header(
+                        &mut headers,
+                        "x-private-ai-gateway-selected-route",
+                        &selected_route_id,
+                    );
+                    headers.insert(
+                        HeaderName::from_static("x-accel-buffering"),
+                        HeaderValue::from_static("no"),
+                    );
+                    headers.insert(
+                        HeaderName::from_static("cache-control"),
+                        HeaderValue::from_static("no-cache"),
+                    );
+                    let body = Body::from_stream(
+                        finalized
+                            .body
+                            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string()))),
+                    );
+                    (status, headers, body).into_response()
+                }
+                Err(err) => {
+                    service_error_response(surface, endpoint_path, service, &request_id, err, None)
+                }
+            }
+        }
+        Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
+            let (status, body) = errors::normalize_upstream_error_parts(
+                surface,
+                forward.upstream_status,
+                &forward.upstream_body,
+                &received_body,
+                Some(&request_id),
+            );
+            finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
+        }
+        Err(err) => service_error_response(surface, endpoint_path, service, &request_id, err, e2ee),
     }
 }
 

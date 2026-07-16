@@ -384,20 +384,27 @@ Deployment files:
 
 ## Middleware
 
-The gateway runs in no-middleware mode unless middleware is configured. In
-middleware mode the middleware runs in-process, between the frontend and
-backend:
+The gateway runs in no-middleware mode unless middleware is configured. The
+`middleware` section selects one backend:
 
-- Public `/v1/models` and its sub-catalogs are served from the control plane.
-- Public inference requests are decrypted and normalized by the frontend, then
-  handed to the middleware, which consults the control plane to
-  authorize and route the request and shapes the provider request.
-- The middleware selects a configured target route, forwards through the
-  backend, transforms the response, injects usage cost, and reports usage back
-  to the control plane. Verification facts still come from the backend.
-- Streaming responses stay streaming across backend, middleware, and frontend.
-- Middleware-generated OpenAI-compatible responses are passed through downstream
-  E2EE when the original user request used E2EE.
+- `control`: the gateway consults an HTTP control plane at `/consult/pre`,
+  shapes one request body per candidate, and forwards through the verified
+  backend path itself.
+- `proxy`: the gateway sends the full normalized request body to an external
+  data-plane middleware after applying the gateway's OpenAI-compatible request
+  shaping, so PAG-only routing fields such as `provider` are not exposed to the
+  router. The middleware selects a route and calls `POST /internal/forward`
+  with a one-use request id. The gateway then rebuilds the backend request from
+  the stored original request plus the selected route's `format`/`engine`, so
+  final provider shaping remains inside PAG. The internal callback still goes
+  through the verified backend path and records `middleware.forwarded`,
+  `route.selected`, `request.forwarded`, and `upstream.verified` in the receipt.
+
+In both modes, public requests are decrypted and normalized by the frontend
+before middleware sees them, and verification facts still come from the backend.
+Streaming responses stay streaming across middleware, backend, and frontend.
+Middleware-generated OpenAI-compatible responses are passed through downstream
+E2EE when the original user request used E2EE.
 
 The middleware is configured by the `middleware` section of the static gateway
 config; see the [configuration reference](docs/configuration-reference.md#middleware).

@@ -11,6 +11,7 @@ mod common;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
+use axum::http::HeaderMap;
 use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
 use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
@@ -24,11 +25,15 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
+use private_ai_gateway::middleware::completion::InternalForwardRequest;
 use private_ai_gateway::middleware::control::ControlClient;
 use private_ai_gateway::middleware::errors::Surface;
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
-use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::types::{Engine, ProviderFormat, RouteCandidate};
+use private_ai_gateway::middleware::{
+    CompletionInput, Middleware, MiddlewareConfig, MiddlewareMode,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
@@ -38,6 +43,7 @@ use common::{event_from_request, StaticKeyProvider, StubQuoter};
 struct MockUpstream {
     status: u16,
     body: Vec<u8>,
+    received: Option<Arc<Mutex<Option<Vec<u8>>>>>,
 }
 
 #[async_trait]
@@ -48,7 +54,10 @@ impl UpstreamBackend for MockUpstream {
     fn url_origin(&self) -> Option<&str> {
         Some("https://mock-upstream.example")
     }
-    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        if let Some(received) = &self.received {
+            *received.lock().unwrap() = Some(req.body);
+        }
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {
@@ -94,6 +103,7 @@ fn build_service_failing_verify() -> Arc<AciService> {
             Arc::new(MockUpstream {
                 status: 200,
                 body: b"{}".to_vec(),
+                received: None,
             }),
             Arc::new(FailVerifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -105,18 +115,31 @@ fn build_service_failing_verify() -> Arc<AciService> {
 }
 
 fn build_service_with_upstream(status: u16, body: Vec<u8>) -> Arc<AciService> {
-    Arc::new(
+    build_service_with_upstream_capture(status, body).0
+}
+
+fn build_service_with_upstream_capture(
+    status: u16,
+    body: Vec<u8>,
+) -> (Arc<AciService>, Arc<Mutex<Option<Vec<u8>>>>) {
+    let received = Arc::new(Mutex::new(None));
+    let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(MockUpstream { status, body }),
+            Arc::new(MockUpstream {
+                status,
+                body,
+                received: Some(received.clone()),
+            }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
             AciServiceConfig::for_test("private-ai-gateway"),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
-    )
+    );
+    (service, received)
 }
 
 fn temp_config_path() -> std::path::PathBuf {
@@ -232,13 +255,92 @@ async fn wait_for_post(posts: &Arc<Mutex<Vec<Value>>>, pred: impl Fn(&Value) -> 
 
 fn middleware(control_url: String) -> Middleware {
     Middleware::new(&MiddlewareConfig {
-        control_url,
+        mode: MiddlewareMode::Control,
+        control_url: Some(control_url),
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        proxy_url: None,
+        internal_token: None,
+        proxy_timeout_ms: None,
     })
     .unwrap()
+}
+
+#[derive(Default)]
+struct ProxyObservation {
+    request_id: String,
+    internal_token: String,
+    user_tier: String,
+    body: Value,
+}
+
+type ProxyCallbackTarget = Arc<Mutex<Option<(Arc<Middleware>, Arc<AciService>)>>>;
+
+async fn spawn_proxy_callback(
+    target: ProxyCallbackTarget,
+    observed: Arc<Mutex<Option<ProxyObservation>>>,
+) -> String {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let target = target.clone();
+            let observed = observed.clone();
+            async move {
+                let request_id = headers
+                    .get("x-private-ai-gateway-request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let internal_token = headers
+                    .get("x-private-ai-gateway-internal-token")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let user_tier = headers
+                    .get("x-user-tier")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let callback_body = body.to_vec();
+                let proxy_body: Value = serde_json::from_slice(&callback_body).unwrap();
+                *observed.lock().unwrap() = Some(ProxyObservation {
+                    request_id: request_id.clone(),
+                    internal_token,
+                    user_tier: user_tier.clone(),
+                    body: proxy_body,
+                });
+                let (middleware, service) = target
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .expect("proxy callback target not installed")
+                    .clone();
+                middleware
+                    .handle_internal_forward(
+                        &service,
+                        InternalForwardRequest {
+                            request_id,
+                            selected_route: RouteCandidate {
+                                route_id: "openai:gpt-test".to_string(),
+                                format: ProviderFormat::Openai,
+                                engine: Some(Engine::Vllm),
+                            },
+                            user_tier: Some(user_tier),
+                            body: callback_body,
+                        },
+                    )
+                    .await
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
 
 fn chat_input() -> CompletionInput {
@@ -255,6 +357,7 @@ fn chat_input() -> CompletionInput {
         upstream_required: true,
         request_id: "req-1".to_string(),
         user_model: Some("gpt-test".to_string()),
+        user_tier: None,
         stream: false,
     }
 }
@@ -265,6 +368,109 @@ async fn response_parts(response: axum::response::Response) -> (u16, axum::http:
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, headers, body)
+}
+
+#[tokio::test]
+async fn proxy_mode_sanitizes_router_body_and_shapes_callback_route() {
+    let target: ProxyCallbackTarget = Arc::new(Mutex::new(None));
+    let observed = Arc::new(Mutex::new(None));
+    let proxy_url = spawn_proxy_callback(target.clone(), observed.clone()).await;
+    let middleware = Arc::new(
+        Middleware::new(&MiddlewareConfig {
+            mode: MiddlewareMode::Proxy,
+            control_url: None,
+            control_token: None,
+            control_timeout_ms: None,
+            control_post_timeout_ms: None,
+            sse_keepalive_ms: None,
+            proxy_url: Some(proxy_url),
+            internal_token: Some("shared-secret".to_string()),
+            proxy_timeout_ms: Some(2_000),
+        })
+        .unwrap(),
+    );
+    let upstream_body = br#"{"id":"chat-1","object":"chat.completion","choices":[]}"#.to_vec();
+    let (service, received) = build_service_with_upstream_capture(200, upstream_body);
+    *target.lock().unwrap() = Some((middleware.clone(), service.clone()));
+
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.params = json!({
+        "model": "gpt-test",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "provider": { "tier": "premium", "only": ["openai"] },
+        "top_k": 5
+    });
+
+    let (status, headers, body) =
+        response_parts(middleware.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["id"], json!("chat-1"));
+    assert!(headers.get("x-receipt-id").is_some());
+    assert_eq!(
+        headers.get("x-private-ai-gateway-selected-route").unwrap(),
+        "openai:gpt-test"
+    );
+
+    let observed = observed.lock().unwrap().take().unwrap();
+    assert_eq!(observed.request_id, "req-1");
+    assert_eq!(observed.internal_token, "shared-secret");
+    assert_eq!(observed.user_tier, "premium");
+    assert_eq!(observed.body["model"], json!("gpt-test"));
+    assert!(
+        observed.body.get("provider").is_none(),
+        "PAG routing extensions must not be sent to vLLM Router"
+    );
+    assert!(
+        observed.body.get("top_k").is_none(),
+        "engine-specific backend params are applied only after route selection"
+    );
+
+    let backend_body: Value =
+        serde_json::from_slice(&received.lock().unwrap().clone().unwrap()).unwrap();
+    assert_eq!(backend_body["model"], json!("gpt-test"));
+    assert!(backend_body.get("provider").is_none());
+    assert_eq!(
+        backend_body["top_k"],
+        json!(5),
+        "selected vLLM route receives engine-specific shaped params"
+    );
+}
+
+#[tokio::test]
+async fn proxy_mode_forwards_external_user_tier_header() {
+    let target: ProxyCallbackTarget = Arc::new(Mutex::new(None));
+    let observed = Arc::new(Mutex::new(None));
+    let proxy_url = spawn_proxy_callback(target.clone(), observed.clone()).await;
+    let middleware = Arc::new(
+        Middleware::new(&MiddlewareConfig {
+            mode: MiddlewareMode::Proxy,
+            control_url: None,
+            control_token: None,
+            control_timeout_ms: None,
+            control_post_timeout_ms: None,
+            sse_keepalive_ms: None,
+            proxy_url: Some(proxy_url),
+            internal_token: Some("shared-secret".to_string()),
+            proxy_timeout_ms: Some(2_000),
+        })
+        .unwrap(),
+    );
+    let upstream_body = br#"{"id":"chat-1","object":"chat.completion","choices":[]}"#.to_vec();
+    let (service, _received) = build_service_with_upstream_capture(200, upstream_body);
+    *target.lock().unwrap() = Some((middleware.clone(), service.clone()));
+
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.user_tier = Some("premium".to_string());
+
+    let (status, _, body) =
+        response_parts(middleware.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["id"], json!("chat-1"));
+
+    let observed = observed.lock().unwrap().take().unwrap();
+    assert_eq!(observed.user_tier, "premium");
 }
 
 #[tokio::test]
@@ -399,11 +605,15 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
 async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
     let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
+        mode: MiddlewareMode::Control,
+        control_url: Some(control_url),
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        proxy_url: None,
+        internal_token: None,
+        proxy_timeout_ms: None,
     })
     .unwrap();
     let report = StreamReport {

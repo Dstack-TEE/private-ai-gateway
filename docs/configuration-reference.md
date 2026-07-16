@@ -42,35 +42,100 @@ This is the smallest practical container config.
 | `state_dir` | `/var/lib/private-ai-gateway` | Gateway-owned writable state directory. The active upstream config and attested-session log are derived from this directory. |
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
+| `api_token` | unset | Optional Bearer token for public OpenAI-compatible catalog and inference endpoints, including `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/v1/responses`, and `/v1/metrics`. When unset, these endpoints keep the upstream default unauthenticated behavior. When set, requests without the matching Bearer token fail closed. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
+| `middleware` | unset | Optional middleware section. When present, the gateway runs one configured middleware backend; when unset it serves directly. See [Middleware](#middleware). |
 
 ## Middleware
 
-The optional `middleware` section runs the middleware in the request
-path. When present, the gateway consults a control plane at `control_url` to
-authorize and route each request, shapes the provider request, injects response
-cost, and reports usage back to the control plane — all in-process, with no
-out-of-process hop. When the section is omitted the gateway serves directly.
+The optional `middleware` section runs a middleware backend in the request path.
+The backend is selected by `middleware.mode`.
+
+`control` mode is the existing control-plane integration. The gateway consults
+a control plane at `control_url` to authorize and route each request, shapes the
+provider request, injects response cost, and reports usage back to the control
+plane. The gateway still performs the verified upstream forward itself.
+
+`proxy` mode is for request-body-aware data-plane middleware, such as a vLLM
+Router wrapper. The gateway stores a one-use request context, sends an
+OpenAI-compatible shaped request body to `proxy_url`, and expects the middleware
+to call back to `POST /internal/forward` with the chosen target route. PAG-only
+routing fields such as `provider` are stripped before the proxy hop. The
+callback body is not trusted as the final provider-shaped backend request; PAG
+rebuilds that body from the stored original request and the selected route's
+`format`/`engine`, then returns through the normal verified-forward and receipt
+path. The final receipt still records `middleware.forwarded`, `route.selected`,
+`request.forwarded`, and `upstream.verified`.
+
+When the section is omitted the gateway serves directly.
+
+Setting `api_token` also enables public model-id validation for inference
+requests. In `proxy` middleware mode, model-id validation is enabled even when
+`api_token` is unset so the external router receives only configured public
+model ids.
 
 | Field | Default | Use |
 | --- | --- | --- |
-| `middleware.control_url` | required | Base URL of the control plane the gateway consults for routing, authorization, catalogs, and usage reporting. |
+| `middleware.mode` | `control` | `control` for `/consult/pre` candidate ordering, or `proxy` for full data-plane middleware. |
+| `middleware.control_url` | required in `control` mode | Base URL of the control plane the gateway consults for routing, authorization, catalogs, and usage reporting. |
 | `middleware.control_token` | unset | Bearer token sent to the control plane. When unset, no `Authorization` header is sent. |
 | `middleware.control_timeout_ms` | `60000` | Timeout for the pre-request consult and catalog fetches. A failed or timed-out consult fails closed. |
 | `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
-| `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses; `0` disables the heartbeat. |
+| `middleware.proxy_url` | required in `proxy` mode | Base URL of the external data-plane middleware. Public completion requests are forwarded to this URL with the original `/v1/...` path. |
+| `middleware.internal_token` | required in `proxy` mode | Shared secret required on `POST /internal/forward`. Give this only to the data-plane middleware. |
+| `middleware.proxy_timeout_ms` | `1800000` | Timeout for the external proxy request. |
+| `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses finalized by the gateway; `0` disables the heartbeat. |
 
 ```json
 {
   "middleware": {
+    "mode": "control",
     "control_url": "https://control.example",
     "control_token": "<control-plane-bearer-token>"
   }
 }
 ```
 
-Only `control_url` is required.
+Proxy mode:
+
+```json
+{
+  "middleware": {
+    "mode": "proxy",
+    "proxy_url": "http://vllm-router:8100",
+    "internal_token": "<shared-internal-callback-token>"
+  }
+}
+```
+
+When the proxy is a `vllm-project/router` wrapper, regular router mode still
+needs at least one initial worker. Use the wrapper's bootstrap worker as the
+initial `--worker-urls` value, then add and remove real upstream nodes through
+the wrapper admin API so the wrapper can keep PAG upstream config and router
+workers in sync.
+
+In proxy mode the middleware receives:
+
+```text
+X-Private-AI-Gateway-Request-ID: <one-use request id>
+X-Private-AI-Gateway-Internal-Token: <internal_token>
+X-User-Tier: basic|premium, when known
+```
+
+The middleware callback must send:
+
+```text
+POST /internal/forward
+X-Private-AI-Gateway-Internal-Token: <internal_token>
+X-Private-AI-Gateway-Request-ID: <same request id>
+X-Private-AI-Gateway-Targets: <selected route id>
+X-Private-AI-Gateway-Target-Format: openai|anthropic
+X-User-Tier: basic|premium, when known
+```
+
+The callback request body should be the request body received from the proxy
+hop. PAG uses the one-use request id and selected route as the authority, then
+applies its own provider request shaping before forwarding to the upstream.
 
 ## Source Provenance
 
