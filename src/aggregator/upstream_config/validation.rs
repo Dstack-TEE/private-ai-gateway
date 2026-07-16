@@ -167,6 +167,23 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.basic_auth {
+            if upstream.bearer_token.is_none() {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} basic_auth requires bearer_token",
+                    upstream.name
+                )));
+            }
+            if !matches!(
+                upstream.provider,
+                UpstreamProvider::OpenAiCompatible | UpstreamProvider::Chutes
+            ) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} basic_auth is supported only for openai-compatible or chutes providers",
+                    upstream.name
+                )));
+            }
+        }
         for (field, value) in [
             ("connect_timeout_seconds", upstream.connect_timeout_seconds),
             ("read_timeout_seconds", upstream.read_timeout_seconds),

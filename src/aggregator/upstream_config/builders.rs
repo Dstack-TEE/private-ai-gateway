@@ -127,6 +127,7 @@ fn build_provider_backend(
                     backend.with_bearer_token(token.clone())
                 };
             }
+            backend = backend.with_basic_auth(cfg.basic_auth);
             Ok(Arc::new(backend))
         }
     }
@@ -154,6 +155,7 @@ pub(super) fn build_chutes_provider_backend(
     if let Some(token) = &cfg.bearer_token {
         backend = backend.with_bearer_token(token.clone());
     }
+    backend = backend.with_basic_auth(cfg.basic_auth);
     if let Some(base_url) = &cfg.chutes_e2ee_api_base {
         backend = backend.with_e2ee_api_base(base_url.clone());
     }
@@ -228,6 +230,7 @@ fn build_provider_verifier(
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_api_key(token.clone());
                 }
+                verifier = verifier.with_basic_auth(cfg.basic_auth);
                 if let Some(base_url) = &cfg.chutes_e2ee_api_base {
                     verifier = verifier.with_e2ee_api_base(base_url.clone());
                 }

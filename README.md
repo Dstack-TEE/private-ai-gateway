@@ -306,8 +306,16 @@ upstream:
 ```
 
 `models` maps public model ids to provider-facing upstream model ids. In
-no-middleware mode, the public model id is also the target route id. In
-middleware mode, middleware selects a backend target route of this form:
+no-middleware mode, the public model id is also the target route id. Private
+Chutes deployments that use Basic authentication and the attested E2EE transport
+are documented in [Private Chutes configuration](docs/providers/chutes/configuration.md).
+
+For other scoped private OpenAI-compatible endpoints that require Basic
+authentication, keep the credential in `bearer_token` and set
+`"basic_auth": true`. The flag defaults to `false`, which uses Bearer
+authentication.
+
+In middleware mode, middleware selects a backend target route of this form:
 
 ```text
 <upstream name>:<public model id in upstream config>

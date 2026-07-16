@@ -10,7 +10,7 @@ One directory per upstream provider. Each holds up to two documents:
 
 | Provider | TEE | Session binding | Verification | Audit |
 | --- | --- | --- | --- | --- |
-| Chutes | Intel TDX + NVIDIA CC | `e2ee_public_key_sha256` | [verification](chutes/verification.md) | [review](chutes/review.md) |
+| Chutes | Intel TDX + NVIDIA CC | `e2ee_public_key_sha256` | [configuration](chutes/configuration.md), [verification](chutes/verification.md) | [review](chutes/review.md) |
 | NEAR AI | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](near-ai/verification.md) | [review](near-ai/review.md) |
 | Tinfoil | AMD SEV-SNP (or TDX) + NVIDIA CC | `tls_spki_sha256` | [verification](tinfoil/verification.md) | [review](tinfoil/review.md) |
 | AciService (first-party) | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](aci-service/verification.md) | — (first-party) |

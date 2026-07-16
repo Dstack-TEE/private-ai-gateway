@@ -56,6 +56,13 @@ impl ChutesProviderVerifier {
         self
     }
 
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
+        self.verifier = self
+            .verifier
+            .with_option("chutes_basic_auth", enabled.to_string());
+        self
+    }
+
     pub fn with_e2ee_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.verifier = self.verifier.with_option("chutes_e2ee_api_base", api_base);
         self

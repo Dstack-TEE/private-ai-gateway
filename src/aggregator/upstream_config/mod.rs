@@ -50,6 +50,9 @@ pub struct UpstreamConfig {
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
+    /// Use HTTP Basic authentication with `bearer_token`. Defaults to Bearer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub basic_auth: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +92,7 @@ pub struct PublicUpstreamConfig {
     pub path: Option<String>,
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
+    pub basic_auth: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +132,7 @@ impl UpstreamConfig {
             path: self.path.clone(),
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
+            basic_auth: self.basic_auth,
             accepted_workload_ids: self.accepted_workload_ids.clone(),
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),

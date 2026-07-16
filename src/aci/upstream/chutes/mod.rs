@@ -49,6 +49,7 @@ pub struct ChutesProviderBackend {
     inner: OpenAICompatibleBackend,
     e2ee_api_base: String,
     api_key: Option<String>,
+    basic_auth: bool,
     chute_ids: HashMap<String, String>,
     client: reqwest::Client,
     session_store: Arc<ChutesSessionStore>,
@@ -74,6 +75,7 @@ impl ChutesProviderBackend {
             .with_name("chutes"),
             e2ee_api_base: CHUTES_DEFAULT_E2EE_API_BASE.to_string(),
             api_key: None,
+            basic_auth: false,
             chute_ids: HashMap::new(),
             client,
             session_store: Arc::new(ChutesSessionStore::new()),
@@ -90,6 +92,18 @@ impl ChutesProviderBackend {
         self.api_key = Some(token.clone());
         self.inner = self.inner.with_bearer_token(token);
         self
+    }
+
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
+        self.basic_auth = enabled;
+        self
+    }
+
+    fn authorization(&self, api_key: &str) -> String {
+        format!(
+            "{} {api_key}",
+            if self.basic_auth { "Basic" } else { "Bearer" }
+        )
     }
 
     pub fn with_e2ee_api_base(mut self, base_url: impl Into<String>) -> Self {
@@ -157,7 +171,7 @@ impl ChutesProviderBackend {
             .await?;
         let encrypted = build_chutes_e2ee_request(&selected.e2e_pubkey, payload)?;
         let headers = chutes_invoke_headers(
-            &api_key,
+            &self.authorization(&api_key),
             &chute_id,
             &selected.instance_id,
             &selected.nonce,
@@ -202,7 +216,7 @@ impl ChutesProviderBackend {
             .client
             .get(url)
             .query(&[("include_public", "true"), ("name", model)])
-            .header("authorization", format!("Bearer {api_key}"))
+            .header("authorization", self.authorization(api_key))
             .header("accept", "application/json")
             .send()
             .await
@@ -243,7 +257,7 @@ impl ChutesProviderBackend {
         let resp = self
             .client
             .get(url)
-            .header("authorization", format!("Bearer {api_key}"))
+            .header("authorization", self.authorization(api_key))
             .header("accept", "application/json")
             .send()
             .await
@@ -332,7 +346,7 @@ impl ChutesProviderBackend {
             .client
             .get(url)
             .query(&[("nonce", nonce)])
-            .header("authorization", format!("Bearer {api_key}"))
+            .header("authorization", self.authorization(api_key))
             .header("accept", "application/json")
             .send()
             .await
@@ -587,7 +601,7 @@ fn looks_like_uuid(value: &str) -> bool {
 }
 
 fn chutes_invoke_headers(
-    api_key: &str,
+    authorization: &str,
     chute_id: &str,
     instance_id: &str,
     nonce: &str,
@@ -595,7 +609,7 @@ fn chutes_invoke_headers(
     e2e_path: &str,
 ) -> HashMap<&'static str, String> {
     HashMap::from([
-        ("authorization", format!("Bearer {api_key}")),
+        ("authorization", authorization.to_string()),
         ("x-chute-id", chute_id.to_string()),
         ("x-instance-id", instance_id.to_string()),
         ("x-e2e-nonce", nonce.to_string()),

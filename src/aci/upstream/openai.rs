@@ -21,6 +21,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 enum UpstreamAuth {
     /// `Authorization: Bearer <token>` (OpenAI-compatible APIs).
     Bearer(String),
+    /// `Authorization: Basic <token>` (scoped private APIs).
+    Basic(String),
     /// `x-api-key: <key>` plus the required `anthropic-version` header
     /// (native Anthropic API; it rejects API keys sent as Bearer).
     AnthropicApiKey(String),
@@ -104,10 +106,22 @@ impl OpenAICompatibleBackend {
         self
     }
 
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
+        if enabled {
+            if let Some(UpstreamAuth::Bearer(token)) = self.auth.take() {
+                self.auth = Some(UpstreamAuth::Basic(token));
+            }
+        }
+        self
+    }
+
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             Some(UpstreamAuth::Bearer(token)) => {
                 builder.header("authorization", format!("Bearer {token}"))
+            }
+            Some(UpstreamAuth::Basic(token)) => {
+                builder.header("authorization", format!("Basic {token}"))
             }
             Some(UpstreamAuth::AnthropicApiKey(key)) => builder
                 .header("x-api-key", key.as_str())

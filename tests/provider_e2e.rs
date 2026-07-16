@@ -623,6 +623,54 @@ fn gzip_decompress(compressed: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
+    let (base_url, provider_calls) = serve_openai_provider_fixture().await;
+    let path = temp_config_path();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
+            .unwrap(),
+    );
+    manager
+        .replace(vec![UpstreamConfig {
+            name: "private-chute".to_string(),
+            provider: UpstreamProvider::OpenAiCompatible,
+            base_url,
+            path: None,
+            models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
+            bearer_token: Some("scoped-credential".to_string()),
+            basic_auth: true,
+            accepted_workload_ids: None,
+            accepted_image_digests: None,
+            accepted_dstack_kms_root_public_keys: None,
+            pccs_url: None,
+            verifier_cache_seconds: None,
+            connect_timeout_seconds: None,
+            read_timeout_seconds: None,
+            verifier_request_timeout_seconds: None,
+            verification_refresh_seconds: None,
+            session_refresh_seconds: None,
+            chutes_e2ee_api_base: None,
+            chutes_chute_ids: None,
+            chutes_e2ee_discovery_rounds: None,
+            chutes_e2ee_discovery_interval_seconds: None,
+        }])
+        .unwrap();
+    let app = build_router(service_for_manager(manager));
+
+    let (status, _, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let calls = provider_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].authorization.as_deref(),
+        Some("Basic scoped-credential")
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn openai_compatible_provider_e2e_via_runtime_config() {
     let (base_url, provider_calls) = serve_openai_provider_fixture().await;
     let path = temp_config_path();
@@ -638,6 +686,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -728,6 +777,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
                 ),
             ]),
             bearer_token: Some("provider-secret".to_string()),
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -812,6 +862,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -913,6 +964,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         .unwrap()
         .with_name("chutes-provider")
         .with_bearer_token("chutes-secret")
+        .with_basic_auth(true)
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         url_origin: Some(base_url),
@@ -943,7 +995,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
     assert_eq!(calls.len(), 1);
     let call = &calls[0];
     assert_eq!(call.path, "/e2e/invoke");
-    assert_eq!(call.authorization.as_deref(), Some("Bearer chutes-secret"));
+    assert_eq!(call.authorization.as_deref(), Some("Basic chutes-secret"));
     assert_eq!(
         call.content_type.as_deref(),
         Some("application/octet-stream")
