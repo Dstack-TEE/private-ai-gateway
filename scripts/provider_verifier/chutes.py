@@ -26,9 +26,9 @@ from .common import (
 )
 
 
-def chutes_headers(api_key: str, authorization_scheme: str = "Bearer") -> dict[str, str]:
+def chutes_headers(api_key: str, basic_auth: bool = False) -> dict[str, str]:
     return {
-        "Authorization": f"{authorization_scheme} {api_key}",
+        "Authorization": f"{'Basic' if basic_auth else 'Bearer'} {api_key}",
         "Content-Type": "application/json",
     }
 
@@ -257,11 +257,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     provider = "chutes"
     options = provider_options(request)
     api_key = (options.get("chutes_api_key") or "").strip()
-    authorization_scheme = (
-        "Basic"
-        if options.get("chutes_authorization_scheme", "Bearer").lower() == "basic"
-        else "Bearer"
-    )
+    basic_auth = options.get("chutes_basic_auth", "false").lower() == "true"
     api_base = chutes_api_base(options)
     if not api_key:
         measurements_url = f"{api_base}/servers/tee/measurements"
@@ -287,7 +283,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     import requests
 
     timeout = request_timeout_seconds(request, 60)
-    headers = chutes_headers(api_key, authorization_scheme)
+    headers = chutes_headers(api_key, basic_auth)
     chute_id = chutes_resolve_id(
         request["model_id"],
         headers,

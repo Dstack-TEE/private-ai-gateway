@@ -29,7 +29,7 @@ pub struct OpenAICompatibleBackend {
     base_url: String,
     path: String,
     bearer_token: Option<String>,
-    authorization_scheme: String,
+    basic_auth: bool,
     client: reqwest::Client,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
@@ -63,7 +63,7 @@ impl OpenAICompatibleBackend {
             base_url: base,
             path: "/v1/chat/completions".to_string(),
             bearer_token: None,
-            authorization_scheme: "Bearer".to_string(),
+            basic_auth: false,
             client,
             connect_timeout_seconds,
             read_timeout_seconds,
@@ -89,12 +89,8 @@ impl OpenAICompatibleBackend {
         self
     }
 
-    pub fn with_authorization_scheme(mut self, scheme: impl AsRef<str>) -> Self {
-        self.authorization_scheme = if scheme.as_ref().eq_ignore_ascii_case("basic") {
-            "Basic".to_string()
-        } else {
-            "Bearer".to_string()
-        };
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
+        self.basic_auth = enabled;
         self
     }
 }
@@ -345,7 +341,7 @@ impl OpenAICompatibleBackend {
         if let Some(t) = &self.bearer_token {
             builder = builder.header(
                 "authorization",
-                format!("{} {t}", self.authorization_scheme),
+                format!("{} {t}", if self.basic_auth { "Basic" } else { "Bearer" }),
             );
         }
         builder
@@ -357,7 +353,7 @@ impl OpenAICompatibleBackend {
         if let Some(t) = &self.bearer_token {
             builder = builder.header(
                 "authorization",
-                format!("{} {t}", self.authorization_scheme),
+                format!("{} {t}", if self.basic_auth { "Basic" } else { "Bearer" }),
             );
         }
         builder

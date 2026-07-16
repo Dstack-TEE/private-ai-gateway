@@ -306,10 +306,9 @@ upstream:
 
 `models` maps public model ids to provider-facing upstream model ids. In
 no-middleware mode, the public model id is also the target route id. For scoped
-private OpenAI-compatible endpoints that require Basic authentication, keep the
-credential in `bearer_token` and set `"authorization_scheme": "basic"`.
-`authorization_scheme` accepts `bearer` or `basic`, defaults to `bearer`, and is
-available only for `openai-compatible` upstreams.
+private OpenAI-compatible or Chutes endpoints that require Basic authentication,
+keep the credential in `bearer_token` and set `"basic_auth": true`. The flag
+defaults to `false`, which uses Bearer authentication.
 
 In middleware mode, middleware selects a backend target route of this form:
 
