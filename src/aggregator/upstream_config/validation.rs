@@ -180,9 +180,12 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                     upstream.name
                 )));
             }
-            if upstream.provider != UpstreamProvider::OpenAiCompatible {
+            if !matches!(
+                upstream.provider,
+                UpstreamProvider::OpenAiCompatible | UpstreamProvider::Chutes
+            ) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} authorization_scheme is supported only for openai-compatible providers",
+                    "upstream {:?} authorization_scheme is supported only for openai-compatible or chutes providers",
                     upstream.name
                 )));
             }
