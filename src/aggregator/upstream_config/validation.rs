@@ -167,16 +167,10 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
-        if let Some(scheme) = upstream.authorization_scheme.as_deref() {
-            if !matches!(scheme.to_ascii_lowercase().as_str(), "bearer" | "basic") {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} authorization_scheme must be bearer or basic",
-                    upstream.name
-                )));
-            }
+        if upstream.basic_auth {
             if upstream.bearer_token.is_none() {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} authorization_scheme requires bearer_token",
+                    "upstream {:?} basic_auth requires bearer_token",
                     upstream.name
                 )));
             }
@@ -185,7 +179,7 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 UpstreamProvider::OpenAiCompatible | UpstreamProvider::Chutes
             ) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} authorization_scheme is supported only for openai-compatible or chutes providers",
+                    "upstream {:?} basic_auth is supported only for openai-compatible or chutes providers",
                     upstream.name
                 )));
             }

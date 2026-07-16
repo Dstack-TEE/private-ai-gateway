@@ -49,7 +49,7 @@ pub struct ChutesProviderBackend {
     inner: OpenAICompatibleBackend,
     e2ee_api_base: String,
     api_key: Option<String>,
-    authorization_scheme: String,
+    basic_auth: bool,
     chute_ids: HashMap<String, String>,
     client: reqwest::Client,
     session_store: Arc<ChutesSessionStore>,
@@ -75,7 +75,7 @@ impl ChutesProviderBackend {
             .with_name("chutes"),
             e2ee_api_base: CHUTES_DEFAULT_E2EE_API_BASE.to_string(),
             api_key: None,
-            authorization_scheme: "Bearer".to_string(),
+            basic_auth: false,
             chute_ids: HashMap::new(),
             client,
             session_store: Arc::new(ChutesSessionStore::new()),
@@ -94,17 +94,16 @@ impl ChutesProviderBackend {
         self
     }
 
-    pub fn with_authorization_scheme(mut self, scheme: impl AsRef<str>) -> Self {
-        self.authorization_scheme = if scheme.as_ref().eq_ignore_ascii_case("basic") {
-            "Basic".to_string()
-        } else {
-            "Bearer".to_string()
-        };
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
+        self.basic_auth = enabled;
         self
     }
 
     fn authorization(&self, api_key: &str) -> String {
-        format!("{} {api_key}", self.authorization_scheme)
+        format!(
+            "{} {api_key}",
+            if self.basic_auth { "Basic" } else { "Bearer" }
+        )
     }
 
     pub fn with_e2ee_api_base(mut self, base_url: impl Into<String>) -> Self {

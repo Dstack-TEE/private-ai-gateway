@@ -56,10 +56,10 @@ impl ChutesProviderVerifier {
         self
     }
 
-    pub fn with_authorization_scheme(mut self, scheme: impl Into<String>) -> Self {
+    pub fn with_basic_auth(mut self, enabled: bool) -> Self {
         self.verifier = self
             .verifier
-            .with_option("chutes_authorization_scheme", scheme);
+            .with_option("chutes_basic_auth", enabled.to_string());
         self
     }
 

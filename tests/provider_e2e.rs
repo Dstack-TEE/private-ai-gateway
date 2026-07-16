@@ -638,7 +638,7 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("scoped-credential".to_string()),
-            authorization_scheme: Some("basic".to_string()),
+            basic_auth: true,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -686,7 +686,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
-            authorization_scheme: None,
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -777,7 +777,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
                 ),
             ]),
             bearer_token: Some("provider-secret".to_string()),
-            authorization_scheme: None,
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -862,7 +862,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             path: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
-            authorization_scheme: None,
+            basic_auth: false,
             accepted_workload_ids: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
@@ -964,7 +964,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         .unwrap()
         .with_name("chutes-provider")
         .with_bearer_token("chutes-secret")
-        .with_authorization_scheme("Basic")
+        .with_basic_auth(true)
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
         url_origin: Some(base_url),
