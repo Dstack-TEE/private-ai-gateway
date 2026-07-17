@@ -407,10 +407,14 @@ pub async fn run(
                 &received_body,
                 Some(&request_id),
             );
-            let attempt_index = candidates
-                .iter()
-                .position(|c| c.route_id == forward.selected_route)
-                .unwrap_or(0) as u32;
+            // The forwarder tries candidates in order and pushes exactly one
+            // `failed_attempts` entry per candidate it abandons, so the serving
+            // candidate's index is the number of attempts before it. Derived,
+            // not looked up by route id: a route id repeated in the candidate
+            // list would resolve to the earlier copy, and control dedupes
+            // reports by (request_id, attempt, status) — a tie would silently
+            // drop one of the two 429s this arm exists to record.
+            let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
             meter.upstream_error(
                 reported_status(status, forward.error.upstream_status),
