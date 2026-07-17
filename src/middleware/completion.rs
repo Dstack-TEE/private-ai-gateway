@@ -191,10 +191,15 @@ pub async fn run(
     match result {
         Ok(MiddlewareForwardResult::Forwarded(forward)) => {
             let upstream_status = forward.upstream_status;
-            let attempt_index = candidates
-                .iter()
-                .position(|c| c.route_id == forward.selected_route)
-                .unwrap_or(0) as u32;
+            // The forwarder tries candidates in order and pushes exactly one
+            // `failed_attempts` entry per candidate it abandons, so the serving
+            // candidate's index is the number of attempts before it (all three
+            // arms derive it this way). Derived, not looked up by route id: the
+            // candidate list is not deduped here, and a repeated route id would
+            // resolve to the earlier copy — colliding with that attempt's report
+            // under control's (request_id, attempt, status) idempotency gate and
+            // mislabeling a failed-over serve as a first-choice one.
+            let attempt_index = forward.failed_attempts.len() as u32;
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -310,10 +315,7 @@ pub async fn run(
                 .cloned()
                 .unwrap_or_else(|| "text/event-stream".to_string());
             let upstream_status = forward.upstream_status;
-            let attempt_index = candidates
-                .iter()
-                .position(|c| c.route_id == forward.selected_route)
-                .unwrap_or(0) as u32;
+            let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
 
             let report = StreamReport {
@@ -407,13 +409,6 @@ pub async fn run(
                 &received_body,
                 Some(&request_id),
             );
-            // The forwarder tries candidates in order and pushes exactly one
-            // `failed_attempts` entry per candidate it abandons, so the serving
-            // candidate's index is the number of attempts before it. Derived,
-            // not looked up by route id: a route id repeated in the candidate
-            // list would resolve to the earlier copy, and control dedupes
-            // reports by (request_id, attempt, status) — a tie would silently
-            // drop one of the two 429s this arm exists to record.
             let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
             meter.upstream_error(
