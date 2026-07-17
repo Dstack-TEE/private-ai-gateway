@@ -191,10 +191,15 @@ pub async fn run(
     match result {
         Ok(MiddlewareForwardResult::Forwarded(forward)) => {
             let upstream_status = forward.upstream_status;
-            let attempt_index = candidates
-                .iter()
-                .position(|c| c.route_id == forward.selected_route)
-                .unwrap_or(0) as u32;
+            // The forwarder tries candidates in order and pushes exactly one
+            // `failed_attempts` entry per candidate it abandons, so the serving
+            // candidate's index is the number of attempts before it (all three
+            // arms derive it this way). Derived, not looked up by route id: the
+            // candidate list is not deduped here, and a repeated route id would
+            // resolve to the earlier copy — colliding with that attempt's report
+            // under control's (request_id, attempt, status) idempotency gate and
+            // mislabeling a failed-over serve as a first-choice one.
+            let attempt_index = forward.failed_attempts.len() as u32;
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -310,10 +315,7 @@ pub async fn run(
                 .cloned()
                 .unwrap_or_else(|| "text/event-stream".to_string());
             let upstream_status = forward.upstream_status;
-            let attempt_index = candidates
-                .iter()
-                .position(|c| c.route_id == forward.selected_route)
-                .unwrap_or(0) as u32;
+            let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
 
             let report = StreamReport {
@@ -397,16 +399,23 @@ pub async fn run(
             }
         }
         Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
-            // Streaming non-2xx: attribution is not carried on this variant, so the
-            // report records the status with no selected route (parity).
+            // Streaming non-2xx: no receipt (no completed stream to bind), but the
+            // attempt did reach an upstream, so it reports the serving route and
+            // every failed-over candidate exactly like the Stream arm.
             let (status, body) = errors::normalize_upstream_error_parts(
                 surface,
-                forward.upstream_status,
-                &forward.upstream_body,
+                forward.error.upstream_status,
+                &forward.error.upstream_body,
                 &received_body,
                 Some(&request_id),
             );
-            meter.upstream_error(reported_status(status, forward.upstream_status));
+            let attempt_index = forward.failed_attempts.len() as u32;
+            meter.failed_attempts(&forward.failed_attempts, true);
+            meter.upstream_error(
+                reported_status(status, forward.error.upstream_status),
+                attempt_index,
+                &forward.selected_route,
+            );
             finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
         }
         // All candidates failed. Record an upstream-attributed failure so the
@@ -476,10 +485,12 @@ impl Meter<'_> {
         });
     }
 
-    fn upstream_error(&self, status: u16) {
+    fn upstream_error(&self, status: u16, attempt_index: u32, selected_route_id: &str) {
         self.spawn(PostReport {
             status,
             is_streaming: Some(true),
+            attempt_index: Some(attempt_index),
+            selected_route_id: Some(selected_route_id.to_string()),
             ..self.base()
         });
     }

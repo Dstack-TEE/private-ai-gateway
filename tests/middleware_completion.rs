@@ -501,6 +501,92 @@ async fn total_forward_failure_reports_upstream_failure() {
 }
 
 #[tokio::test]
+async fn streaming_upstream_non_2xx_reports_the_serving_route() {
+    // A streaming request whose upstream answers non-2xx issues no receipt, but it
+    // did reach an upstream: the report must name the route that produced the
+    // status, or the failure cannot count against that route's health and the
+    // load behind the 429s is never shed.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.stream = true;
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 429, "the upstream status must reach the client");
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(429)).await;
+    assert_eq!(
+        report["selectedRouteId"],
+        json!("openai:gpt"),
+        "an unattributed upstream 429 counts against no route's health"
+    );
+    assert_eq!(report["isStreaming"], json!(true));
+    assert_eq!(report["attemptIndex"], json!(0));
+    // A real upstream attempt, not a gateway-generated failure: error_source
+    // stays empty so the status is attributed to the route itself.
+    assert!(
+        report
+            .get("errorSource")
+            .map(Value::is_null)
+            .unwrap_or(true),
+        "a real upstream attempt must not be tagged as a gateway failure"
+    );
+}
+
+#[tokio::test]
+async fn repeated_route_id_still_reports_distinct_attempt_indices() {
+    // Failover exhausted: every candidate 429s, and each attempt must reach
+    // control as its own attributed report — the failed-over one via
+    // failed_attempts, the last via upstream_error. The gateway does not dedupe
+    // `candidates` — it forwards whatever control supplies, and control
+    // implementations are swappable (the open-source stack ships its own). A
+    // route id repeated in the list must still yield one report per attempt:
+    // control dedupes by (request_id, attempt, status), so two 429s sharing an
+    // attempt index would silently collapse into one, under-counting the
+    // pressure signal by half. The index is therefore derived from the number
+    // of prior attempts, never looked up by route id.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "openai:dup", "format": "openai" },
+                { "routeId": "openai:dup", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
+    let mut input = chat_input();
+    input.upstream_required = false;
+    input.stream = true;
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 429);
+
+    wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
+    let indices: Vec<i64> = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["status"].as_i64() == Some(429))
+        .filter_map(|r| r["attemptIndex"].as_i64())
+        .collect();
+    assert_eq!(
+        indices,
+        vec![0, 1],
+        "both 429s against the repeated route must carry distinct attempt indices"
+    );
+}
+
+#[tokio::test]
 async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
     // The upstream can't fetch the client's image URL and (wrongly) reports it as a
     // 500. That is a bad-input error: the client must get a 400, it must not fail

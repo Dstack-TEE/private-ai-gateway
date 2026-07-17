@@ -70,7 +70,7 @@ pub struct ForwardResult {
 pub enum MiddlewareForwardResult {
     Forwarded(Box<MiddlewareForwarded>),
     Stream(Box<MiddlewareStreamingForwarded>),
-    UpstreamError(StreamingUpstreamError),
+    UpstreamError(Box<MiddlewareUpstreamError>),
 }
 
 pub struct MiddlewareForwarded {
@@ -205,6 +205,21 @@ pub struct StreamingUpstreamError {
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub upstream_body: Vec<u8>,
+}
+
+/// A streaming non-2xx on the middleware path, carrying the same route
+/// attribution as the `Forwarded`/`Stream` variants. No receipt is issued (there
+/// is no completed inference stream to bind), but the attempt still reached an
+/// upstream, so the caller must be able to report *which* route produced the
+/// status — an unattributed report cannot count against any route's health, which
+/// would leave the load behind upstream 429s invisible and never shed.
+pub struct MiddlewareUpstreamError {
+    pub error: StreamingUpstreamError,
+    /// The route that produced the non-2xx (the last one tried).
+    pub selected_route: String,
+    /// Candidates failed over before this one, as (route_id, status), in the
+    /// order tried. Same contract as the sibling variants' field.
+    pub failed_attempts: Vec<(String, u16)>,
 }
 
 #[derive(Debug, Clone)]
