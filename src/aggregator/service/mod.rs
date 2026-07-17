@@ -57,8 +57,8 @@ pub use wire::{
     LegacySignatureResult, MiddlewareForwardResult, MiddlewareForwarded,
     MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
     MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
-    ServiceResponseStream, StreamingForwardResult, StreamingForwardStream, StreamingUpstreamError,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    MiddlewareUpstreamError, ServiceResponseStream, StreamingForwardResult, StreamingForwardStream,
+    StreamingUpstreamError, UpstreamVerificationRequest, UpstreamVerifier,
 };
 
 pub struct AciService {

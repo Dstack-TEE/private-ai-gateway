@@ -16,7 +16,8 @@ use super::{
     ForwardCandidate, MiddlewareForwardResult, MiddlewareForwarded,
     MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
     MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
-    ReceiptOwner, ServiceError, ServiceResponseStream, StreamingUpstreamError,
+    MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
+    StreamingUpstreamError,
 };
 use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
@@ -295,13 +296,17 @@ impl AciService {
                     }
                     self.metrics
                         .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
-                    return Ok(MiddlewareForwardResult::UpstreamError(
-                        StreamingUpstreamError {
-                            upstream_status: status,
-                            upstream_headers,
-                            upstream_body,
+                    return Ok(MiddlewareForwardResult::UpstreamError(Box::new(
+                        MiddlewareUpstreamError {
+                            error: StreamingUpstreamError {
+                                upstream_status: status,
+                                upstream_headers,
+                                upstream_body,
+                            },
+                            selected_route: route_id,
+                            failed_attempts,
                         },
-                    ));
+                    )));
                 }
 
                 // Commit this candidate.
