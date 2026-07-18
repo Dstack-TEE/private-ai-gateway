@@ -33,7 +33,7 @@ use super::types::{PostReport, SpendMode};
 /// request OOMs. A single SSE line above this is pathological (legitimate events
 /// — even large tool-call arguments or embedded data — stay far below it), so we
 /// treat the overflow as an upstream failure rather than keep buffering.
-const MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Terminal classification of a stream: how the response body actually ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
