@@ -20,7 +20,7 @@ use private_ai_gateway::aci::upstream::{
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, ForwardCandidate,
-    GatewayRequestContext, InMemoryReceiptStore, MiddlewareReceiptJournal,
+    GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult, MiddlewareReceiptJournal,
     UpstreamVerificationRequest, UpstreamVerifier,
 };
 
@@ -329,10 +329,17 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
         )
         .await;
 
-    assert!(
-        result.is_err(),
-        "single candidate that always mismatches must be exhausted into an error"
-    );
+    match result {
+        Ok(MiddlewareForwardResult::AllFailed(all_failed)) => {
+            assert_eq!(
+                all_failed.failed_attempts,
+                vec![("route-a".to_string(), 502)],
+                "the exhausted candidate is reported as a per-attempt failure"
+            );
+        }
+        Ok(_) => panic!("single candidate that always mismatches must not commit"),
+        Err(err) => panic!("exhausted candidates now surface AllFailed, not Err: {err}"),
+    }
     assert!(
         verifier.invalidate_calls() >= 1,
         "middleware path must flush a possibly-stale binding even for a caller-supplied event"

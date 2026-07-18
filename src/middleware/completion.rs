@@ -434,10 +434,38 @@ pub async fn run(
             );
             finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
         }
-        // All candidates failed. Record an upstream-attributed failure so the
-        // request is visible to billing/health (per-attempt rows are not
-        // recoverable from the typed error). Client-attributable errors (E2EE/4xx)
-        // are not recorded. The E2EE context is still available to encrypt the body.
+        // Every candidate was attempted and failed without an HTTP response to
+        // relay (a chain that ends in an upstream HTTP status — including an
+        // all-429 chain — exits via the UpstreamError arm above, which relays
+        // that status). Report each attempt so deployment health and triage
+        // see the full chain, then a summary row placed after them carrying
+        // the aggregated error message.
+        Ok(MiddlewareForwardResult::AllFailed(forward)) => {
+            let status = forward_error_status(&forward.error);
+            meter.failed_attempts(&forward.failed_attempts, stream);
+            if status >= 500 {
+                meter.gateway_failure_at(
+                    forward.failed_attempts.len() as u32,
+                    status,
+                    ErrorSource::Upstream,
+                    &forward.error.to_string(),
+                    stream,
+                );
+            }
+            service_error_response(
+                surface,
+                endpoint_path,
+                service,
+                &request_id,
+                forward.error,
+                e2ee,
+            )
+        }
+        // Failures where no attempt chain is available (pre-forward errors,
+        // plus the forwarder's rare mid-walk internal-error abort): record an
+        // upstream-attributed failure so the request is visible to
+        // billing/health. Client-attributable errors (E2EE/4xx) are not
+        // recorded. The E2EE context is still available to encrypt the body.
         Err(err) => {
             let status = forward_error_status(&err);
             if status >= 500 {
@@ -528,9 +556,25 @@ impl Meter<'_> {
     }
 
     fn gateway_failure(&self, status: u16, source: ErrorSource, message: &str, is_streaming: bool) {
+        self.gateway_failure_at(0, status, source, message, is_streaming);
+    }
+
+    // Like `gateway_failure`, but placed at an explicit attempt index. Control
+    // dedupes reports by (request_id, attempt, status), so a summary row that
+    // follows per-attempt rows must sit after them or it collides with (and
+    // silently drops) the first attempt's row.
+    fn gateway_failure_at(
+        &self,
+        attempt_index: u32,
+        status: u16,
+        source: ErrorSource,
+        message: &str,
+        is_streaming: bool,
+    ) {
         self.spawn(PostReport {
             status,
             is_streaming: Some(is_streaming),
+            attempt_index: Some(attempt_index),
             error_source: Some(source),
             error_message: Some(truncate(message, 500)),
             ..self.base()

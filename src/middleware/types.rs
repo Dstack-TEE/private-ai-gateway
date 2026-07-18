@@ -127,6 +127,13 @@ pub struct PostReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_index: Option<u32>,
     /// `<provider>:<model>` from the backend's selected route, or `null`.
+    ///
+    /// Wire contract for consumers: a request may emit multiple per-attempt
+    /// reports — aggregate by `request_id`. A report with
+    /// `selected_route_id == null` and a non-empty `error_source` is a
+    /// request-level summary (e.g. the aggregate error after every candidate
+    /// failed), not an attempt; attempt counting must only consider reports
+    /// that carry a route.
     pub selected_route_id: Option<String>,
     pub request_model: String,
     /// Raw upstream usage before any cost injection, or `null`.
