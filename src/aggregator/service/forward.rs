@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent,
@@ -13,6 +13,7 @@ use crate::aggregator::session::{
 
 use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
+use super::errors::forwarding_error;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -123,7 +124,7 @@ impl AciService {
             )
             .await?;
 
-        let upstream_response = match self
+        let mut upstream_response = match self
             .forward_with_binding_reverify(
                 &prepared,
                 &mut recorded_event,
@@ -141,8 +142,12 @@ impl AciService {
         {
             ReverifyOutcome::Forwarded(response) => response,
             ReverifyOutcome::RefreshFailed(err) => return Err(err),
-            ReverifyOutcome::Failed(err) => return Err(err.into()),
+            ReverifyOutcome::Failed(err) => return Err(forwarding_error(err)),
         };
+        Self::attach_provider_response_claims(
+            &mut recorded_event,
+            upstream_response.provider_response_claims.take(),
+        );
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body);
         self.metrics.record_upstream_response(
@@ -311,7 +316,7 @@ impl AciService {
         {
             ReverifyOutcome::Forwarded(response) => response,
             ReverifyOutcome::RefreshFailed(err) => return Err(err),
-            ReverifyOutcome::Failed(err) => return Err(err.into()),
+            ReverifyOutcome::Failed(err) => return Err(forwarding_error(err)),
         };
         // Match dstack-vllm-proxy compatibility behavior: streaming
         // requests whose upstream response is not exactly HTTP 200
@@ -338,7 +343,6 @@ impl AciService {
                 },
             ));
         }
-
         let receipt_id = generate_receipt_id();
         let served_at = self.clock.now_secs();
         let mut builder = ReceiptBuilder::new(
@@ -729,6 +733,18 @@ impl AciService {
             }
             None => builder.add_upstream_verified(event),
         }
+    }
+
+    pub(super) fn attach_provider_response_claims(
+        event: &mut UpstreamVerifiedEvent,
+        claims: Option<Value>,
+    ) {
+        let Some(claims) = claims else {
+            return;
+        };
+        event.provider_claims = Some(json!({
+            "response_evidence": claims
+        }));
     }
 
     pub(super) fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {

@@ -17,7 +17,13 @@ pub(super) fn response_headers(resp: &reqwest::Response) -> HashMap<String, Stri
     let mut headers = HashMap::new();
     for (k, v) in resp.headers().iter() {
         if let Ok(value) = v.to_str() {
-            headers.insert(k.to_string(), value.to_string());
+            headers
+                .entry(k.to_string())
+                .and_modify(|existing: &mut String| {
+                    existing.push(',');
+                    existing.push_str(value);
+                })
+                .or_insert_with(|| value.to_string());
         }
     }
     headers

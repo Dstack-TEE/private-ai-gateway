@@ -28,6 +28,15 @@
     "bearer_token": "<near-ai-api-key>"
   },
   {
+    "name": "zero-g",
+    "provider": "0g",
+    "base_url": "https://router-api.0g.ai",
+    "models": {
+      "zero-g-model": "<0g-provider-model-id>"
+    },
+    "bearer_token": "<0g-api-key>"
+  },
+  {
     "name": "chutes-glm51",
     "provider": "chutes",
     "base_url": "https://api.chutes.ai",

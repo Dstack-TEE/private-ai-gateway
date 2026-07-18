@@ -219,7 +219,9 @@ Example seed:
 ```
 
 Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
-`near-ai`, `chutes`, and `phala-direct`.
+`near-ai`, `chutes`, `phala-direct`, and `0g`. The `0g` adapter enforces
+provider-reported buffered response verification only; streaming is rejected as
+unsupported.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,

@@ -314,6 +314,46 @@ impl UpstreamVerifier for PhalaDirectProviderVerifier {
     }
 }
 
+/// 0G's current public contract is per-response provider reporting:
+/// the gateway requests `verify_tee=true`, then accepts successful buffered
+/// response bytes only when 0G returns a non-empty `ZG-Res-Key` and the JSON
+/// response body contains `x_0g_trace.tee_verified: true`.
+///
+/// This verifier event intentionally does **not** claim a cryptographically
+/// verified TEE quote or channel binding. The backend performs the response
+/// gate and adds request-specific response evidence to `provider_claims` before
+/// the receipt is signed.
+#[derive(Debug, Clone, Default)]
+pub struct ZeroGProviderVerifier;
+
+impl ZeroGProviderVerifier {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for ZeroGProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name,
+            provider_type: Some("0g".to_string()),
+            model_id: request.model_id,
+            url_origin: request.url_origin,
+            verifier_id: "0g/provider-reported-response/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: request.required,
+            provider_claims: Some(serde_json::json!({
+                "trust_boundary": "0g-router-provider-report",
+                "evidence_scope": "per_response",
+                "verification_type": "provider_reported_per_response",
+                "cryptographic_binding": "pending_0g_clarification"
+            })),
+            ..Default::default()
+        }
+    }
+}
+
 pub struct RoutingUpstreamVerifier {
     by_origin: HashMap<String, Arc<dyn UpstreamVerifier>>,
     by_name: HashMap<String, Arc<dyn UpstreamVerifier>>,

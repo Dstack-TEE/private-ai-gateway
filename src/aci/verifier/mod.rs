@@ -45,7 +45,7 @@ pub use aci_service::{
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
-    RoutingUpstreamVerifier, TinfoilProviderVerifier,
+    RoutingUpstreamVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
 };
 pub use report::{validate_aci_report_binding, AciReportValidationError, ValidatedAciReport};
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};

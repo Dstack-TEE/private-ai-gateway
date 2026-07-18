@@ -69,6 +69,22 @@ fn router_provider_verifies_once_per_channel() {
 }
 
 #[test]
+fn zero_g_response_scoped_verification_is_not_prewarmed() {
+    let zero_g = test_upstream_config("zero-g", UpstreamProvider::ZeroG, "pub-a", "up-a");
+    assert!(super::validation::verification_targets(&[zero_g]).is_empty());
+}
+
+#[test]
+fn zero_g_requires_https_except_for_loopback_fixtures() {
+    let insecure = r#"[{"name":"zero-g","provider":"0g","base_url":"http://0g.example","models":{"public-model":"provider-model"}}]"#;
+    let err = parse_config_text(insecure).unwrap_err();
+    assert!(err.to_string().contains("0g base_url must use HTTPS"));
+
+    let loopback = r#"[{"name":"zero-g","provider":"0g","base_url":"http://127.0.0.1:8080","models":{"public-model":"provider-model"}}]"#;
+    assert!(parse_config_text(loopback).is_ok());
+}
+
+#[test]
 fn provider_attestation_scopes() {
     // NEAR AI (gateway TD) and Tinfoil (confidential-model-router) front many
     // models behind one verified channel, so they are per-router. Phala-direct
@@ -79,6 +95,7 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
+    assert_eq!(UpstreamProvider::ZeroG.attestation_scope(), PerModel);
     assert_eq!(
         UpstreamProvider::OpenAiCompatible.attestation_scope(),
         PerModel
@@ -150,6 +167,26 @@ fn parse_config_rejects_preverified_provider() {
     .expect_err("preverified must not be accepted as upstream config");
 
     assert!(err.to_string().contains("unknown variant"));
+}
+
+#[test]
+fn parse_config_accepts_zero_g_provider() {
+    let config = parse_config_text(
+        r#"
+            [
+              {
+                "name": "zero-g",
+                "provider": "0g",
+                "base_url": "https://router-api.0g.ai",
+                "models": {"public-model": "provider-model"}
+              }
+            ]
+            "#,
+    )
+    .expect("0G provider config should parse");
+
+    let public = serde_json::to_value(config[0].redacted()).unwrap();
+    assert_eq!(public["provider"], "0g");
 }
 
 #[test]

@@ -3,6 +3,7 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
+use super::errors::forwarding_error;
 use super::forward::{cite_served_session, ReverifyOutcome};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
@@ -265,7 +266,16 @@ impl AciService {
                         // Terminal binding mismatch and transport errors
                         // intentionally share failover priority 2 (a failed
                         // reverify outranks them at 3).
-                        upgrade_err(&mut aggregated_err, 2, err.into());
+                        let priority = if matches!(
+                            err,
+                            UpstreamError::ResponseVerificationFailed(_)
+                                | UpstreamError::ResponseVerificationUnsupported(_)
+                        ) {
+                            3
+                        } else {
+                            2
+                        };
+                        upgrade_err(&mut aggregated_err, priority, forwarding_error(err));
                         None
                     }
                 };
@@ -308,7 +318,6 @@ impl AciService {
                         },
                     )));
                 }
-
                 // Commit this candidate.
                 let upstream_headers = upstream_response.headers;
                 let receipt_id = generate_receipt_id();
@@ -384,14 +393,32 @@ impl AciService {
                     None
                 }
                 ReverifyOutcome::Failed(err) => {
+                    if candidate_required == Some(true)
+                        && matches!(
+                            err,
+                            UpstreamError::ResponseVerificationFailed(_)
+                                | UpstreamError::ResponseVerificationUnsupported(_)
+                        )
+                    {
+                        return Err(forwarding_error(err));
+                    }
                     // Terminal binding mismatch and transport errors
                     // intentionally share failover priority 2 (a failed
                     // reverify outranks them at 3).
-                    upgrade_err(&mut aggregated_err, 2, err.into());
+                    let priority = if matches!(
+                        err,
+                        UpstreamError::ResponseVerificationFailed(_)
+                            | UpstreamError::ResponseVerificationUnsupported(_)
+                    ) {
+                        3
+                    } else {
+                        2
+                    };
+                    upgrade_err(&mut aggregated_err, priority, forwarding_error(err));
                     None
                 }
             };
-            let Some(upstream_response) = upstream_response else {
+            let Some(mut upstream_response) = upstream_response else {
                 failed_attempts.push((route_id.clone(), 502));
                 continue;
             };
@@ -407,6 +434,10 @@ impl AciService {
                 failed_attempts.push((route_id.clone(), status));
                 continue;
             }
+            Self::attach_provider_response_claims(
+                &mut recorded_event,
+                upstream_response.provider_response_claims.take(),
+            );
 
             // Commit this candidate.
             let response_model = accepted_response_model(status, &upstream_response.body);

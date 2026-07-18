@@ -196,11 +196,12 @@ impl UpstreamBackend for ModelRouterBackend {
                     .unwrap_or_else(|| "/v1/chat/completions".to_string()),
             );
         }
+        let provider_prepared = route.upstream.prepare(request)?;
         Ok(PreparedUpstreamRequest {
-            request,
-            upstream_name: route.upstream.name().to_string(),
-            url_origin: route.upstream.url_origin().map(str::to_string),
-            model_id: route.upstream_model_id.clone(),
+            request: provider_prepared.request,
+            upstream_name: provider_prepared.upstream_name,
+            url_origin: provider_prepared.url_origin,
+            model_id: provider_prepared.model_id,
             route_id: Some(route.route_id.clone()),
             is_tee: route.is_tee,
         })
@@ -280,6 +281,7 @@ impl UpstreamBackend for ModelRouterBackend {
             body,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 

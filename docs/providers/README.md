@@ -15,6 +15,7 @@ One directory per upstream provider. Each holds up to two documents:
 | Tinfoil | AMD SEV-SNP (or TDX) + NVIDIA CC | `tls_spki_sha256` | [verification](tinfoil/verification.md) | [review](tinfoil/review.md) |
 | AciService (first-party) | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](aci-service/verification.md) | — (first-party) |
 | PhalaDirect | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](phala-direct/verification.md) | [review](phala-direct/review.md) |
+| 0G | Provider-reported per response | response markers (`ZG-Res-Key`, `x_0g_trace`) | [verification](0g/verification.md) | — (first-party adapter) |
 | SecretAI | AMD SEV-SNP + NVIDIA CC | — (adapter deferred) | — | [review](secret-ai/review.md) |
 
 The two columns are different document *types* — `verification.md` tracks the running
@@ -62,13 +63,21 @@ The two binding types:
   backend encrypts the request body to that key, so only the attested enclave can
   decrypt.
 
-### Invariant: verified ⟹ enforceable binding
+### Invariant: session-verified ⟹ enforceable binding
 
 A "verified" result that carries no enforceable channel binding is rejected
 (`src/aci/verifier.rs`). Forwarding fails closed if the selected backend cannot enforce
 the accepted binding
 (`tests/upstream_verifier.rs::service_fails_if_selected_backend_cannot_enforce_channel_binding`).
-A provider can never be "verified but unpinned."
+For session-bound providers, a provider can never be "verified but unpinned."
+
+The initial 0G adapter is a documented exception because the current 0G router
+contract is response-scoped: the gateway forces `verify_tee=true` and accepts a
+successful buffered response only when 0G reports `x_0g_trace.tee_verified=true`
+with a non-empty `ZG-Res-Key`. The receipt records this as
+`provider_reported_per_response` and does not attach an attested session or
+claim cryptographic TEE signature validation. Streaming 0G responses are
+rejected before upstream bytes are released.
 
 ### The attested session record
 

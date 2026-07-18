@@ -181,6 +181,7 @@ impl UpstreamBackend for RecordingUpstream {
             body: self.response_body.clone(),
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 

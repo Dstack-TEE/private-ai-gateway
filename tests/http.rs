@@ -73,6 +73,7 @@ impl UpstreamBackend for StubUpstream {
             body: self.body.clone(),
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 
@@ -449,6 +450,7 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
                 body: br#"{"error":{"message":"403, message='Forbidden', url='https://img.example/x.jpg'","type":"InternalServerError"}}"#.to_vec(),
                 headers,
                 served_instance_id: None,
+                provider_response_claims: None,
             })
         }
         async fn forward_verified_prepared(

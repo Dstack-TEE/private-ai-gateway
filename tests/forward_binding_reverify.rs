@@ -121,6 +121,7 @@ impl MismatchingBackend {
             body: br#"{"id":"chat-ok","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_vec(),
             headers: std::collections::HashMap::new(),
             served_instance_id: None,
+            provider_response_claims: None,
         }
     }
 }

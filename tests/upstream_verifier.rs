@@ -33,6 +33,7 @@ impl UpstreamBackend for NoopUpstream {
             body: b"{}".to_vec(),
             headers: HashMap::new(),
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 }

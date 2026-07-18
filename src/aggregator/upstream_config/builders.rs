@@ -11,12 +11,12 @@ use super::{
 use crate::aci::canonical;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
-    OpenAICompatibleBackend, UpstreamBackend,
+    OpenAICompatibleBackend, UpstreamBackend, ZeroGProviderBackend,
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
     NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, TinfoilProviderVerifier,
+    RoutingUpstreamVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -78,7 +78,8 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Chutes
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
-        | UpstreamProvider::PhalaDirect => true,
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::ZeroG => true,
     }
 }
 
@@ -106,6 +107,20 @@ fn build_provider_backend(
                 options,
                 session_store,
             )?))
+        }
+        UpstreamProvider::ZeroG => {
+            let mut backend = ZeroGProviderBackend::new_with_timeouts(
+                cfg.base_url.clone(),
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone());
+            if let Some(token) = &cfg.bearer_token {
+                backend = backend.with_bearer_token(token.clone());
+            }
+            backend = backend.with_basic_auth(cfg.basic_auth);
+            Ok(Arc::new(backend))
         }
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
@@ -263,6 +278,7 @@ fn build_provider_verifier(
                 }
                 Some(Arc::new(verifier))
             }
+            UpstreamProvider::ZeroG => Some(Arc::new(ZeroGProviderVerifier::new())),
         };
         if let Some(verifier) = verifier {
             router = router

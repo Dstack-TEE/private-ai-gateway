@@ -54,6 +54,7 @@ impl UpstreamBackend for EmptyUpstreamBackend {
                 .map_err(|e| UpstreamError::Routing(e.to_string()))?,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 }

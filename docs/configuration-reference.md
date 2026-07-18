@@ -160,6 +160,7 @@ Supported `provider` values:
 | `near-ai` | NEAR AI provider adapter. |
 | `chutes` | Chutes provider adapter. |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
+| `0g` | 0G router adapter. Forces `verify_tee=true` and fail-closes successful buffered responses unless 0G reports `tee_verified=true`; streaming is unsupported. |
 
 Provider verification policy belongs on the upstream entry. For ACI service
 routes, configure accepted workload ids, image digests, or dstack KMS root

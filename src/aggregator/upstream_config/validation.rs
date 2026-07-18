@@ -41,6 +41,11 @@ fn verification_targets_for_configs<'a>(
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
     for cfg in configs {
+        if cfg.provider == UpstreamProvider::ZeroG {
+            // 0G evidence is learned from each inference response. There is no
+            // channel/session fact to prewarm or refresh before a request.
+            continue;
+        }
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
         // A router's attestation is of the gateway/enclave channel itself, which
         // is identical for every model it fronts — every model resolves to the
@@ -161,6 +166,24 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.provider == UpstreamProvider::ZeroG {
+            let url = reqwest::Url::parse(&upstream.base_url).map_err(|e| {
+                UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} 0g base_url is invalid: {e}",
+                    upstream.name
+                ))
+            })?;
+            let loopback = url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .is_some_and(|ip| ip.is_loopback());
+            if url.scheme() != "https" && !loopback {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} 0g base_url must use HTTPS",
+                    upstream.name
+                )));
+            }
+        }
         if upstream.models.is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} must route at least one public model",
@@ -176,10 +199,12 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             }
             if !matches!(
                 upstream.provider,
-                UpstreamProvider::OpenAiCompatible | UpstreamProvider::Chutes
+                UpstreamProvider::OpenAiCompatible
+                    | UpstreamProvider::Chutes
+                    | UpstreamProvider::ZeroG
             ) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} basic_auth is supported only for openai-compatible or chutes providers",
+                    "upstream {:?} basic_auth is supported only for openai-compatible, chutes, or 0g providers",
                     upstream.name
                 )));
             }

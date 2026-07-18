@@ -165,6 +165,8 @@ pub enum UpstreamProvider {
     Tinfoil,
     NearAi,
     PhalaDirect,
+    #[serde(rename = "0g")]
+    ZeroG,
 }
 
 impl UpstreamProvider {
@@ -175,6 +177,7 @@ impl UpstreamProvider {
             UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            UpstreamProvider::ZeroG => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
             // prewarm probe granularity. Per-model is the safe default — it

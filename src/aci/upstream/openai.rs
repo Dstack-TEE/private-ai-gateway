@@ -115,6 +115,18 @@ impl OpenAICompatibleBackend {
         self
     }
 
+    /// Provider evidence must come from the configured origin. Disabling HTTP
+    /// redirects prevents evidence from another origin being accepted under it.
+    pub(crate) fn without_redirects(mut self) -> Result<Self, UpstreamError> {
+        self.client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(self.connect_timeout_seconds))
+            .read_timeout(Duration::from_secs(self.read_timeout_seconds))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        Ok(self)
+    }
+
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             Some(UpstreamAuth::Bearer(token)) => {
@@ -192,6 +204,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 
@@ -246,6 +259,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 
@@ -356,6 +370,7 @@ impl OpenAICompatibleBackend {
             body,
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 

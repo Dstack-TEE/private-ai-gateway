@@ -56,6 +56,7 @@ impl UpstreamBackend for MockUpstream {
             body: self.body.clone(),
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
@@ -64,6 +65,7 @@ impl UpstreamBackend for MockUpstream {
             body: b"{}".to_vec(),
             headers: HashMap::new(),
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 }

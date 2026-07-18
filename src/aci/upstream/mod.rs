@@ -24,6 +24,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{stream, Stream};
+use serde_json::Value;
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
@@ -31,12 +32,14 @@ mod chutes;
 mod openai;
 mod router;
 mod tls;
+mod zero_g;
 
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
 pub use openai::OpenAICompatibleBackend;
 pub use router::{ModelRoute, ModelRouterBackend};
+pub use zero_g::ZeroGProviderBackend;
 
 use openai::request_model_id;
 
@@ -77,6 +80,11 @@ pub struct UpstreamResponse {
     /// several (Chutes: the serving instance id). Lets the receipt cite that
     /// instance's attested session; `None` for single-channel backends.
     pub served_instance_id: Option<String>,
+    /// Compact provider-authored claims learned from this specific response,
+    /// signed into the receipt's `upstream.verified` event before bytes are
+    /// released to the caller. Used by providers whose current contract reports
+    /// per-response verification rather than a pre-forward channel binding.
+    pub provider_response_claims: Option<Value>,
 }
 
 pub type UpstreamBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;
@@ -97,6 +105,10 @@ pub enum UpstreamError {
     Transport(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
+    #[error("upstream response verification failed: {0}")]
+    ResponseVerificationFailed(String),
+    #[error("upstream response verification unsupported: {0}")]
+    ResponseVerificationUnsupported(String),
     #[error("upstream rejected request with status {status}: {body}")]
     Upstream { status: u16, body: String },
 }

@@ -46,8 +46,8 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
 };
 use private_ai_gateway::aggregator::upstream_config::{
-    UpstreamConfig, UpstreamConfigManager, UpstreamProvider, UpstreamRuntimeOptions,
-    UpstreamVerifierMode,
+    parse_config_text, UpstreamConfig, UpstreamConfigManager, UpstreamProvider,
+    UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::build_router;
 use rand::RngCore;
@@ -68,6 +68,11 @@ const EMBEDDINGS_RESPONSE: &[u8] =
     br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"provider-embed-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
 const STREAM_CHAT_REQUEST: &[u8] =
     br#"{"model":"provider-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+const ZERO_G_CHAT_REQUEST_VERIFY_FALSE: &[u8] =
+    br#"{"model":"public-model","verify_tee":false,"messages":[{"role":"user","content":"hello"}]}"#;
+const ZERO_G_STREAM_CHAT_REQUEST: &[u8] =
+    br#"{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+
 const STREAM_CHAT_RESPONSE_EVENT: &[u8] =
     br#"data: {"id":"chat-provider-1","object":"chat.completion.chunk","model":"provider-model","choices":[{"index":0,"delta":{"role":"assistant","content":"world"},"finish_reason":null}]}"#;
 const CHUTES_CHUTE_ID: &str = "2ff25e81-4586-5ec8-b892-3a6f342693d7";
@@ -192,6 +197,126 @@ async fn serve_openai_provider_fixture() -> (String, Arc<Mutex<Vec<ProviderCall>
         .route("/v1/models", get(models_handler))
         .with_state(ProviderState {
             calls: calls.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), calls)
+}
+
+#[derive(Clone)]
+struct ZeroGProviderState {
+    calls: Arc<Mutex<Vec<ProviderCall>>>,
+    response: Arc<Mutex<ZeroGFixtureResponse>>,
+}
+
+#[derive(Clone)]
+struct ZeroGFixtureResponse {
+    status: StatusCode,
+    zg_res_key: Option<String>,
+    body: Vec<u8>,
+}
+
+impl ZeroGFixtureResponse {
+    fn verified() -> Self {
+        Self {
+            status: StatusCode::OK,
+            zg_res_key: Some("zg-response-key-a".to_string()),
+            body: serde_json::to_vec(&json!({
+                "id": "chatcmpl-provider",
+                "object": "chat.completion",
+                "model": "provider-model",
+                "choices": [],
+                "x_0g_trace": {
+                    "request_id": "0g-request-a",
+                    "provider": "0x0000000000000000000000000000000000000001",
+                    "tee_verified": true
+                }
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn without_zg_res_key() -> Self {
+        Self {
+            zg_res_key: None,
+            ..Self::verified()
+        }
+    }
+
+    fn with_unverified_trace() -> Self {
+        Self {
+            body: serde_json::to_vec(&json!({
+                "id": "chatcmpl-provider",
+                "object": "chat.completion",
+                "model": "provider-model",
+                "choices": [],
+                "x_0g_trace": {
+                    "request_id": "0g-request-a",
+                    "provider": "0x0000000000000000000000000000000000000001",
+                    "tee_verified": false
+                }
+            }))
+            .unwrap(),
+            ..Self::verified()
+        }
+    }
+}
+
+async fn zero_g_chat_handler(
+    State(state): State<ZeroGProviderState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    state.calls.lock().unwrap().push(ProviderCall {
+        path: "/v1/chat/completions".to_string(),
+        authorization: headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        accept: headers
+            .get("accept")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        content_type: headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_chute_id: None,
+        x_instance_id: None,
+        x_e2e_nonce: None,
+        x_e2e_stream: None,
+        x_e2e_path: None,
+        body: body.to_vec(),
+        decrypted_body: None,
+    });
+    let response = state.response.lock().unwrap().clone();
+    let mut out = (response.status, response.body).into_response();
+    out.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    if let Some(zg_res_key) = response.zg_res_key {
+        out.headers_mut().insert(
+            axum::http::HeaderName::from_static("zg-res-key"),
+            axum::http::HeaderValue::from_str(&zg_res_key).unwrap(),
+        );
+    }
+    out
+}
+
+async fn serve_zero_g_provider_fixture_with_response(
+    response: ZeroGFixtureResponse,
+) -> (String, Arc<Mutex<Vec<ProviderCall>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/v1/chat/completions", post(zero_g_chat_handler))
+        .route("/v1/models", get(models_handler))
+        .with_state(ZeroGProviderState {
+            calls: calls.clone(),
+            response: Arc::new(Mutex::new(response)),
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -486,6 +611,31 @@ fn service_for_manager(manager: Arc<UpstreamConfigManager>) -> Arc<AciService> {
         )
         .unwrap(),
     )
+}
+
+fn zero_g_manager(base_url: &str) -> Arc<UpstreamConfigManager> {
+    let path = temp_config_path();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None)).unwrap(),
+    );
+    let config = parse_config_text(
+        &json!([{
+            "name": "zero-g-provider",
+            "provider": "0g",
+            "base_url": base_url,
+            "models": {
+                "public-model": "provider-model"
+            },
+            "bearer_token": "zero-g-secret"
+        }])
+        .to_string(),
+    )
+    .expect("0G upstream config should parse");
+    manager
+        .replace(config)
+        .expect("0G upstream config should be accepted");
+    let _ = std::fs::remove_file(path);
+    manager
 }
 
 fn receipt_event<'a>(
@@ -846,6 +996,158 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     assert_eq!(upstream_verified["result"], "verified");
 
     let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn zero_g_provider_forces_verify_tee_and_records_response_evidence() {
+    let (base_url, provider_calls) =
+        serve_zero_g_provider_fixture_with_response(ZeroGFixtureResponse::verified()).await;
+    let service = service_for_manager(zero_g_manager(&base_url));
+    let app = build_router(service.clone());
+
+    let (status, headers, body) = call(
+        app,
+        "POST",
+        "/v1/chat/completions",
+        ZERO_G_CHAT_REQUEST_VERIFY_FALSE,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["x_0g_trace"]["tee_verified"], true);
+    let receipt_id = headers
+        .get("x-receipt-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("successful 0G response must include x-receipt-id");
+
+    let calls = provider_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.authorization.as_deref(), Some("Bearer zero-g-secret"));
+    let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
+    assert_eq!(forwarded["model"], "provider-model");
+    assert_eq!(forwarded["verify_tee"], true);
+    assert_ne!(
+        call.body, ZERO_G_CHAT_REQUEST_VERIFY_FALSE,
+        "receipt must hash the exact routed bytes after forcing verify_tee=true"
+    );
+
+    let receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("verified 0G response must persist a receipt");
+    assert_eq!(
+        receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+        sha256_hex(&call.body)
+    );
+    let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
+    assert_eq!(upstream_verified["upstream_name"], "zero-g-provider");
+    assert_eq!(upstream_verified["provider_type"], "0g");
+    assert_eq!(upstream_verified["model_id"], "provider-model");
+    assert_eq!(upstream_verified["url_origin"], base_url);
+    assert_eq!(
+        upstream_verified["verifier_id"],
+        "0g/provider-reported-response/v1"
+    );
+    assert_eq!(upstream_verified["result"], "verified");
+
+    let evidence =
+        &upstream_verified["provider_claims"]["response_evidence"]["0g_response_verification"];
+    assert_eq!(
+        evidence["verification_type"],
+        "provider_reported_per_response"
+    );
+    assert_eq!(evidence["tee_verified"], true);
+    assert_eq!(evidence["zg_res_key_present"], true);
+    assert_eq!(
+        evidence["zg_res_key_sha256"],
+        sha256_hex(b"zg-response-key-a")
+    );
+    assert_eq!(
+        evidence["x_0g_trace_sha256"],
+        sha256_hex(
+            serde_json::to_vec(&json!({
+                "request_id": "0g-request-a",
+                "provider": "0x0000000000000000000000000000000000000001",
+                "tee_verified": true
+            }))
+            .unwrap()
+            .as_slice()
+        )
+    );
+    assert_eq!(evidence["forwarded_body_hash"], sha256_hex(&call.body));
+    assert_eq!(
+        evidence["cryptographic_binding"],
+        "pending_0g_clarification"
+    );
+}
+
+#[tokio::test]
+async fn zero_g_provider_rejects_success_without_non_empty_zg_res_key() {
+    let (base_url, provider_calls) =
+        serve_zero_g_provider_fixture_with_response(ZeroGFixtureResponse::without_zg_res_key())
+            .await;
+    let app = build_router(service_for_manager(zero_g_manager(&base_url)));
+
+    let (status, headers, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(headers.get("x-receipt-id").is_none());
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["type"], "upstream_verification_failed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("expected exactly one non-empty ZG-Res-Key"));
+    assert_eq!(
+        provider_calls.lock().unwrap().len(),
+        1,
+        "0G buffered verification happens after the provider response but before release"
+    );
+}
+
+#[tokio::test]
+async fn zero_g_provider_rejects_success_without_tee_verified_true() {
+    let (base_url, provider_calls) =
+        serve_zero_g_provider_fixture_with_response(ZeroGFixtureResponse::with_unverified_trace())
+            .await;
+    let app = build_router(service_for_manager(zero_g_manager(&base_url)));
+
+    let (status, headers, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(headers.get("x-receipt-id").is_none());
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["type"], "upstream_verification_failed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("x_0g_trace.tee_verified must be JSON boolean true"));
+    assert_eq!(provider_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn zero_g_provider_rejects_streaming_as_unverifiable() {
+    let (base_url, provider_calls) =
+        serve_zero_g_provider_fixture_with_response(ZeroGFixtureResponse::verified()).await;
+    let app = build_router(service_for_manager(zero_g_manager(&base_url)));
+
+    let (status, headers, body) = call(
+        app,
+        "POST",
+        "/v1/chat/completions",
+        ZERO_G_STREAM_CHAT_REQUEST,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(headers.get("x-receipt-id").is_none());
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["type"], "upstream_verification_failed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("0G response verification for streaming responses is unsupported"));
+    assert!(
+        provider_calls.lock().unwrap().is_empty(),
+        "streaming 0G requests must fail before unverifiable upstream bytes exist"
+    );
 }
 
 #[tokio::test]

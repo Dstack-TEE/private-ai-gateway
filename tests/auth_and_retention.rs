@@ -45,6 +45,7 @@ impl UpstreamBackend for StubUpstream {
             body: CHAT_RESPONSE.to_vec(),
             headers,
             served_instance_id: None,
+            provider_response_claims: None,
         })
     }
 }

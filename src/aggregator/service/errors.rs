@@ -49,6 +49,24 @@ pub enum UpstreamVerificationError {
     NoVerifierResult,
     #[error("upstream verifier reported failed: {0}")]
     VerifierFailed(String),
+    #[error("provider response verification failed: {0}")]
+    ProviderResponseInvalid(String),
+    #[error("provider response verification unsupported: {0}")]
+    ProviderResponseVerificationUnsupported(String),
+}
+
+pub(super) fn forwarding_error(err: UpstreamError) -> ServiceError {
+    match err {
+        UpstreamError::ResponseVerificationFailed(reason) => ServiceError::UpstreamVerification(
+            UpstreamVerificationError::ProviderResponseInvalid(reason),
+        ),
+        UpstreamError::ResponseVerificationUnsupported(reason) => {
+            ServiceError::UpstreamVerification(
+                UpstreamVerificationError::ProviderResponseVerificationUnsupported(reason),
+            )
+        }
+        other => ServiceError::Upstream(other),
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone)]
