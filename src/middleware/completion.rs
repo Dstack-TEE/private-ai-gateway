@@ -386,11 +386,27 @@ pub async fn run(
                         HeaderName::from_static("cache-control"),
                         HeaderValue::from_static("no-cache"),
                     );
-                    let body = Body::from_stream(
-                        finalized
-                            .body
-                            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string()))),
-                    );
+                    // A response-stream error must not become a body Err: hyper
+                    // aborts the connection (TCP RST toward the proxy), which
+                    // clients experience as a silently killed stream and a
+                    // poisoned keep-alive pool, invisible to application logs.
+                    // Log the error (this is its only surface) and end the body
+                    // instead, so the connection closes with a normal FIN.
+                    let stream_request_id = request_id.clone();
+                    let body = Body::from_stream(finalized.body.scan((), move |_, chunk| {
+                        std::future::ready(match chunk {
+                            Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
+                            Err(err) => {
+                                tracing::warn!(
+                                    target: "stream_abort",
+                                    request_id = %stream_request_id,
+                                    error = %err,
+                                    "response stream error; ending body gracefully instead of aborting the connection"
+                                );
+                                None
+                            }
+                        })
+                    }));
                     (status, headers, body).into_response()
                 }
                 Err(err) => {
