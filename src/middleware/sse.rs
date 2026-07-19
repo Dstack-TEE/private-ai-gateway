@@ -14,6 +14,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -24,9 +26,13 @@ use tokio::time::{sleep, Sleep};
 
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
+use super::completion::{
+    debug_gated_detail, detail_snippet, finish_reasons_anomalous, sanitize_identifier,
+    sanitize_reason, should_log_failure,
+};
 use super::control::ControlClient;
 use super::pricing;
-use super::types::{PostReport, SpendMode};
+use super::types::{ErrorSource, PostReport, SpendMode};
 
 /// Cap on the partial-line reassembly buffer. An upstream that streams bytes
 /// without ever sending a `\n` would otherwise grow it without bound until the
@@ -68,10 +74,26 @@ pub struct StreamReport {
     pub attempt_index: u32,
     pub upstream_status: u16,
     pub started: Instant,
+    /// Set by the response-body wrapper when the downstream finalizer
+    /// (receipt drafting / E2EE) errors mid-consumption. The meter's drop then
+    /// settles the stream as an internal failure instead of misattributing the
+    /// teardown to the client.
+    pub downstream_abort: Arc<AtomicBool>,
+    /// Set once this report has settled. Lets the response-body wrapper tell
+    /// whether a finalizer error arrived after a clean end-of-stream (the
+    /// meter has already settled Completed and will not emit again) so it can
+    /// record the failure itself.
+    pub settled: Arc<AtomicBool>,
 }
 
 impl StreamReport {
     fn settle(&self, outcome: Outcome, usage: Option<Value>, ttft_ms: Option<u64>) {
+        self.settled.store(true, Ordering::Relaxed);
+        // A Failed settle caused by the downstream finalizer is a gateway
+        // failure, not the upstream's: attribute it so health scoring does not
+        // count it against the serving route.
+        let downstream =
+            matches!(outcome, Outcome::Failed) && self.downstream_abort.load(Ordering::Relaxed);
         let report = PostReport {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint.clone(),
@@ -87,8 +109,9 @@ impl StreamReport {
             spend_mode: self.spend_mode,
             user_id: self.user_id,
             virtual_key_id: self.virtual_key_id,
-            error_source: None,
-            error_message: None,
+            error_source: downstream.then_some(ErrorSource::Gateway),
+            error_message: downstream
+                .then(|| "downstream finalizer aborted the response".to_string()),
         };
         let control = self.control.clone();
         // Fire-and-forget. Guard against being called from a drop that runs
@@ -131,7 +154,26 @@ pub struct MeterStream {
     saw_terminal: bool,
     saw_error: bool,
     settled: bool,
+    // Observation state for the `request_outcome` settle log. Always
+    // collected; the distinct-reason list is capped so a pathological stream
+    // cannot grow it without bound.
+    data_events: u64,
+    // Sanitized at collection: length-capped, single-line. Raw values are
+    // judged for anomaly once and never retained (a provider-controlled
+    // reason near the SSE line cap must not be held per stream).
+    finish_reasons: Vec<String>,
+    anomalous_finish: bool,
+    terminal_marker: Option<&'static str>,
+    error_detail: Option<String>,
+    // Whether raw error detail may be collected at all, resolved once per
+    // stream from the `request_outcome` target's debug level: the 240-char
+    // output bound must also bound the transient memory producing it, so at
+    // the default level in-band error values are never serialized.
+    detail_enabled: bool,
 }
+
+/// Cap on distinct finish reasons retained for the observation log.
+const MAX_REASONS: usize = 8;
 
 impl MeterStream {
     pub fn new(inner: ServiceResponseStream, report: StreamReport) -> Self {
@@ -148,6 +190,15 @@ impl MeterStream {
             saw_terminal: false,
             saw_error: false,
             settled: false,
+            data_events: 0,
+            finish_reasons: Vec::new(),
+            anomalous_finish: false,
+            terminal_marker: None,
+            error_detail: None,
+            detail_enabled: tracing::enabled!(
+                target: "request_outcome",
+                tracing::Level::DEBUG
+            ),
         }
     }
 
@@ -156,30 +207,98 @@ impl MeterStream {
             return;
         }
         self.settled = true;
+        let status = metered_status(outcome, self.report.upstream_status);
+        // Failures are always logged; a Completed stream is logged only when
+        // its finish reasons are nonstandard (an upstream error smuggled
+        // through a "success").
+        let anomalous_finish = self.anomalous_finish;
+        if (outcome != Outcome::Completed && should_log_failure(status)) || anomalous_finish {
+            let out_tokens = self.last_usage.as_ref().and_then(|u| {
+                u.get("completion_tokens")
+                    .or_else(|| u.get("output_tokens"))
+                    .and_then(Value::as_u64)
+            });
+            tracing::info!(
+                target: "request_outcome",
+                request_id = %self.report.request_id,
+                model = %sanitize_identifier(&self.report.request_model),
+                route = %self.report.selected_route_id.as_deref().unwrap_or(""),
+                attempt = self.report.attempt_index,
+                upstream_status = self.report.upstream_status,
+                status,
+                outcome = ?outcome,
+                anomalous_finish,
+                ttft_ms = self.ttft_ms,
+                duration_ms = self.report.started.elapsed().as_millis() as u64,
+                data_events = self.data_events,
+                out_tokens,
+                finish_reasons = %self.finish_reasons.join(","),
+                terminal = %self.terminal_marker.unwrap_or("none"),
+                saw_error = self.saw_error,
+                downstream_abort = self.report.downstream_abort.load(Ordering::Relaxed),
+                detail = %debug_gated_detail(self.error_detail.as_deref().unwrap_or("")),
+                "stream settled"
+            );
+        }
         self.report
             .settle(outcome, self.last_usage.take(), self.ttft_ms);
+    }
+
+    // Judge the raw reason once, then retain only a sanitized copy for the
+    // observation log: distinct values, in arrival order, capped.
+    fn record_reason(&mut self, reason: &str) {
+        if finish_reasons_anomalous([reason]) {
+            self.anomalous_finish = true;
+        }
+        let sanitized = sanitize_reason(reason);
+        if self.finish_reasons.len() >= MAX_REASONS || self.finish_reasons.contains(&sanitized) {
+            return;
+        }
+        self.finish_reasons.push(sanitized);
     }
 
     // Detect in-band terminal/error signals, surface-agnostic (works on either
     // the OpenAI or Anthropic shape).
     fn detect_outcome(&mut self, parsed: &Value) {
-        if parsed.get("error").is_some_and(|e| !e.is_null())
-            || parsed.get("type").and_then(Value::as_str) == Some("error")
-            || parsed
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .is_some_and(|e| !e.is_null())
-        {
+        let error_value = parsed
+            .get("error")
+            .filter(|e| !e.is_null())
+            .or_else(|| {
+                (parsed.get("type").and_then(Value::as_str) == Some("error")).then_some(parsed)
+            })
+            .or_else(|| {
+                parsed
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .filter(|e| !e.is_null())
+            });
+        if let Some(error_value) = error_value {
             self.saw_error = true;
+            // Collect detail only when it can actually be emitted
+            // (request_outcome=debug), and prefer the error's message field
+            // over serializing the whole value — an in-band error event can
+            // approach the 16 MiB SSE line cap, and the 240-char output bound
+            // must also bound the transient memory spent producing it.
+            if self.error_detail.is_none() && self.detail_enabled {
+                let message = error_value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| error_value.as_str())
+                    .unwrap_or("in-band stream error");
+                self.error_detail = Some(detail_snippet(message.as_bytes()));
+            }
         }
         let response_status = parsed
             .get("response")
             .and_then(|r| r.get("status"))
             .and_then(Value::as_str);
-        if parsed.get("type").and_then(Value::as_str) == Some("message_stop")
-            || matches!(response_status, Some("completed") | Some("incomplete"))
-        {
+        if parsed.get("type").and_then(Value::as_str) == Some("message_stop") {
             self.saw_terminal = true;
+            self.terminal_marker.get_or_insert("message_stop");
+        }
+        if matches!(response_status, Some("completed") | Some("incomplete")) {
+            self.saw_terminal = true;
+            self.terminal_marker.get_or_insert("response_status");
         }
         let mut reasons: Vec<&str> = parsed
             .get("choices")
@@ -201,8 +320,14 @@ impl MeterStream {
         for reason in reasons {
             if !reason.is_empty() {
                 self.saw_terminal = true;
+                self.terminal_marker.get_or_insert("finish_reason");
+                self.record_reason(reason);
                 if reason == "error" || reason.ends_with("_error") {
                     self.saw_error = true;
+                    if self.error_detail.is_none() {
+                        self.error_detail =
+                            Some(format!("finish_reason={}", sanitize_reason(reason)));
+                    }
                 }
             }
         }
@@ -287,8 +412,10 @@ impl MeterStream {
                         return line.to_string();
                     };
                     let data = data.trim();
+                    self.data_events += 1;
                     if data == "[DONE]" {
                         self.saw_terminal = true;
+                        self.terminal_marker.get_or_insert("done");
                         return line.to_string();
                     }
                     let Ok(parsed) = serde_json::from_str::<Value>(data) else {
@@ -364,6 +491,9 @@ impl Stream for MeterStream {
                     Fed::Overflow => {
                         this.inner_done = true;
                         this.buf.clear();
+                        if this.error_detail.is_none() {
+                            this.error_detail = Some("sse line overflow".to_string());
+                        }
                         this.settle(Outcome::Failed);
                         return Poll::Ready(None);
                     }
@@ -372,9 +502,12 @@ impl Stream for MeterStream {
                 // failure rather than propagating the error downstream. The
                 // truncated residual is dropped, never parsed (a partial line
                 // must not synthesize a spurious terminal marker).
-                Poll::Ready(Some(Err(_))) => {
+                Poll::Ready(Some(Err(err))) => {
                     this.inner_done = true;
                     this.buf.clear();
+                    if this.error_detail.is_none() {
+                        this.error_detail = Some(detail_snippet(err.to_string().as_bytes()));
+                    }
                     this.settle(Outcome::Failed);
                     return Poll::Ready(None);
                 }
@@ -407,7 +540,14 @@ impl Drop for MeterStream {
         // downstream consumer went away. A drop before the first poll (the stream
         // was never consumed, e.g. the finalizer errored) is not a client cancel.
         if self.started {
-            self.settle(Outcome::ClientClosed);
+            if self.report.downstream_abort.load(Ordering::Relaxed) {
+                // The finalizer aborted mid-consumption: an internal failure,
+                // not a client disconnect (the settle line carries the
+                // `downstream_abort` flag).
+                self.settle(Outcome::Failed);
+            } else {
+                self.settle(Outcome::ClientClosed);
+            }
         }
     }
 }
@@ -505,9 +645,128 @@ mod tests {
             attempt_index: 0,
             upstream_status: 200,
             started: Instant::now(),
+            downstream_abort: Arc::new(AtomicBool::new(false)),
+            settled: Arc::new(AtomicBool::new(false)),
         };
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::empty());
         MeterStream::new(inner, report)
+    }
+
+    // Observation state: finish reasons are collected distinct and in order,
+    // the terminal marker records how the stream ended, and data events are
+    // counted — the raw material for the `request_outcome` settle log.
+    #[test]
+    fn observation_state_collects_reasons_and_terminal() {
+        let mut meter = test_meter();
+        let chunk = Bytes::from(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        ));
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+
+        assert_eq!(meter.data_events, 5, "every data line is counted");
+        assert_eq!(
+            meter.finish_reasons,
+            vec!["tool_calls".to_string(), "stop".to_string()],
+            "reasons dedupe and keep arrival order"
+        );
+        assert_eq!(
+            meter.terminal_marker,
+            Some("finish_reason"),
+            "first terminal signal wins"
+        );
+        assert!(!meter.saw_error);
+    }
+
+    // An in-band error event is captured (truncated) as the `detail` for the
+    // settle log, and only the first error is retained. Detail collection is
+    // gated on the target's debug level, resolved once per stream.
+    #[test]
+    fn observation_captures_in_band_error_detail() {
+        let mut meter = test_meter();
+        meter.detail_enabled = true;
+        let chunk = Bytes::from(concat!(
+            "data: {\"error\":{\"message\":\"upstream exploded\",\"code\":500}}\n",
+            "data: {\"error\":{\"message\":\"second error ignored\"}}\n",
+        ));
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+        assert!(meter.saw_error);
+        let detail = meter.error_detail.as_deref().expect("detail captured");
+        assert!(
+            detail.contains("upstream exploded"),
+            "first error message retained: {detail}"
+        );
+        assert!(!detail.contains("second error"), "first error wins");
+    }
+
+    // Without request_outcome=debug the in-band error value is never
+    // serialized into detail state — the output bound must also bound the
+    // transient memory producing it.
+    #[test]
+    fn in_band_error_detail_not_collected_at_default_level() {
+        let mut meter = test_meter();
+        meter.detail_enabled = false;
+        let chunk =
+            Bytes::from("data: {\"error\":{\"message\":\"upstream exploded\",\"code\":500}}\n");
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+        assert!(meter.saw_error, "classification is unaffected");
+        assert!(
+            meter.error_detail.is_none(),
+            "no detail state at info level"
+        );
+    }
+
+    // A hostile finish reason (multi-line, near the SSE line cap) must be
+    // judged on the raw value but stored only in sanitized, bounded form —
+    // never retained raw (memory amplification) nor logged with newlines
+    // (log-record forgery).
+    #[test]
+    fn hostile_finish_reason_is_bounded_and_single_line_at_collection() {
+        let mut meter = test_meter();
+        let hostile = format!("evil\nFORGED LOG LINE\n{}", "x".repeat(1024));
+        let chunk = Bytes::from(format!(
+            "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":{}}}]}}\n",
+            serde_json::to_string(&hostile).unwrap()
+        ));
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+        assert!(meter.anomalous_finish, "raw value judged anomalous");
+        assert_eq!(meter.finish_reasons.len(), 1);
+        let stored = &meter.finish_reasons[0];
+        assert!(stored.chars().count() <= 32, "length-capped: {stored:?}");
+        assert!(
+            !stored.contains('\n') && !stored.contains('\r'),
+            "single-line"
+        );
+    }
+
+    // An error-ish finish_reason (no error object) still yields a detail.
+    #[test]
+    fn observation_captures_error_finish_reason_detail() {
+        let mut meter = test_meter();
+        let chunk = Bytes::from(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"upstream_error\"}]}\n",
+        );
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+        assert!(meter.saw_error);
+        assert_eq!(
+            meter.error_detail.as_deref(),
+            Some("finish_reason=upstream_error")
+        );
+    }
+
+    // Observation state is always collected — there is no off switch — so a
+    // settle can decide on failure/anomaly logging for any request.
+    #[test]
+    fn observation_always_collects() {
+        let mut meter = test_meter();
+        let chunk =
+            Bytes::from("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n");
+        assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
+        assert_eq!(meter.finish_reasons, vec!["stop".to_string()]);
+        assert!(meter.saw_terminal, "classification is unaffected");
     }
 
     // A usage-bearing SSE event split across two upstream chunks must still be

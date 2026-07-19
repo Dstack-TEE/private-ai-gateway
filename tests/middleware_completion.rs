@@ -419,6 +419,8 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         attempt_index: 0,
         upstream_status: 200,
         started: std::time::Instant::now(),
+        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let events: Vec<Result<Bytes, _>> = vec![
         Ok(Bytes::from(
@@ -662,4 +664,127 @@ async fn empty_candidates_returns_model_not_found() {
         .as_str()
         .unwrap()
         .contains("no route available"));
+}
+
+// Behavior contract for finalizer failures relative to meter settle timing.
+//
+// Pre-settle: a downstream finalizer error during body consumption (the
+// response wrapper sets `downstream_abort` before the chain drops) must
+// settle as an internal gateway failure — 502 with error_source=gateway —
+// not as a client disconnect (499), and must not charge the serving route.
+#[tokio::test]
+async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close() {
+    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+    let control = ControlClient::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+    })
+    .unwrap();
+    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let report = StreamReport {
+        control,
+        request_id: "r-abort".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        request_model: "gpt".to_string(),
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        selected_route_id: Some("openai:gpt".to_string()),
+        attempt_index: 0,
+        upstream_status: 200,
+        started: std::time::Instant::now(),
+        downstream_abort: downstream_abort.clone(),
+        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    // One chunk, then the stream stays open: the meter starts but never
+    // reaches a terminal marker.
+    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
+        vec![Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ))];
+    let inner: ServiceResponseStream =
+        Box::pin(futures_util::stream::iter(events).chain(futures_util::stream::pending()));
+    let mut metered = MeterStream::new(inner, report);
+    let first = metered.next().await;
+    assert!(first.is_some(), "meter must have started streaming");
+
+    // The downstream finalizer errors; the wrapper marks it, then the chain
+    // is dropped.
+    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(metered);
+
+    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
+    assert_eq!(report["status"], json!(502), "internal failure, not 499");
+    assert_eq!(report["errorSource"], json!("gateway"));
+    assert_eq!(
+        report["selectedRouteId"],
+        json!("openai:gpt"),
+        "route still recorded for traceability"
+    );
+}
+
+// Post-settle: once the meter settled Completed at a clean end-of-stream, a
+// later finalizer error (flag set just before the drop) must not emit a
+// second, conflicting usage report — the supplemental request_outcome line is
+// the response wrapper's job, not the meter's.
+#[tokio::test]
+async fn downstream_abort_after_settle_does_not_double_report() {
+    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+    let control = ControlClient::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+    })
+    .unwrap();
+    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let report = StreamReport {
+        control,
+        request_id: "r-late".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        request_model: "gpt".to_string(),
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        selected_route_id: Some("openai:gpt".to_string()),
+        attempt_index: 0,
+        upstream_status: 200,
+        started: std::time::Instant::now(),
+        downstream_abort: downstream_abort.clone(),
+        settled: settled.clone(),
+    };
+    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
+        vec![Ok(Bytes::from(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ))];
+    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+    let mut metered = MeterStream::new(inner, report);
+    while metered.next().await.is_some() {}
+    assert!(
+        settled.load(std::sync::atomic::Ordering::Relaxed),
+        "clean EOF settles the meter"
+    );
+
+    // Receipt/E2EE finalization now fails; the wrapper marks the abort and
+    // the chain is dropped afterwards.
+    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(metered);
+
+    let first = wait_for_post(&posts, |r| r["requestId"] == json!("r-late")).await;
+    assert_eq!(first["status"], json!(200), "the settled outcome stands");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let count = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["requestId"] == json!("r-late"))
+        .count();
+    assert_eq!(count, 1, "no second, conflicting report after settle");
 }
