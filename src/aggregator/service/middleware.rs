@@ -13,7 +13,7 @@ use super::streaming::{
 };
 use super::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    ForwardCandidate, MiddlewareForwardResult, MiddlewareForwarded,
+    ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
     MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
     MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
     MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
@@ -463,14 +463,22 @@ impl AciService {
             )));
         }
 
-        // No candidate succeeded. Return the highest-priority failure, with
-        // the attempted route ids for context.
-        Err(aggregated_err.map(|(_, err)| err).unwrap_or_else(|| {
+        // No candidate succeeded. Return the highest-priority failure together
+        // with every attempt's outcome — the caller reports the attempts (they
+        // are unrecoverable from the error alone) and derives the client
+        // status from the failure mix.
+        let error = aggregated_err.map(|(_, err)| err).unwrap_or_else(|| {
             ServiceError::Upstream(UpstreamError::Routing(format!(
                 "all upstream routes failed (attempted: {})",
                 candidate_route_ids.join(", ")
             )))
-        }))
+        });
+        Ok(MiddlewareForwardResult::AllFailed(Box::new(
+            MiddlewareAllFailed {
+                failed_attempts,
+                error,
+            },
+        )))
     }
 
     /// Start a streaming chat completion. The response stream hashes

@@ -71,6 +71,27 @@ pub enum MiddlewareForwardResult {
     Forwarded(Box<MiddlewareForwarded>),
     Stream(Box<MiddlewareStreamingForwarded>),
     UpstreamError(Box<MiddlewareUpstreamError>),
+    /// Every candidate was attempted and failed without an HTTP response to
+    /// relay. Carries the per-attempt outcomes so the caller can report each
+    /// attempt (they are otherwise unrecoverable from the aggregated error)
+    /// and derive an honest client status from the failure mix.
+    AllFailed(Box<MiddlewareAllFailed>),
+}
+
+pub struct MiddlewareAllFailed {
+    /// Every candidate attempted, as (route_id, status), in the order tried.
+    /// Non-HTTP failures (prepare/verification/transport) record 502; HTTP
+    /// failures record the upstream status (e.g. 429).
+    ///
+    /// Usage-report consumers: the caller reports these as attempt rows
+    /// 0..N-1, and MAY additionally report one request-level summary row at
+    /// attempt index N (currently only for 5xx aggregate errors) with an
+    /// empty route and a gateway/upstream error source. A row with no route
+    /// and a non-empty error source is a request-level summary, not an
+    /// attempt; attempt counting must only consider rows that carry a route.
+    pub failed_attempts: Vec<(String, u16)>,
+    /// The highest-priority underlying failure across the attempts.
+    pub error: ServiceError,
 }
 
 pub struct MiddlewareForwarded {

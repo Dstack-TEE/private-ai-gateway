@@ -61,6 +61,27 @@ out-of-process hop. When the section is omitted the gateway serves directly.
 | `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
 | `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses; `0` disables the heartbeat. |
 
+Request outcome observation is always on and needs no configuration: every
+failed request that reaches the middleware completion path (consult denials,
+routing/shaping failures, upstream errors, stream failures, client
+disconnects; final 429s excepted, they are recorded per-attempt in the usage
+pipeline) emits a `request_outcome` tracing line carrying the client-facing
+and upstream status, route, attempt chain length, TTFT/duration, finish
+reasons, and terminal marker. Requests rejected before that path — malformed
+JSON, oversized bodies, E2EE setup failures — do not produce lines, so
+complete request accounting still needs the usage pipeline. A request emits
+at most one primary line; a late receipt/E2EE finalization failure appends
+one supplemental `phase=finalize_error` line for the same `request_id`
+(aggregate by unique request id, letting `finalize_error` supersede).
+Completed
+responses are logged only when their finish reasons fall outside the standard
+OpenAI/Anthropic set (`anomalous_finish=true`) — the "error smuggled through a
+success" class. The `detail` field (a 240-char snippet of the upstream error
+body, which may quote request fragments) is emitted only when the
+`request_outcome` target is enabled at `debug`; at the default level it is
+blank. Silence or re-route the target via `RUST_LOG` (the subscriber uses
+`EnvFilter`).
+
 ```json
 {
   "middleware": {

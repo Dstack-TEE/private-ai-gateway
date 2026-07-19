@@ -72,7 +72,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response,
@@ -80,6 +80,13 @@ use axum::{
     Router,
 };
 use tower_http::cors::CorsLayer;
+
+/// Request-body cap for the inference surface. Multimodal chat payloads with
+/// base64 image parts routinely run 5–20 MB; axum's 2 MB default rejected them
+/// with an extractor-level 413 that reached clients as a connection reset.
+/// Bodies are buffered in memory, so the cap stays bounded rather than
+/// unlimited.
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 use crate::aggregator::service::AciService;
 use crate::aggregator::upstream_config::UpstreamConfigManager;
@@ -182,6 +189,13 @@ fn build_router_inner(
         // Outermost layer: it answers preflight OPTIONS before routing, which
         // otherwise 405s since the routes only declare GET/POST/PUT.
         .layer(CorsLayer::permissive())
+        // Multimodal chat payloads (base64 image parts) routinely exceed
+        // axum's 2 MB default body limit. The default-limit 413 is rejected in
+        // the extractor with the client's upload left unread, which hyper
+        // turns into a TCP RST — clients see a connection error instead of a
+        // 413, and the request never reaches request logging. Raise the cap so
+        // legitimate payloads fit.
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
 

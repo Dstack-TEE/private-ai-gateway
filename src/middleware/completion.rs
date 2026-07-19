@@ -6,6 +6,8 @@
 //! response, inject cost, post the usage report, and finalize through the
 //! existing receipt/E2EE finalizers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -51,6 +53,170 @@ pub struct CompletionInput {
     pub stream: bool,
 }
 
+/// Cap on the error-detail snippet in `request_outcome` lines. Long enough to
+/// carry a provider's error envelope, short enough to bound log growth and to
+/// avoid replaying large bodies into the log.
+const MAX_DETAIL_CHARS: usize = 240;
+
+/// Whether a terminal failure with this client-facing status gets a
+/// `request_outcome` line. Always-on for every model; the only exclusion is
+/// final 429s — the highest-volume, lowest-information class, already recorded
+/// per-attempt in the usage pipeline. Every other failure (4xx/5xx, client
+/// disconnects, stream failures) is logged with content-free structured
+/// fields (statuses, route, phase, finish reasons, timings); the raw error
+/// detail appears only with `request_outcome=debug`. Silence the target via
+/// `RUST_LOG` if ever needed — there is deliberately no config knob.
+pub(super) fn should_log_failure(status: u16) -> bool {
+    status != 429
+}
+
+/// Finish/stop reasons that mark a genuinely clean completion on the OpenAI
+/// and Anthropic surfaces. A completed stream whose collected reasons include
+/// anything outside this set is logged as an anomaly: an upstream signalling
+/// an error through a nonstandard finish reason would otherwise be recorded
+/// as a plain success.
+///
+/// This is a heuristic: a miss on a newly introduced legitimate value costs
+/// only an info-level false positive and a one-line addition here. Keep it a
+/// flat list — no provider-specific registries or runtime configuration.
+pub(super) const STANDARD_FINISH_REASONS: &[&str] = &[
+    "stop",
+    "length",
+    "tool_calls",
+    "function_call",
+    "content_filter",
+    "end_turn",
+    "max_tokens",
+    "stop_sequence",
+    "tool_use",
+    "pause_turn",
+    "refusal",
+    "model_context_window_exceeded",
+];
+
+pub(super) fn finish_reasons_anomalous<'a, I: IntoIterator<Item = &'a str>>(reasons: I) -> bool {
+    reasons
+        .into_iter()
+        .any(|r| !STANDARD_FINISH_REASONS.contains(&r))
+}
+
+/// Per-reason length cap for logged finish reasons. Long enough for every
+/// standard value and any plausible provider-specific token, short enough
+/// that a provider-controlled string cannot become a content channel in the
+/// always-on log.
+const MAX_REASON_CHARS: usize = 32;
+
+/// Log-safe form of a client-controlled identifier (the requested model
+/// name): single-line, control characters replaced, length-capped. The
+/// request body allows megabytes, so an unbounded identifier in an always-on
+/// info log would be a log-injection and disk-amplification vector.
+pub(super) fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(128)
+        .collect()
+}
+
+/// Log-safe form of a single provider-controlled finish reason:
+/// length-capped, with every control character (newlines, ANSI escapes)
+/// replaced — a JSON string can embed them after parsing, enabling forged
+/// log records or terminal-escape injection.
+pub(super) fn sanitize_reason(reason: &str) -> String {
+    reason
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_REASON_CHARS)
+        .collect()
+}
+
+/// Emission form of collected finish reasons: count-capped, each value
+/// sanitized. Anomaly *detection* runs on the raw values; only what gets
+/// stored or logged is bounded.
+pub(super) fn sanitized_reasons<'a, I: IntoIterator<Item = &'a str>>(reasons: I) -> String {
+    reasons
+        .into_iter()
+        .take(8)
+        .map(sanitize_reason)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Whether raw error detail may be included in `request_outcome` lines.
+/// Upstream error bodies can echo request content (validation errors quoting
+/// input, signed URLs), and this gateway's confidentiality model treats logs
+/// as operator-visible — so raw detail is opt-in via the tracing filter
+/// (`RUST_LOG=request_outcome=debug`); at the default level the structured
+/// fields (statuses, route, phase, finish reasons, timings) still identify
+/// the failure class.
+pub(super) fn debug_gated_detail(detail: &str) -> &str {
+    if tracing::enabled!(target: "request_outcome", tracing::Level::DEBUG) {
+        detail
+    } else {
+        ""
+    }
+}
+
+/// Single-line, length-capped snippet of an error body/message for the
+/// `request_outcome` `detail` field (char-boundary safe). The input is
+/// byte-capped before the lossy conversion so a large non-UTF-8 body is never
+/// copied whole; a char split at the cap degrades to a replacement character,
+/// which is fine for a log snippet.
+pub(super) fn detail_snippet(raw: &[u8]) -> String {
+    let capped = &raw[..raw.len().min(4 * MAX_DETAIL_CHARS)];
+    String::from_utf8_lossy(capped)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_DETAIL_CHARS)
+        .collect()
+}
+
+/// `request_outcome` line for a terminal path that never settles a stream or a
+/// buffered 2xx: consult denials, routing/shaping failures, upstream error
+/// responses, and forward errors. Together with the stream-settle and
+/// buffered-2xx lines this makes observation exhaustive. Contract: a request
+/// emits at most one primary line, and a late finalization failure may append
+/// one supplemental `phase=finalize_error` line for the same request_id —
+/// aggregate by unique request_id, with `finalize_error` superseding the
+/// earlier record.
+/// Identity fields threaded into response finalization so a late failure
+/// there (E2EE encryption of a generated body) can record the actual
+/// client-facing terminal as `phase=finalize_error`.
+#[derive(Clone, Copy)]
+struct OutcomeCtx<'a> {
+    request_id: &'a str,
+    model: &'a str,
+    started: Instant,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_generated_outcome(
+    request_id: &str,
+    model: &str,
+    phase: &'static str,
+    status: u16,
+    upstream_status: u16,
+    route: &str,
+    attempt: u32,
+    started: Instant,
+    detail: &str,
+) {
+    tracing::info!(
+        target: "request_outcome",
+        request_id = %request_id,
+        model = %sanitize_identifier(model),
+        route = %route,
+        attempt,
+        upstream_status,
+        status,
+        outcome = "Generated",
+        phase = %phase,
+        duration_ms = started.elapsed().as_millis() as u64,
+        detail = %debug_gated_detail(detail),
+        "generated response"
+    );
+}
+
 /// Run the completion flow and produce the client response.
 pub async fn run(
     control: &ControlClient,
@@ -75,6 +241,11 @@ pub async fn run(
 
     let started = Instant::now();
     let model = params.get("model").and_then(Value::as_str);
+    let outcome_ctx = OutcomeCtx {
+        request_id: &request_id,
+        model: model.unwrap_or(""),
+        started,
+    };
     // Forward the routing block verbatim; the control plane validates it. Parsing
     // it here would silently drop a caller's restrictions on a malformed field.
     let provider = params.get("provider");
@@ -99,6 +270,19 @@ pub async fn run(
     if !consult.allow {
         let status = consult.status.unwrap_or(403);
         let message = consult.message.as_deref().unwrap_or("forbidden");
+        if should_log_failure(status) {
+            log_generated_outcome(
+                &request_id,
+                model.unwrap_or(""),
+                "consult_deny",
+                status,
+                0,
+                "",
+                0,
+                started,
+                &detail_snippet(message.as_bytes()),
+            );
+        }
         // Record 5xx and 429 denials as gateway failures; other user denials
         // (401/402/404) are caller-attributable and left unrecorded. Tagging
         // these ErrorSource::Control keeps them out of upstream-health signals.
@@ -117,6 +301,7 @@ pub async fn run(
                     body,
                     &extra,
                     e2ee,
+                    outcome_ctx,
                 );
             }
         }
@@ -126,14 +311,45 @@ pub async fn run(
             message,
             Some(&request_id),
         );
-        return finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee);
+        return finalize_generated(
+            surface,
+            service,
+            endpoint_path,
+            status,
+            body,
+            &[],
+            e2ee,
+            outcome_ctx,
+        );
     }
 
     let candidates = consult.candidates.clone().unwrap_or_default();
     if candidates.is_empty() {
         let message = format!("no route available for model {}", model.unwrap_or("(none)"));
+        if should_log_failure(400) {
+            log_generated_outcome(
+                &request_id,
+                model.unwrap_or(""),
+                "no_route",
+                400,
+                0,
+                "",
+                0,
+                started,
+                "",
+            );
+        }
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
-        return finalize_generated(surface, service, endpoint_path, 400, body, &[], e2ee);
+        return finalize_generated(
+            surface,
+            service,
+            endpoint_path,
+            400,
+            body,
+            &[],
+            e2ee,
+            outcome_ctx,
+        );
     }
 
     // Shape one body per candidate (typed per-route contract).
@@ -141,6 +357,19 @@ pub async fn run(
         Ok(shaped) => shaped,
         Err(err) => {
             let message = format!("failed to shape provider request: {err}");
+            if should_log_failure(500) {
+                log_generated_outcome(
+                    &request_id,
+                    model.unwrap_or(""),
+                    "shape_error",
+                    500,
+                    0,
+                    "",
+                    0,
+                    started,
+                    &detail_snippet(message.as_bytes()),
+                );
+            }
             meter.gateway_failure(500, ErrorSource::Gateway, &message, stream);
             let body = errors::envelope_bytes(
                 surface,
@@ -148,7 +377,16 @@ pub async fn run(
                 &message,
                 Some(&request_id),
             );
-            return finalize_generated(surface, service, endpoint_path, 500, body, &[], e2ee);
+            return finalize_generated(
+                surface,
+                service,
+                endpoint_path,
+                500,
+                body,
+                &[],
+                e2ee,
+                outcome_ctx,
+            );
         }
     };
     let forward_candidates: Vec<ForwardCandidate> = shaped
@@ -160,7 +398,7 @@ pub async fn run(
         .collect();
 
     let context = GatewayRequestContext {
-        request_id,
+        request_id: request_id.clone(),
         user_model,
         target_route_id: None,
         user_tier: consult.user_tier.clone(),
@@ -169,7 +407,6 @@ pub async fn run(
     // The receipt-draft journal is only consumed by the streaming finalizer; the
     // buffered result carries its draft inline.
     let journal = MiddlewareReceiptJournal::default();
-    let request_id = context.request_id.clone();
     let result = service
         .forward_chat_completion_for_middleware(
             ChatCompletionRequest {
@@ -218,6 +455,19 @@ pub async fn run(
                         // success. Attribute it to the upstream (it sent an
                         // unparseable success body) and return 502.
                         let message = "upstream returned a malformed success body";
+                        if should_log_failure(502) {
+                            log_generated_outcome(
+                                &request_id,
+                                model.unwrap_or(""),
+                                "malformed_body",
+                                502,
+                                upstream_status,
+                                &forward.selected_route,
+                                attempt_index,
+                                started,
+                                message,
+                            );
+                        }
                         meter.gateway_failure(502, ErrorSource::Upstream, message, false);
                         let body = errors::envelope_bytes(
                             surface,
@@ -233,6 +483,7 @@ pub async fn run(
                             body,
                             &[],
                             e2ee,
+                            outcome_ctx,
                         );
                     }
                 };
@@ -245,6 +496,45 @@ pub async fn run(
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
                 let raw_usage = transformed.get("usage").cloned();
+                // A buffered 2xx is only observable when its finish reasons are
+                // nonstandard — an upstream error smuggled through a "success".
+                // Covers both response shapes: OpenAI `choices[].finish_reason`
+                // and Anthropic top-level `stop_reason`.
+                let mut finish_reasons: Vec<&str> = transformed
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .map(|choices| {
+                        choices
+                            .iter()
+                            .filter_map(|c| c.get("finish_reason").and_then(Value::as_str))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(stop_reason) = transformed.get("stop_reason").and_then(Value::as_str) {
+                    finish_reasons.push(stop_reason);
+                }
+                if finish_reasons_anomalous(finish_reasons.iter().copied()) {
+                    let out_tokens = raw_usage.as_ref().and_then(|u| {
+                        u.get("completion_tokens")
+                            .or_else(|| u.get("output_tokens"))
+                            .and_then(Value::as_u64)
+                    });
+                    tracing::info!(
+                        target: "request_outcome",
+                        request_id = %request_id,
+                        model = %sanitize_identifier(model.unwrap_or("")),
+                        route = %forward.selected_route,
+                        attempt = attempt_index,
+                        upstream_status,
+                        status = upstream_status,
+                        outcome = "Buffered",
+                        anomalous_finish = true,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        out_tokens,
+                        finish_reasons = %sanitized_reasons(finish_reasons.iter().copied()),
+                        "buffered response with nonstandard finish reason"
+                    );
+                }
                 meter.success(
                     upstream_status,
                     attempt_index,
@@ -275,6 +565,19 @@ pub async fn run(
                     &received_body,
                     Some(&request_id),
                 );
+                if should_log_failure(mapped) {
+                    log_generated_outcome(
+                        &request_id,
+                        model.unwrap_or(""),
+                        "upstream_error_buffered",
+                        mapped,
+                        upstream_status,
+                        &forward.selected_route,
+                        attempt_index,
+                        started,
+                        &detail_snippet(&forward.upstream_body),
+                    );
+                }
                 meter.success(
                     reported_status(mapped, upstream_status),
                     attempt_index,
@@ -304,7 +607,24 @@ pub async fn run(
                 // The receipt finalizer consumed the E2EE context, so a generated
                 // error here is necessarily cleartext.
                 Err(err) => {
-                    service_error_response(surface, endpoint_path, service, &request_id, err, None)
+                    // Any earlier outcome line for this request described the
+                    // upstream outcome; the client actually receives this
+                    // finalization error, so record the real terminal too.
+                    let status = forward_error_status(&err);
+                    if should_log_failure(status) {
+                        log_generated_outcome(
+                            &request_id,
+                            model.unwrap_or(""),
+                            "finalize_error",
+                            status,
+                            upstream_status,
+                            &forward.selected_route,
+                            attempt_index,
+                            started,
+                            &detail_snippet(err.to_string().as_bytes()),
+                        );
+                    }
+                    service_error_response(surface, endpoint_path, service, outcome_ctx, err, None)
                 }
             }
         }
@@ -318,6 +638,11 @@ pub async fn run(
             let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
 
+            // Set when the downstream finalizer (receipt drafting / E2EE)
+            // errors while the body is being consumed: the meter's drop must
+            // then record an internal failure, not a client disconnect.
+            let downstream_abort = Arc::new(AtomicBool::new(false));
+            let meter_settled = Arc::new(AtomicBool::new(false));
             let report = StreamReport {
                 control: control.clone(),
                 request_id: request_id.clone(),
@@ -331,6 +656,8 @@ pub async fn run(
                 attempt_index,
                 upstream_status,
                 started,
+                downstream_abort: downstream_abort.clone(),
+                settled: meter_settled.clone(),
             };
             // 0 (or unset → default) disables the heartbeat.
             let keepalive = match sse_keepalive_ms.unwrap_or(10_000) {
@@ -386,15 +713,73 @@ pub async fn run(
                         HeaderName::from_static("cache-control"),
                         HeaderValue::from_static("no-cache"),
                     );
-                    let body = Body::from_stream(
-                        finalized
-                            .body
-                            .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string()))),
-                    );
+                    // A response-stream error must not become a body Err: hyper
+                    // aborts the connection (TCP RST toward the proxy), which
+                    // clients experience as a silently killed stream and a
+                    // poisoned keep-alive pool, invisible to application logs.
+                    // Log the error (this is its only surface) and end the body
+                    // instead — a clean HTTP body termination (h1 terminal
+                    // chunk, h2 END_STREAM), leaving the connection reusable.
+                    let stream_request_id = request_id.clone();
+                    let stream_model = model.unwrap_or("").to_string();
+                    let stream_route = forward.selected_route.clone();
+                    let body = Body::from_stream(finalized.body.scan((), move |_, chunk| {
+                        std::future::ready(match chunk {
+                            Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
+                            Err(err) => {
+                                // Mark before the chain drops so the meter's
+                                // drop settles this as an internal failure
+                                // rather than misreading it as a client
+                                // disconnect.
+                                downstream_abort.store(true, Ordering::Relaxed);
+                                tracing::warn!(
+                                    target: "stream_abort",
+                                    request_id = %stream_request_id,
+                                    error = %err,
+                                    "response stream error; ending body gracefully instead of aborting the connection"
+                                );
+                                // A finalizer error after a clean end-of-stream
+                                // (receipt store / E2EE finish): the meter has
+                                // already settled Completed and will not emit,
+                                // so record the client-visible failure here.
+                                if meter_settled.load(Ordering::Relaxed) {
+                                    log_generated_outcome(
+                                        &stream_request_id,
+                                        &stream_model,
+                                        "finalize_error",
+                                        502,
+                                        upstream_status,
+                                        &stream_route,
+                                        attempt_index,
+                                        started,
+                                        &detail_snippet(err.to_string().as_bytes()),
+                                    );
+                                }
+                                None
+                            }
+                        })
+                    }));
                     (status, headers, body).into_response()
                 }
                 Err(err) => {
-                    service_error_response(surface, endpoint_path, service, &request_id, err, None)
+                    // Synchronous finalizer failure: the stream never started,
+                    // so the meter never settles — this is the request's only
+                    // outcome line.
+                    let status = forward_error_status(&err);
+                    if should_log_failure(status) {
+                        log_generated_outcome(
+                            &request_id,
+                            model.unwrap_or(""),
+                            "finalize_error",
+                            status,
+                            upstream_status,
+                            &forward.selected_route,
+                            attempt_index,
+                            started,
+                            &detail_snippet(err.to_string().as_bytes()),
+                        );
+                    }
+                    service_error_response(surface, endpoint_path, service, outcome_ctx, err, None)
                 }
             }
         }
@@ -410,24 +795,100 @@ pub async fn run(
                 Some(&request_id),
             );
             let attempt_index = forward.failed_attempts.len() as u32;
+            if should_log_failure(status) {
+                log_generated_outcome(
+                    &request_id,
+                    model.unwrap_or(""),
+                    "upstream_error_stream",
+                    status,
+                    forward.error.upstream_status,
+                    &forward.selected_route,
+                    attempt_index,
+                    started,
+                    &detail_snippet(&forward.error.upstream_body),
+                );
+            }
             meter.failed_attempts(&forward.failed_attempts, true);
             meter.upstream_error(
                 reported_status(status, forward.error.upstream_status),
                 attempt_index,
                 &forward.selected_route,
             );
-            finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
+            finalize_generated(
+                surface,
+                service,
+                endpoint_path,
+                status,
+                body,
+                &[],
+                e2ee,
+                outcome_ctx,
+            )
         }
-        // All candidates failed. Record an upstream-attributed failure so the
-        // request is visible to billing/health (per-attempt rows are not
-        // recoverable from the typed error). Client-attributable errors (E2EE/4xx)
-        // are not recorded. The E2EE context is still available to encrypt the body.
+        // Every candidate was attempted and failed without an HTTP response to
+        // relay (a chain that ends in an upstream HTTP status — including an
+        // all-429 chain — exits via the UpstreamError arm above, which relays
+        // that status). Report each attempt so deployment health and triage
+        // see the full chain, then a summary row placed after them carrying
+        // the aggregated error message.
+        Ok(MiddlewareForwardResult::AllFailed(forward)) => {
+            let status = forward_error_status(&forward.error);
+            meter.failed_attempts(&forward.failed_attempts, stream);
+            if should_log_failure(status) {
+                log_generated_outcome(
+                    &request_id,
+                    model.unwrap_or(""),
+                    "all_candidates_failed",
+                    status,
+                    0,
+                    "",
+                    forward.failed_attempts.len() as u32,
+                    started,
+                    &detail_snippet(forward.error.to_string().as_bytes()),
+                );
+            }
+            if status >= 500 {
+                meter.gateway_failure_at(
+                    forward.failed_attempts.len() as u32,
+                    status,
+                    ErrorSource::Upstream,
+                    &forward.error.to_string(),
+                    stream,
+                );
+            }
+            service_error_response(
+                surface,
+                endpoint_path,
+                service,
+                outcome_ctx,
+                forward.error,
+                e2ee,
+            )
+        }
+        // Failures where no attempt chain is available (pre-forward errors,
+        // plus the forwarder's rare mid-walk internal-error abort): record an
+        // upstream-attributed failure so the request is visible to
+        // billing/health. Client-attributable errors (E2EE/4xx) are not
+        // recorded. The E2EE context is still available to encrypt the body.
         Err(err) => {
             let status = forward_error_status(&err);
+            if should_log_failure(status) {
+                log_generated_outcome(
+                    &request_id,
+                    model.unwrap_or(""),
+                    "forward_failed",
+                    status,
+                    0,
+                    "",
+                    0,
+                    started,
+                    &detail_snippet(err.to_string().as_bytes()),
+                );
+            }
             if status >= 500 {
                 meter.gateway_failure(status, ErrorSource::Upstream, &err.to_string(), stream);
             }
-            service_error_response(surface, endpoint_path, service, &request_id, err, e2ee)
+            service_error_response(surface, endpoint_path, service, outcome_ctx, err, e2ee)
         }
     }
 }
@@ -512,9 +973,25 @@ impl Meter<'_> {
     }
 
     fn gateway_failure(&self, status: u16, source: ErrorSource, message: &str, is_streaming: bool) {
+        self.gateway_failure_at(0, status, source, message, is_streaming);
+    }
+
+    // Like `gateway_failure`, but placed at an explicit attempt index. Control
+    // dedupes reports by (request_id, attempt, status), so a summary row that
+    // follows per-attempt rows must sit after them or it collides with (and
+    // silently drops) the first attempt's row.
+    fn gateway_failure_at(
+        &self,
+        attempt_index: u32,
+        status: u16,
+        source: ErrorSource,
+        message: &str,
+        is_streaming: bool,
+    ) {
         self.spawn(PostReport {
             status,
             is_streaming: Some(is_streaming),
+            attempt_index: Some(attempt_index),
             error_source: Some(source),
             error_message: Some(truncate(message, 500)),
             ..self.base()
@@ -562,10 +1039,11 @@ fn service_error_response(
     surface: Surface,
     endpoint_path: &str,
     service: &AciService,
-    request_id: &str,
+    outcome: OutcomeCtx<'_>,
     err: ServiceError,
     e2ee: Option<E2eeRequestContext>,
 ) -> Response {
+    let request_id = outcome.request_id;
     let status = forward_error_status(&err);
     let e2ee = match &err {
         ServiceError::E2ee(_) => None,
@@ -577,12 +1055,22 @@ fn service_error_response(
         &err.to_string(),
         Some(request_id),
     );
-    finalize_generated(surface, service, endpoint_path, status, body, &[], e2ee)
+    finalize_generated(
+        surface,
+        service,
+        endpoint_path,
+        status,
+        body,
+        &[],
+        e2ee,
+        outcome,
+    )
 }
 
 // Build a generated (no-receipt) response, E2EE-encrypting the body when a
 // request context is present. If encryption fails it is fail-closed: a generic
 // error is returned rather than the cleartext body.
+#[allow(clippy::too_many_arguments)]
 fn finalize_generated(
     surface: Surface,
     service: &AciService,
@@ -591,6 +1079,7 @@ fn finalize_generated(
     body: Vec<u8>,
     extra_headers: &[(&'static str, String)],
     e2ee: Option<E2eeRequestContext>,
+    outcome: OutcomeCtx<'_>,
 ) -> Response {
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = HeaderMap::new();
@@ -614,6 +1103,19 @@ fn finalize_generated(
         // Fail-closed: never return the cleartext body when E2EE was requested.
         Err(err) => {
             tracing::error!(error = %err, "E2EE generated-response finalization failed");
+            // Any earlier outcome line recorded the pre-finalization status;
+            // the client actually receives this 500.
+            log_generated_outcome(
+                outcome.request_id,
+                outcome.model,
+                "finalize_error",
+                500,
+                0,
+                "",
+                0,
+                outcome.started,
+                &detail_snippet(err.to_string().as_bytes()),
+            );
             errors::error_response(
                 surface,
                 500,
@@ -710,5 +1212,45 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
         HeaderValue::from_str(value),
     ) {
         headers.insert(name, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observed_failure_policy() {
+        // Every client-visible failure class is logged...
+        for status in [400u16, 401, 402, 404, 499, 500, 502, 503, 504] {
+            assert!(should_log_failure(status), "{status} must be observable");
+        }
+        // ...except final 429s, which are recorded in the usage pipeline.
+        assert!(!should_log_failure(429));
+    }
+
+    #[test]
+    fn client_controlled_identifier_is_bounded_and_single_line() {
+        let hostile = format!("bad\u{1b}[2Jmodel\n{}", "m".repeat(4096));
+        let cleaned = sanitize_identifier(&hostile);
+        assert!(cleaned.chars().count() <= 128);
+        assert!(!cleaned.contains('\n') && !cleaned.contains('\u{1b}'));
+        assert_eq!(sanitize_identifier("z-ai/glm-5.2"), "z-ai/glm-5.2");
+    }
+
+    #[test]
+    fn finish_reason_anomaly_detection() {
+        assert!(!finish_reasons_anomalous(["stop"]));
+        assert!(!finish_reasons_anomalous(["length", "tool_calls"]));
+        assert!(!finish_reasons_anomalous(["end_turn", "max_tokens"]));
+        // A legitimate context-window truncation is a successful response.
+        assert!(!finish_reasons_anomalous(["model_context_window_exceeded"]));
+        // Empty is not anomalous: truncation without a terminal is already a
+        // Failed outcome, and some surfaces terminate without finish reasons.
+        assert!(!finish_reasons_anomalous([]));
+        // Nonstandard values — the "error smuggled through a success"
+        // class — must trip the anomaly.
+        assert!(finish_reasons_anomalous(["upstream_error"]));
+        assert!(finish_reasons_anomalous(["stop", "weird_provider_reason"]));
     }
 }

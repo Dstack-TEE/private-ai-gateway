@@ -39,6 +39,7 @@ pub(super) async fn forward_to_backend(
     input: BackendForwardInput,
 ) -> Response {
     if input.stream {
+        let request_id = input.context.request_id.clone();
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
                 context: input.context,
@@ -69,11 +70,23 @@ pub(super) async fn forward_to_backend(
                 );
                 let status =
                     StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-                let body = Body::from_stream(
-                    forward
-                        .body
-                        .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string()))),
-                );
+                // Same contract as the middleware stream path: a body Err makes
+                // hyper abort the connection with a TCP RST (client-visible as a
+                // silently killed stream); log it and end the body gracefully.
+                let body = Body::from_stream(forward.body.scan((), move |_, chunk| {
+                    std::future::ready(match chunk {
+                        Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "stream_abort",
+                                request_id = %request_id,
+                                error = %err,
+                                "response stream error; ending body gracefully instead of aborting the connection"
+                            );
+                            None
+                        }
+                    })
+                }));
                 (status, resp_headers, body).into_response()
             }
             Ok(StreamingForwardResult::UpstreamError(forward)) => {
