@@ -2,7 +2,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -76,9 +76,21 @@ pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-pub(super) async fn models(State(state): State<AppState>) -> Response {
+// Catalog filters (e.g. `?zdr=true`) are the control plane's to interpret, so
+// the query string is relayed verbatim rather than parsed here. Without this the
+// gateway would silently drop it and serve an unfiltered catalog.
+fn catalog_path(base: &str, query: Option<String>) -> String {
+    match query.as_deref().filter(|q| !q.is_empty()) {
+        Some(q) => format!("{base}?{q}"),
+        None => base.to_string(),
+    }
+}
+
+pub(super) async fn models(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
     if let Some(middleware) = state.middleware.clone() {
-        return middleware.handle_catalog("/v1/models").await;
+        return middleware
+            .handle_catalog(&catalog_path("/v1/models", query))
+            .await;
     }
     match state.service.upstream().models().await {
         Ok(upstream) => upstream_direct_response(upstream, "application/json"),
@@ -93,6 +105,7 @@ pub(super) async fn models(State(state): State<AppState>) -> Response {
 pub(super) async fn models_subpath(
     State(state): State<AppState>,
     Path(rest): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> Response {
     let Some(middleware) = state.middleware.clone() else {
         return error_response(
@@ -102,7 +115,7 @@ pub(super) async fn models_subpath(
         );
     };
     middleware
-        .handle_catalog(&format!("/v1/models/{rest}"))
+        .handle_catalog(&catalog_path(&format!("/v1/models/{rest}"), query))
         .await
 }
 
