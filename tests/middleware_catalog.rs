@@ -92,7 +92,9 @@ async fn spawn_stub_control() -> String {
         )
         .route(
             "/embeddings/models",
-            get(|| async { Json(json!({ "data": ["e1"], "source": "control-embeddings" })) }),
+            get(|RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["e1"], "source": "control-embeddings", "query": q }))
+            }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -173,6 +175,12 @@ async fn relays_catalog_query_string_to_control() {
     // Sub-catalogs relay it too, alongside the path.
     let (_, body) = get_json(app.clone(), "/v1/models/my-namespace?zdr=true").await;
     assert_eq!(body["source"], "control-sub");
+    assert_eq!(body["query"], "zdr=true");
+
+    // Every catalog route relays it — embeddings included. Missing one would
+    // serve an unfiltered catalog to a client that asked to filter.
+    let (_, body) = get_json(app.clone(), "/v1/embeddings/models?zdr=true").await;
+    assert_eq!(body["source"], "control-embeddings");
     assert_eq!(body["query"], "zdr=true");
 
     // No query string means no trailing `?` is invented.

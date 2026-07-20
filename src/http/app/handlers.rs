@@ -121,7 +121,10 @@ pub(super) async fn models_subpath(
 
 // Embedding model catalog. Only meaningful in the control-plane middleware
 // topology.
-pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response {
+pub(super) async fn embeddings_models(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Response {
     let Some(middleware) = state.middleware.clone() else {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -129,7 +132,9 @@ pub(super) async fn embeddings_models(State(state): State<AppState>) -> Response
             "embedding model catalog is not available in direct-upstream mode",
         );
     };
-    middleware.handle_catalog("/v1/embeddings/models").await
+    middleware
+        .handle_catalog(&catalog_path("/v1/embeddings/models", query))
+        .await
 }
 
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
