@@ -10,6 +10,7 @@ mod common;
 
 use axum::{
     body::{to_bytes, Body},
+    extract::RawQuery,
     http::{Request, StatusCode},
     routing::get,
     Json, Router,
@@ -72,17 +73,22 @@ fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
 }
 
 // Spawn a stub control plane that labels each catalog so the test can prove the
-// relay reached the right path. The control plane serves catalogs without the
-// `/v1` prefix.
+// relay reached the right path, and echoes the query string it received so the
+// test can prove catalog filters (e.g. `?zdr=true`) survive the relay. The
+// control plane serves catalogs without the `/v1` prefix.
 async fn spawn_stub_control() -> String {
     let app = Router::new()
         .route(
             "/models",
-            get(|| async { Json(json!({ "data": ["m1"], "source": "control-models" })) }),
+            get(|RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["m1"], "source": "control-models", "query": q }))
+            }),
         )
         .route(
             "/models/*rest",
-            get(|| async { Json(json!({ "data": ["ns"], "source": "control-sub" })) }),
+            get(|RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["ns"], "source": "control-sub", "query": q }))
+            }),
         )
         .route(
             "/embeddings/models",
@@ -134,6 +140,44 @@ async fn relays_catalogs_from_control() {
     let (status, body) = get_json(app, "/v1/embeddings/models").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["source"], "control-embeddings");
+}
+
+// Catalog filters live in the control plane (`?zdr=true` restricts the catalog
+// to zero-data-retention providers). The gateway must relay the query string
+// verbatim — dropping it would silently serve an unfiltered catalog to a client
+// that asked to filter.
+#[tokio::test]
+async fn relays_catalog_query_string_to_control() {
+    let control_url = spawn_stub_control().await;
+    let middleware = Arc::new(
+        Middleware::new(&MiddlewareConfig {
+            control_url,
+            control_token: None,
+            control_timeout_ms: Some(2_000),
+            control_post_timeout_ms: Some(2_000),
+            sse_keepalive_ms: None,
+        })
+        .unwrap(),
+    );
+    let (service, manager) = build_service();
+    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+
+    let (status, body) = get_json(app.clone(), "/v1/models?zdr=true").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["query"], "zdr=true");
+
+    // Multiple params survive intact; the gateway does not parse or reorder them.
+    let (_, body) = get_json(app.clone(), "/v1/models?zdr=true&foo=bar").await;
+    assert_eq!(body["query"], "zdr=true&foo=bar");
+
+    // Sub-catalogs relay it too, alongside the path.
+    let (_, body) = get_json(app.clone(), "/v1/models/my-namespace?zdr=true").await;
+    assert_eq!(body["source"], "control-sub");
+    assert_eq!(body["query"], "zdr=true");
+
+    // No query string means no trailing `?` is invented.
+    let (_, body) = get_json(app, "/v1/models").await;
+    assert_eq!(body["query"], Value::Null);
 }
 
 #[tokio::test]
