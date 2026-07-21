@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use crate::aci::receipt::{
@@ -67,6 +69,19 @@ pub(super) fn cite_served_session(
     chosen.map(|s| (s.session_id.clone(), s.claims.clone()))
 }
 
+/// Whether a route with this TEE classification may serve a request restricted
+/// to ACI-verified upstreams. Half of that policy; the other half is
+/// [`AciService::upstream_required_for_prepared`], which keeps verification
+/// required so the fail-closed gate still runs. Every forwarding path applies
+/// both.
+///
+/// Only `Some(true)` qualifies: an unclassified route is not *known* to be
+/// attested, so no verifier (nor a caller-supplied event) can stand in for the
+/// classification.
+pub(super) fn attested_route_eligible(is_tee: Option<bool>) -> bool {
+    is_tee == Some(true)
+}
+
 impl AciService {
     pub async fn forward_chat_completion(
         &self,
@@ -81,6 +96,8 @@ impl AciService {
             received_body,
             forwarded_body,
             upstream_required,
+            aci_required: false,
+            aci_session_ids: Vec::new(),
             upstream_verification_event,
             requester: None,
             e2ee: None,
@@ -95,6 +112,7 @@ impl AciService {
         &self,
         req: ChatCompletionRequest<'_>,
     ) -> Result<ForwardResult, ServiceError> {
+        let aci_required = req.requires_aci_verification();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         self.metrics.record_request(
@@ -112,10 +130,17 @@ impl AciService {
             target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
+        if aci_required && !attested_route_eligible(prepared.is_tee) {
+            return Err(ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedRoute(
+                    req.context.user_model.clone().unwrap_or_default(),
+                ),
+            ));
+        }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
         let upstream_required =
-            self.upstream_required_for_prepared(&prepared, req.upstream_required);
+            self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -123,6 +148,11 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
+        self.apply_aci_session_constraint(
+            &mut recorded_event,
+            &req.aci_session_ids,
+            &prepared.model_id,
+        )?;
 
         let upstream_response = match self
             .forward_with_binding_reverify(
@@ -130,6 +160,7 @@ impl AciService {
                 &mut recorded_event,
                 upstream_required,
                 caller_supplied_upstream_event,
+                &req.aci_session_ids,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -265,6 +296,7 @@ impl AciService {
         &self,
         req: ChatCompletionRequest<'_>,
     ) -> Result<StreamingForwardResult, ServiceError> {
+        let aci_required = req.requires_aci_verification();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         self.metrics.record_request(
@@ -283,10 +315,17 @@ impl AciService {
             target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
+        if aci_required && !attested_route_eligible(prepared.is_tee) {
+            return Err(ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedRoute(
+                    req.context.user_model.clone().unwrap_or_default(),
+                ),
+            ));
+        }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
         let upstream_required =
-            self.upstream_required_for_prepared(&prepared, req.upstream_required);
+            self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -294,6 +333,11 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
+        self.apply_aci_session_constraint(
+            &mut recorded_event,
+            &req.aci_session_ids,
+            &prepared.model_id,
+        )?;
 
         let upstream_response = match self
             .forward_with_binding_reverify(
@@ -301,6 +345,7 @@ impl AciService {
                 &mut recorded_event,
                 upstream_required,
                 caller_supplied_upstream_event,
+                &req.aci_session_ids,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -491,12 +536,14 @@ impl AciService {
     /// is invalidated when the gateway owns the event (`!caller_supplied_event`),
     /// or unconditionally when `always_invalidate_on_mismatch` is set — the
     /// failover path's conservative "flush a possibly-stale binding" default.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn forward_with_binding_reverify<R, Fwd, Fut>(
         &self,
         prepared: &PreparedUpstreamRequest,
         recorded_event: &mut UpstreamVerifiedEvent,
         upstream_required: Option<bool>,
         caller_supplied_event: bool,
+        aci_session_ids: &[String],
         always_invalidate_on_mismatch: bool,
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
@@ -520,7 +567,16 @@ impl AciService {
                         .refresh_upstream_event(prepared, upstream_required)
                         .await
                     {
-                        Ok(event) => *recorded_event = event,
+                        Ok(mut event) => {
+                            if let Err(err) = self.apply_aci_session_constraint(
+                                &mut event,
+                                aci_session_ids,
+                                &prepared.model_id,
+                            ) {
+                                return ReverifyOutcome::RefreshFailed(err);
+                            }
+                            *recorded_event = event;
+                        }
                         Err(err) => return ReverifyOutcome::RefreshFailed(err),
                     }
                 }
@@ -541,12 +597,21 @@ impl AciService {
         }
     }
 
+    /// Resolve the effective verification mode for one prepared route.
+    ///
+    /// Non-TEE routes are normally exempt from the fail-closed gate — they are
+    /// forwarded with TLS endpoint binding only. `aci_required` removes that
+    /// exemption, including the caller's `X-Upstream-Verification: none`
+    /// opt-out. See [`attested_route_eligible`] for the other half.
     pub(super) fn upstream_required_for_prepared(
         &self,
         prepared: &PreparedUpstreamRequest,
         requested: Option<bool>,
+        aci_required: bool,
     ) -> Option<bool> {
-        if prepared.is_tee == Some(false) {
+        if aci_required {
+            Some(true)
+        } else if prepared.is_tee == Some(false) {
             Some(false)
         } else {
             requested
@@ -654,6 +719,44 @@ impl AciService {
             });
         }
         Ok(sealed)
+    }
+
+    /// Apply a client session allowlist to the current verified event before
+    /// prompt forwarding. Session ids are re-derived from this event instead
+    /// of trusted from historical storage, so a stale or rotated binding cannot
+    /// satisfy the constraint. Filtering the bindings also limits a
+    /// multi-instance backend (Chutes) to allowed instances.
+    pub(super) fn apply_aci_session_constraint(
+        &self,
+        event: &mut UpstreamVerifiedEvent,
+        allowed_ids: &[String],
+        model_id: &str,
+    ) -> Result<(), ServiceError> {
+        if allowed_ids.is_empty() {
+            return Ok(());
+        }
+
+        let sealed = self.record_attested_upstream_session(event)?;
+        let allowed_ids: HashSet<&str> = allowed_ids.iter().map(String::as_str).collect();
+        let allowed_bindings: Vec<ChannelBinding> = event
+            .channel_bindings
+            .iter()
+            .cloned()
+            .zip(sealed)
+            .filter_map(|(binding, session)| {
+                allowed_ids
+                    .contains(session.session_id.as_str())
+                    .then_some(binding)
+            })
+            .collect();
+
+        if allowed_bindings.is_empty() {
+            return Err(ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
+            ));
+        }
+        event.channel_bindings = allowed_bindings;
+        Ok(())
     }
 
     /// Seal (or renew) one session for a verified channel binding and return its

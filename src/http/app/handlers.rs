@@ -1,5 +1,7 @@
 //! Axum route handlers and their query types.
 
+use std::collections::HashSet;
+
 use axum::{
     body::Bytes,
     extract::{Path, Query, RawQuery, State},
@@ -541,6 +543,82 @@ pub(super) async fn responses(
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
 }
 
+#[derive(Debug, Default)]
+struct AciConstraint {
+    required: bool,
+    session_ids: Vec<String>,
+}
+
+/// Parse the gateway-owned ACI routing constraints. The rest of `provider` is
+/// still forwarded verbatim to the control plane for its own validation.
+/// Malformed constraints are rejected rather than silently downgraded.
+fn aci_constraint(parsed: &Value) -> Result<AciConstraint, String> {
+    let Some(provider) = parsed.get("provider") else {
+        return Ok(AciConstraint::default());
+    };
+    if provider.is_null() {
+        return Ok(AciConstraint::default());
+    }
+    let Some(block) = provider.as_object() else {
+        return Err("invalid 'provider' routing block: expected an object".to_string());
+    };
+
+    let explicitly_verified = match block.get("aci_verified") {
+        None => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return Err("invalid 'provider.aci_verified': expected a boolean".to_string()),
+    };
+
+    let mut session_ids = Vec::new();
+    let mut seen_session_ids = HashSet::new();
+    if let Some(value) = block.get("aci_session_ids") {
+        let Some(values) = value.as_array() else {
+            return Err("invalid 'provider.aci_session_ids': expected an array".to_string());
+        };
+        if values.is_empty() {
+            return Err("invalid 'provider.aci_session_ids': must not be empty".to_string());
+        }
+        for value in values {
+            let Some(id) = value.as_str().filter(|id| !id.trim().is_empty()) else {
+                return Err(
+                    "invalid 'provider.aci_session_ids': expected non-empty strings".to_string(),
+                );
+            };
+            if seen_session_ids.insert(id) {
+                session_ids.push(id.to_string());
+            }
+        }
+    }
+
+    if explicitly_verified == Some(false) && !session_ids.is_empty() {
+        return Err(
+            "invalid provider constraint: 'aci_session_ids' requires 'aci_verified'".to_string(),
+        );
+    }
+
+    Ok(AciConstraint {
+        required: explicitly_verified.unwrap_or(false) || !session_ids.is_empty(),
+        session_ids,
+    })
+}
+
+/// Remove gateway-only ACI controls before direct upstream forwarding. The
+/// middleware path already shapes a fresh provider request, so it keeps the
+/// original block for the control-plane consult.
+fn strip_aci_constraint(mut parsed: Value) -> (Value, bool) {
+    let Some(provider) = parsed.get_mut("provider").and_then(Value::as_object_mut) else {
+        return (parsed, false);
+    };
+    let changed =
+        provider.remove("aci_verified").is_some() | provider.remove("aci_session_ids").is_some();
+    if changed && provider.is_empty() {
+        let _ = parsed
+            .as_object_mut()
+            .and_then(|root| root.remove("provider"));
+    }
+    (parsed, changed)
+}
+
 pub(super) async fn openai_completion_endpoint(
     state: AppState,
     headers: HeaderMap,
@@ -591,20 +669,7 @@ pub(super) async fn openai_completion_endpoint(
             );
         }
     };
-    let (parsed, forwarded_body) = match strip_empty_tool_calls(parsed) {
-        (normalized, true) => match serde_json::to_vec(&normalized) {
-            Ok(bytes) => (normalized, Some(bytes)),
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialize normalized request");
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "failed to serialize normalized request",
-                );
-            }
-        },
-        (normalized, false) => (normalized, None),
-    };
+    let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
     let upstream_required = match headers
         .get("x-upstream-verification")
@@ -618,6 +683,13 @@ pub(super) async fn openai_completion_endpoint(
                 "invalid_request_error",
                 format!("invalid X-Upstream-Verification: {other}"),
             );
+        }
+    };
+
+    let aci = match aci_constraint(&parsed) {
+        Ok(constraint) => constraint,
+        Err(message) => {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
         }
     };
 
@@ -664,12 +736,31 @@ pub(super) async fn openai_completion_endpoint(
             requester,
             e2ee,
             upstream_required,
+            aci_required: aci.required,
+            aci_session_ids: aci.session_ids,
             request_id: context.request_id,
             user_model: context.user_model,
             stream,
         };
         return middleware.handle_completion(&state.service, input).await;
     }
+
+    let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
+    let forwarded_body = if normalized || aci_stripped {
+        match serde_json::to_vec(&direct_params) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize normalized request");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "failed to serialize normalized request",
+                );
+            }
+        }
+    } else {
+        None
+    };
 
     forward_to_backend(
         state.service,
@@ -679,6 +770,8 @@ pub(super) async fn openai_completion_endpoint(
             received_body: service_body,
             forwarded_body,
             upstream_required,
+            aci_required: aci.required,
+            aci_session_ids: aci.session_ids,
             requester,
             e2ee,
             stream,

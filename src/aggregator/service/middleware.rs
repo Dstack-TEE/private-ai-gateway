@@ -3,7 +3,7 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
-use super::forward::{cite_served_session, ReverifyOutcome};
+use super::forward::{attested_route_eligible, cite_served_session, ReverifyOutcome};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -17,10 +17,10 @@ use super::{
     MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
     MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
     MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
-    StreamingUpstreamError,
+    StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
-use crate::aci::upstream::{UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
 use crate::sse_framing::SseFramingObserver;
@@ -51,11 +51,59 @@ fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> 
 
 /// Track the highest-priority failover error so that, when every candidate
 /// fails, the returned error reflects the most informative failure.
-/// Priority order: verification (3), then transport (2), then routing (1).
+/// Priority order: verification (3), then transport (2), then routing (1),
+/// then a route the ACI constraint made ineligible (0) — it never got the
+/// chance to fail, so any real failure must outrank it in either order.
 fn upgrade_err(slot: &mut Option<(u8, ServiceError)>, priority: u8, err: ServiceError) {
     if slot.as_ref().map(|(p, _)| priority >= *p).unwrap_or(true) {
         *slot = Some((priority, err));
     }
+}
+
+/// A candidate's real upstream response, held back while the failover walk
+/// keeps looking for a 2xx. A later candidate may never reach an upstream at
+/// all (unroutable, unverified, transport error); without retention its
+/// failure would overwrite this answer and the client's status would depend on
+/// candidate order.
+enum RetainedResponse {
+    /// Relayed as an upstream error — a stream that never completed has no
+    /// receipt to bind.
+    Streaming {
+        error: StreamingUpstreamError,
+        route_id: String,
+        attempt_slot: usize,
+    },
+    /// Committed like any other buffered response, receipt included.
+    Buffered {
+        inputs: Box<BufferedCommit>,
+        attempt_slot: usize,
+    },
+}
+
+impl RetainedResponse {
+    /// Where this candidate's own entry sits in `failed_attempts`. Removing it
+    /// on commit keeps the committed attempt last: attempts are reported by
+    /// position, and a request's user-facing status is read as the one at the
+    /// highest attempt index.
+    fn attempt_slot(&self) -> usize {
+        match self {
+            Self::Streaming { attempt_slot, .. } | Self::Buffered { attempt_slot, .. } => {
+                *attempt_slot
+            }
+        }
+    }
+}
+
+/// Everything [`AciService::commit_buffered_response`] needs to turn one
+/// buffered upstream response into a committed result.
+pub(super) struct BufferedCommit {
+    pub response: UpstreamResponse,
+    /// Resolved where the response arrived, alongside its one metrics count.
+    pub response_model: Option<String>,
+    pub recorded_event: UpstreamVerifiedEvent,
+    pub route_id: String,
+    pub middleware_forwarded_body: Vec<u8>,
+    pub forwarded_body: Vec<u8>,
 }
 
 /// The request/response context observed for one forwarded candidate,
@@ -117,6 +165,73 @@ impl AciService {
         Ok(builder)
     }
 
+    /// Turn one buffered upstream response into a committed result: seal the
+    /// attested session, build the receipt, and report the attempts that
+    /// preceded it. Shared by the in-loop commit and the retained-response
+    /// commit after the walk.
+    fn commit_buffered_response(
+        &self,
+        commit: BufferedCommit,
+        failed_attempts: Vec<(String, u16)>,
+        endpoint_path: &str,
+        received_body: &[u8],
+        user_model: Option<String>,
+    ) -> Result<MiddlewareForwardResult, ServiceError> {
+        let BufferedCommit {
+            response,
+            response_model,
+            recorded_event,
+            route_id,
+            middleware_forwarded_body,
+            forwarded_body,
+        } = commit;
+        let status = response.status_code;
+
+        let receipt_id = generate_receipt_id();
+        let served_at = self.clock.now_secs();
+        let chat_id = extract_chat_id(&response.body);
+        let sealed = self.record_attested_upstream_session(&recorded_event)?;
+        let recorded = cite_served_session(&sealed, response.served_instance_id.as_deref());
+        let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+        let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+            receipt_id: &receipt_id,
+            chat_id,
+            model: user_model,
+            served_at,
+            endpoint_path,
+            received_body,
+            middleware_forwarded_body: &middleware_forwarded_body,
+            selected_route_id: &route_id,
+            forwarded_body: &forwarded_body,
+            recorded_event,
+            recorded,
+        })?;
+        // The session is keyed on the requested (routed) model; record the
+        // exact upstream-served model in the receipt's upstream.verified.
+        builder.set_upstream_verified_model_id(response_model.clone());
+        let provider_response_hash = builder.add_response_received(&response.body)?;
+
+        Ok(MiddlewareForwardResult::Forwarded(Box::new(
+            MiddlewareForwarded {
+                receipt_id: receipt_id.clone(),
+                receipt: MiddlewareReceiptDraft {
+                    receipt_id: receipt_id.clone(),
+                    builder,
+                    provider_response_hash,
+                    endpoint_path: endpoint_path.to_string(),
+                    request_mode: RequestMode::Buffered,
+                    response_model,
+                },
+                upstream_status: status,
+                upstream_body: response.body,
+                upstream_headers: response.headers,
+                selected_route: route_id,
+                failed_attempts,
+                session_id,
+            },
+        )))
+    }
+
     pub async fn forward_chat_completion_for_middleware(
         &self,
         req: ChatCompletionRequest<'_>,
@@ -124,6 +239,7 @@ impl AciService {
         stream: bool,
         receipt_journal: MiddlewareReceiptJournal,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
+        let aci_required = req.requires_aci_verification();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         // The user-requested model, recorded as the receipt's top-level `model`.
@@ -141,6 +257,7 @@ impl AciService {
                 "no candidate routes supplied".to_string(),
             )));
         }
+
         // A caller-supplied verifier event only applies to a single
         // explicit candidate (non-failover). With an ordered list the
         // backend always computes per-candidate events.
@@ -178,6 +295,10 @@ impl AciService {
         // failures (prepare/verification/transport) record 502.
         let mut failed_attempts: Vec<(String, u16)> = Vec::new();
 
+        // The most recent candidate that actually answered, held back in case
+        // nothing better follows. See [`RetainedResponse`].
+        let mut retained: Option<RetainedResponse> = None;
+
         for (index, candidate) in candidates.iter().enumerate() {
             let route_id = candidate.route_id.clone();
             let is_last = index == last_index;
@@ -205,15 +326,28 @@ impl AciService {
                 }
             };
 
-            // Per-route fail-closed mode: explicitly non-TEE routes never
-            // fail closed; TEE and unclassified routes honour the
-            // request-level `upstream_required` flag.
-            let non_tee = prepared.is_tee == Some(false);
-            let candidate_required = if non_tee {
-                Some(false)
-            } else {
-                req.upstream_required
-            };
+            // A route not known to be attested cannot serve an
+            // `aci_verified` request. Kept out of `failed_attempts`: this is a
+            // policy decision, and those are reported per route, which would
+            // charge a provider for a request it never saw.
+            if aci_required && !attested_route_eligible(prepared.is_tee) {
+                upgrade_err(
+                    &mut aggregated_err,
+                    0,
+                    ServiceError::UpstreamVerification(
+                        UpstreamVerificationError::NoEligibleAttestedRoute(
+                            user_model.clone().unwrap_or_default(),
+                        ),
+                    ),
+                );
+                continue;
+            }
+
+            // Per-route fail-closed mode. Under `aci_required` it cannot be
+            // waived: a request pinned to an attested upstream must not also
+            // opt out of the attestation.
+            let candidate_required =
+                self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
 
             let mut recorded_event = match self
                 .recorded_upstream_event(&prepared, candidate_required, single_caller_event.clone())
@@ -232,6 +366,23 @@ impl AciService {
                 Err(err) => return Err(err),
             };
 
+            if let Err(err) = self.apply_aci_session_constraint(
+                &mut recorded_event,
+                &req.aci_session_ids,
+                &prepared.model_id,
+            ) {
+                if matches!(
+                    err,
+                    ServiceError::UpstreamVerification(
+                        UpstreamVerificationError::NoEligibleAttestedSession(_)
+                    )
+                ) {
+                    upgrade_err(&mut aggregated_err, 0, err);
+                    continue;
+                }
+                return Err(err);
+            }
+
             let forwarded_body = prepared.request.body.clone();
 
             if stream {
@@ -241,6 +392,7 @@ impl AciService {
                         &mut recorded_event,
                         candidate_required,
                         caller_supplied_upstream_event,
+                        &req.aci_session_ids,
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
@@ -292,6 +444,15 @@ impl AciService {
                         .await
                         .unwrap_or_default();
                     if !is_last && should_fail_over(status, received_body, &upstream_body) {
+                        retained = Some(RetainedResponse::Streaming {
+                            error: StreamingUpstreamError {
+                                upstream_status: status,
+                                upstream_headers,
+                                upstream_body,
+                            },
+                            route_id: route_id.clone(),
+                            attempt_slot: failed_attempts.len(),
+                        });
                         failed_attempts.push((route_id.clone(), status));
                         continue;
                     }
@@ -363,6 +524,7 @@ impl AciService {
                     &mut recorded_event,
                     candidate_required,
                     caller_supplied_upstream_event,
+                    &req.aci_session_ids,
                     // Failover path: flush a possibly-stale binding on any
                     // terminal mismatch so the next candidate/request re-verifies.
                     true,
@@ -397,19 +559,10 @@ impl AciService {
                 continue;
             };
 
+            // Counted once, here, where the response arrives — a response that is
+            // held back and committed after the walk must not be counted again
+            // on commit.
             let status = upstream_response.status_code;
-            if !is_last && should_fail_over(status, received_body, &upstream_response.body) {
-                self.metrics.record_upstream_response(
-                    endpoint_path,
-                    RequestMode::Buffered,
-                    status,
-                    None,
-                );
-                failed_attempts.push((route_id.clone(), status));
-                continue;
-            }
-
-            // Commit this candidate.
             let response_model = accepted_response_model(status, &upstream_response.body);
             self.metrics.record_upstream_response(
                 endpoint_path,
@@ -417,57 +570,77 @@ impl AciService {
                 status,
                 response_model.as_deref(),
             );
+            if !is_last && should_fail_over(status, received_body, &upstream_response.body) {
+                retained = Some(RetainedResponse::Buffered {
+                    inputs: Box::new(BufferedCommit {
+                        response: upstream_response,
+                        response_model,
+                        recorded_event,
+                        route_id: route_id.clone(),
+                        middleware_forwarded_body: candidate.body.clone(),
+                        forwarded_body,
+                    }),
+                    attempt_slot: failed_attempts.len(),
+                });
+                failed_attempts.push((route_id.clone(), status));
+                continue;
+            }
 
-            let receipt_id = generate_receipt_id();
-            let served_at = self.clock.now_secs();
-            let chat_id = extract_chat_id(&upstream_response.body);
-            let sealed = self.record_attested_upstream_session(&recorded_event)?;
-            let recorded =
-                cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-            let session_id = recorded.as_ref().map(|(id, _)| id.clone());
-            let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
-                receipt_id: &receipt_id,
-                chat_id,
-                model: user_model.clone(),
-                served_at,
+            // Commit this candidate.
+            return self.commit_buffered_response(
+                BufferedCommit {
+                    response: upstream_response,
+                    response_model,
+                    recorded_event,
+                    route_id,
+                    middleware_forwarded_body: candidate.body.clone(),
+                    forwarded_body,
+                },
+                std::mem::take(&mut failed_attempts),
                 endpoint_path,
                 received_body,
-                middleware_forwarded_body: &candidate.body,
-                selected_route_id: &route_id,
-                forwarded_body: &forwarded_body,
-                recorded_event,
-                recorded,
-            })?;
-            // The session is keyed on the requested (routed) model; record the
-            // exact upstream-served model in the receipt's upstream.verified.
-            builder.set_upstream_verified_model_id(response_model.clone());
-            let provider_response_hash = builder.add_response_received(&upstream_response.body)?;
-
-            return Ok(MiddlewareForwardResult::Forwarded(Box::new(
-                MiddlewareForwarded {
-                    receipt_id: receipt_id.clone(),
-                    receipt: MiddlewareReceiptDraft {
-                        receipt_id: receipt_id.clone(),
-                        builder,
-                        provider_response_hash,
-                        endpoint_path: endpoint_path.to_string(),
-                        request_mode: RequestMode::Buffered,
-                        response_model,
-                    },
-                    upstream_status: status,
-                    upstream_body: upstream_response.body,
-                    upstream_headers: upstream_response.headers,
-                    selected_route: route_id.clone(),
-                    failed_attempts: std::mem::take(&mut failed_attempts),
-                    session_id,
-                },
-            )));
+                user_model.clone(),
+            );
         }
 
-        // No candidate succeeded. Return the highest-priority failure together
-        // with every attempt's outcome — the caller reports the attempts (they
-        // are unrecoverable from the error alone) and derives the client
-        // status from the failure mix.
+        // No candidate produced a 2xx, but one may still have answered — commit
+        // that rather than a status synthesized from a candidate that never
+        // reached an upstream. Its own entry leaves `failed_attempts` so the
+        // committed attempt is once again the last one reported.
+        if let Some(retained) = retained {
+            let mut failed_attempts = failed_attempts;
+            failed_attempts.remove(retained.attempt_slot());
+            return match retained {
+                RetainedResponse::Streaming {
+                    error, route_id, ..
+                } => {
+                    // Counted here rather than where the response arrived: this
+                    // is the point at which it becomes the stream's outcome,
+                    // matching the in-loop return below.
+                    self.metrics
+                        .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
+                    Ok(MiddlewareForwardResult::UpstreamError(Box::new(
+                        MiddlewareUpstreamError {
+                            error,
+                            selected_route: route_id,
+                            failed_attempts,
+                        },
+                    )))
+                }
+                RetainedResponse::Buffered { inputs, .. } => self.commit_buffered_response(
+                    *inputs,
+                    failed_attempts,
+                    endpoint_path,
+                    received_body,
+                    user_model,
+                ),
+            };
+        }
+
+        // No candidate answered at all. Return the highest-priority failure
+        // together with every attempt's outcome — the caller reports the
+        // attempts (they are unrecoverable from the error alone) and derives
+        // the client status from the failure mix.
         let error = aggregated_err.map(|(_, err)| err).unwrap_or_else(|| {
             ServiceError::Upstream(UpstreamError::Routing(format!(
                 "all upstream routes failed (attempted: {})",

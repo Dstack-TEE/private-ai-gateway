@@ -335,6 +335,8 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
             received_body: CHAT_REQUEST,
             forwarded_body: None,
             upstream_required: Some(true),
+            aci_required: false,
+            aci_session_ids: Vec::new(),
             upstream_verification_event: None,
             requester: None,
             e2ee: None,

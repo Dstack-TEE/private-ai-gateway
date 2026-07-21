@@ -34,8 +34,8 @@ use private_ai_gateway::aci::upstream::{
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, GatewayRequestContext,
-    InMemoryReceiptStore, ReceiptOwner, UpstreamVerificationRequest, UpstreamVerifier,
-    CHAT_COMPLETIONS_PATH,
+    InMemoryReceiptStore, ReceiptOwner, ServiceError, UpstreamVerificationError,
+    UpstreamVerificationRequest, UpstreamVerifier, CHAT_COMPLETIONS_PATH,
 };
 use private_ai_gateway::http::build_router;
 use serde_json::Value;
@@ -723,6 +723,80 @@ async fn receipt_lookup_requires_authenticated_original_requester() {
 }
 
 #[tokio::test]
+async fn aci_constraint_rejects_a_route_not_classed_as_attested() {
+    // The direct path must apply the same `provider.aci_verified` policy
+    // as the failover path, and it must not lean on "a non-TEE upstream has no
+    // verifier configured" — that is a property of one deployment's config, not
+    // of the code. This harness verifies everything (AlwaysVerified) and even
+    // accepts a caller-supplied verified event, yet an unclassified route must
+    // still be refused: only a route the config classes as TEE is eligible.
+    let h = harness();
+
+    let err = h
+        .service
+        .forward_chat_completion_request(ChatCompletionRequest {
+            context: GatewayRequestContext {
+                user_model: Some("public".to_string()),
+                ..GatewayRequestContext::default()
+            },
+            endpoint_path: CHAT_COMPLETIONS_PATH,
+            received_body: br#"{"model":"public","messages":[]}"#,
+            forwarded_body: None,
+            upstream_required: Some(true),
+            aci_required: true,
+            aci_session_ids: Vec::new(),
+            upstream_verification_event: Some(verified_event("surface-upstream", "public")),
+            requester: None,
+            e2ee: None,
+        })
+        .await
+        .expect_err("an unattested route must not serve a TEE-restricted request");
+    assert!(
+        matches!(err, ServiceError::UpstreamVerification(_)),
+        "unexpected error: {err}"
+    );
+    assert!(
+        h.upstream_calls.lock().unwrap().is_empty(),
+        "nothing may reach the upstream"
+    );
+}
+
+#[tokio::test]
+async fn aci_session_ids_imply_verification_for_non_http_callers() {
+    // The service API is public, so it must enforce this invariant itself
+    // rather than rely on the HTTP parser to set both fields consistently.
+    let h = harness();
+
+    let err = h
+        .service
+        .forward_chat_completion_request(ChatCompletionRequest {
+            context: GatewayRequestContext {
+                user_model: Some("public".to_string()),
+                ..GatewayRequestContext::default()
+            },
+            endpoint_path: CHAT_COMPLETIONS_PATH,
+            received_body: br#"{"model":"public","messages":[]}"#,
+            forwarded_body: None,
+            upstream_required: Some(false),
+            aci_required: false,
+            aci_session_ids: vec![format!("as_{}", "ab".repeat(32))],
+            upstream_verification_event: Some(verified_event("surface-upstream", "public")),
+            requester: None,
+            e2ee: None,
+        })
+        .await
+        .expect_err("session pinning must imply attested-route verification");
+    assert!(matches!(
+        err,
+        ServiceError::UpstreamVerification(UpstreamVerificationError::NoEligibleAttestedRoute(_))
+    ));
+    assert!(
+        h.upstream_calls.lock().unwrap().is_empty(),
+        "nothing may reach a route not classified as attested"
+    );
+}
+
+#[tokio::test]
 async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
     let h = harness();
     let original = br#"{"model":"public","messages":[]}"#;
@@ -736,6 +810,8 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             received_body: original,
             forwarded_body: Some(forwarded.to_vec()),
             upstream_required: Some(true),
+            aci_required: false,
+            aci_session_ids: Vec::new(),
             upstream_verification_event: Some(UpstreamVerifiedEvent {
                 url_origin: Some("https://surface-upstream.example".to_string()),
                 verifier_id: "surface-verifier/v1".to_string(),

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
     UpstreamStreamResponse,
@@ -21,7 +21,7 @@ use private_ai_gateway::aci::upstream::{
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, ForwardCandidate,
     GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult, MiddlewareReceiptJournal,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    ServiceError, UpstreamVerificationError, UpstreamVerificationRequest, UpstreamVerifier,
 };
 
 use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
@@ -70,6 +70,29 @@ impl RecordingVerifier {
     }
 }
 
+/// Returns one binding for the first two verifications (seed + pinned initial
+/// attempt), then a rotated binding for the refresh after a mismatch.
+#[derive(Default)]
+struct RotatingVerifier {
+    verify_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamVerifier for RotatingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let call = self.verify_calls.fetch_add(1, Ordering::SeqCst);
+        let byte = if call < 2 { "aa" } else { "bb" };
+        UpstreamVerifiedEvent {
+            verifier_id: "rotating-verifier/v1".to_string(),
+            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: UPSTREAM_ORIGIN.to_string(),
+                spki_sha256: byte.repeat(32),
+            }],
+            ..event_from_request(&request, VerificationResult::Verified)
+        }
+    }
+}
+
 /// Mock `UpstreamBackend` that returns `ChannelBindingMismatch` for the first
 /// `mismatches_remaining` verified-forward calls, then succeeds.
 ///
@@ -90,6 +113,10 @@ impl MismatchingBackend {
         Self {
             mismatches_remaining: AtomicUsize::new(n),
         }
+    }
+
+    fn set_mismatches(&self, n: usize) {
+        self.mismatches_remaining.store(n, Ordering::SeqCst);
     }
 
     /// Consume one "mismatch budget" unit; returns true while the budget lasts.
@@ -135,9 +162,16 @@ impl UpstreamBackend for MismatchingBackend {
         Some(UPSTREAM_ORIGIN)
     }
 
-    // Default `prepare` derives `model_id` from the request body and copies the
-    // backend `name`/`url_origin`, so `recorded_upstream_event` and the
-    // verification request build consistently against this backend.
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "model-a".to_string(),
+            is_tee: Some(true),
+            route_id: req.target_route_id.clone(),
+            request: req,
+        })
+    }
 
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         Ok(Self::ok_response())
@@ -215,6 +249,8 @@ fn forward_request(
         received_body: CHAT_BODY,
         forwarded_body: None,
         upstream_required: Some(true),
+        aci_required: false,
+        aci_session_ids: Vec::new(),
         upstream_verification_event,
         requester: None,
         e2ee: None,
@@ -301,6 +337,59 @@ async fn forward_gateway_owned_mismatch_once_then_ok() {
         verifier.verify_calls(),
         2,
         "1 initial verify + exactly 1 reverify round"
+    );
+}
+
+#[tokio::test]
+async fn reverify_cannot_escape_the_requested_aci_session() {
+    let backend = Arc::new(MismatchingBackend::mismatch_times(0));
+    let verifier = Arc::new(RotatingVerifier::default());
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            backend.clone(),
+            verifier.clone(),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test("forward-binding-reverify-test"),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+
+    // First establish and expose the id for binding A.
+    let mut seed = forward_request(None);
+    seed.aci_required = true;
+    let seeded = service.forward_chat_completion_request(seed).await.unwrap();
+    let session_id = seeded
+        .receipt
+        .event_log
+        .iter()
+        .find(|event| event.event_type == "upstream.verified")
+        .and_then(|event| event.fields.get("session_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("seeded verified binding must expose a session id")
+        .to_string();
+
+    // The next initial verification still returns A and may forward once. Its
+    // binding mismatch refreshes to B; B is not in the allowlist, so there must
+    // be no retry carrying the prompt to the rotated session.
+    backend.set_mismatches(1);
+    let mut pinned = forward_request(None);
+    pinned.aci_required = true;
+    pinned.aci_session_ids = vec![session_id];
+    let err = service
+        .forward_chat_completion_request(pinned)
+        .await
+        .expect_err("a rotated session must not satisfy the original allowlist");
+    assert!(matches!(
+        err,
+        ServiceError::UpstreamVerification(UpstreamVerificationError::NoEligibleAttestedSession(_))
+    ));
+    assert_eq!(
+        verifier.verify_calls.load(Ordering::SeqCst),
+        3,
+        "seed + pinned initial verify + one refresh"
     );
 }
 
