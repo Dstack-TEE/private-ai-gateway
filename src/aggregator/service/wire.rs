@@ -269,6 +269,14 @@ pub struct ChatCompletionRequest<'a> {
     pub forwarded_body: Option<Vec<u8>>,
     /// Override the configured default upstream-verification mode.
     pub upstream_required: Option<bool>,
+    /// Restrict this request to ACI-verified attested upstreams. Set by
+    /// `provider.aci_verified`, or implied by a non-empty
+    /// `provider.aci_session_ids` allowlist. It only ever tightens the
+    /// configured verification mode.
+    pub aci_required: bool,
+    /// Optional hard allowlist of attested session ids. A route may forward
+    /// only when its current verified channel binding derives one of these ids.
+    pub aci_session_ids: Vec<String>,
     /// Verifier event already produced by the caller. When `None`,
     /// the service consults its configured `UpstreamVerifier` (if any)
     /// to compute one before forwarding.
@@ -278,6 +286,15 @@ pub struct ChatCompletionRequest<'a> {
     /// receipt that any caller can retrieve.
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
+}
+
+impl ChatCompletionRequest<'_> {
+    /// Session pinning is itself an ACI-verification requirement. Keep this
+    /// invariant at the service boundary so non-HTTP callers cannot construct
+    /// a pinned request that bypasses route classification or verification.
+    pub(crate) fn requires_aci_verification(&self) -> bool {
+        self.aci_required || !self.aci_session_ids.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]

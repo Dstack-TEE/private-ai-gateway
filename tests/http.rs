@@ -798,6 +798,84 @@ async fn chat_invalid_x_upstream_verification_header_rejected() {
 }
 
 #[tokio::test]
+async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
+    // `aci_verified` cannot be relaxed by the verification opt-out. This
+    // harness has no route classed as attested, so the prompt must not forward.
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-upstream-verification", "none")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"provider":{"aci_verified":true}}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(h.received.lock().unwrap().is_none());
+
+    // Malformed or contradictory constraints are 400s; none may silently
+    // downgrade to unrestricted routing.
+    for body in [
+        br#"{"model":"x","messages":[],"provider":{"aci_verified":"yes"}}"#.as_slice(),
+        br#"{"model":"x","messages":[],"provider":{"aci_session_ids":[]}}"#.as_slice(),
+        br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"aci_session_ids":["as_one"]}}"#.as_slice(),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    assert!(h.received.lock().unwrap().is_none());
+
+    // These controls belong to the gateway, not the provider protocol. On a
+    // non-restricting request they are removed while unrelated provider fields
+    // are preserved for a direct upstream.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-upstream-verification", "none")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"custom":"keep"}}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let forwarded: Value = serde_json::from_slice(
+        h.received
+            .lock()
+            .unwrap()
+            .as_deref()
+            .expect("request should reach the direct upstream"),
+    )
+    .unwrap();
+    assert!(forwarded["provider"].get("aci_verified").is_none());
+    assert_eq!(forwarded["provider"]["custom"], "keep");
+}
+
+#[tokio::test]
 async fn receipt_lookup_by_chat_id() {
     let h = make_harness();
     let app = build_router(h.service.clone());

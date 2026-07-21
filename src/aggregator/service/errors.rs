@@ -49,6 +49,16 @@ pub enum UpstreamVerificationError {
     NoVerifierResult,
     #[error("upstream verifier reported failed: {0}")]
     VerifierFailed(String),
+    /// The request is restricted to ACI-verified upstreams and no
+    /// route was eligible to serve it. Distinct from [`Self::VerifierFailed`]:
+    /// no verifier ran and no upstream failed — the routes on offer were never
+    /// candidates, so nothing here is attributable to a provider.
+    #[error("no attested upstream available for model {0}")]
+    NoEligibleAttestedRoute(String),
+    /// The request pins one or more attested session ids, but none matches the
+    /// route's current verified channel bindings. No prompt was forwarded.
+    #[error("none of the requested attested sessions is available for model {0}")]
+    NoEligibleAttestedSession(String),
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

@@ -22,7 +22,7 @@ use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, ForwardCandidate,
     GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner,
-    ServiceError, ServiceResponseStream,
+    ServiceError, ServiceResponseStream, UpstreamVerificationError,
 };
 
 use super::control::ControlClient;
@@ -48,6 +48,10 @@ pub struct CompletionInput {
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
     pub upstream_required: bool,
+    /// Request is restricted to ACI-verified attested upstreams.
+    pub aci_required: bool,
+    /// Optional hard allowlist of attested session ids.
+    pub aci_session_ids: Vec<String>,
     pub request_id: String,
     pub user_model: Option<String>,
     pub stream: bool,
@@ -234,6 +238,8 @@ pub async fn run(
         requester,
         e2ee,
         upstream_required,
+        aci_required,
+        aci_session_ids,
         request_id,
         user_model,
         stream,
@@ -415,6 +421,8 @@ pub async fn run(
                 received_body: &received_body,
                 forwarded_body: None,
                 upstream_required: Some(upstream_required),
+                aci_required,
+                aci_session_ids,
                 upstream_verification_event: None,
                 requester: requester.clone(),
                 e2ee: e2ee.clone(),
@@ -858,7 +866,7 @@ pub async fn run(
                 meter.gateway_failure_at(
                     forward.failed_attempts.len() as u32,
                     status,
-                    ErrorSource::Upstream,
+                    forward_error_source(&forward.error),
                     &forward.error.to_string(),
                     stream,
                 );
@@ -873,10 +881,11 @@ pub async fn run(
             )
         }
         // Failures where no attempt chain is available (pre-forward errors,
-        // plus the forwarder's rare mid-walk internal-error abort): record an
-        // upstream-attributed failure so the request is visible to
-        // billing/health. Client-attributable errors (E2EE/4xx) are not
-        // recorded. The E2EE context is still available to encrypt the body.
+        // plus the forwarder's rare mid-walk internal-error abort): record the
+        // failure so the request is visible to billing/health, attributed by
+        // `forward_error_source` (upstream, except the gateway's own TEE-policy
+        // rejection). Client-attributable errors (E2EE/4xx) are not recorded.
+        // The E2EE context is still available to encrypt the body.
         Err(err) => {
             let status = forward_error_status(&err);
             if should_log_failure(status) {
@@ -893,7 +902,7 @@ pub async fn run(
                 );
             }
             if status >= 500 {
-                meter.gateway_failure(status, ErrorSource::Upstream, &err.to_string(), stream);
+                meter.gateway_failure(status, forward_error_source(&err), &err.to_string(), stream);
             }
             service_error_response(surface, endpoint_path, service, outcome_ctx, err, e2ee)
         }
@@ -1029,9 +1038,22 @@ fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
     }
 }
 
-// Map a forward/finalize `ServiceError` to a client-facing generated response.
-// E2EE clients still get an encrypted error body, except for `E2ee` errors
-// themselves (the E2EE setup failed, so the response cannot be encrypted).
+// Which component a terminal forward failure is attributable to.
+//
+// Upstream by default: a forward chain that ends in a 5xx is a provider
+// failure. The exceptions are ACI constraints that leave no eligible route or
+// current session — no prompt was forwarded, so attributing them to a provider
+// would report the gateway's policy decision as someone else's failure.
+fn forward_error_source(err: &ServiceError) -> ErrorSource {
+    match err {
+        ServiceError::UpstreamVerification(
+            UpstreamVerificationError::NoEligibleAttestedRoute(_)
+            | UpstreamVerificationError::NoEligibleAttestedSession(_),
+        ) => ErrorSource::Gateway,
+        _ => ErrorSource::Upstream,
+    }
+}
+
 // Client-facing status for a forward/finalize `ServiceError`.
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
@@ -1042,6 +1064,9 @@ fn forward_error_status(err: &ServiceError) -> u16 {
     }
 }
 
+// Map a forward/finalize `ServiceError` to a client-facing generated response.
+// E2EE clients still get an encrypted error body, except for `E2ee` errors
+// themselves (the E2EE setup failed, so the response cannot be encrypted).
 fn service_error_response(
     surface: Surface,
     endpoint_path: &str,

@@ -13,13 +13,16 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
-use private_ai_gateway::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceResponseStream,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, ForwardCandidate,
+    GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult, MiddlewareReceiptJournal,
+    ServiceError, ServiceResponseStream, UpstreamVerificationError, UpstreamVerificationRequest,
+    UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
@@ -68,6 +71,114 @@ impl UpstreamBackend for MockUpstream {
     }
 }
 
+// A mock upstream that classifies a route as attested by its `tee-` prefix and
+// records every route it was actually asked to forward to. Classification
+// happens in `prepare`, as the real config-driven router does it, so a route
+// the ACI constraint rejects can be told apart from one never reached.
+struct TeeAwareUpstream {
+    forwarded: Arc<Mutex<Vec<String>>>,
+    status: u16,
+}
+
+#[async_trait]
+impl UpstreamBackend for TeeAwareUpstream {
+    fn name(&self) -> &str {
+        "tee-aware-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://tee-aware-upstream.example")
+    }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        let route_id = req.target_route_id.clone().unwrap_or_default();
+        if route_id.starts_with("missing-") {
+            return Err(UpstreamError::Routing(format!("no route {route_id}")));
+        }
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "gpt-test".to_string(),
+            is_tee: Some(route_id.starts_with("tee-")),
+            route_id: Some(route_id),
+            request: req,
+        })
+    }
+    async fn forward_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forwarded
+            .lock()
+            .unwrap()
+            .push(req.route_id.clone().unwrap_or_default());
+        self.forward(req.request).await
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+    // Streaming resolves through `forward_stream_prepared`, not
+    // `forward_prepared`, so it needs its own recording hook — otherwise a
+    // streaming test cannot tell "never forwarded" from "not observed".
+    async fn forward_stream_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forwarded
+            .lock()
+            .unwrap()
+            .push(req.route_id.clone().unwrap_or_default());
+        self.forward_stream(req.request).await
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        Ok(UpstreamResponse {
+            status_code: self.status,
+            body: br#"{"choices":[]}"#.to_vec(),
+            headers,
+            served_instance_id: None,
+        })
+    }
+}
+
+// Sum every series in one Prometheus counter family.
+fn metric_total(service: &AciService, name: &str) -> u64 {
+    let body = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    body.lines()
+        .filter(|line| line.starts_with(name))
+        .filter_map(|line| line.rsplit_once(' '))
+        .filter_map(|(_, value)| value.trim().parse::<f64>().ok())
+        .map(|value| value as u64)
+        .sum()
+}
+
+fn build_tee_aware_service() -> (Arc<AciService>, Arc<Mutex<Vec<String>>>) {
+    build_tee_aware_service_with_status(200)
+}
+
+fn build_tee_aware_service_with_status(status: u16) -> (Arc<AciService>, Arc<Mutex<Vec<String>>>) {
+    let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(TeeAwareUpstream {
+                forwarded: forwarded.clone(),
+                status,
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test("private-ai-gateway"),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    (service, forwarded)
+}
+
 struct OkVerifier;
 
 #[async_trait]
@@ -83,6 +194,22 @@ struct FailVerifier;
 impl UpstreamVerifier for FailVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         event_from_request(&request, VerificationResult::Failed)
+    }
+}
+
+struct SessionVerifier;
+
+#[async_trait]
+impl UpstreamVerifier for SessionVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            verifier_id: "session-verifier/v1".to_string(),
+            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: "https://tee-aware-upstream.example".to_string(),
+                spki_sha256: "ab".repeat(32),
+            }],
+            ..event_from_request(&request, VerificationResult::Verified)
+        }
     }
 }
 
@@ -253,6 +380,8 @@ fn chat_input() -> CompletionInput {
         requester: None,
         e2ee: None,
         upstream_required: true,
+        aci_required: false,
+        aci_session_ids: Vec::new(),
         request_id: "req-1".to_string(),
         user_model: Some("gpt-test".to_string()),
         stream: false,
@@ -647,6 +776,373 @@ async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
     assert!(
         !failed_over,
         "an image-input error must not trigger failover attempts"
+    );
+}
+
+#[tokio::test]
+async fn aci_constraint_skips_non_tee_routes_without_blaming_them() {
+    // `provider.aci_verified` must not be satisfiable by a plaintext route,
+    // even when one is offered ahead of an attested route. Nor may the skipped
+    // route be reported as a failed attempt: being ineligible is a policy
+    // decision, and counting it would penalize a provider that never got the
+    // chance to fail.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "plain:gpt-test", "format": "openai" },
+                { "routeId": "tee-a:gpt-test", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, forwarded) = build_tee_aware_service();
+    let mut input = chat_input();
+    input.aci_required = true;
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200, "the attested candidate must still serve");
+    assert_eq!(
+        *forwarded.lock().unwrap(),
+        vec!["tee-a:gpt-test".to_string()],
+        "the non-TEE candidate must never receive the prompt"
+    );
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(200)).await;
+    assert_eq!(
+        report["attemptIndex"].as_i64(),
+        Some(0),
+        "the skipped route must not count as a failed attempt"
+    );
+    assert!(
+        !posts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["selectedRouteId"] == json!("plain:gpt-test")),
+        "no attempt may be attributed to the rejected non-TEE route"
+    );
+}
+
+#[tokio::test]
+async fn aci_session_ids_are_a_preforward_hard_allowlist() {
+    let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let service = AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        Arc::new(TeeAwareUpstream {
+            forwarded: forwarded.clone(),
+            status: 200,
+        }),
+        Arc::new(SessionVerifier),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test("private-ai-gateway"),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+
+    let request = |session_ids| ChatCompletionRequest {
+        context: GatewayRequestContext {
+            user_model: Some("gpt-test".to_string()),
+            ..GatewayRequestContext::default()
+        },
+        endpoint_path: "/v1/chat/completions",
+        received_body: br#"{"model":"gpt-test","messages":[]}"#,
+        forwarded_body: None,
+        upstream_required: Some(false),
+        aci_required: true,
+        aci_session_ids: session_ids,
+        upstream_verification_event: None,
+        requester: None,
+        e2ee: None,
+    };
+    let candidate = || ForwardCandidate {
+        route_id: "tee-a:gpt-test".to_string(),
+        body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
+    };
+
+    // Discover the stable id derived from the current verified binding.
+    let first = service
+        .forward_chat_completion_for_middleware(
+            request(Vec::new()),
+            vec![candidate()],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    let session_id = match first {
+        MiddlewareForwardResult::Forwarded(forward) => forward
+            .session_id
+            .expect("verified binding must seal a session"),
+        _ => panic!("expected a buffered forward"),
+    };
+
+    forwarded.lock().unwrap().clear();
+    let allowed = service
+        .forward_chat_completion_for_middleware(
+            request(vec!["as_unavailable".to_string(), session_id.clone()]),
+            vec![candidate()],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match allowed {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            assert_eq!(forward.session_id.as_deref(), Some(session_id.as_str()));
+        }
+        _ => panic!("expected an allowlisted buffered forward"),
+    }
+    assert_eq!(forwarded.lock().unwrap().len(), 1);
+
+    forwarded.lock().unwrap().clear();
+    let result = service
+        .forward_chat_completion_for_middleware(
+            request(vec!["as_unavailable".to_string()]),
+            vec![candidate()],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await;
+    match result {
+        Ok(MiddlewareForwardResult::AllFailed(failure)) => assert!(matches!(
+            failure.error,
+            ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedSession(_)
+            )
+        )),
+        _ => panic!("an unavailable session must fail closed"),
+    }
+    assert!(
+        forwarded.lock().unwrap().is_empty(),
+        "the prompt must not reach a route before its current session matches"
+    );
+}
+
+#[tokio::test]
+async fn a_real_failure_outranks_a_tee_ineligible_route_in_either_order() {
+    // Being ineligible is the least informative outcome — the route never got
+    // the chance to fail — so a genuine failure must win whichever order the
+    // candidates arrived in. Sharing a priority band with routing errors would
+    // make the client-facing status depend on that order.
+    for candidates in [
+        json!([
+            { "routeId": "missing-a:gpt-test", "format": "openai" },
+            { "routeId": "plain:gpt-test", "format": "openai" }
+        ]),
+        json!([
+            { "routeId": "plain:gpt-test", "format": "openai" },
+            { "routeId": "missing-a:gpt-test", "format": "openai" }
+        ]),
+    ] {
+        let control_url =
+            spawn_control(200, json!({ "allow": true, "candidates": candidates })).await;
+        let mw = middleware(control_url);
+        let (service, _) = build_tee_aware_service();
+        let mut input = chat_input();
+        input.aci_required = true;
+
+        let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+        assert_eq!(
+            status, 404,
+            "the routing failure must outrank the ineligible route"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
+    // Plain failover, no ACI constraint: the first candidate answers 429, the
+    // walk moves on, and the second cannot even be routed. A route that never
+    // reached an upstream must not overwrite one that did — the client's status
+    // is the real 429, not a 404 synthesized from the second candidate's own
+    // failure. Both streaming and buffered, which commit through separate
+    // paths.
+    for stream in [false, true] {
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [
+                    { "routeId": "plain:gpt-test", "format": "openai" },
+                    { "routeId": "missing-b:gpt-test", "format": "openai" }
+                ]
+            }),
+        )
+        .await;
+        let mw = middleware(control_url);
+        let (service, forwarded) = build_tee_aware_service_with_status(429);
+        let mut input = chat_input();
+        input.stream = stream;
+
+        let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+        assert_eq!(
+            status, 429,
+            "stream={stream}: the real upstream status wins"
+        );
+        assert_eq!(
+            *forwarded.lock().unwrap(),
+            vec!["plain:gpt-test".to_string()],
+            "stream={stream}: only the routable candidate was contacted"
+        );
+
+        // The committed 429 must be reported last: dashboards read a request's
+        // user-facing status as the one at the highest attempt index, so a
+        // committed response sitting behind a later attempt would be misread.
+        let report = wait_for_post(&posts, |r| {
+            r["status"].as_i64() == Some(429) && r["selectedRouteId"] == json!("plain:gpt-test")
+        })
+        .await;
+        let committed = report["attemptIndex"].as_i64().unwrap_or(-1);
+        let highest = posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["attemptIndex"].as_i64())
+            .max()
+            .unwrap_or(-1);
+        assert_eq!(
+            committed, highest,
+            "stream={stream}: the committed attempt must carry the highest index"
+        );
+
+        // Holding a response back must not change what it contributes to the
+        // metrics: exactly one upstream response was observed, and a streaming
+        // non-2xx is still one stream error however late it is committed.
+        assert_eq!(
+            metric_total(&service, "private_ai_gateway_upstream_responses_total"),
+            1,
+            "stream={stream}: the retained response is counted once, not twice"
+        );
+        if stream {
+            assert_eq!(
+                metric_total(&service, "private_ai_gateway_stream_errors_total"),
+                1,
+                "a retained streaming non-2xx is still a stream error"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_ineligible_trailing_route_does_not_swallow_a_real_upstream_status() {
+    // A candidate the ACI constraint will skip is not a fallback, so it must not
+    // make the attested candidate ahead of it look like a non-final attempt.
+    // Otherwise the attested route's real 429 is discarded in the hope of a
+    // retry that never happens, and the client gets a synthesized 503 instead —
+    // with the status flipping on candidate order alone.
+    for candidates in [
+        json!([
+            { "routeId": "tee-a:gpt-test", "format": "openai" },
+            { "routeId": "plain:gpt-test", "format": "openai" }
+        ]),
+        json!([
+            { "routeId": "plain:gpt-test", "format": "openai" },
+            { "routeId": "tee-a:gpt-test", "format": "openai" }
+        ]),
+    ] {
+        let control_url =
+            spawn_control(200, json!({ "allow": true, "candidates": candidates })).await;
+        let mw = middleware(control_url);
+        let (service, _) = build_tee_aware_service_with_status(429);
+        let mut input = chat_input();
+        input.aci_required = true;
+
+        let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+        assert_eq!(
+            status, 429,
+            "the attested route's real status must reach the client in either order"
+        );
+    }
+}
+
+#[tokio::test]
+async fn aci_constraint_cannot_be_waived_by_the_verification_opt_out() {
+    // A route classed as TEE is not the same as a route whose attestation held.
+    // `provider.aci_verified` pins the request to an attested upstream, so the caller's
+    // `X-Upstream-Verification: none` must not also waive the attestation —
+    // otherwise the constraint degrades into a static provider-name check and a
+    // TEE route with a failed or missing attestation still receives the prompt.
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "tee-a:gpt-test", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(TeeAwareUpstream {
+                forwarded: forwarded.clone(),
+                status: 200,
+            }),
+            Arc::new(FailVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test("private-ai-gateway"),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let mut input = chat_input();
+    input.aci_required = true;
+    input.upstream_required = false;
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 503, "a failed attestation must still fail closed");
+    assert!(
+        forwarded.lock().unwrap().is_empty(),
+        "an unattested TEE route must not receive the prompt"
+    );
+}
+
+#[tokio::test]
+async fn aci_constraint_with_no_attested_route_is_a_diagnosable_503() {
+    // Every candidate is plaintext, so the request cannot be served at all. The
+    // failure names the constraint and the model rather than surfacing as a bare
+    // "upstream verification failed". It is reported as a gateway failure, not an
+    // upstream one: no provider was contacted, so attributing it to one would
+    // make our own policy look like someone else's outage.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "plain:gpt-test", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, forwarded) = build_tee_aware_service();
+    let mut input = chat_input();
+    input.aci_required = true;
+
+    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 503);
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("no attested upstream available for model gpt-test"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        forwarded.lock().unwrap().is_empty(),
+        "nothing may be forwarded when no candidate is attested"
+    );
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
+    assert_eq!(
+        report["errorSource"], "gateway",
+        "an ineligible-route failure must not be attributed to a provider"
+    );
+    assert!(
+        report["selectedRouteId"].is_null(),
+        "no route was ever committed"
     );
 }
 
