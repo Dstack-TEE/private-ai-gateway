@@ -17,7 +17,7 @@ use crate::aci::types::{
 };
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
-use crate::aggregator::upstream_config::{AttestationScope, SevTcb};
+use crate::aggregator::upstream_config::AttestationScope;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
@@ -314,11 +314,11 @@ async fn tinfoil_provider_verifier_runs_provider_owned_external_verifier() {
 }
 
 #[tokio::test]
-async fn secret_ai_provider_verifier_runs_provider_owned_external_verifier() {
+async fn secret_ai_provider_verifier_runs_embedded_bridge() {
     let verifier = SecretAiProviderVerifier::with_command(
         provider_script(
             "secret-ai",
-            "secretvm-verify/external-test/v1",
+            "private-ai-verifier/secret-ai/v1",
             json!({
                 "type": "tls_spki_sha256",
                 "origin": "https://provider.example",
@@ -331,7 +331,7 @@ async fn secret_ai_provider_verifier_runs_provider_owned_external_verifier() {
     assert_provider_script_verifier(
         &verifier,
         "secret-ai",
-        "secretvm-verify/external-test/v1",
+        "private-ai-verifier/secret-ai/v1",
         ChannelBinding::TlsSpkiSha256 {
             origin: "https://provider.example".to_string(),
             spki_sha256: "aa".repeat(32),
@@ -341,10 +341,10 @@ async fn secret_ai_provider_verifier_runs_provider_owned_external_verifier() {
 }
 
 #[tokio::test]
-async fn secret_ai_provider_verifier_passes_policy_to_the_bridge() {
+async fn secret_ai_provider_verifier_passes_workload_pin_to_the_bridge() {
     let output = json!({
         "result": "verified",
-        "verifier_id": "secretvm-verify/external-test/v1",
+        "verifier_id": "private-ai-verifier/secret-ai/v1",
         "attested_scope": "router",
         "evidence": {
             "digest": format!("sha256:{}", "11".repeat(32)),
@@ -363,37 +363,22 @@ async fn secret_ai_provider_verifier_passes_policy_to_the_bridge() {
     .to_string();
     let script = format!(
         r#"payload="$(cat)"
-for expected in \
-  '"secret_ai_accepted_workload_id:wid":"true"' \
-  '"secret_ai_minimum_sev_tcb_boot_loader":"10"' \
-  '"secret_ai_minimum_sev_tcb_tee":"0"' \
-  '"secret_ai_minimum_sev_tcb_snp":"23"' \
-  '"secret_ai_minimum_sev_tcb_microcode":"88"'
-do
-  case "$payload" in
-    *"$expected"*) ;;
-    *) printf '%s' '{{"result":"failed","reason":"missing SEV TCB policy"}}'; exit ;;
-  esac
-done
-printf '%s' '{output}'"#
+case "$payload" in
+  *'"secret_ai_accepted_workload_id:wid":"true"'*) printf '%s' '{output}' ;;
+  *) printf '%s' '{{"result":"failed","reason":"missing workload pin"}}' ;;
+esac"#
     );
     let verifier = SecretAiProviderVerifier::with_command(
         vec!["/bin/sh".to_string(), "-c".to_string(), script],
         5,
     )
     .unwrap()
-    .with_accepted_workload_ids(["wid".to_string()])
-    .with_minimum_sev_tcb(SevTcb {
-        boot_loader: 10,
-        tee: 0,
-        snp: 23,
-        microcode: 88,
-    });
+    .with_accepted_workload_ids(["wid".to_string()]);
 
     assert_provider_script_verifier(
         &verifier,
         "secret-ai",
-        "secretvm-verify/external-test/v1",
+        "private-ai-verifier/secret-ai/v1",
         ChannelBinding::TlsSpkiSha256 {
             origin: "https://provider.example".to_string(),
             spki_sha256: "aa".repeat(32),

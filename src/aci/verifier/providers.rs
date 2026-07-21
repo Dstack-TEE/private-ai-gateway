@@ -12,7 +12,7 @@ use super::external::ProviderVerifierConfigError;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
-use crate::aggregator::upstream_config::{SevTcb, UpstreamProvider};
+use crate::aggregator::upstream_config::UpstreamProvider;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {
@@ -276,21 +276,6 @@ impl SecretAiProviderVerifier {
             self.verifier = self.verifier.with_option(
                 format!("secret_ai_accepted_workload_id:{workload_id}"),
                 "true",
-            );
-        }
-        self
-    }
-
-    pub fn with_minimum_sev_tcb(mut self, minimum: SevTcb) -> Self {
-        for (field, value) in [
-            ("boot_loader", minimum.boot_loader),
-            ("tee", minimum.tee),
-            ("snp", minimum.snp),
-            ("microcode", minimum.microcode),
-        ] {
-            self.verifier = self.verifier.with_option(
-                format!("secret_ai_minimum_sev_tcb_{field}"),
-                value.to_string(),
             );
         }
         self

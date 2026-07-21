@@ -14,7 +14,7 @@ exact SHA-256 digest of `/docker-compose`:
 secretvm:<cpu-type>:<environment>:<template>:<artifacts-version>:sha256:<compose-sha256>
 ```
 
-The following unpinned JEDI configuration was verified live on 2026-07-20:
+The following unpinned JEDI configuration was verified live on 2026-07-21:
 
 ```json
 [
@@ -25,13 +25,7 @@ The following unpinned JEDI configuration was verified live on 2026-07-20:
     "models": {
       "secret-ai/gpt-oss-120b": "gpt-oss:120b"
     },
-    "bearer_token": "<secret-ai-api-key>",
-    "minimum_sev_tcb": {
-      "boot_loader": 10,
-      "tee": 0,
-      "snp": 23,
-      "microcode": 88
-    }
+    "bearer_token": "<secret-ai-api-key>"
   }
 ]
 ```
@@ -44,7 +38,7 @@ To pin that exact measured workload, add:
 ]
 ```
 
-The following RYTN workload was also verified live on 2026-07-20:
+The following RYTN workload was also verified live on 2026-07-21:
 
 ```text
 secretvm:tdx:prod:4xlarge_256gb_gpu:v0.0.33:sha256:3a013b14abfacd03515ca3c6ae2d9d45d489ce8692c7fa3dff7f73837e3c8b1a
@@ -53,13 +47,15 @@ secretvm:tdx:prod:4xlarge_256gb_gpu:v0.0.33:sha256:3a013b14abfacd03515ca3c6ae2d9
 A SecretAI rollout that changes the VM artifacts or compose bytes produces a
 different workload ID. An unpinned configuration reports the new ID and
 continues after all mandatory checks pass. A pinned configuration rejects it
-until an operator updates the allowlist. The JEDI minimum TCB above was verified
-live on 2026-07-21; review and raise it as platform fixes become required.
+until an operator updates the allowlist. The embedded AMD TCB minimum was
+verified against JEDI on 2026-07-21.
 
 ## Verification algorithm
 
-The `secret-ai` adapter uses `secretvm-verify==0.12.0`. The exact wheel and its
-bundled artifact registries are pinned by `uv.lock`.
+SecretAI support is embedded in `private-ai-verifier` and reports verifier ID
+`private-ai-verifier/secret-ai/v1`. It uses `secretvm-verify==0.12.0`
+internally; the exact wheel and its bundled artifact registries are pinned by
+`uv.lock`.
 
 For each verification, the adapter:
 
@@ -75,7 +71,8 @@ For each verification, the adapter:
    not accept stale KDS collateral or a guest policy that permits an unverified
    migration agent.
 5. Requires TDX DCAP status to be exactly `UpToDate`. For SEV-SNP, requires the
-   signed `reported_tcb` components to meet the operator's `minimum_sev_tcb`.
+   signed `reported_tcb` components to meet the verifier's embedded minimum:
+   boot loader 10, TEE 0, SNP 23, and microcode 88.
 6. Requires the 64-byte CPU `report_data` to contain the inference TLS SPKI
    digest in bytes 0 through 31.
 7. Requires `/gpu` to contain a 32-byte nonce equal to CPU `report_data` bytes
@@ -109,7 +106,7 @@ release.
 | Claim | Result |
 | --- | --- |
 | TEE attested | Asserted from a verified TDX or SEV-SNP report bound to the inference SPKI. |
-| Platform TCB current | TDX must be `UpToDate`. SEV-SNP must meet the configured minimum; its absolute freshness remains unknown. |
+| Platform TCB current | TDX must be `UpToDate`. SEV-SNP must meet the embedded minimum; its absolute freshness remains unknown. |
 | Serving software known good | Unknown by default; asserted when the uniquely measured workload matches an optional operator pin. |
 | OS known good | Asserted only for a matched `prod` or `gpu_prod` registry entry. |
 | GPU attested | Asserted after NRAS verification and an exact GPU nonce match against CPU `report_data`. |
@@ -134,8 +131,9 @@ behind the same attested workload and SPKI.
 - An accepted workload ID is an optional operator policy decision. Review the
   full compose, image digests, SecretVM artifact release, endpoint exposure, and
   provider logging behavior before adding a pin.
-- `minimum_sev_tcb` is also operator policy. Raise it when the reviewed AMD
-  security baseline changes; a lower signed report fails closed.
+- The SEV-SNP minimum is release policy embedded in the verifier. Raise it in a
+  reviewed gateway release when the AMD security baseline changes; a lower
+  signed report fails closed.
 - A registry or verifier upgrade changes the verification trust root. Upgrade
   `secretvm-verify` and `uv.lock` deliberately, then rerun the live and hermetic
   tests.

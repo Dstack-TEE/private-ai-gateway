@@ -198,16 +198,7 @@ Without this field, the verifier still reconstructs and reports the exact
 production workload, but does not assert that its serving software was
 operator-approved. When pins are configured, a nonmatching workload fails
 verification. TDX workloads must report DCAP status `UpToDate`. An SEV-SNP
-origin must also configure a reviewed componentwise minimum:
-
-```json
-"minimum_sev_tcb": {
-  "boot_loader": 10,
-  "tee": 0,
-  "snp": 23,
-  "microcode": 88
-}
-```
+origin must meet the componentwise AMD TCB minimum embedded in the verifier.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,

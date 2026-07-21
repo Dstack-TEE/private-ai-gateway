@@ -66,7 +66,6 @@ def _run(
     cpu_policy: str = "0x0000000000020000",
     tdx_tcb_status: str = "UpToDate",
     sev_reported_tcb: tuple[int, int, int, int] = (10, 0, 23, 88),
-    minimum_sev_tcb: tuple[int, int, int, int] | None = None,
     gpu_valid: Any = True,
     verified_gpu_overall_result: Any = True,
     verified_gpu_nonce: str = GPU_NONCE,
@@ -131,15 +130,6 @@ def _run(
         f"secret_ai_accepted_workload_id:{workload_id}": "true"
         for workload_id in accepted_workloads
     }
-    if minimum_sev_tcb is not None:
-        options.update(
-            {
-                f"secret_ai_minimum_sev_tcb_{field}": str(value)
-                for field, value in zip(
-                    secret_ai._SEV_TCB_FIELDS, minimum_sev_tcb, strict=True
-                )
-            }
-        )
     request = {
         "provider": "secret-ai",
         "upstream_name": "secret-ai",
@@ -353,7 +343,7 @@ def check() -> list[str]:
             failures.append("genuine: signed NRAS GPU identity was not surfaced")
         if "gpu_arch" in claims:
             failures.append("genuine: unverified top-level GPU arch was surfaced")
-        if output.get("verifier_id") != "secretvm-verify/0.12.0/private-ai-gateway/v1":
+        if output.get("verifier_id") != "private-ai-verifier/secret-ai/v1":
             failures.append(f"genuine: wrong verifier id {output.get('verifier_id')!r}")
         evidence = output.get("evidence") or {}
         if not str(evidence.get("data") or "").startswith("data:multipart/mixed;"):
@@ -392,23 +382,13 @@ def check() -> list[str]:
     )
     _expect_failure(
         failures,
-        "sev-missing-minimum-tcb",
-        "requires minimum_sev_tcb policy",
-        cpu_type="SEV-SNP",
-    )
-    _expect_failure(
-        failures,
         "sev-below-minimum-tcb",
         "is below minimum",
         cpu_type="SEV-SNP",
-        minimum_sev_tcb=(10, 0, 23, 89),
+        sev_reported_tcb=(10, 0, 23, 87),
     )
     sev_workload = replace(WORKLOAD, cpu_type="sev-snp", template_name="4xlarge")
-    sev = _run(
-        cpu_type="SEV-SNP",
-        workload=sev_workload,
-        minimum_sev_tcb=(10, 0, 23, 88),
-    )
+    sev = _run(cpu_type="SEV-SNP", workload=sev_workload)
     if sev.get("result") != "verified":
         failures.append(f"sev-minimum-tcb: expected verified, got {sev!r}")
     _expect_failure(failures, "gpu", "GPU attestation failed", gpu_valid=False)

@@ -255,14 +255,11 @@ fn build_provider_verifier(
                 cache_seconds,
             ))),
             UpstreamProvider::SecretAi => {
-                let mut verifier = SecretAiProviderVerifier::new_with_cache(
+                let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
                 )
                 .with_accepted_workload_ids(cfg.accepted_workload_ids.clone().unwrap_or_default());
-                if let Some(minimum) = cfg.minimum_sev_tcb {
-                    verifier = verifier.with_minimum_sev_tcb(minimum);
-                }
                 Some(Arc::new(verifier))
             }
             UpstreamProvider::PhalaDirect => {

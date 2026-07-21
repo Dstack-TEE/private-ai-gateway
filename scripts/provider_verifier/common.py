@@ -38,10 +38,6 @@ def emit(obj: dict[str, Any]) -> None:
 def verifier_id_for(provider: str) -> str:
     if provider == "near-ai":
         return "private-ai-verifier/near-ai-gateway/v1"
-    if provider == "secret-ai":
-        from importlib.metadata import version
-
-        return f"secretvm-verify/{version('secretvm-verify')}/private-ai-gateway/v1"
     return f"private-ai-verifier/{provider}/v1"
 
 

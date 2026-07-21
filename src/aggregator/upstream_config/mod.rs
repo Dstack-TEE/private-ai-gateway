@@ -56,8 +56,6 @@ pub struct UpstreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub minimum_sev_tcb: Option<SevTcb>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_dstack_kms_root_public_keys: Option<Vec<String>>,
@@ -98,8 +96,6 @@ pub struct PublicUpstreamConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum_sev_tcb: Option<SevTcb>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dstack_kms_root_public_keys: Option<Vec<String>>,
@@ -138,7 +134,6 @@ impl UpstreamConfig {
             bearer_token_configured: self.bearer_token.is_some(),
             basic_auth: self.basic_auth,
             accepted_workload_ids: self.accepted_workload_ids.clone(),
-            minimum_sev_tcb: self.minimum_sev_tcb,
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),
             pccs_url: self.pccs_url.clone(),
@@ -154,15 +149,6 @@ impl UpstreamConfig {
             chutes_e2ee_discovery_interval_seconds: self.chutes_e2ee_discovery_interval_seconds,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SevTcb {
-    pub boot_loader: u8,
-    pub tee: u8,
-    pub snp: u8,
-    pub microcode: u8,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -25,7 +25,6 @@ fn test_upstream_config(
         bearer_token: None,
         basic_auth: false,
         accepted_workload_ids: None,
-        minimum_sev_tcb: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,
         pccs_url: None,
@@ -106,27 +105,6 @@ fn parse_secret_ai_allows_an_unpinned_workload() {
 
     assert_eq!(config[0].provider, UpstreamProvider::SecretAi);
     assert_eq!(config[0].accepted_workload_ids, None);
-}
-
-#[test]
-fn parse_secret_ai_requires_a_minimum_tcb_for_sev_snp() {
-    let workload_id = concat!(
-        "secretvm:sev-snp:gpu_prod:4xlarge:v0.0.33:sha256:",
-        "ea08d2b8a03bea1d3206286e50da41e437b3fd4a9e6e3415a0d6169f05bb7cf2"
-    );
-    let without_minimum = parse_config_text(&format!(
-        r#"[{{
-              "name": "secret-ai",
-              "provider": "secret-ai",
-              "base_url": "https://secret.example:21434",
-              "models": {{"public-model": "upstream-model"}},
-              "accepted_workload_ids": ["{workload_id}"]
-            }}]"#
-    ))
-    .expect_err("SEV-SNP policy must include a reviewed minimum TCB");
-    assert!(without_minimum
-        .to_string()
-        .contains("has no minimum_sev_tcb"));
 }
 
 #[test]
@@ -319,7 +297,6 @@ async fn prewarm_verification_deduplicates_upstream_models() {
         bearer_token: None,
         basic_auth: false,
         accepted_workload_ids: None,
-        minimum_sev_tcb: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,
         pccs_url: None,

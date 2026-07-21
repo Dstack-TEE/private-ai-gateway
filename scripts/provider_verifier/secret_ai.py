@@ -1,7 +1,8 @@
-"""Gateway-owned SecretAI adapter over the pinned ``secretvm-verify`` package.
+"""SecretAI support embedded in the private AI provider verifier.
 
-The package performs TDX, strict AMD SEV-SNP, and NVIDIA NRAS verification;
-this module adds gateway origin, optional workload pinning, and TLS binding policy.
+The pinned ``secretvm-verify`` package performs TDX, strict AMD SEV-SNP, and
+NVIDIA NRAS verification; this module adds gateway origin, optional workload
+pinning, and TLS binding policy.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ _HEX_32_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX_48_RE = re.compile(r"^[0-9a-f]{96}$")
 _HEX_64_RE = re.compile(r"^[0-9a-f]{128}$")
 _ACCEPTED_WORKLOAD_PREFIX = "secret_ai_accepted_workload_id:"
-_MINIMUM_SEV_TCB_PREFIX = "secret_ai_minimum_sev_tcb_"
 _SEV_TCB_FIELDS = ("boot_loader", "tee", "snp", "microcode")
+# Reviewed against the live JEDI SEV-SNP deployment on 2026-07-21.
+_MINIMUM_SEV_TCB = {"boot_loader": 10, "tee": 0, "snp": 23, "microcode": 88}
 _SEV_MIGRATE_MA = 1 << 18
 
 
@@ -214,25 +216,8 @@ def _require_safe_sev_policy(cpu_report: dict[str, Any]) -> None:
         raise ValueError("SecretAI SEV-SNP guest policy permits an unverified migration agent")
 
 
-def _minimum_sev_tcb(options: dict[str, str]) -> dict[str, int]:
-    minimum: dict[str, int] = {}
-    for field in _SEV_TCB_FIELDS:
-        value = options.get(f"{_MINIMUM_SEV_TCB_PREFIX}{field}")
-        if value is None:
-            raise ValueError("SecretAI SEV-SNP requires minimum_sev_tcb policy")
-        if not value.isascii() or not value.isdecimal():
-            raise ValueError(f"SecretAI minimum_sev_tcb.{field} must be an integer")
-        component = int(value)
-        if component > 255:
-            raise ValueError(f"SecretAI minimum_sev_tcb.{field} must fit in one byte")
-        minimum[field] = component
-    if not any(minimum.values()):
-        raise ValueError("SecretAI minimum_sev_tcb must not be all zero")
-    return minimum
-
-
-def _require_accepted_cpu_tcb(
-    cpu_type: str, cpu_report: dict[str, Any], options: dict[str, str]
+def _require_current_cpu_tcb(
+    cpu_type: str, cpu_report: dict[str, Any]
 ) -> dict[str, int] | None:
     if cpu_type == "TDX":
         status = cpu_report.get("tcb_status")
@@ -240,17 +225,17 @@ def _require_accepted_cpu_tcb(
             raise ValueError(f"SecretAI TDX TCB status is {status!r}, expected 'UpToDate'")
         return None
 
-    minimum = _minimum_sev_tcb(options)
     reported = cpu_report.get("reported_tcb")
     if not isinstance(reported, dict) or any(
         type(reported.get(field)) is not int for field in _SEV_TCB_FIELDS
     ):
         raise ValueError("SecretAI SEV-SNP report is missing its signed reported_tcb")
-    if any(reported[field] < minimum[field] for field in _SEV_TCB_FIELDS):
+    if any(reported[field] < _MINIMUM_SEV_TCB[field] for field in _SEV_TCB_FIELDS):
         raise ValueError(
-            f"SecretAI SEV-SNP reported_tcb {reported!r} is below minimum {minimum!r}"
+            f"SecretAI SEV-SNP reported_tcb {reported!r} is below minimum "
+            f"{_MINIMUM_SEV_TCB!r}"
         )
-    return minimum
+    return _MINIMUM_SEV_TCB
 
 
 def _verified_gpu_claims(gpu_result: Any, gpu_nonce: str) -> tuple[list[str], int]:
@@ -422,7 +407,7 @@ async def verify_secret_ai(request: dict[str, Any]) -> None:
         cpu_report = cpu_result.report
         if cpu_type == "SEV-SNP":
             _require_safe_sev_policy(cpu_report)
-        minimum_sev_tcb = _require_accepted_cpu_tcb(cpu_type, cpu_report, options)
+        minimum_sev_tcb = _require_current_cpu_tcb(cpu_type, cpu_report)
         report_data = str(cpu_report.get("report_data") or "").lower()
         if not _HEX_64_RE.fullmatch(report_data):
             raise ValueError("SecretAI CPU report_data is not exactly 64 bytes")

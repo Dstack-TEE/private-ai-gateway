@@ -180,39 +180,11 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
-        if upstream.provider == UpstreamProvider::SecretAi {
-            if !valid_secret_ai_origin(&upstream.base_url) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
-                    upstream.name
-                )));
-            }
-            if let Some(workload_ids) = upstream.accepted_workload_ids.as_ref() {
-                if workload_ids
-                    .iter()
-                    .any(|workload_id| workload_id.starts_with("secretvm:sev-snp:"))
-                    && upstream.minimum_sev_tcb.is_none()
-                {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
-                        "upstream {:?} accepts an SEV-SNP workload but has no minimum_sev_tcb",
-                        upstream.name
-                    )));
-                }
-            }
-            if upstream.minimum_sev_tcb.is_some_and(|minimum| {
-                minimum.boot_loader == 0
-                    && minimum.tee == 0
-                    && minimum.snp == 0
-                    && minimum.microcode == 0
-            }) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} minimum_sev_tcb must not be all zero",
-                    upstream.name
-                )));
-            }
-        } else if upstream.minimum_sev_tcb.is_some() {
+        if upstream.provider == UpstreamProvider::SecretAi
+            && !valid_secret_ai_origin(&upstream.base_url)
+        {
             return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} has minimum_sev_tcb but provider is not secret-ai",
+                "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
         }
