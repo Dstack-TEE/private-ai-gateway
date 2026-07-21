@@ -24,7 +24,9 @@ use futures_util::Stream;
 use serde_json::Value;
 use tokio::time::{sleep, Sleep};
 
+use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use crate::sse_protocol::SseProtocol;
 
 use super::completion::{
     debug_gated_detail, detail_snippet, finish_reasons_anomalous, sanitize_identifier,
@@ -151,8 +153,16 @@ pub struct MeterStream {
     inner_done: bool,
     last_usage: Option<Value>,
     ttft_ms: Option<u64>,
+    /// Diagnostic: any sign the response reached an end, including a per-choice
+    /// `finish_reason`. Feeds the settle log and anomaly detection, not the
+    /// outcome — the outcome comes from `framing`.
     saw_terminal: bool,
     saw_error: bool,
+    /// The client-facing outcome (Completed / Failed) is read from this shared
+    /// observer, byte-accurate about SSE framing, so it agrees with what the
+    /// finalizer does to the body. The line parse below stays for cost, TTFT and
+    /// diagnostics.
+    framing: crate::sse_framing::SseFramingObserver,
     settled: bool,
     // Observation state for the `request_outcome` settle log. Always
     // collected; the distinct-reason list is capped so a pathological stream
@@ -176,7 +186,7 @@ pub struct MeterStream {
 const MAX_REASONS: usize = 8;
 
 impl MeterStream {
-    pub fn new(inner: ServiceResponseStream, report: StreamReport) -> Self {
+    pub fn new(inner: ServiceResponseStream, report: StreamReport, protocol: SseProtocol) -> Self {
         let inject = report.pricing.as_ref().is_some_and(|p| !p.is_null());
         Self {
             inner,
@@ -189,6 +199,7 @@ impl MeterStream {
             ttft_ms: None,
             saw_terminal: false,
             saw_error: false,
+            framing: crate::sse_framing::SseFramingObserver::for_protocol(protocol),
             settled: false,
             data_events: 0,
             finish_reasons: Vec::new(),
@@ -199,6 +210,32 @@ impl MeterStream {
                 target: "request_outcome",
                 tracing::Level::DEBUG
             ),
+        }
+    }
+
+    /// What the stream amounts to, read from the shared framing observer so it
+    /// agrees with what the finalizer does to the body.
+    ///
+    /// A framing terminal settles it as completed regardless of how the body
+    /// ended — a transport error after the terminal does not override a
+    /// delivered response. Without one, a clean end of stream at an event
+    /// boundary is also completed on any surface: a provider that closed
+    /// normally has finished, whether or not it sent the terminator. A transport
+    /// error, or a partial or pending tail, is a failure. An in-band error is
+    /// always a failure.
+    fn protocol_outcome(&self, clean_eof: bool) -> Outcome {
+        let f = &self.framing;
+        // Two complementary error detectors: the meter's own parse catches
+        // error-shaped finish reasons; the framing observer catches framed
+        // errors (in-band `error`, `response.failed`, nested `response.error`).
+        // Either one fails the stream.
+        if self.saw_error || f.saw_error() {
+            Outcome::Failed
+        } else if f.saw_terminal() || (clean_eof && f.at_event_boundary() && f.observation_usable())
+        {
+            Outcome::Completed
+        } else {
+            Outcome::Failed
         }
     }
 
@@ -292,11 +329,21 @@ impl MeterStream {
             .get("response")
             .and_then(|r| r.get("status"))
             .and_then(Value::as_str);
-        if parsed.get("type").and_then(Value::as_str) == Some("message_stop") {
+        // Each terminal counts only on the surface that defines it. A stray
+        // event from another protocol is a diagnostic signal at most; treating
+        // it as end-of-stream would report a stream completed while the
+        // finalizer was appending a client-visible error to it.
+        let event_type = parsed.get("type").and_then(Value::as_str);
+        if event_type == Some("message_stop") {
             self.saw_terminal = true;
             self.terminal_marker.get_or_insert("message_stop");
         }
-        if matches!(response_status, Some("completed") | Some("incomplete")) {
+        let responses_terminal = matches!(response_status, Some("completed") | Some("incomplete"))
+            || matches!(
+                event_type,
+                Some("response.completed" | "response.incomplete" | "response.failed")
+            );
+        if responses_terminal {
             self.saw_terminal = true;
             self.terminal_marker.get_or_insert("response_status");
         }
@@ -390,12 +437,13 @@ impl MeterStream {
     // state for the report and inject cost. Returns `raw` verbatim unless a line
     // was rewritten (only rewritten runs are re-encoded).
     fn transform_lines(&mut self, raw: Vec<u8>) -> Bytes {
+        let text = String::from_utf8_lossy(&raw);
+        let lines: Vec<&str> = text.split('\n').collect();
         let rewritten: Option<String> = {
-            let text = String::from_utf8_lossy(&raw);
             let mut changed = false;
-            let out_lines: Vec<String> = text
-                .split('\n')
-                .map(|line| {
+            let out_lines: Vec<String> = lines
+                .iter()
+                .map(|&line| {
                     // TTFT: the first non-empty, non-comment line marks the first
                     // content delivered. Evaluated on complete lines only, so a
                     // comment (`:`-prefixed) split across chunks can't have its
@@ -481,47 +529,52 @@ impl Stream for MeterStream {
                 return Poll::Ready(None);
             }
             match this.inner.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(bytes))) => match this.process(&bytes) {
-                    Fed::Emit(out) => return Poll::Ready(Some(Ok(out))),
-                    // Only a partial line so far: poll again rather than emit a
-                    // fragment.
-                    Fed::NeedMore => {}
-                    // A single line blew past the cap: drop it and end as an
-                    // upstream failure rather than buffer or parse it.
-                    Fed::Overflow => {
-                        this.inner_done = true;
-                        this.buf.clear();
-                        if this.error_detail.is_none() {
-                            this.error_detail = Some("sse line overflow".to_string());
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.framing.observe(&bytes);
+                    match this.process(&bytes) {
+                        Fed::Emit(out) => return Poll::Ready(Some(Ok(out))),
+                        // Only a partial line so far: poll again rather than emit a
+                        // fragment.
+                        Fed::NeedMore => {}
+                        // A single line blew past the cap: drop it and end as an
+                        // upstream failure rather than buffer or parse it.
+                        Fed::Overflow => {
+                            this.inner_done = true;
+                            this.buf.clear();
+                            if this.error_detail.is_none() {
+                                this.error_detail = Some("sse line overflow".to_string());
+                            }
+                            let outcome = this.protocol_outcome(false);
+                            this.settle(outcome);
+                            return Poll::Ready(Some(Err(ServiceError::Upstream(
+                                UpstreamError::Transport("sse line overflow".to_string()),
+                            ))));
                         }
-                        this.settle(Outcome::Failed);
-                        return Poll::Ready(None);
                     }
-                },
-                // An upstream break ends the client stream cleanly and records a
-                // failure rather than propagating the error downstream. The
-                // truncated residual is dropped, never parsed (a partial line
-                // must not synthesize a spurious terminal marker).
+                }
+                // The truncated residual is dropped, never parsed (a partial
+                // line must not synthesize a spurious terminal marker). The
+                // error is passed on for the wrapper above to turn into a
+                // client-visible one; it never reaches hyper.
                 Poll::Ready(Some(Err(err))) => {
                     this.inner_done = true;
                     this.buf.clear();
                     if this.error_detail.is_none() {
                         this.error_detail = Some(detail_snippet(err.to_string().as_bytes()));
                     }
-                    this.settle(Outcome::Failed);
-                    return Poll::Ready(None);
+                    let outcome = this.protocol_outcome(false);
+                    this.settle(outcome);
+                    return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
-                    // Parse the final unterminated line (if any) before settling so
-                    // a usage or terminal marker in it is still counted, then emit
-                    // it so no client-visible bytes are lost.
+                    // Parse the final unterminated line (if any) so a usage
+                    // marker in it is still counted, then emit it so no
+                    // client-visible bytes are lost. A clean end completes only
+                    // where the framing observer says the finalizer can — that
+                    // check lives in `protocol_outcome`.
                     let residual = this.flush();
-                    let outcome = if this.saw_terminal && !this.saw_error {
-                        Outcome::Completed
-                    } else {
-                        Outcome::Failed
-                    };
+                    let outcome = this.protocol_outcome(true);
                     this.settle(outcome);
                     return match residual {
                         Some(out) => Poll::Ready(Some(Ok(out))),
@@ -623,7 +676,157 @@ mod tests {
         assert_eq!(metered_status(Outcome::ClientClosed, 200), 499);
     }
 
+    // A clean end of stream and a transport error are the dividing line, not a
+    // per-choice finish reason. Chat completes on a clean end even without
+    // `[DONE]` (the gateway supplies it); a transport error without `[DONE]` is
+    // a failure whatever content preceded it.
+    #[tokio::test]
+    async fn the_outcome_turns_on_clean_end_versus_transport_error() {
+        // Feed one chunk, then either end cleanly or break; return the outcome.
+        async fn outcome(first: &'static [u8], broken: bool) -> Outcome {
+            let mut meter = test_meter();
+            let mut chunks: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from_static(first))];
+            if broken {
+                chunks.push(Err(ServiceError::Metrics("dropped".to_string())));
+            }
+            meter.inner = Box::pin(futures_util::stream::iter(chunks));
+            let mut errored = false;
+            while let Some(chunk) = futures_util::StreamExt::next(&mut meter).await {
+                if chunk.is_err() {
+                    errored = true;
+                    break;
+                }
+            }
+            meter.protocol_outcome(!errored)
+        }
+
+        let finish = b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
+        let content = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+
+        // Clean end: chat completes with or without a finish reason.
+        assert_eq!(
+            outcome(b"data: [DONE]\n\n", false).await,
+            Outcome::Completed
+        );
+        assert_eq!(outcome(finish, false).await, Outcome::Completed);
+        assert_eq!(
+            outcome(content, false).await,
+            Outcome::Completed,
+            "a chat provider that closed normally has finished"
+        );
+
+        // Transport error: only a delivered `[DONE]` keeps it completed.
+        assert_eq!(outcome(b"data: [DONE]\n\n", true).await, Outcome::Completed);
+        assert_eq!(
+            outcome(finish, true).await,
+            Outcome::Failed,
+            "a finish reason does not rescue a broken connection"
+        );
+        assert_eq!(outcome(content, true).await, Outcome::Failed);
+    }
+
+    // A clean end settles the chat surface as complete only at an event
+    // boundary — the same point the finalizer supplies the missing `[DONE]`. A
+    // partial line or a pending event (a `data:` line not closed by a blank
+    // line) is a truncation and stays Failed.
+    // An error the stream reported is a failure however it is framed — even
+    // alongside the protocol's terminal. A `response.failed` event, or an
+    // error-shaped finish reason followed by `[DONE]`, must not settle Completed.
+    #[tokio::test]
+    async fn a_reported_error_fails_the_outcome_even_with_a_terminal() {
+        async fn drain(meter: &mut MeterStream) -> Outcome {
+            while futures_util::StreamExt::next(meter).await.is_some() {}
+            meter.protocol_outcome(true)
+        }
+
+        let mut responses = test_meter_for(crate::sse_protocol::SseProtocol::OpenaiResponses);
+        responses.inner = Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+            b"data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"error\":{\"message\":\"x\"}}}\n\n",
+        ))]));
+        assert_eq!(
+            drain(&mut responses).await,
+            Outcome::Failed,
+            "response.failed is not a completed response"
+        );
+
+        // Anthropic→OpenAI transforms an upstream error into an error finish
+        // reason plus `[DONE]`; the terminal must not mask it.
+        let mut chat = test_meter();
+        chat.inner = Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+            b"data: {\"choices\":[{\"finish_reason\":\"upstream_error\"}]}\n\ndata: [DONE]\n\n",
+        ))]));
+        assert_eq!(
+            drain(&mut chat).await,
+            Outcome::Failed,
+            "an error finish reason fails even with [DONE]"
+        );
+    }
+
+    // A clean end of stream at an event boundary completes on every surface —
+    // a provider that closed normally has finished, terminator sent or not.
+    #[tokio::test]
+    async fn a_clean_end_completes_on_every_surface() {
+        use crate::sse_protocol::SseProtocol;
+        for (protocol, chunk) in [
+            (
+                SseProtocol::OpenaiChat,
+                &b"data: {\"choices\":[{\"delta\":{}}]}\n\n"[..],
+            ),
+            (
+                SseProtocol::AnthropicMessages,
+                &b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"[..],
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                &b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1}\n\n"[..],
+            ),
+        ] {
+            let mut meter = test_meter_for(protocol);
+            meter.inner = Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from(chunk))]));
+            while futures_util::StreamExt::next(&mut meter).await.is_some() {}
+            assert_eq!(
+                meter.protocol_outcome(true),
+                Outcome::Completed,
+                "{protocol:?} clean end at a boundary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_clean_eof_completes_only_at_an_event_boundary() {
+        async fn eof_outcome(chunk: &'static [u8]) -> Outcome {
+            let mut meter = test_meter();
+            meter.inner = Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+                chunk,
+            ))]));
+            while futures_util::StreamExt::next(&mut meter).await.is_some() {}
+            // A clean end: whether it completes is decided inside
+            // `protocol_outcome` from the framing observer's boundary state.
+            meter.protocol_outcome(true)
+        }
+
+        assert_eq!(
+            eof_outcome(b"data: {\"choices\":[{\"delta\":{}}]}\n\n").await,
+            Outcome::Completed,
+            "a complete event, cleanly ended, is completable"
+        );
+        assert_eq!(
+            eof_outcome(b"data: {\"choices\":[{\"delta\":{}}]}\n").await,
+            Outcome::Failed,
+            "an event never closed by a blank line is pending, not complete"
+        );
+        assert_eq!(
+            eof_outcome(b"data: {\"choices\":[").await,
+            Outcome::Failed,
+            "a partial line is a truncation"
+        );
+    }
+
     fn test_meter() -> MeterStream {
+        test_meter_for(crate::sse_protocol::SseProtocol::OpenaiChat)
+    }
+
+    fn test_meter_for(protocol: crate::sse_protocol::SseProtocol) -> MeterStream {
         let control = ControlClient::new(&MiddlewareConfig {
             control_url: "http://control.invalid".to_string(),
             control_token: None,
@@ -649,7 +852,7 @@ mod tests {
             settled: Arc::new(AtomicBool::new(false)),
         };
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::empty());
-        MeterStream::new(inner, report)
+        MeterStream::new(inner, report, protocol)
     }
 
     // Observation state: finish reasons are collected distinct and in order,

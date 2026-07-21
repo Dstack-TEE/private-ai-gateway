@@ -16,6 +16,7 @@ use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::{json, Value};
 
+use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::Endpoint;
@@ -740,6 +741,11 @@ pub struct SseTransformStream {
     reader: SseEventReader,
     queue: VecDeque<Bytes>,
     inner_done: bool,
+    // Why the stream ended, when it ended badly. Held until the queue drains so
+    // events completed before the failure still reach the client, then yielded
+    // as the final item. Ending on a plain `None` would instead read downstream
+    // as a clean end-of-stream.
+    pending_error: Option<ServiceError>,
 }
 
 impl SseTransformStream {
@@ -753,7 +759,17 @@ impl SseTransformStream {
             reader: SseEventReader::default(),
             queue: VecDeque::new(),
             inner_done: false,
+            pending_error: None,
         }
+    }
+
+    // A transform-side failure is still an upstream failure: the provider sent
+    // bytes this surface cannot represent.
+    fn fail(&mut self, reason: &'static str) {
+        self.inner_done = true;
+        self.pending_error.get_or_insert_with(|| {
+            ServiceError::Upstream(UpstreamError::Transport(reason.to_string()))
+        });
     }
 
     // Returns false if the transform rejected the event (unparseable provider
@@ -784,7 +800,8 @@ impl Stream for SseTransformStream {
                 return Poll::Ready(Some(Ok(bytes)));
             }
             if this.inner_done {
-                return Poll::Ready(None);
+                // The queue is drained; surface why the stream ended, once.
+                return Poll::Ready(this.pending_error.take().map(Err));
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
@@ -794,28 +811,39 @@ impl Stream for SseTransformStream {
                     let overflowed = this.reader.push_chunk(&bytes, &mut events).is_err();
                     for event in &events {
                         if !this.emit(event) {
-                            this.inner_done = true;
+                            this.fail("provider sent an event this surface cannot represent");
                             break;
                         }
                     }
                     if overflowed {
-                        this.inner_done = true;
+                        this.fail("provider SSE event exceeded the size cap");
                     }
                     // loop to flush the queue or poll again
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
                     // Flush a residual event once (no trailing blank line).
+                    // Deliberate cross-format framing normalization: a final
+                    // event whose lines are complete but which the upstream
+                    // never closed with a blank line is salvaged and re-framed,
+                    // rather than dropped as WHATWG would at EOF. Delivering a
+                    // valid last event beats losing it; a truncated (unparseable)
+                    // one still fails in `emit`. A byte passthrough cannot do
+                    // this, so the two paths differ for this one malformed shape.
                     if let Some(event) = this.reader.finish() {
-                        this.emit(&event);
+                        if !this.emit(&event) {
+                            this.fail("provider sent an event this surface cannot represent");
+                        }
                     }
-                    // loop to drain any queued output, then return None.
+                    // loop to drain any queued output, then end.
                 }
                 // On an upstream error, end without flushing the (truncated)
                 // residual, so a partial event can't synthesize a spurious
-                // terminal marker.
-                Poll::Ready(Some(Err(_))) => {
+                // terminal marker. The error itself is propagated: swallowing
+                // it would read downstream as a clean end-of-stream.
+                Poll::Ready(Some(Err(err))) => {
                     this.inner_done = true;
+                    this.pending_error.get_or_insert(err);
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -843,9 +871,14 @@ mod tests {
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
         let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        assert!(
+            collected.last().expect("stream yielded items").is_err(),
+            "a malformed event ends the stream as an error, not a clean EOF"
+        );
         let text: String = collected
             .iter()
+            .filter_map(|r| r.as_ref().ok())
             .map(|b| String::from_utf8_lossy(b).into_owned())
             .collect();
         assert!(text.contains("chat.completion.chunk"));
@@ -1042,8 +1075,9 @@ mod tests {
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
         let stream = SseTransformStream::new(inner, StreamTransform::OpenaiToAnthropicMessages);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
-        assert!(collected.is_empty(), "capped stream emits nothing further");
+        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        assert_eq!(collected.len(), 1, "no payload, only the failure");
+        assert!(collected[0].is_err(), "and not a clean EOF");
     }
 
     // Replay a fixture's input events through the transform (fixed fallback id),

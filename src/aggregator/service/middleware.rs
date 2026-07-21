@@ -9,7 +9,7 @@ use super::helpers::{
 };
 use super::streaming::{
     E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
-    MiddlewareResponseFinalizingStream, SseChatIdParser,
+    MiddlewareResponseFinalizingStream,
 };
 use super::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
@@ -23,6 +23,7 @@ use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifie
 use crate::aci::upstream::{UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
+use crate::sse_framing::SseFramingObserver;
 use std::collections::HashMap;
 
 // Provider statuses that make this candidate worth abandoning for the next one.
@@ -494,10 +495,10 @@ impl AciService {
     ) -> Result<MiddlewareReceiptFinalization, ServiceError> {
         let is_sse = is_sse_content_type(content_type);
         if is_sse {
-            let mut parser = SseChatIdParser::default();
+            let mut parser = SseFramingObserver::identifiers_only();
             parser.observe(final_cleartext_body);
-            if parser.chat_id.is_some() {
-                draft.builder.set_chat_id(parser.chat_id);
+            if parser.chat_id().is_some() {
+                draft.builder.set_chat_id(parser.chat_id());
             }
         } else if let Some(chat_id) = extract_chat_id(final_cleartext_body) {
             draft.builder.set_chat_id(Some(chat_id));
@@ -566,6 +567,7 @@ impl AciService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finalize_middleware_response_stream(
         &self,
         journal: MiddlewareReceiptJournal,
@@ -574,6 +576,7 @@ impl AciService {
         content_type: Option<&str>,
         requester: Option<ReceiptOwner>,
         e2ee: Option<E2eeRequestContext>,
+        request_id: Option<String>,
     ) -> Result<MiddlewareStreamFinalization, ServiceError> {
         let is_sse = is_sse_content_type(content_type);
         if e2ee.is_some() && !is_sse {
@@ -594,6 +597,8 @@ impl AciService {
             endpoint_path.to_string(),
             e2ee_transformer,
             e2ee_response.is_some(),
+            request_id,
+            is_sse,
         );
         Ok(MiddlewareStreamFinalization {
             body: Box::pin(body),
