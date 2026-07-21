@@ -284,6 +284,43 @@ pub fn image_input_error_parts(
     ))
 }
 
+/// Marker substring an upstream uses to signal it has no available capacity or
+/// targets to serve the request. Matched raw against the error body because the
+/// message can sit outside the usual `error`/`error.message` fields.
+const UPSTREAM_CAPACITY_MARKER: &[u8] = b"exhausted all available targets";
+
+/// The client-facing `(status, envelope bytes)` for an upstream capacity signal,
+/// or `None` when the upstream error is not one. An upstream reporting it has no
+/// available capacity/targets is busy, not faulty: surface it as `429`
+/// (rate-limited) rather than a `5xx` outage, so it is treated as load, not an
+/// error. Peer to [`image_input_error_parts`] — both remap a recognized upstream
+/// error body to a specific client status.
+fn capacity_error_parts(
+    surface: Surface,
+    upstream_status: u16,
+    upstream_body: &[u8],
+    request_id: Option<&str>,
+) -> Option<(u16, Vec<u8>)> {
+    if !(500..600).contains(&upstream_status) {
+        return None;
+    }
+    if !upstream_body
+        .windows(UPSTREAM_CAPACITY_MARKER.len())
+        .any(|w| w == UPSTREAM_CAPACITY_MARKER)
+    {
+        return None;
+    }
+    Some((
+        429,
+        envelope_bytes(
+            surface,
+            error_type(surface, 429),
+            upstream_message(429),
+            request_id,
+        ),
+    ))
+}
+
 /// Normalize a non-2xx upstream response into the client-facing status and the
 /// surface-shaped error body bytes. For actionable client errors the provider's
 /// own message is re-wrapped at the original status; everything else gets a
@@ -300,6 +337,10 @@ pub fn normalize_upstream_error_parts(
     if let Some(parts) =
         image_input_error_parts(surface, received_body, upstream_status, body, request_id)
     {
+        return parts;
+    }
+    // A provider signalling it is out of capacity is busy, not broken: 429, not 5xx.
+    if let Some(parts) = capacity_error_parts(surface, upstream_status, body, request_id) {
         return parts;
     }
     if is_actionable_client_error(upstream_status) {
@@ -450,6 +491,34 @@ mod tests {
             body["error"]["message"],
             json!("The upstream provider returned an error")
         );
+    }
+
+    #[tokio::test]
+    async fn capacity_exhaustion_5xx_remaps_to_429() {
+        // An upstream 5xx that reports it has no available capacity/targets is a
+        // busy signal (the message sits under `detail`, outside the usual
+        // `error` field): the client sees 429 (rate-limited), not a 502 outage.
+        let (status, body) = response_json(normalize_upstream_error(
+            Surface::Openai,
+            500,
+            br#"{"detail":"exhausted all available targets to no avail"}"#,
+            b"",
+            None,
+        ))
+        .await;
+        assert_eq!(status, 429);
+        assert_eq!(body["error"]["type"], json!("rate_limit_error"));
+
+        // Regression guard: a plain 500 without the marker still maps to 502.
+        let (status, _) = response_json(normalize_upstream_error(
+            Surface::Openai,
+            500,
+            br#"{"error":{"message":"kaboom"}}"#,
+            b"",
+            None,
+        ))
+        .await;
+        assert_eq!(status, 502);
     }
 
     #[test]
