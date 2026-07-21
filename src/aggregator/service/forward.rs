@@ -82,6 +82,16 @@ pub(super) fn attested_route_eligible(is_tee: Option<bool>) -> bool {
     is_tee == Some(true)
 }
 
+/// A request's `provider.aci_session_ids` allowlist, carried with the model id
+/// to name if it cannot be satisfied. The label travels with the ids so every
+/// path reports the model the caller asked for, including the reverify path,
+/// which has only the prepared (upstream-renamed) request to hand.
+#[derive(Clone, Copy)]
+pub(super) struct AciSessionPin<'a> {
+    pub ids: &'a [String],
+    pub requested_model: &'a str,
+}
+
 impl AciService {
     pub async fn forward_chat_completion(
         &self,
@@ -141,6 +151,10 @@ impl AciService {
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
         let upstream_required =
             self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
+        let pin = AciSessionPin {
+            ids: &req.aci_session_ids,
+            requested_model: req.context.user_model.as_deref().unwrap_or_default(),
+        };
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -148,11 +162,7 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
-        self.apply_aci_session_constraint(
-            &mut recorded_event,
-            &req.aci_session_ids,
-            &prepared.model_id,
-        )?;
+        self.apply_aci_session_constraint(&mut recorded_event, pin)?;
 
         let upstream_response = match self
             .forward_with_binding_reverify(
@@ -160,7 +170,7 @@ impl AciService {
                 &mut recorded_event,
                 upstream_required,
                 caller_supplied_upstream_event,
-                &req.aci_session_ids,
+                pin,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -326,6 +336,10 @@ impl AciService {
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
         let upstream_required =
             self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
+        let pin = AciSessionPin {
+            ids: &req.aci_session_ids,
+            requested_model: req.context.user_model.as_deref().unwrap_or_default(),
+        };
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -333,11 +347,7 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
-        self.apply_aci_session_constraint(
-            &mut recorded_event,
-            &req.aci_session_ids,
-            &prepared.model_id,
-        )?;
+        self.apply_aci_session_constraint(&mut recorded_event, pin)?;
 
         let upstream_response = match self
             .forward_with_binding_reverify(
@@ -345,7 +355,7 @@ impl AciService {
                 &mut recorded_event,
                 upstream_required,
                 caller_supplied_upstream_event,
-                &req.aci_session_ids,
+                pin,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -543,7 +553,7 @@ impl AciService {
         recorded_event: &mut UpstreamVerifiedEvent,
         upstream_required: Option<bool>,
         caller_supplied_event: bool,
-        aci_session_ids: &[String],
+        pin: AciSessionPin<'_>,
         always_invalidate_on_mismatch: bool,
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
@@ -568,11 +578,7 @@ impl AciService {
                         .await
                     {
                         Ok(mut event) => {
-                            if let Err(err) = self.apply_aci_session_constraint(
-                                &mut event,
-                                aci_session_ids,
-                                &prepared.model_id,
-                            ) {
+                            if let Err(err) = self.apply_aci_session_constraint(&mut event, pin) {
                                 return ReverifyOutcome::RefreshFailed(err);
                             }
                             *recorded_event = event;
@@ -729,15 +735,14 @@ impl AciService {
     pub(super) fn apply_aci_session_constraint(
         &self,
         event: &mut UpstreamVerifiedEvent,
-        allowed_ids: &[String],
-        model_id: &str,
+        pin: AciSessionPin<'_>,
     ) -> Result<(), ServiceError> {
-        if allowed_ids.is_empty() {
+        if pin.ids.is_empty() {
             return Ok(());
         }
 
         let sealed = self.record_attested_upstream_session(event)?;
-        let allowed_ids: HashSet<&str> = allowed_ids.iter().map(String::as_str).collect();
+        let allowed_ids: HashSet<&str> = pin.ids.iter().map(String::as_str).collect();
         let allowed_bindings: Vec<ChannelBinding> = event
             .channel_bindings
             .iter()
@@ -752,7 +757,9 @@ impl AciService {
 
         if allowed_bindings.is_empty() {
             return Err(ServiceError::UpstreamVerification(
-                UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
+                UpstreamVerificationError::NoEligibleAttestedSession(
+                    pin.requested_model.to_string(),
+                ),
             ));
         }
         event.channel_bindings = allowed_bindings;

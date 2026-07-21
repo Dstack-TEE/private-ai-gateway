@@ -96,7 +96,9 @@ impl UpstreamBackend for TeeAwareUpstream {
         Ok(PreparedUpstreamRequest {
             upstream_name: self.name().to_string(),
             url_origin: self.url_origin().map(str::to_string),
-            model_id: "gpt-test".to_string(),
+            // Renamed like a real router does, so a test can tell the
+            // requested model from the upstream's own name.
+            model_id: "upstream-model".to_string(),
             is_tee: Some(route_id.starts_with("tee-")),
             route_id: Some(route_id),
             request: req,
@@ -908,11 +910,14 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         )
         .await;
     match result {
+        // The model named is the one the caller asked for. The upstream renames
+        // it (here to "upstream-model"), and reporting that name instead would
+        // hand the caller an id they never sent and cannot look up.
         Ok(MiddlewareForwardResult::AllFailed(failure)) => assert!(matches!(
-            failure.error,
+            &failure.error,
             ServiceError::UpstreamVerification(
-                UpstreamVerificationError::NoEligibleAttestedSession(_)
-            )
+                UpstreamVerificationError::NoEligibleAttestedSession(model)
+            ) if model == "gpt-test"
         )),
         _ => panic!("an unavailable session must fail closed"),
     }

@@ -3,7 +3,9 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
-use super::forward::{attested_route_eligible, cite_served_session, ReverifyOutcome};
+use super::forward::{
+    attested_route_eligible, cite_served_session, AciSessionPin, ReverifyOutcome,
+};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -295,6 +297,13 @@ impl AciService {
         // failures (prepare/verification/transport) record 502.
         let mut failed_attempts: Vec<(String, u16)> = Vec::new();
 
+        // The session allowlist, labelled with the model the caller asked for so
+        // a pin miss names that rather than the upstream's own model id.
+        let pin = AciSessionPin {
+            ids: &req.aci_session_ids,
+            requested_model: user_model.as_deref().unwrap_or_default(),
+        };
+
         // The most recent candidate that actually answered, held back in case
         // nothing better follows. See [`RetainedResponse`].
         let mut retained: Option<RetainedResponse> = None;
@@ -366,11 +375,7 @@ impl AciService {
                 Err(err) => return Err(err),
             };
 
-            if let Err(err) = self.apply_aci_session_constraint(
-                &mut recorded_event,
-                &req.aci_session_ids,
-                &prepared.model_id,
-            ) {
+            if let Err(err) = self.apply_aci_session_constraint(&mut recorded_event, pin) {
                 if matches!(
                     err,
                     ServiceError::UpstreamVerification(
@@ -392,7 +397,7 @@ impl AciService {
                         &mut recorded_event,
                         candidate_required,
                         caller_supplied_upstream_event,
-                        &req.aci_session_ids,
+                        pin,
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
@@ -524,7 +529,7 @@ impl AciService {
                     &mut recorded_event,
                     candidate_required,
                     caller_supplied_upstream_event,
-                    &req.aci_session_ids,
+                    pin,
                     // Failover path: flush a possibly-stale binding on any
                     // terminal mismatch so the next candidate/request re-verifies.
                     true,
