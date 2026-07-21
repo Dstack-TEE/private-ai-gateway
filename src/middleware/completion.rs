@@ -682,7 +682,13 @@ pub async fn run(
                     Some(transform) => Box::pin(SseTransformStream::new(forward.body, transform)),
                     None => forward.body,
                 };
-            let metered: ServiceResponseStream = Box::pin(MeterStream::new(transformed, report));
+            let metered: ServiceResponseStream = Box::pin(MeterStream::new(
+                transformed,
+                report,
+                errors::sse_protocol(endpoint_path),
+            ));
+            // A failure anywhere below reaches the finalizer, which holds the
+            // protocol state needed to decide whether the client can be told.
             let kept: ServiceResponseStream = Box::pin(KeepAliveStream::new(metered, keepalive));
 
             let receipt_id = journal.peek_receipt_id();
@@ -693,6 +699,7 @@ pub async fn run(
                 Some(&content_type),
                 requester,
                 e2ee,
+                Some(request_id.clone()),
             ) {
                 Ok(finalized) => {
                     let status =

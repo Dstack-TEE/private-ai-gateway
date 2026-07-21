@@ -13,15 +13,16 @@ use crate::aggregator::session::{
 
 use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
+use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
 use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
 use super::{
-    AciService, ChatCompletionRequest, E2eeResponseInfo, ForwardResult, GatewayRequestContext,
-    ReceiptOwner, ServiceError, StreamingForwardResult, StreamingForwardStream,
-    StreamingUpstreamError, UpstreamVerificationError, UpstreamVerificationRequest,
-    CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
+    AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo, ForwardResult,
+    GatewayRequestContext, ReceiptOwner, ServiceError, StreamingForwardResult,
+    StreamingForwardStream, StreamingUpstreamError, UpstreamVerificationError,
+    UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
 };
 
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
@@ -272,6 +273,7 @@ impl AciService {
             req.e2ee.as_ref().is_some(),
         );
         let target_route_id = req.context.target_route_id.clone();
+        let request_id = req.context.request_id.clone();
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
@@ -369,6 +371,23 @@ impl AciService {
             cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
         Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
 
+        // This is the streaming entry point, so a response with no declared
+        // media type is taken to be an event stream — the same assumption the
+        // middleware path makes. Only a header that says otherwise turns the
+        // protocol observation off.
+        let is_sse = upstream_response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .is_none_or(|(_, value)| is_sse_content_type(Some(value)));
+        // E2EE stream encryption only knows how to encrypt SSE event payloads. A
+        // non-SSE body (an upstream that answered `application/json`) cannot be
+        // encrypted, and must not be returned in the clear or signed as if it
+        // were — the middleware path rejects the same combination.
+        if req.e2ee.is_some() && !is_sse {
+            return Err(ServiceError::E2ee(E2eeError::EncryptionFailed));
+        }
+
         let e2ee_response = req.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
@@ -387,6 +406,8 @@ impl AciService {
             endpoint_path.to_string(),
             e2ee_transformer,
             response_modified,
+            Some(request_id),
+            is_sse,
         );
 
         Ok(StreamingForwardResult::Stream(StreamingForwardStream {

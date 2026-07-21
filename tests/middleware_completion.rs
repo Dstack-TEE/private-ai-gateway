@@ -25,7 +25,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::middleware::control::ControlClient;
-use private_ai_gateway::middleware::errors::Surface;
+use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
 use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
@@ -432,7 +432,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         Ok(Bytes::from("data: [DONE]\n\n")),
     ];
     let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let metered = MeterStream::new(inner, report);
+    let metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
     let collected: Vec<Bytes> = metered.map(|r| r.unwrap()).collect().await;
     let text: String = collected
         .iter()
@@ -708,7 +708,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         ))];
     let inner: ServiceResponseStream =
         Box::pin(futures_util::stream::iter(events).chain(futures_util::stream::pending()));
-    let mut metered = MeterStream::new(inner, report);
+    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
     let first = metered.next().await;
     assert!(first.is_some(), "meter must have started streaming");
 
@@ -765,7 +765,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
             "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
         ))];
     let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report);
+    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
     while metered.next().await.is_some() {}
     assert!(
         settled.load(std::sync::atomic::Ordering::Relaxed),

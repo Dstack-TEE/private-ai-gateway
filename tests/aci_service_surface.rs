@@ -122,6 +122,9 @@ struct RecordingUpstream {
     stream_status: u16,
     stream_headers: HashMap<String, String>,
     stream_chunks: Vec<Bytes>,
+    /// When set, the body yields the chunks and then this transport error,
+    /// standing in for a connection that dropped mid-stream.
+    stream_error: Option<String>,
 }
 
 impl Default for RecordingUpstream {
@@ -138,6 +141,7 @@ impl Default for RecordingUpstream {
                 Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"lo\"}\n\n"),
                 Bytes::from_static(b"data: [DONE]\n\n"),
             ],
+            stream_error: None,
         }
     }
 }
@@ -159,6 +163,25 @@ impl RecordingUpstream {
             stream_chunks,
             ..Self::default()
         }
+    }
+
+    fn with_stream_chunks_then_error(stream_chunks: Vec<Bytes>) -> Self {
+        Self {
+            stream_chunks,
+            stream_error: Some("connection reset".to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn without_content_type(mut self) -> Self {
+        self.stream_headers.remove("content-type");
+        self
+    }
+
+    fn with_content_type(mut self, content_type: &str) -> Self {
+        self.stream_headers
+            .insert("content-type".to_string(), content_type.to_string());
+        self
     }
 }
 
@@ -192,7 +215,14 @@ impl UpstreamBackend for RecordingUpstream {
         Ok(UpstreamStreamResponse {
             status_code: self.stream_status,
             headers: self.stream_headers.clone(),
-            body: Box::pin(stream::iter(self.stream_chunks.clone().into_iter().map(Ok))),
+            body: {
+                let ok = self.stream_chunks.clone().into_iter().map(Ok);
+                let tail = self
+                    .stream_error
+                    .clone()
+                    .map(|message| Err(UpstreamError::Transport(message)));
+                Box::pin(stream::iter(ok.chain(tail)))
+            },
             served_instance_id: None,
         })
     }
@@ -286,6 +316,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
             stream_chunks: vec![Bytes::from_static(
                 br#"{"error":{"message":"Invalid request parameters","type":"invalid_request_error","code":400}}"#,
             )],
+            stream_error: None,
         },
     )
 }
@@ -1229,6 +1260,346 @@ async fn streaming_chat_completion_hashes_complete_ordered_stream() {
     assert_eq!(
         receipt_event(&receipt, "response.returned")["wire_hash"],
         sha256_hex(&resp.body)
+    );
+}
+
+// An OpenAI chat upstream that closes normally without ever sending `[DONE]`
+// has finished, not truncated: `[DONE]` is a fixed marker the gateway can
+// supply. It completes the framing rather than injecting an error, and because
+// that happens inside the finalizer the receipt commits to exactly the bytes
+// the client received — appended terminator included.
+#[tokio::test]
+async fn a_chat_stream_missing_done_is_completed_inside_the_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
+        Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"lo\"}\n\n"),
+    ]));
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            &[],
+        )
+        .await;
+
+    assert_eq!(resp.status, StatusCode::OK);
+    let body = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !body.contains("\"error\""),
+        "a clean close is not an error: {body}"
+    );
+    assert!(
+        body.ends_with("data: [DONE]\n\n"),
+        "the missing terminator is supplied: {body}"
+    );
+
+    // The receipt covers the appended terminator, not just what the upstream
+    // sent, and a clean stream is signed.
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(
+        receipt_event(&receipt, "response.returned")["wire_hash"],
+        sha256_hex(&resp.body)
+    );
+    assert!(
+        receipt
+            .event_log
+            .iter()
+            .any(|event| event.event_type == "transparency.response_modified"),
+        "the gateway added the terminator the upstream never sent"
+    );
+}
+
+// An Anthropic stream that closes cleanly without `message_stop` has finished,
+// so it is completed and signed — but the gateway appends nothing: fabricating
+// a `message_stop` would assert an end the upstream never sent. The client gets
+// exactly what the upstream sent, then EOF, as litellm's Anthropic passthrough
+// also does.
+#[tokio::test]
+async fn an_anthropic_stream_missing_message_stop_is_completed_without_a_tail() {
+    let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
+        ),
+    ]));
+    let resp = h
+        .requester
+        .post(
+            "/v1/messages",
+            br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            &[],
+        )
+        .await;
+
+    let body = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !body.contains("event: error"),
+        "a clean close is not an error: {body}"
+    );
+    assert!(
+        !body.contains("message_stop"),
+        "no terminal is fabricated: {body}"
+    );
+    assert!(
+        body.ends_with("data: {\"type\":\"content_block_delta\"}\n\n"),
+        "nothing appended: {body}"
+    );
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(
+        receipt_event(&receipt, "response.returned")["wire_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+// A Responses stream that closes without `response.completed` also completes,
+// but its terminal carries the final response object and cannot be fabricated,
+// so nothing is appended — no error, and the receipt covers the bytes as sent.
+#[tokio::test]
+async fn a_responses_stream_missing_its_terminal_is_completed_without_a_tail() {
+    let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"delta\":\"hi\"}\n\n",
+        ),
+    ]));
+    let resp = h
+        .requester
+        .post(
+            "/v1/responses",
+            br#"{"model":"aci-model","stream":true,"input":"hi"}"#,
+            &[],
+        )
+        .await;
+
+    let body = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !body.contains("\"error\""),
+        "a clean close is not an error: {body}"
+    );
+    assert!(
+        body.ends_with("\"delta\":\"hi\"}\n\n"),
+        "nothing appended (the terminal cannot be fabricated): {body}"
+    );
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    assert!(
+        h.service.get_receipt_by_receipt_id(receipt_id).is_some(),
+        "a clean end is signed"
+    );
+}
+
+// An error-shaped finish reason without `[DONE]`, then a clean end, must not be
+// stamped with a success terminator: the finalizer detects the error (as the
+// meter does) and appends nothing, so a signed receipt never frames an upstream
+// error as a completed response.
+#[tokio::test]
+async fn an_error_finish_reason_is_not_completed_with_done() {
+    let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(b"data: {\"choices\":[{\"finish_reason\":\"upstream_error\"}]}\n\n"),
+    ]));
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            &[],
+        )
+        .await;
+
+    let body = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !body.contains("[DONE]"),
+        "no success terminator over an error: {body}"
+    );
+    assert!(
+        body.ends_with("\"finish_reason\":\"upstream_error\"}]}\n\n"),
+        "nothing appended: {body}"
+    );
+}
+
+// A stream that ended mid-event is left alone: supplying the delimiter the
+// upstream never sent would dispatch a fragment the client would otherwise
+// discard, and it would fail on that instead of reading the error.
+// A transport failure reaches the finalizer, which holds the protocol state
+// that decides whether the client can still be told. It appends the error only
+// when the stream stopped on a complete event without its terminal; a stream
+// that already ended, or stopped mid-event, is left as it is.
+#[tokio::test]
+async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
+    struct Case {
+        name: &'static str,
+        path: &'static str,
+        request: &'static [u8],
+        chunks: Vec<Bytes>,
+        expect_error: bool,
+        /// Substring the appended error must contain, when one is expected.
+        expect_in_error: &'static str,
+    }
+    let chat =
+        br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let responses = br#"{"model":"aci-model","stream":true,"input":"hi"}"#;
+    let cases = vec![
+        Case {
+            name: "already terminated, then the connection drops",
+            path: "/v1/chat/completions",
+            request: chat,
+            chunks: vec![
+                Bytes::from_static(b"data: {\"id\":\"c\",\"delta\":\"hi\"}\n\n"),
+                Bytes::from_static(b"data: [DONE]\n\n"),
+            ],
+            expect_error: false,
+            expect_in_error: "",
+        },
+        Case {
+            name: "content with no completion reason, then the connection drops",
+            path: "/v1/chat/completions",
+            request: chat,
+            chunks: vec![Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            )],
+            expect_error: true,
+            expect_in_error: "data: [DONE]",
+        },
+        Case {
+            // A finish reason does not rescue a broken connection: the transport
+            // failed, so the client is told, whatever content-level signal came
+            // before it.
+            name: "a finish reason, then the connection drops",
+            path: "/v1/chat/completions",
+            request: chat,
+            chunks: vec![Bytes::from_static(
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            )],
+            expect_error: true,
+            expect_in_error: "data: [DONE]",
+        },
+        Case {
+            name: "mid-event, then the connection drops",
+            path: "/v1/chat/completions",
+            request: chat,
+            chunks: vec![Bytes::from_static(b"data: {\"id\":\"c\",")],
+            expect_error: false,
+            expect_in_error: "",
+        },
+        Case {
+            // The error continues the event numbering rather than restarting
+            // it, which is why the finalizer builds it: only there is the last
+            // sequence known.
+            name: "responses stream drops after sequence 4",
+            path: "/v1/responses",
+            request: responses,
+            chunks: vec![Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\n",
+            )],
+            expect_error: true,
+            expect_in_error: "\"sequence_number\":5",
+        },
+    ];
+    for case in cases {
+        let h = harness_with_upstream(RecordingUpstream::with_stream_chunks_then_error(
+            case.chunks.clone(),
+        ));
+        let resp = h.requester.post(case.path, case.request, &[]).await;
+        let body = String::from_utf8(resp.body.clone()).unwrap();
+        assert_eq!(
+            body.contains("\"error\""),
+            case.expect_error,
+            "{}: {body:?}",
+            case.name
+        );
+        assert!(
+            body.contains(case.expect_in_error),
+            "{}: expected {:?} in {body:?}",
+            case.name,
+            case.expect_in_error
+        );
+        // A failed stream is never signed, however it ended: the reserved id
+        // is on the header, but no receipt is stored under it.
+        let receipt_id = header(&resp.headers, "x-receipt-id");
+        assert!(
+            h.service.get_receipt_by_receipt_id(receipt_id).is_none(),
+            "{}: a broken stream must not be bound to a receipt",
+            case.name
+        );
+    }
+}
+
+// The streaming entry point treats a response with no declared media type as an
+// event stream, so the missing chat terminator is still supplied on a clean end.
+#[tokio::test]
+async fn a_stream_without_a_content_type_is_still_observed() {
+    let h = harness_with_upstream(
+        RecordingUpstream::with_stream_chunks(vec![Bytes::from_static(
+            b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hi\"}\n\n",
+        )])
+        .without_content_type(),
+    );
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            &[],
+        )
+        .await;
+    let body = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(!body.contains("\"error\""), "{body}");
+    assert!(
+        body.ends_with("data: [DONE]\n\n"),
+        "the terminator is supplied: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_cut_mid_event_is_not_given_an_error() {
+    let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
+        Bytes::from_static(b"data: {\"id\":\"chat-stream-1\","),
+    ]));
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            br#"{"model":"aci-model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            &[],
+        )
+        .await;
+
+    assert_eq!(
+        resp.body,
+        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"id\":\"chat-stream-1\","
+    );
+}
+
+// E2EE stream encryption only knows how to encrypt SSE event payloads. An
+// upstream that answered `application/json` on a streaming request cannot be
+// encrypted, so the request is rejected rather than returned in the clear or
+// bound to a receipt — the same rule the middleware path enforces.
+#[tokio::test]
+async fn e2ee_streaming_rejects_a_non_sse_upstream_without_a_receipt() {
+    let h = harness_with_e2ee(
+        RecordingUpstream::with_stream_chunks(vec![Bytes::from_static(
+            br#"{"id":"chat-1","choices":[{"message":{"content":"hi"}}]}"#,
+        )])
+        .with_content_type("application/json"),
+    );
+    let client_secret = k256::SecretKey::from_slice(&[0x5b; 32]).unwrap();
+    let nonce = hex_nonce("nonce-json");
+    let (encrypted_body, headers) = e2ee_stream_request(&h, &client_secret, nonce.as_str());
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .await;
+
+    assert_ne!(
+        resp.status,
+        StatusCode::OK,
+        "the combination must be rejected"
+    );
+    assert!(
+        resp.headers.get("x-receipt-id").is_none(),
+        "a rejected E2EE response is not bound to a receipt"
     );
 }
 

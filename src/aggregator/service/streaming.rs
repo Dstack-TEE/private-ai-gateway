@@ -6,6 +6,9 @@ use bytes::Bytes;
 use futures_util::Stream;
 use sha2::{Digest, Sha256};
 
+use crate::sse_framing::SseFramingObserver;
+use crate::sse_protocol::{stream_error_tail, stream_success_terminator, SseProtocol};
+
 use super::e2ee_crypto::encrypt_e2ee_stream_payload;
 use super::{
     AciService, Clock, E2eeError, E2eeRequestContext, MiddlewareReceiptDraft,
@@ -23,7 +26,7 @@ pub(super) struct MiddlewareProviderResponseDraftingStream {
     provider_response_hasher: Sha256,
     receipt_id: String,
     endpoint_path: String,
-    sse_parser: SseChatIdParser,
+    sse_parser: SseFramingObserver,
     metrics: Arc<ServiceMetrics>,
     upstream_status: u16,
     upstream_ended: bool,
@@ -93,8 +96,8 @@ impl MiddlewareProviderResponseDraftingStream {
             journal,
             provider_response_hasher: Sha256::new(),
             receipt_id,
+            sse_parser: SseFramingObserver::identifiers_only(),
             endpoint_path,
-            sse_parser: SseChatIdParser::default(),
             metrics,
             upstream_status,
             upstream_ended: false,
@@ -107,9 +110,9 @@ impl MiddlewareProviderResponseDraftingStream {
             "sha256:{}",
             hex::encode(self.provider_response_hasher.clone().finalize())
         );
-        let response_model = self.sse_parser.model_id.clone();
+        let response_model = self.sse_parser.model_id();
         let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
-        builder.set_chat_id(self.sse_parser.chat_id.clone());
+        builder.set_chat_id(self.sse_parser.chat_id());
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received_hash(provider_response_hash.clone())?;
         self.journal.set(MiddlewareReceiptDraft {
@@ -145,10 +148,20 @@ struct FinalizerShared {
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
     endpoint_path: String,
-    sse_parser: SseChatIdParser,
+    sse_parser: SseFramingObserver,
     e2ee_transformer: Option<E2eeSseTransformer>,
+    request_id: Option<String>,
     upstream_ended: bool,
     finished: bool,
+    /// Set once the clean-EOF check has run, so the tail is considered exactly
+    /// once however many times the terminal branch is polled.
+    error_tail_settled: bool,
+    /// The gateway appended bytes the upstream never sent (a success
+    /// terminator, or a client-visible error).
+    synthesized_tail: bool,
+    /// The stream feeding this finalizer failed, rather than ending. Nothing is
+    /// signed for it, and nothing buffered may be flushed.
+    broken: bool,
 }
 
 impl FinalizerShared {
@@ -157,6 +170,8 @@ impl FinalizerShared {
         requester: Option<ReceiptOwner>,
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
+        request_id: Option<String>,
+        is_sse: bool,
     ) -> Self {
         Self {
             cleartext_hasher: Sha256::new(),
@@ -168,12 +183,81 @@ impl FinalizerShared {
             receipt_ttl_seconds: service.config.receipt_ttl_seconds,
             clock: service.clock.clone(),
             metrics: service.metrics.clone(),
+            // A response that is not an event stream has no protocol terminal to
+            // miss, so it is observed for identifiers only.
+            sse_parser: if is_sse {
+                SseFramingObserver::new(&endpoint_path)
+            } else {
+                SseFramingObserver::identifiers_only()
+            },
             endpoint_path,
-            sse_parser: SseChatIdParser::default(),
             e2ee_transformer,
+            request_id,
             upstream_ended: false,
             finished: false,
+            error_tail_settled: false,
+            synthesized_tail: false,
+            broken: false,
         }
+    }
+
+    /// The bytes to append to a stream that ended without its protocol
+    /// terminal, or `None` when nothing may be added.
+    ///
+    /// The kind of ending decides the kind of tail. A clean end of stream is
+    /// the provider closing normally — a completion, never an error. The chat
+    /// surface's `[DONE]` is a fixed stateless marker the gateway supplies when
+    /// the provider omitted it; Anthropic and Responses terminals carry state
+    /// the gateway cannot fabricate, so nothing is appended (the outcome is
+    /// still complete). A transport error is an abnormal interruption, so the
+    /// client is told with the protocol's error.
+    ///
+    /// Built here, inside the finalizer, so the tail is hashed and encrypted
+    /// like any other chunk and the receipt covers exactly what the client
+    /// received.
+    fn take_synthesized_tail(&mut self) -> Option<Vec<u8>> {
+        if std::mem::replace(&mut self.error_tail_settled, true) {
+            return None;
+        }
+        let protocol = self.sse_parser.protocol()?;
+        if self.sse_parser.saw_terminal() || self.sse_parser.saw_error() {
+            return None;
+        }
+        // Nothing may be appended unless the stream stopped cleanly between
+        // events and was observed all the way there.
+        if !self.sse_parser.at_event_boundary() || !self.sse_parser.observation_usable() {
+            return None;
+        }
+
+        // A clean end is a completion, never an error: supply the protocol's
+        // terminator where it is a fixed marker the gateway can emit, and
+        // otherwise append nothing (the outcome is still complete).
+        if !self.broken {
+            return stream_success_terminator(protocol).map(|terminator| {
+                self.synthesized_tail = true;
+                terminator.as_bytes().to_vec()
+            });
+        }
+
+        // A sequence with no successor cannot be continued, so the error would
+        // have to repeat a number the client has already seen. Only the
+        // protocol that numbers its events is affected; the field is recorded
+        // wherever it appears, so gating on its value alone would silence the
+        // others over a number they never use.
+        if protocol == SseProtocol::OpenaiResponses
+            && self.sse_parser.last_sequence_number() == Some(u64::MAX)
+        {
+            return None;
+        }
+        self.synthesized_tail = true;
+        Some(
+            stream_error_tail(
+                protocol,
+                self.request_id.as_deref(),
+                self.sse_parser.last_sequence_number(),
+            )
+            .into_bytes(),
+        )
     }
 
     /// `sha256:` hex digests of the cleartext and wire bytes seen so far.
@@ -224,7 +308,37 @@ fn poll_finalizing_stream<F: FinalizingStream>(
 
     loop {
         if f.shared().upstream_ended {
-            if let Some(mut transformer) = f.shared().e2ee_transformer.take() {
+            // Before the transformer is finished, so the tail passes through it
+            // exactly like an upstream chunk would.
+            if let Some(tail) = f.shared().take_synthesized_tail() {
+                let s = f.shared();
+                s.cleartext_hasher.update(&tail);
+                let wire = match s.e2ee_transformer.as_mut() {
+                    Some(transformer) => match transformer.push_chunk(&tail) {
+                        Ok(wire) => wire,
+                        Err(err) => {
+                            s.metrics
+                                .record_stream_error(&s.endpoint_path, StreamErrorKind::E2ee);
+                            s.finished = true;
+                            return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
+                        }
+                    },
+                    None => tail,
+                };
+                if !wire.is_empty() {
+                    s.wire_hasher.update(&wire);
+                    return Poll::Ready(Some(Ok(Bytes::from(wire))));
+                }
+            }
+            // `finish()` flushes whatever the transformer still holds, which for
+            // a stream cut mid-event means dispatching an event the client
+            // would otherwise discard. Only a stream sitting on an event
+            // boundary is finished; a broken one is never finished at all.
+            let may_finish = !f.shared().broken
+                && f.shared().sse_parser.observation_usable()
+                && f.shared().sse_parser.at_event_boundary();
+            if let Some(mut transformer) = f.shared().e2ee_transformer.take().filter(|_| may_finish)
+            {
                 let wire = match transformer.finish() {
                     Ok(wire) => wire,
                     Err(err) => {
@@ -241,6 +355,11 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                 }
             }
             f.shared().finished = true;
+            // A stream that failed is not signed: the gateway cannot claim the
+            // client received a complete, determinate response.
+            if f.shared().broken {
+                return Poll::Ready(None);
+            }
             return match f.finalize_receipt() {
                 Ok(()) => Poll::Ready(None),
                 Err(err) => {
@@ -279,12 +398,23 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                 s.wire_hasher.update(&chunk);
                 return Poll::Ready(Some(Ok(chunk)));
             }
+            // The stream feeding this finalizer failed. Absorbing it here is
+            // what keeps hyper from aborting the connection, and this is the
+            // last point the underlying error exists, so it is logged. The
+            // terminal branch then decides whether the client can be told —
+            // it holds the protocol state that decision needs.
             Poll::Ready(Some(Err(err))) => {
                 let s = f.shared();
                 s.metrics
                     .record_stream_error(&s.endpoint_path, StreamErrorKind::UpstreamRead);
-                s.finished = true;
-                return Poll::Ready(Some(Err(err)));
+                tracing::warn!(
+                    target: "stream_abort",
+                    request_id = s.request_id.as_deref().unwrap_or_default(),
+                    error = %err,
+                    "response stream failed; ending the body instead of aborting the connection"
+                );
+                s.broken = true;
+                s.upstream_ended = true;
             }
             Poll::Ready(None) => {
                 f.shared().upstream_ended = true;
@@ -326,10 +456,8 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
         };
         let (cleartext_hash, wire_hash) = self.shared.hashes();
 
-        if self.shared.sse_parser.chat_id.is_some() {
-            draft
-                .builder
-                .set_chat_id(self.shared.sse_parser.chat_id.clone());
+        if self.shared.sse_parser.chat_id().is_some() {
+            draft.builder.set_chat_id(self.shared.sse_parser.chat_id());
         }
         if draft.provider_response_hash != cleartext_hash || self.response_modified_by_wire {
             draft
@@ -351,6 +479,7 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
 }
 
 impl MiddlewareResponseFinalizingStream {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         service: &AciService,
         inner: ServiceResponseStream,
@@ -359,12 +488,21 @@ impl MiddlewareResponseFinalizingStream {
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
         response_modified_by_wire: bool,
+        request_id: Option<String>,
+        is_sse: bool,
     ) -> Self {
         Self {
             inner,
             journal,
             response_modified_by_wire,
-            shared: FinalizerShared::new(service, requester, endpoint_path, e2ee_transformer),
+            shared: FinalizerShared::new(
+                service,
+                requester,
+                endpoint_path,
+                e2ee_transformer,
+                request_id,
+                is_sse,
+            ),
         }
     }
 }
@@ -404,9 +542,11 @@ impl FinalizingStream for ReceiptFinalizingStream {
     fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
         let (cleartext_hash, wire_hash) = self.shared.hashes();
         let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
-        builder.set_chat_id(self.shared.sse_parser.chat_id.clone());
-        builder.set_upstream_verified_model_id(self.shared.sse_parser.model_id.clone());
-        if self.response_modified {
+        builder.set_chat_id(self.shared.sse_parser.chat_id());
+        builder.set_upstream_verified_model_id(self.shared.sse_parser.model_id());
+        // Appending an error tail is a modification of the response, whatever
+        // else did or did not change it.
+        if self.response_modified || self.shared.synthesized_tail {
             builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
         }
         builder.add_response_returned_hashes(cleartext_hash, wire_hash)?;
@@ -416,12 +556,12 @@ impl FinalizingStream for ReceiptFinalizingStream {
             &self.shared.endpoint_path,
             RequestMode::Streaming,
             200,
-            self.shared.sse_parser.model_id.as_deref(),
+            self.shared.sse_parser.model_id().as_deref(),
         );
         self.shared.metrics.record_receipt_issued(
             &self.shared.endpoint_path,
             RequestMode::Streaming,
-            self.shared.sse_parser.model_id.as_deref(),
+            self.shared.sse_parser.model_id().as_deref(),
         );
 
         Ok(())
@@ -429,6 +569,7 @@ impl FinalizingStream for ReceiptFinalizingStream {
 }
 
 impl ReceiptFinalizingStream {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         service: &AciService,
         inner: UpstreamBodyStream,
@@ -437,12 +578,21 @@ impl ReceiptFinalizingStream {
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
         response_modified: bool,
+        request_id: Option<String>,
+        is_sse: bool,
     ) -> Self {
         Self {
             inner,
             builder: Some(builder),
             response_modified,
-            shared: FinalizerShared::new(service, requester, endpoint_path, e2ee_transformer),
+            shared: FinalizerShared::new(
+                service,
+                requester,
+                endpoint_path,
+                e2ee_transformer,
+                request_id,
+                is_sse,
+            ),
         }
     }
 }
@@ -563,77 +713,4 @@ pub(super) fn serialize_original_sse_event(lines: &[Vec<u8>]) -> Vec<u8> {
     }
     out.push(b'\n');
     out
-}
-
-#[derive(Default)]
-pub(super) struct SseChatIdParser {
-    pub(super) line_buffer: Vec<u8>,
-    pub(super) event_data: Vec<u8>,
-    pub(super) chat_id: Option<String>,
-    pub(super) model_id: Option<String>,
-}
-
-impl SseChatIdParser {
-    pub(super) fn observe(&mut self, chunk: &[u8]) {
-        if self.chat_id.is_some() && self.model_id.is_some() {
-            return;
-        }
-        for &byte in chunk {
-            if byte == b'\n' {
-                let mut line = std::mem::take(&mut self.line_buffer);
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                self.observe_line(&line);
-                if self.chat_id.is_some() && self.model_id.is_some() {
-                    return;
-                }
-            } else {
-                self.line_buffer.push(byte);
-            }
-        }
-    }
-
-    fn observe_line(&mut self, line: &[u8]) {
-        if line.is_empty() {
-            self.dispatch_event();
-            return;
-        }
-        if line.starts_with(b":") {
-            return;
-        }
-        let Some(rest) = line.strip_prefix(b"data:") else {
-            return;
-        };
-        let data = rest.strip_prefix(b" ").unwrap_or(rest);
-        if !self.event_data.is_empty() {
-            self.event_data.push(b'\n');
-        }
-        self.event_data.extend_from_slice(data);
-    }
-
-    fn dispatch_event(&mut self) {
-        if self.event_data.is_empty() {
-            return;
-        }
-        let data = std::mem::take(&mut self.event_data);
-        if data.as_slice() == b"[DONE]" {
-            return;
-        }
-        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&data) else {
-            return;
-        };
-        if self.chat_id.is_none() {
-            self.chat_id = parsed
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-        }
-        if self.model_id.is_none() {
-            self.model_id = parsed
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-        }
-    }
 }

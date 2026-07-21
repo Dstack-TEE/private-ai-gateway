@@ -70,9 +70,12 @@ pub(super) async fn forward_to_backend(
                 );
                 let status =
                     StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-                // Same contract as the middleware stream path: a body Err makes
-                // hyper abort the connection with a TCP RST (client-visible as a
-                // silently killed stream); log it and end the body gracefully.
+                // The finalizer already absorbs a failure of the stream it wraps
+                // and tells the client where it safely can. What is left here
+                // is the finalizer's own failure — receipt signing, E2EE
+                // teardown — after headers have gone out: a body `Err` would
+                // make hyper abort the connection with a TCP RST, so it is
+                // logged and the body ended instead.
                 let body = Body::from_stream(forward.body.scan((), move |_, chunk| {
                     std::future::ready(match chunk {
                         Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
@@ -81,7 +84,7 @@ pub(super) async fn forward_to_backend(
                                 target: "stream_abort",
                                 request_id = %request_id,
                                 error = %err,
-                                "response stream error; ending body gracefully instead of aborting the connection"
+                                "response finalization failed; ending the body instead of aborting the connection"
                             );
                             None
                         }
