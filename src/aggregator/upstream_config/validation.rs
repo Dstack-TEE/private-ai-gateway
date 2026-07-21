@@ -107,6 +107,19 @@ fn looks_like_uuid(value: &str) -> bool {
         && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
+fn valid_secret_ai_origin(value: &str) -> bool {
+    let Ok(origin) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    origin.scheme() == "https"
+        && origin.host_str().is_some()
+        && origin.username().is_empty()
+        && origin.password().is_none()
+        && origin.path() == "/"
+        && origin.query().is_none()
+        && origin.fragment().is_none()
+}
+
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {
     UpstreamConfigSnapshot {
         config_path: path.display().to_string(),
@@ -164,6 +177,14 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         if upstream.models.is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} must route at least one public model",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::SecretAi
+            && !valid_secret_ai_origin(&upstream.base_url)
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
         }

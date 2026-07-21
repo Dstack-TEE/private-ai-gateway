@@ -20,7 +20,7 @@ adapters that fail closed when binding material cannot be enforced.
 | Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
-| Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI service upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
+| Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, SecretAI, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI service upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
 | Frontend/middleware/backend framework | Shipped | Frontend/backend split with an optional middleware that consults the control plane to route, transform, cost-inject, and report usage; the middleware-disabled path stays behavior-compatible. |
 | Multi-domain downstream TLS binding | In progress | Domain-tagged TLS SPKIs can be configured, published in the keyset, and selected in report evidence from the HTTP `Host`. Downstream session ids are still pending. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
@@ -137,15 +137,10 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   blindly trusting new workloads.
 - Chutes: use explicit per-model `chute_id` pins in production configs and
   complete long-window nonce-throughput testing.
-- SecretAI: review complete (SEV-SNP + NVIDIA Hopper, single-VM trust
-  boundary; see [providers/secret-ai/review.md](providers/secret-ai/review.md)).
-  Adapter implementation deferred until SCRT addresses partner feedback sent
-  2026-05-23 — SPKI binding, per-release build provenance, downstream image
-  digest pins, journald policy, and open-sourcing `secret-vm-attest-rest-server`
-  (feedback: <https://hackmd.io/@h4x3rotab/H1b2ECA1Ml>). Resume by adding
-  `UpstreamProvider::SecretAi` and `SecretAiProviderVerifier` parallel to
-  the existing Chutes/Tinfoil/NEAR adapters; the review's "Required Adapter
-  Behavior" section captures wiring requirements.
+- SecretAI: adapter implemented for measured production TDX/SEV-SNP workloads,
+  optional exact workload pins, CPU-bound NRAS evidence, and enforced inference
+  SPKI. Model-weight provenance and provider logging remain open. See
+  [verification](providers/secret-ai/verification.md).
 - Verifier code is now vendored. The provider-verifier bridge imports
   `scripts/confidential_verifier` (vendored from `Phala-Network/private-ai-verifier`,
   see its `VENDOR.md`) instead of a sibling checkout, so the gateway no longer breaks

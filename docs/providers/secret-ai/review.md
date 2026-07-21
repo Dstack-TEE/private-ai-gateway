@@ -1,10 +1,13 @@
 # SecretAI Direct-Instance Review
 
 Date: 2026-05-22 UTC.
-Provider endpoint: `https://secretai-jedi.scrtlabs.com` (attestation on `:29343`,
-Ollama-via-Caddy inference on `:21434`).
-Trust boundary: single verified SecretVM running AMD SEV-SNP with NVIDIA H100
-("HOPPER") GPU, fronted by `secret-ai-caddy`.
+
+> **Historical audit snapshot.** The adapter and deployments changed after this
+> review. As of 2026-07-20, JEDI (SEV-SNP) and RYTN (TDX) expose canonical
+> evidence bound to the inference SPKI and pass the gateway verifier. The
+> implementation, current trust conditions, and limitations are documented in
+> [verification.md](verification.md). Statements below that the adapter is
+> deferred or that the channel binds a full certificate are superseded.
 
 > **Gateway verification:** not yet implemented — the SecretAI adapter is deferred
 > (see the roadmap). This review stands as the admissions audit; there is no

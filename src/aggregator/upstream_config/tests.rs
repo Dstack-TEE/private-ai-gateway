@@ -70,13 +70,14 @@ fn router_provider_verifies_once_per_channel() {
 
 #[test]
 fn provider_attestation_scopes() {
-    // NEAR AI (gateway TD) and Tinfoil (confidential-model-router) front many
-    // models behind one verified channel, so they are per-router. Phala-direct
-    // verifies a TEE per model; Chutes a key per instance; the rest default to
-    // per-model. Only per-router drops the model from the channel identity.
+    // NEAR AI, Tinfoil, and SecretAI front many models behind one verified
+    // channel, so they are per-router. Phala-direct verifies a TEE per model;
+    // Chutes a key per instance; the rest default to per-model. Only per-router
+    // drops the model from the channel identity.
     use AttestationScope::*;
     assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
     assert_eq!(
@@ -86,6 +87,49 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
     assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
+}
+
+#[test]
+fn parse_secret_ai_allows_an_unpinned_workload() {
+    let config = parse_config_text(
+        r#"
+            [{
+              "name": "secret-ai",
+              "provider": "secret-ai",
+              "base_url": "https://secret.example:21434",
+              "models": {"public-model": "upstream-model"}
+            }]
+            "#,
+    )
+    .expect("SecretAI should measure an unpinned workload by default");
+
+    assert_eq!(config[0].provider, UpstreamProvider::SecretAi);
+    assert_eq!(config[0].accepted_workload_ids, None);
+}
+
+#[test]
+fn parse_secret_ai_rejects_invalid_origins() {
+    for base_url in [
+        "http://secret.example",
+        "https://user@secret.example",
+        "https://secret.example/evidence",
+        "https://secret.example?target=other",
+        "https://secret.example#fragment",
+    ] {
+        let err = parse_config_text(&format!(
+            r#"[{{
+              "name": "secret-ai",
+              "provider": "secret-ai",
+              "base_url": "{base_url}",
+              "models": {{"public-model": "upstream-model"}}
+            }}]"#
+        ))
+        .expect_err("SecretAI must reject an origin that the verifier cannot use");
+        assert!(
+            err.to_string().contains("requires a root HTTPS base_url"),
+            "{base_url:?}: {err}"
+        );
+    }
 }
 
 #[async_trait]

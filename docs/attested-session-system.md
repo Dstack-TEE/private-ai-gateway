@@ -70,8 +70,8 @@ Non-goals (kept out deliberately):
 - **No gateway-defined provenance schema.** Source-code-level verification is
   the verifier's responsibility; the gateway records the claim and reason it
   returns (see "Source-code provenance").
-- No security material in config: the channel binding and all claims are
-  supplied by the verifier at verify time, not pinned in config.
+- No channel binding or asserted claims in config: those come from the verifier.
+  Provider policy may pin accepted verified identities.
 - No policy DSL. The fail-closed gate stays on *verification result +
   enforceable binding*; claims are a transparency surface.
 
@@ -156,8 +156,8 @@ an NRAS check proves a CC-capable GPU *exists* for a nonce, not that it serves
 this request or is bound to the CPU quote. Proving *that* needs the reviewed
 serving software (measured into the CPU TEE quote) to locally attest the GPU and
 set up the encrypted CPU↔GPU channel — a stronger statement we do not make here.
-The gateway never *gates* on the GPU check (it stays supplemental); it only
-records the honest claim. Absent or unverified GPU evidence leaves it `Unknown`.
+Whether failed GPU evidence rejects verification is provider policy. Absent or
+unverified supplemental GPU evidence leaves the claim `Unknown`.
 
 ## Source-code provenance
 
@@ -187,16 +187,16 @@ auditor sees the full provider scope. The event carries a stable `provider_type`
 (distinct from the operator's per-endpoint config `name`) that selects the
 mapping. A `failed` result asserts nothing.
 
-| Claim | tinfoil | near-ai | chutes | phala-direct | generic |
-| --- | --- | --- | --- | --- | --- |
-| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
-| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | unknown |
-| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | unknown |
-| `os_known_good` | unknown | unknown | unknown | unknown | unknown |
-| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | unknown |
-| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown |
+| Claim | tinfoil | near-ai | chutes | phala-direct | secret-ai⁴ | generic |
+| --- | --- | --- | --- | --- | --- | --- |
+| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
+| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | unknown |
+| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown |
+| `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | unknown |
+| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown |
+| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown |
 
-- For the four real provider verifiers `tee_attested` is `HardwareProven`: a
+- For the five real provider verifiers `tee_attested` is `HardwareProven`: a
   genuine TEE quote was verified and the request channel bound to it. For NEAR AI
   this is the **gateway** TD — a router that fronts many models behind one TEE,
   so its attested session is the gateway *channel*: one session per router, not
@@ -213,9 +213,10 @@ mapping. A `failed` result asserts nothing.
   `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
   **refutes** (the quote proves a stale TCB — the gateway records the bad claim
   but does **not** hard-reject the session), and an absent status is `unknown`.
-  Freshness is never asserted by policy. All four provider verifiers surface
-  `tcb_status`: NEAR AI and Phala-direct read it from the dstack verifier, which
-  reports TCB freshness separately from its overall `is_valid`, so a stale TCB
+  Freshness is never asserted by policy. NEAR AI, Chutes, and Phala-direct
+  surface `tcb_status`: NEAR AI and Phala-direct read it from the dstack
+  verifier, which reports TCB freshness separately from its overall `is_valid`,
+  so a stale TCB
   shows up without failing the gateway; Chutes no longer hard-rejects a stale
   TCB — it records the per-instance and fleet-aggregated status, so an OutOfDate
   instance serves with a refuted claim (quote signature, report-data binding,
@@ -233,13 +234,16 @@ mapping. A `failed` result asserts nothing.
   Absent or unverified GPU evidence leaves it `unknown` (we do not refute on an
   ambiguous negative). The raw `gpu_verified` / `gpu_arch` facts also stay in
   `extra`.
+- ⁴ SecretAI policy and claim details are documented in
+  [SecretAI verification](providers/secret-ai/verification.md).
 - "generic" is a verifier path with no provider-specific identity: it asserts
   only `tee_attested` (`VerifierDerived`), nothing else.
 
 ## Configuration
 
-Config is thin: it says *what to connect to*, not *what is trusted*. One
-provider entry holds many models; each value is either the legacy `String`
+Config is thin by default. Optional provider policy can narrow accepted
+identities without supplying asserted claims. One provider entry holds many
+models; each value is either the legacy `String`
 (`upstream_model_id`, inherits the provider `base_url`) or an object:
 
 ```jsonc
@@ -260,9 +264,9 @@ When a model omits `endpoint` it inherits the provider `base_url` (one endpoint
 serving all of a provider's models). When each model is its own endpoint, the
 loader builds one verifier + route + session per `(model, endpoint)`.
 
-The channel binding (TLS SPKI / provider E2EE key) and every claim are supplied
-by the **verifier dynamically** — config carries no SPKI pin, no provenance
-pins, and no asserted claims.
+The channel binding and claims are supplied dynamically by the verifier. Config
+may carry provider policy such as SecretAI workload pins, but no raw SPKI or
+asserted claims.
 
 ## Receipt linkage
 

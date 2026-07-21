@@ -183,4 +183,3 @@ def tdx_debug_enabled(quote_bytes: bytes) -> bool:
     if len(td_attributes) != 8:
         raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
     return td_attributes[0] != 0
-

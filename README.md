@@ -180,7 +180,7 @@ container.
 | Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
-| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |
+| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, SecretAI, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |
 | Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
 | Middleware framework | Implemented over HTTP on Unix domain sockets |
 | Receipt store | In-memory; receipt TTL is configurable. The gateway never stores request bodies (receipts hold hashes, not content). |
@@ -330,15 +330,16 @@ Supported `provider` values:
 | `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
 | `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
 | `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
+| `secret-ai` | Direct SecretAI SecretVM adapter with CPU/GPU verification, measured production workload reporting, optional workload pinning, and enforced inference TLS SPKI. See [docs/providers/secret-ai/verification.md](docs/providers/secret-ai/verification.md). |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
 
 ACI service verification policy is set on the upstream entry with
 `accepted_workload_ids`, `accepted_image_digests`,
 `accepted_dstack_kms_root_public_keys`, and `pccs_url`.
 
-Tinfoil, NEAR AI, Chutes, and PhalaDirect use the vendored provider verifier
-bridge. Set `PRIVATE_AI_VERIFIER_DIR` only when you need to override the
-vendored verifier package with an external checkout.
+Tinfoil, NEAR AI, Chutes, SecretAI, and PhalaDirect use the Python provider
+verifier bridge. Set `PRIVATE_AI_VERIFIER_DIR` only when you need to override
+the bridge's vendored `confidential_verifier` package with an external checkout.
 
 For one-command Compose deployments, set `upstream_config_seed_path` in the
 static gateway config to a read-only seed file. The gateway validates and

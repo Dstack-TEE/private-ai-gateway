@@ -219,7 +219,7 @@ Example seed:
 ```
 
 Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
-`near-ai`, `chutes`, and `phala-direct`.
+`near-ai`, `chutes`, `secret-ai`, and `phala-direct`.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,

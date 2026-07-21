@@ -164,6 +164,7 @@ pub enum UpstreamProvider {
     Chutes,
     Tinfoil,
     NearAi,
+    SecretAi,
     PhalaDirect,
 }
 
@@ -172,7 +173,9 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
+            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
+                AttestationScope::PerRouter
+            }
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier

@@ -93,11 +93,11 @@ fn custody_report(identity: &SigningKey, signature_chain: Vec<String>) -> Attest
 }
 
 /// The scope token a stub verifier declares. Only routers declare a scope in
-/// production (near.ai / Tinfoil); per-model and per-instance verifiers omit it
+/// production (near.ai / Tinfoil / SecretAI); per-model and per-instance verifiers omit it
 /// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" => Some("router"),
+        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
         _ => None,
     }
 }
@@ -314,6 +314,80 @@ async fn tinfoil_provider_verifier_runs_provider_owned_external_verifier() {
 }
 
 #[tokio::test]
+async fn secret_ai_provider_verifier_runs_embedded_bridge() {
+    let verifier = SecretAiProviderVerifier::with_command(
+        provider_script(
+            "secret-ai",
+            "private-ai-verifier/secret-ai/v1",
+            json!({
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }),
+        ),
+        5,
+    )
+    .unwrap();
+    assert_provider_script_verifier(
+        &verifier,
+        "secret-ai",
+        "private-ai-verifier/secret-ai/v1",
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://provider.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn secret_ai_provider_verifier_passes_workload_pin_to_the_bridge() {
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "private-ai-verifier/secret-ai/v1",
+        "attested_scope": "router",
+        "evidence": {
+            "digest": format!("sha256:{}", "11".repeat(32)),
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://provider.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+        "provider_claims": {
+            "fixture_provider": "secret-ai",
+            "model_evidence_present": true,
+        },
+    })
+    .to_string();
+    let script = format!(
+        r#"payload="$(cat)"
+case "$payload" in
+  *'"secret_ai_accepted_workload_id:wid":"true"'*) printf '%s' '{output}' ;;
+  *) printf '%s' '{{"result":"failed","reason":"missing workload pin"}}' ;;
+esac"#
+    );
+    let verifier = SecretAiProviderVerifier::with_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        5,
+    )
+    .unwrap()
+    .with_accepted_workload_ids(["wid".to_string()]);
+
+    assert_provider_script_verifier(
+        &verifier,
+        "secret-ai",
+        "private-ai-verifier/secret-ai/v1",
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://provider.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn near_ai_provider_verifier_runs_provider_owned_external_verifier() {
     let verifier = NearAiProviderVerifier::with_command(
         provider_script(
@@ -338,6 +412,43 @@ async fn near_ai_provider_verifier_runs_provider_owned_external_verifier() {
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn routing_verifier_keeps_policy_isolated_for_shared_origins() {
+    let origin = "https://shared.example";
+    let router = RoutingUpstreamVerifier::new()
+        .add_route(
+            "route-a",
+            origin,
+            Arc::new(StaticUpstreamVerifier::verified("policy-a/v1")),
+        )
+        .add_route(
+            "route-b",
+            origin,
+            Arc::new(StaticUpstreamVerifier::verified("policy-b/v1")),
+        );
+    let request = |name: &str, requested_origin: &str| UpstreamVerificationRequest {
+        upstream_name: name.to_string(),
+        url_origin: Some(requested_origin.to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: "22".repeat(32),
+        required: true,
+    };
+
+    let route_a = router.verify(request("route-a", origin)).await;
+    let route_b = router.verify(request("route-b", origin)).await;
+    assert_eq!(route_a.verifier_id, "policy-a/v1");
+    assert_eq!(route_b.verifier_id, "policy-b/v1");
+
+    let wrong_origin = router
+        .verify(request("route-a", "https://other.example"))
+        .await;
+    assert_eq!(wrong_origin.result, VerificationResult::Failed);
+    assert!(wrong_origin
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("expected \"https://shared.example\"")));
 }
 
 #[tokio::test]

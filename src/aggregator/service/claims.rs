@@ -29,6 +29,7 @@ pub(super) trait ProviderClaimMapper {
 pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn ProviderClaimMapper {
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
+        Some("secret-ai") => &SecretAiClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
     }
@@ -196,6 +197,23 @@ impl ProviderClaimMapper for TinfoilClaims {
     }
 }
 
+/// SecretAI: a verified TDX or SEV-SNP quote, an NRAS-verified GPU bound by
+/// report_data, and an exact measured production SecretVM workload. An optional
+/// operator pin upgrades measured software identity to known-good software.
+pub(super) struct SecretAiClaims;
+impl ProviderClaimMapper for SecretAiClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
+            serving_software_known_good: secret_ai_software_claim(event),
+            os_known_good: secret_ai_os_claim(event),
+            gpu_attested: secret_ai_gpu_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
 /// Generic verifier path: we only know it returned Verified with an enforceable
 /// channel binding.
 pub(super) struct GenericClaims;
@@ -321,6 +339,73 @@ pub(super) fn tinfoil_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
     Claim::asserted(ClaimSource::VerifierDerived, reason)
 }
 
+pub(super) fn secret_ai_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let workload_id = event
+        .provider_claims
+        .as_ref()
+        .and_then(|claims| claims.get("accepted_workload_id"))
+        .and_then(Value::as_str);
+    match workload_id {
+        Some(workload_id) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            format!("measured SecretVM workload matches operator-configured pin {workload_id}"),
+        ),
+        None => Claim::unknown(),
+    }
+}
+
+pub(super) fn secret_ai_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let production = event
+        .provider_claims
+        .as_ref()
+        .and_then(|claims| claims.get("production_os_image"))
+        .and_then(Value::as_bool);
+    match production {
+        Some(true) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            "measured SecretVM launch matches a production entry in the pinned verifier registry",
+        ),
+        Some(false) => Claim::refuted(
+            ClaimSource::VerifierDerived,
+            "measured SecretVM launch does not match a production registry entry",
+        ),
+        None => Claim::unknown(),
+    }
+}
+
+pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let claims = event.provider_claims.as_ref();
+    let verified = claims
+        .and_then(|claims| claims.get("gpu_verified"))
+        .and_then(Value::as_bool);
+    match verified {
+        Some(true) => {
+            let models = claims
+                .and_then(|claims| claims.get("gpu_models"))
+                .and_then(Value::as_array)
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|models| !models.is_empty());
+            let reason = match models {
+                Some(models) => format!(
+                    "NVIDIA confidential-computing GPU attestation verified by NRAS and its nonce \
+                     matches the CPU report_data (signed models {models})"
+                ),
+                None => "NVIDIA confidential-computing GPU attestation verified by NRAS and its \
+                         nonce matches the CPU report_data"
+                    .to_string(),
+            };
+            Claim::asserted(ClaimSource::VerifierDerived, reason)
+        }
+        _ => Claim::unknown(),
+    }
+}
+
 #[cfg(test)]
 mod claim_mapping_tests {
     use super::session_claims_for_event;
@@ -426,6 +511,53 @@ mod claim_mapping_tests {
                 "{provider}"
             );
         }
+    }
+
+    #[test]
+    fn secret_ai_maps_pinned_workload_and_cpu_bound_gpu_claims() {
+        let workload_id = concat!(
+            "secretvm:sev-snp:gpu_prod:4xlarge:v0.0.33:sha256:",
+            "ea08d2b8a03bea1d3206286e50da41e437b3fd4a9e6e3415a0d6169f05bb7cf2"
+        );
+        let claims = session_claims_for_event(&event(
+            Some("secret-ai"),
+            VerificationResult::Verified,
+            Some(json!({
+                "workload_id": workload_id,
+                "accepted_workload_id": workload_id,
+                "production_os_image": true,
+                "gpu_verified": true,
+                "gpu_models": ["GH100"],
+                "gpu_count": 1,
+                "tcb_status": "UpToDate",
+            })),
+        ));
+
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Asserted
+        );
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn secret_ai_unpinned_workload_leaves_software_provenance_unknown() {
+        let claims = session_claims_for_event(&event(
+            Some("secret-ai"),
+            VerificationResult::Verified,
+            Some(json!({
+                "workload_id": "secretvm:tdx:prod:large:v1:sha256:abc",
+            })),
+        ));
+
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
     }
 
     #[test]

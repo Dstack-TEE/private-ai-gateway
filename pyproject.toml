@@ -21,6 +21,10 @@ dependencies = [
   # code-measurement provenance, and TLS-key binding) instead of our own crypto. Used
   # by the bridge's verify_tinfoil. See docs/upstream-verification-lifecycle.md.
   "tinfoil>=0.2",
+  # SecretAI's official verifier supplies SEV-SNP VCEK-chain, TDX DCAP, and
+  # NVIDIA NRAS verification. Pin the release because its bundled SecretVM
+  # artifact registry is part of the accepted measurement root.
+  "secretvm-verify==0.12.0",
 ]
 
 [tool.uv]

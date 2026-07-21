@@ -244,6 +244,74 @@ impl UpstreamVerifier for NearAiProviderVerifier {
     }
 }
 
+/// Verifier for one SecretAI SecretVM origin. The external bridge verifies the
+/// CPU quote, NVIDIA evidence, SPKI and nonce report-data bindings, and the
+/// exact measured workload. An operator workload allowlist is optional.
+#[derive(Debug, Clone)]
+pub struct SecretAiProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl SecretAiProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "secret-ai",
+                UpstreamProvider::SecretAi.attestation_scope(),
+                timeout_seconds,
+                cache_ttl_seconds,
+            ),
+        }
+    }
+
+    pub fn with_accepted_workload_ids(
+        mut self,
+        workload_ids: impl IntoIterator<Item = String>,
+    ) -> Self {
+        for workload_id in workload_ids {
+            self.verifier = self.verifier.with_option(
+                format!("secret_ai_accepted_workload_id:{workload_id}"),
+                "true",
+            );
+        }
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "secret-ai",
+                UpstreamProvider::SecretAi.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for SecretAiProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
 /// Verifier for `PhalaDirect` upstreams: a Phala dstack-vllm-proxy attestation
 /// endpoint reached directly (per model). The external bridge fetches the
 /// `version=2` attestation report, verifies the dstack TDX quote, GPU evidence,
@@ -314,35 +382,74 @@ impl UpstreamVerifier for PhalaDirectProviderVerifier {
     }
 }
 
+struct RoutedUpstreamVerifier {
+    origin: String,
+    verifier: Arc<dyn UpstreamVerifier>,
+}
+
 pub struct RoutingUpstreamVerifier {
-    by_origin: HashMap<String, Arc<dyn UpstreamVerifier>>,
-    by_name: HashMap<String, Arc<dyn UpstreamVerifier>>,
+    by_name: HashMap<String, RoutedUpstreamVerifier>,
 }
 
 impl RoutingUpstreamVerifier {
     pub fn new() -> Self {
         Self {
-            by_origin: HashMap::new(),
             by_name: HashMap::new(),
         }
     }
 
-    pub fn add_origin(
+    pub fn add_route(
         mut self,
+        name: impl Into<String>,
         origin: impl Into<String>,
         verifier: Arc<dyn UpstreamVerifier>,
     ) -> Self {
-        self.by_origin.insert(origin.into(), verifier);
+        self.by_name.insert(
+            name.into(),
+            RoutedUpstreamVerifier {
+                origin: origin.into(),
+                verifier,
+            },
+        );
         self
     }
 
-    pub fn add_name(
-        mut self,
-        name: impl Into<String>,
-        verifier: Arc<dyn UpstreamVerifier>,
-    ) -> Self {
-        self.by_name.insert(name.into(), verifier);
-        self
+    fn verifier_for(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Result<&Arc<dyn UpstreamVerifier>, String> {
+        let route = self.by_name.get(&request.upstream_name).ok_or_else(|| {
+            format!(
+                "no verifier configured for selected upstream {:?}",
+                request.upstream_name
+            )
+        })?;
+        let requested_origin = request.url_origin.as_deref().ok_or_else(|| {
+            format!(
+                "selected upstream {:?} is missing its URL origin",
+                request.upstream_name
+            )
+        })?;
+        if requested_origin != route.origin {
+            return Err(format!(
+                "selected upstream {:?} requested origin {:?}, expected {:?}",
+                request.upstream_name, requested_origin, route.origin
+            ));
+        }
+        Ok(&route.verifier)
+    }
+
+    fn failed_event(request: UpstreamVerificationRequest, reason: String) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name,
+            model_id: request.model_id,
+            url_origin: request.url_origin,
+            verifier_id: "routing-upstream-verifier/v1".to_string(),
+            result: VerificationResult::Failed,
+            required: request.required,
+            reason: Some(reason),
+            ..Default::default()
+        }
     }
 }
 
@@ -355,55 +462,21 @@ impl Default for RoutingUpstreamVerifier {
 #[async_trait]
 impl UpstreamVerifier for RoutingUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        if let Some(origin) = request.url_origin.as_ref() {
-            if let Some(verifier) = self.by_origin.get(origin) {
-                return verifier.verify(request).await;
-            }
-        }
-        if let Some(verifier) = self.by_name.get(&request.upstream_name) {
-            return verifier.verify(request).await;
-        }
-        UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
-            verifier_id: "routing-upstream-verifier/v1".to_string(),
-            result: VerificationResult::Failed,
-            required: request.required,
-            reason: Some("no verifier configured for selected upstream".to_string()),
-            ..Default::default()
+        match self.verifier_for(&request) {
+            Ok(verifier) => verifier.verify(request).await,
+            Err(reason) => Self::failed_event(request, reason),
         }
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        if let Some(origin) = request.url_origin.as_ref() {
-            if let Some(verifier) = self.by_origin.get(origin) {
-                return verifier.refresh(request).await;
-            }
-        }
-        if let Some(verifier) = self.by_name.get(&request.upstream_name) {
-            return verifier.refresh(request).await;
-        }
-        UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
-            verifier_id: "routing-upstream-verifier/v1".to_string(),
-            result: VerificationResult::Failed,
-            required: request.required,
-            reason: Some("no verifier configured for selected upstream".to_string()),
-            ..Default::default()
+        match self.verifier_for(&request) {
+            Ok(verifier) => verifier.refresh(request).await,
+            Err(reason) => Self::failed_event(request, reason),
         }
     }
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {
-        if let Some(origin) = request.url_origin.as_ref() {
-            if let Some(verifier) = self.by_origin.get(origin) {
-                verifier.invalidate(request);
-                return;
-            }
-        }
-        if let Some(verifier) = self.by_name.get(&request.upstream_name) {
+        if let Ok(verifier) = self.verifier_for(request) {
             verifier.invalidate(request);
         }
     }
