@@ -38,6 +38,10 @@ def emit(obj: dict[str, Any]) -> None:
 def verifier_id_for(provider: str) -> str:
     if provider == "near-ai":
         return "private-ai-verifier/near-ai-gateway/v1"
+    if provider == "secret-ai":
+        from importlib.metadata import version
+
+        return f"secretvm-verify/{version('secretvm-verify')}/private-ai-gateway/v1"
     return f"private-ai-verifier/{provider}/v1"
 
 
@@ -183,4 +187,3 @@ def tdx_debug_enabled(quote_bytes: bytes) -> bool:
     if len(td_attributes) != 8:
         raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
     return td_attributes[0] != 0
-

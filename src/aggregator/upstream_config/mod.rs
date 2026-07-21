@@ -56,6 +56,8 @@ pub struct UpstreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_sev_tcb: Option<SevTcb>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_dstack_kms_root_public_keys: Option<Vec<String>>,
@@ -96,6 +98,8 @@ pub struct PublicUpstreamConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_workload_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_sev_tcb: Option<SevTcb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dstack_kms_root_public_keys: Option<Vec<String>>,
@@ -134,6 +138,7 @@ impl UpstreamConfig {
             bearer_token_configured: self.bearer_token.is_some(),
             basic_auth: self.basic_auth,
             accepted_workload_ids: self.accepted_workload_ids.clone(),
+            minimum_sev_tcb: self.minimum_sev_tcb,
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),
             pccs_url: self.pccs_url.clone(),
@@ -151,6 +156,15 @@ impl UpstreamConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SevTcb {
+    pub boot_loader: u8,
+    pub tee: u8,
+    pub snp: u8,
+    pub microcode: u8,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpstreamProvider {
@@ -164,6 +178,7 @@ pub enum UpstreamProvider {
     Chutes,
     Tinfoil,
     NearAi,
+    SecretAi,
     PhalaDirect,
 }
 
@@ -172,7 +187,9 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil => AttestationScope::PerRouter,
+            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
+                AttestationScope::PerRouter
+            }
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier

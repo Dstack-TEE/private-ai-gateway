@@ -180,11 +180,34 @@ Supported `provider` values:
 | `tinfoil` | Tinfoil provider adapter. |
 | `near-ai` | NEAR AI provider adapter. |
 | `chutes` | Chutes provider adapter. |
+| `secret-ai` | Direct SecretAI SecretVM origin with optional workload pinning; see [SecretAI verification](providers/secret-ai/verification.md). |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
 
 Provider verification policy belongs on the upstream entry. For ACI service
 routes, configure accepted workload ids, image digests, or dstack KMS root
 public keys on that entry.
+
+For `secret-ai`, `base_url` must be the root HTTPS inference origin. The optional
+`accepted_workload_ids` field pins measured SecretVM workloads in this form:
+
+```text
+secretvm:<cpu-type>:<environment>:<template>:<artifacts-version>:sha256:<compose-sha256>
+```
+
+Without this field, the verifier still reconstructs and reports the exact
+production workload, but does not assert that its serving software was
+operator-approved. When pins are configured, a nonmatching workload fails
+verification. TDX workloads must report DCAP status `UpToDate`. An SEV-SNP
+origin must also configure a reviewed componentwise minimum:
+
+```json
+"minimum_sev_tcb": {
+  "boot_loader": 10,
+  "tee": 0,
+  "snp": 23,
+  "microcode": 88
+}
+```
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,

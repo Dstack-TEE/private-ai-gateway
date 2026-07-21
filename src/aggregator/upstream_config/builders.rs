@@ -16,7 +16,7 @@ use crate::aci::upstream::{
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
     NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, TinfoilProviderVerifier,
+    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -78,6 +78,7 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Chutes
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
+        | UpstreamProvider::SecretAi
         | UpstreamProvider::PhalaDirect => true,
     }
 }
@@ -112,6 +113,7 @@ fn build_provider_backend(
         | UpstreamProvider::AciService
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
+        | UpstreamProvider::SecretAi
         | UpstreamProvider::PhalaDirect => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(
                 cfg.base_url.clone(),
@@ -182,12 +184,11 @@ pub(super) fn build_verifier(
             let mut router = RoutingUpstreamVerifier::new();
             for cfg in config {
                 let verifier = build_aci_service_verifier(cfg, options)?;
-                router = router
-                    .add_origin(
-                        cfg.base_url.trim_end_matches('/').to_string(),
-                        verifier.clone(),
-                    )
-                    .add_name(cfg.name.clone(), verifier);
+                router = router.add_route(
+                    cfg.name.clone(),
+                    cfg.base_url.trim_end_matches('/').to_string(),
+                    verifier,
+                );
             }
             Ok(Some(Arc::new(router)))
         }
@@ -253,6 +254,17 @@ fn build_provider_verifier(
                 request_timeout_seconds,
                 cache_seconds,
             ))),
+            UpstreamProvider::SecretAi => {
+                let mut verifier = SecretAiProviderVerifier::new_with_cache(
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .with_accepted_workload_ids(cfg.accepted_workload_ids.clone().unwrap_or_default());
+                if let Some(minimum) = cfg.minimum_sev_tcb {
+                    verifier = verifier.with_minimum_sev_tcb(minimum);
+                }
+                Some(Arc::new(verifier))
+            }
             UpstreamProvider::PhalaDirect => {
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
@@ -265,12 +277,11 @@ fn build_provider_verifier(
             }
         };
         if let Some(verifier) = verifier {
-            router = router
-                .add_origin(
-                    cfg.base_url.trim_end_matches('/').to_string(),
-                    verifier.clone(),
-                )
-                .add_name(cfg.name.clone(), verifier);
+            router = router.add_route(
+                cfg.name.clone(),
+                cfg.base_url.trim_end_matches('/').to_string(),
+                verifier,
+            );
         }
     }
     Ok(Some(Arc::new(router)))
