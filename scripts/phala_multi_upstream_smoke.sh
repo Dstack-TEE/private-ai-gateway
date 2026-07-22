@@ -10,7 +10,7 @@ Phala Cloud, deploys one router with a mounted upstream config file, and
 asserts the routing/receipt/metrics invariants.
 
 Environment:
-  PHALA_CLI              Phala CLI binary. Default: phala-h4xuser
+  PHALA_CLI              Phala CLI binary. Default: phala
   WORK_DIR               Artifact directory. Default: /tmp/private-ai-gateway-smoke-router
   NAME_PREFIX            CVM name prefix. Default: aci-route-smoke
   PHALA_GATEWAY_DOMAIN   Gateway domain. Default: dstack-pha-prod5.phala.network
@@ -20,7 +20,7 @@ Environment:
   HTTP_READY_ATTEMPTS    Attempts for endpoint readiness. Default: 60
 
 Requirements:
-  docker buildx, phala-h4xuser, curl, jq, cargo, sha256sum, awk
+  docker buildx, phala, curl, jq, cargo, sha256sum, awk
 
 Artifacts:
   The script writes compose files, reports, receipts, metrics, and deploy
@@ -36,7 +36,7 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-PHALA_CLI="${PHALA_CLI:-phala-h4xuser}"
+PHALA_CLI="${PHALA_CLI:-phala}"
 WORK_DIR="${WORK_DIR:-/tmp/private-ai-gateway-smoke-router}"
 NAME_PREFIX="${NAME_PREFIX:-aci-route-smoke}"
 PHALA_GATEWAY_DOMAIN="${PHALA_GATEWAY_DOMAIN:-dstack-pha-prod5.phala.network}"

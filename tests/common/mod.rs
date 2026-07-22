@@ -306,6 +306,7 @@ impl StubQuoter {
             report_data,
             event_log: serde_json::Value::Null,
             vm_config: serde_json::json!({ "stub": true }),
+            app_compose: Some(r#"{"stub":true}"#.to_string()),
         }
     }
 }

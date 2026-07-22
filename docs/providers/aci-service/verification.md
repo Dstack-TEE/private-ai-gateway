@@ -4,6 +4,8 @@
 - **Session binding:** `tls_spki_sha256`
 - **Verifier:** native Rust — `AciServiceUpstreamVerifier` (`src/aci/verifier.rs`). No
   bridge / Python; this is the path for the gateway's own ACI-compatible workers.
+- **Versions:** ACI report wire format `aci/1`; verifier implementation
+  `aci-service/v2`.
 - **Status:** sound (designed with the keyset-digest binding from the start;
   covered by `tests/upstream_verifier.rs`).
 - **Audit:** none — first-party path; [`audit-criteria.md`](../audit-criteria.md) targets
@@ -24,10 +26,25 @@ canonical ACI report) from the worker and verifies it natively:
    - The keyset endorsement signature (identity key over the keyset digest) verifies.
    - Freshness: `fetched_at <= now < stale_after`.
 2. **DCAP quote** — `dcap_qvl` verifies the TDX quote against fetched collateral.
-3. **dstack event log + app-id** — replay the RTMR event log and extract/accept the
-   dstack app-id.
-4. **dstack KMS identity custody** — verify the secp256k1 KMS signature chain against
+3. **dstack event log, app-id, and Compose:** verify RTMR3, extract and accept
+   the measured app-id, and verify the Compose preimage as described below.
+4. **dstack KMS identity custody:** verify the secp256k1 KMS signature chain against
    the accepted KMS root key.
+
+## How the measured Compose is verified
+
+The ACI-service verifier connects `attestation.evidence.app_compose` to the
+verified TDX quote as follows:
+
+1. Verify the TDX quote and its nonce-bound `report_data`.
+2. Recompute the dstack runtime-event digests, replay the boot event log, and
+   require the result to equal RTMR3 in the verified quote.
+3. Read the pre-`system-ready` `compose-hash` event and require
+   `SHA256(UTF8(app_compose))` to equal that measured value.
+
+These checks prove integrity and measurement binding. They do not prove that an
+image, launcher, source revision, compiler, dependency, or OS build is
+acceptable. Those trust-policy checks remain separate.
 
 ## What binds the session
 
@@ -76,9 +93,11 @@ connection before forwarding.
 Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md) (AciService has no
 separate `review.md`):
 
-- **Software provenance** (worker code → reviewed source): via the
-  `accepted_workload_ids` / `accepted_image_digests` policy plus `app_compose`.
-  **TODO:** populate and pin the reviewed allowlist (kept minimal today).
+- **Software provenance** (worker code → reviewed source): via the RTMR3-bound
+  `app_compose`, followed by launcher/image and source-provenance policy. The
+  native verifier proves the Compose preimage is measured. **TODO:** parse and
+  enforce the reviewed launcher/image/source allowlist rather than accepting a
+  workload id alone.
 - **Platform/OS provenance** (dstack guest OS / firmware → reviewed reproducible build):
   the dstack event-log RTMR replay and KMS-root custody are verified, but the reviewed
   dstack OS image digest is **TODO** to pin.

@@ -223,6 +223,7 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
     assert!(quote.raw_quote.len() > 1024);
     assert!(quote.event_log.as_str().is_some_and(|s| !s.is_empty()));
     assert!(quote.vm_config.as_str().is_some_and(|s| !s.is_empty()));
+    assert!(quote.app_compose.as_deref().is_some_and(|s| !s.is_empty()));
 }
 
 #[tokio::test]
@@ -289,6 +290,9 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     assert_eq!(report.attestation.vendor, "phala");
     assert_eq!(report.attestation.tee_type, "tdx");
     assert_ne!(report.attestation.evidence["vm_config"]["stub"], true);
+    assert!(report.attestation.evidence["app_compose"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty()));
 
     let endorsement_payload =
         identity::keyset_endorsement_payload(&report.attestation.workload_keyset).unwrap();
@@ -439,7 +443,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
         "{:?}",
         event.reason
     );
-    assert_eq!(event.verifier_id, "aci-service/v1");
+    assert_eq!(event.verifier_id, "aci-service/v2");
     assert!(event.evidence.is_some());
     assert_eq!(
         event.channel_bindings,

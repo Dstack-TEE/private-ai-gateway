@@ -66,6 +66,8 @@ pub struct Quote {
     /// VM / TCB configuration metadata. Serialised verbatim into the
     /// attestation envelope `evidence.vm_config`.
     pub vm_config: serde_json::Value,
+    /// Exact deployment-manifest preimage measured by dstack, when available.
+    pub app_compose: Option<String>,
 }
 
 /// Produces a TEE quote binding caller-supplied report-data.

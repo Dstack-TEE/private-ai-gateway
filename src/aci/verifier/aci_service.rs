@@ -131,6 +131,12 @@ pub(super) enum AciServiceVerificationError {
     EventLogRtmrMismatch,
     #[error("dstack app-id event missing from verified event log")]
     MissingAppId,
+    #[error("dstack compose-hash event missing from verified event log")]
+    MissingComposeHash,
+    #[error("missing dstack app_compose evidence")]
+    MissingAppCompose,
+    #[error("dstack app_compose preimage does not match the RTMR3-bound compose hash")]
+    AppComposeHashMismatch,
     #[error("missing dstack KMS key custody evidence")]
     MissingKeyCustody,
     #[error("unsupported key custody provider: {0}")]
@@ -387,7 +393,7 @@ impl AciServiceUpstreamVerifier {
             cache_ttl_seconds,
             request_timeout_seconds,
             cache: RwLock::new(None),
-            verifier_id: "aci-service/v1".to_string(),
+            verifier_id: "aci-service/v2".to_string(),
         })
     }
 

@@ -100,7 +100,7 @@ Use this checklist before treating a deployment as private inference.
 
 | Check | Evidence |
 | --- | --- |
-| Gateway identity is real | `GET /v1/attestation/report?nonce=<fresh nonce>` proves the TEE quote, workload id, and keyset. When source provenance is present, it must match the reviewed deployment. |
+| Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote, workload id, and keyset. For dstack, verify `evidence.app_compose` against the RTMR3-bound `compose-hash`. Image and source-code acceptance remain verifier-policy TODOs. |
 | Keys are bound to the workload | The keyset in the report lists identity, receipt-signing, E2EE, and optional TLS SPKI keys endorsed by the workload identity. |
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
@@ -376,9 +376,15 @@ The recommended dstack deployment path uses `git-launcher`:
 
 Source provenance in attestation reports is derived from the git-launcher pin,
 not from gateway JSON. If the launcher config is absent, the report omits
-source provenance and the value is unknown. In production, compare the report's
-source provenance with `REPO_URL` and `COMMIT_SHA` in the attested launcher
-config.
+source provenance and the value is unknown. The current native verifier does not
+yet bind the reported commit or image digest to reviewed source; that policy is
+an explicit TODO.
+
+The canonical report publishes the exact measured `app_compose` preimage so an
+independent verifier can check it against the RTMR3-bound `compose-hash`. Keep
+plaintext secrets out of the Compose file. Supply values through Phala encrypted
+environment variables; the measured Compose contains the variable references,
+not their values.
 
 The launcher stays generic. Build, install, and run logic belongs to this repo.
 For production, prefer a Rust-capable gateway image so the toolchain is covered

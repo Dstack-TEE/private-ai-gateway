@@ -107,9 +107,16 @@ WORK_DIR=/var/lib/git-launcher/private-ai-gateway
 
 When the launcher config is absent, source provenance is unknown and the
 gateway omits `source_provenance` from attestation reports. Production
-deployments should use `git-launcher`; relying parties should compare reported
-source provenance, when present, with the `REPO_URL` and `COMMIT_SHA` covered by
-the attested dstack compose.
+deployments should use `git-launcher`. The native ACI-service verifier checks
+that `attestation.evidence.app_compose` hashes to the `compose-hash` event bound
+into RTMR3. Binding the reported repository commit or image digest to reviewed
+source remains a verifier-policy TODO.
+
+The canonical attestation endpoint publishes the raw measured `app_compose`.
+Never place plaintext tokens, API keys, or passwords in Compose. Use Phala
+encrypted environment variables and leave only variable references in the
+measured file. Their encrypted values are not published or bound by
+`app_compose`.
 
 If the launcher config exists, `COMMIT_SHA` must be a full 40- or 64-character
 hexadecimal commit hash. Branch names, tags, and short hashes are rejected at
