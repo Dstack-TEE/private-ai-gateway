@@ -10,10 +10,9 @@
 //!   ends.
 //! * `get_receipt(...)` returns a previously-issued receipt by id.
 //!
-//! Upstream verification is **fail-closed by default**. If
-//! `X-Upstream-Verification: required` (the default) and no verifier
-//! event is supplied for the chosen upstream, the service refuses to
-//! forward sensitive bytes and surfaces
+//! Requests constrained by `provider.aci_verified` are fail-closed. If no
+//! verifier event is supplied for the chosen attested upstream, the service
+//! refuses to forward sensitive bytes and surfaces
 //! [`UpstreamVerificationError`].
 
 use std::sync::{Arc, RwLock};
@@ -248,9 +247,5 @@ impl AciService {
         self.metrics
             .render()
             .map_err(|e| ServiceError::Metrics(e.to_string()))
-    }
-
-    pub fn upstream_required_default(&self) -> bool {
-        self.config.upstream_required_default
     }
 }

@@ -1,5 +1,5 @@
-//! Service composition tests: fail-closed defaults, source
-//! provenance, capability default, X-Upstream-Verification semantics.
+//! Service composition tests: ACI-constrained forwarding, source provenance,
+//! capability defaults, and upstream-verification receipts.
 
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +70,16 @@ impl UpstreamBackend for StubUpstream {
     fn url_origin(&self) -> Option<&str> {
         Some("http://stub-upstream")
     }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "x".to_string(),
+            route_id: req.target_route_id.clone(),
+            is_tee: Some(true),
+            request: req,
+        })
+    }
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         *self.received.lock().unwrap() = Some(req.body);
         Ok(UpstreamResponse {
@@ -89,14 +99,13 @@ impl UpstreamBackend for StubUpstream {
     }
 }
 
-fn make_service_raw(body: &[u8], upstream_required_default: bool) -> (AciService, ReceivedBody) {
+fn make_service_raw(body: &[u8]) -> (AciService, ReceivedBody) {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, received) = StubUpstream::new(body);
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
-    cfg.upstream_required_default = upstream_required_default;
     // Do not advertise unwired E2EE.
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
@@ -113,16 +122,16 @@ fn make_service_raw(body: &[u8], upstream_required_default: bool) -> (AciService
     (svc, received)
 }
 
-fn make_service(body: &[u8], upstream_required_default: bool) -> (Arc<AciService>, ReceivedBody) {
-    let (svc, received) = make_service_raw(body, upstream_required_default);
+fn make_service(body: &[u8]) -> (Arc<AciService>, ReceivedBody) {
+    let (svc, received) = make_service_raw(body);
     (Arc::new(svc), received)
 }
 
 #[tokio::test]
-async fn default_required_with_no_verifier_fails_closed_before_forwarding() {
-    let (svc, received) = make_service(br#"{"id":"x"}"#, true);
+async fn aci_required_with_no_verifier_fails_closed_before_forwarding() {
+    let (svc, received) = make_service(br#"{"id":"x"}"#);
     let err = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, None)
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, true, None)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -133,24 +142,24 @@ async fn default_required_with_no_verifier_fails_closed_before_forwarding() {
 }
 
 #[tokio::test]
-async fn x_upstream_verification_none_forwards_and_records_failed_event() {
-    let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
+async fn unconstrained_request_forwards_and_records_failed_event() {
+    let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#);
     let result = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, Some(false), None)
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, None)
         .await
         .unwrap();
     assert_eq!(result.upstream_status, 200);
     assert!(received.lock().unwrap().is_some());
 
-    // Aggregator receipts always carry upstream.verified. The opt-out
-    // path records a synthesised failed event so a downstream
-    // verifier sees the actual state.
+    // Aggregator receipts always carry upstream.verified. An unconstrained
+    // request records a synthesized failed event so a downstream verifier sees
+    // the actual state.
     let uv = result
         .receipt
         .event_log
         .iter()
         .find(|e| e.event_type == "upstream.verified")
-        .expect("opt-out must still record upstream.verified");
+        .expect("unconstrained requests must still record upstream.verified");
     assert_eq!(uv.fields.get("result").unwrap().as_str().unwrap(), "failed");
     assert!(!uv.fields.get("required").unwrap().as_bool().unwrap());
     assert_eq!(
@@ -171,10 +180,10 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
     // simulates a malicious "trusted" X-Request-Hash value by
     // hashing an *empty* body and confirming the body_hash field
     // records the hash of the actual bytes the service received.
-    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
+    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#);
     let body = br#"{"model":"x","messages":[]}"#;
     let result = svc
-        .forward_chat_completion(body, None, Some(false), None)
+        .forward_chat_completion(body, None, false, None)
         .await
         .unwrap();
     let received = result
@@ -196,14 +205,14 @@ async fn x_request_hash_header_value_does_not_enter_request_received_hash() {
 
 #[tokio::test]
 async fn verifier_event_result_verified_emits_upstream_verified() {
-    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
+    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#);
     let event = UpstreamVerifiedEvent {
         url_origin: Some("http://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
         ..verified_event("stub-upstream", "x")
     };
     let result = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, true, Some(event))
         .await
         .unwrap();
     let uv = result
@@ -224,7 +233,7 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
 
 #[tokio::test]
 async fn verified_upstream_binding_creates_attested_session() {
-    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
     let event = UpstreamVerifiedEvent {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -244,7 +253,7 @@ async fn verified_upstream_binding_creates_attested_session() {
     };
 
     let result = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, true, Some(event))
         .await
         .unwrap();
     let uv = result
@@ -310,7 +319,7 @@ async fn verified_upstream_binding_creates_attested_session() {
 
 #[tokio::test]
 async fn verified_upstream_binding_fails_without_persisted_session() {
-    let (svc, received) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let (svc, received) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
     let svc = svc.with_session_store(Arc::new(FailingSessionStore));
     let event = UpstreamVerifiedEvent {
         upstream_name: "stub-upstream".to_string(),
@@ -330,7 +339,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
     };
 
     let err = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, true, Some(event))
         .await
         .expect_err("receipt must not cite a session that was not persisted");
 
@@ -345,7 +354,7 @@ async fn session_is_per_tee_channel_not_per_model() {
     // session attests the verified channel, not the model. (A router-based
     // upstream serving N models therefore yields 1 session, not N.) The model
     // served is recorded on the receipt, never on the session.
-    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#, true);
+    let (svc, _) = make_service(br#"{"id":"chat-xyz"}"#);
     let event = |model: &str| UpstreamVerifiedEvent {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -370,7 +379,7 @@ async fn session_is_per_tee_channel_not_per_model() {
         .forward_chat_completion(
             br#"{"model":"model-a","messages":[]}"#,
             None,
-            None,
+            true,
             Some(event("model-a")),
         )
         .await
@@ -379,7 +388,7 @@ async fn session_is_per_tee_channel_not_per_model() {
         .forward_chat_completion(
             br#"{"model":"model-b","messages":[]}"#,
             None,
-            None,
+            true,
             Some(event("model-b")),
         )
         .await
@@ -396,7 +405,7 @@ async fn session_is_per_tee_channel_not_per_model() {
 
 #[tokio::test]
 async fn attested_session_id_changes_when_verification_material_changes() {
-    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#, true);
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
@@ -418,7 +427,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
         .forward_chat_completion(
             br#"{"model":"x","messages":[]}"#,
             None,
-            None,
+            true,
             Some(make_event("11")),
         )
         .await
@@ -427,7 +436,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
         .forward_chat_completion(
             br#"{"model":"x","messages":[]}"#,
             None,
-            None,
+            true,
             Some(make_event("22")),
         )
         .await
@@ -470,20 +479,15 @@ async fn attested_session_id_changes_when_verification_material_changes() {
 }
 
 #[tokio::test]
-async fn verifier_event_failed_with_required_fails_before_forwarding() {
-    let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#, true);
+async fn verifier_event_failed_for_aci_request_fails_before_forwarding() {
+    let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#);
     let event = UpstreamVerifiedEvent {
         verifier_id: "stub-verifier-1".to_string(),
         reason: Some("quote did not match expected app-id".to_string()),
         ..failed_event("stub-upstream", "x")
     };
     let err = svc
-        .forward_chat_completion(
-            br#"{"model":"x","messages":[]}"#,
-            None,
-            Some(true),
-            Some(event),
-        )
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, true, Some(event))
         .await
         .unwrap_err();
     match err {
@@ -571,7 +575,7 @@ fn service_refuses_test_keys_in_production_mode() {
 
 #[tokio::test]
 async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
-    let (svc, _) = make_service(b"{}", true);
+    let (svc, _) = make_service(b"{}");
     let report = svc.attestation_report(None).await.unwrap();
     assert!(report
         .service_capabilities
@@ -581,7 +585,7 @@ async fn attestation_report_does_not_advertise_unwired_e2ee_by_default() {
 
 #[tokio::test]
 async fn background_verification_writes_inspectable_session_into_the_store() {
-    let (service, _) = make_service(b"{}", true);
+    let (service, _) = make_service(b"{}");
     let event = UpstreamVerifiedEvent {
         provider_type: Some("tinfoil".to_string()),
         url_origin: Some("https://preflight-upstream".to_string()),

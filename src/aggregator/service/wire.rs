@@ -267,12 +267,9 @@ pub struct ChatCompletionRequest<'a> {
     /// `request.received.body_hash == request.forwarded.body_hash` receipt
     /// pair.
     pub forwarded_body: Option<Vec<u8>>,
-    /// Override the configured default upstream-verification mode.
-    pub upstream_required: Option<bool>,
     /// Restrict this request to ACI-verified attested upstreams. Set by
     /// `provider.aci_verified`, or implied by a non-empty
-    /// `provider.aci_session_ids` allowlist. It only ever tightens the
-    /// configured verification mode.
+    /// `provider.aci_session_ids` allowlist.
     pub aci_required: bool,
     /// Optional hard allowlist of attested session ids. A route may forward
     /// only when its current verified channel binding derives one of these ids.

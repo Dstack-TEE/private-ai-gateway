@@ -230,8 +230,7 @@ fn build_service(
 }
 
 /// Canned passing event the caller "owns" — mirrors what the recording verifier
-/// would have produced, so the fail-closed gate (upstream_required defaults to
-/// true) is satisfied and the flow reaches the forward step.
+/// would have produced so the flow reaches the forward step.
 fn caller_event() -> UpstreamVerifiedEvent {
     UpstreamVerifiedEvent {
         url_origin: Some(UPSTREAM_ORIGIN.to_string()),
@@ -248,7 +247,6 @@ fn forward_request(
         endpoint_path: "/v1/chat/completions",
         received_body: CHAT_BODY,
         forwarded_body: None,
-        upstream_required: Some(true),
         aci_required: false,
         aci_session_ids: Vec::new(),
         upstream_verification_event,

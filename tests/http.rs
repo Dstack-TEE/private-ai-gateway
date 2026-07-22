@@ -400,37 +400,6 @@ async fn attestation_report_nonce_null_when_absent() {
 }
 
 #[tokio::test]
-async fn chat_default_required_fails_closed_without_verifier() {
-    let h = make_harness();
-    let app = build_router(h.service.clone());
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: serde_json::Value =
-        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert_eq!(
-        body.get("error")
-            .unwrap()
-            .get("type")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        "upstream_verification_failed"
-    );
-    // Upstream MUST NOT have been called.
-    assert!(h.received.lock().unwrap().is_none());
-}
-
-#[tokio::test]
 async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
     // Direct path (no control middleware) on the Anthropic surface: an upstream 5xx
     // caused by a client image URL becomes a 400 in the *Anthropic* error envelope,
@@ -491,7 +460,6 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -524,7 +492,7 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
 }
 
 #[tokio::test]
-async fn chat_opt_out_forwards_and_signs_receipt_with_failed_event() {
+async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
     let h = make_harness();
     let app = build_router(h.service.clone());
 
@@ -536,7 +504,6 @@ async fn chat_opt_out_forwards_and_signs_receipt_with_failed_event() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from(request_bytes.clone()))
                 .unwrap(),
         )
@@ -564,13 +531,13 @@ async fn chat_opt_out_forwards_and_signs_receipt_with_failed_event() {
         .get_receipt_by_receipt_id(&receipt_id)
         .expect("receipt should be retained");
 
-    // Aggregator receipt: upstream.verified must be present even in
-    // the opt-out path, recorded as failed/no-verifier.
+    // Aggregator receipt: upstream.verified must be present even for an
+    // unconstrained request, recorded as failed/no-verifier.
     let uv = receipt
         .event_log
         .iter()
         .find(|e| e.event_type == "upstream.verified")
-        .expect("upstream.verified must be emitted on opt-out");
+        .expect("upstream.verified must be emitted for unconstrained requests");
     assert_eq!(uv.fields.get("result").unwrap().as_str().unwrap(), "failed");
     assert!(!uv.fields.get("required").unwrap().as_bool().unwrap());
 
@@ -610,7 +577,6 @@ async fn chat_x_request_hash_is_ignored() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .header("x-request-hash", attacker_hash.clone())
                 .body(Body::from(request_bytes.clone()))
                 .unwrap(),
@@ -659,7 +625,7 @@ async fn attested_session_lookup_returns_audit_record() {
     };
     let result = h
         .service
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, None, Some(event))
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, Some(event))
         .await
         .unwrap();
     let session_id = result
@@ -770,7 +736,6 @@ async fn chat_invalid_json_returns_400_before_forwarding() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from("not json".as_bytes().to_vec()))
                 .unwrap(),
         )
@@ -781,7 +746,7 @@ async fn chat_invalid_json_returns_400_before_forwarding() {
 }
 
 #[tokio::test]
-async fn chat_invalid_x_upstream_verification_header_rejected() {
+async fn retired_x_upstream_verification_header_is_rejected() {
     let h = make_harness();
     let app = build_router(h.service.clone());
 
@@ -791,20 +756,25 @@ async fn chat_invalid_x_upstream_verification_header_rejected() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "maybe")
+                .header("x-upstream-verification", "required")
                 .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("provider.aci_verified"));
     assert!(h.received.lock().unwrap().is_none());
 }
 
 #[tokio::test]
 async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
-    // `aci_verified` cannot be relaxed by the verification opt-out. This
-    // harness has no route classed as attested, so the prompt must not forward.
+    // This harness has no route classed as attested, so the prompt must not
+    // forward.
     let h = make_harness();
     let app = build_router(h.service.clone());
 
@@ -815,7 +785,6 @@ async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from(
                     br#"{"model":"x","messages":[],"provider":{"aci_verified":true}}"#.to_vec(),
                 ))
@@ -858,7 +827,6 @@ async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from(
                     br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"custom":"keep"}}"#.to_vec(),
                 ))
@@ -884,14 +852,13 @@ async fn receipt_lookup_by_chat_id() {
     let h = make_harness();
     let app = build_router(h.service.clone());
 
-    // Issue a chat completion (opt-out).
+    // Issue an unconstrained chat completion.
     app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("x-upstream-verification", "none")
                 .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
                 .unwrap(),
         )

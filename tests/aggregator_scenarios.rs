@@ -27,7 +27,7 @@ use private_ai_gateway::aci::receipt::{
 };
 use private_ai_gateway::aci::types::{KeyedPublicKey, Receipt, ServiceCapabilities};
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
@@ -41,6 +41,7 @@ use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0}"#;
+const ACI_CHAT_REQUEST: &[u8] = br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0,"provider":{"aci_verified":true}}"#;
 const CHAT_RESPONSE: &[u8] =
     br#"{"id":"chat-mock-1","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}]}"#;
 
@@ -114,6 +115,17 @@ impl UpstreamBackend for MockUpstream {
 
     fn url_origin(&self) -> Option<&str> {
         Some(&self.origin)
+    }
+
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "gpt-test".to_string(),
+            route_id: req.target_route_id.clone(),
+            is_tee: Some(true),
+            request: req,
+        })
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -478,7 +490,7 @@ async fn metrics_endpoint_exposes_aggregator_prometheus_text() {
     );
     assert!(
         body.contains(
-            "private_ai_gateway_upstream_verifications_total{required=\"true\",result=\"verified\"} 1"
+            "private_ai_gateway_upstream_verifications_total{required=\"false\",result=\"verified\"} 1"
         ),
         "{body}"
     );
@@ -527,7 +539,7 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         let verifier_calls = verifier_calls.lock().unwrap();
         assert_eq!(verifier_calls.len(), 1);
         assert_eq!(verifier_calls[0].model_id, "gpt-test");
-        assert!(verifier_calls[0].required);
+        assert!(!verifier_calls[0].required);
         assert_eq!(
             verifier_calls[0].forwarded_body_hash,
             sha256_hex(CHAT_REQUEST)
@@ -574,7 +586,7 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         event(&receipt, EVENT_UPSTREAM_VERIFIED)["result"],
         "verified"
     );
-    assert_eq!(event(&receipt, EVENT_UPSTREAM_VERIFIED)["required"], true);
+    assert_eq!(event(&receipt, EVENT_UPSTREAM_VERIFIED)["required"], false);
     assert_eq!(
         event(&receipt, EVENT_UPSTREAM_VERIFIED)["verifier_id"],
         "mock-verifier/v1"
@@ -609,11 +621,11 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
 }
 
 #[tokio::test]
-async fn required_upstream_verification_failure_blocks_before_forwarding() {
+async fn aci_verified_failure_blocks_before_forwarding() {
     let (verifier, verifier_calls) = ScriptedVerifier::failed("quote app-id mismatch");
     let h = make_harness(verifier);
 
-    let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
+    let response = h.requester.post_chat(ACI_CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(response.headers.get("x-receipt-id").is_none());
     assert_eq!(
@@ -629,14 +641,11 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
 }
 
 #[tokio::test]
-async fn explicit_none_is_best_effort_and_receipt_records_failed_not_required() {
+async fn unconstrained_request_is_best_effort_and_receipt_records_failed_not_required() {
     let (verifier, _verifier_calls) = ScriptedVerifier::failed("cached evidence stale");
     let h = make_harness(verifier);
 
-    let response = h
-        .requester
-        .post_chat(CHAT_REQUEST, &[("x-upstream-verification", "none")])
-        .await;
+    let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 
@@ -717,7 +726,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         .forward_chat_completion(
             received,
             Some(forwarded.to_vec()),
-            Some(true),
+            false,
             Some(verifier_event),
         )
         .await
@@ -790,15 +799,19 @@ async fn invalid_request_inputs_are_rejected_before_verifier_or_upstream() {
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert!(verifier_calls.lock().unwrap().is_empty());
 
-    let invalid_header = h
+    let retired_header = h
         .requester
-        .post_chat(CHAT_REQUEST, &[("x-upstream-verification", "maybe")])
+        .post_chat(CHAT_REQUEST, &[("x-upstream-verification", "required")])
         .await;
-    assert_eq!(invalid_header.status, StatusCode::BAD_REQUEST);
+    assert_eq!(retired_header.status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        json_body(&invalid_header)["error"]["type"],
+        json_body(&retired_header)["error"]["type"],
         "invalid_request_error"
     );
+    assert!(json_body(&retired_header)["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("provider.aci_verified"));
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert!(verifier_calls.lock().unwrap().is_empty());
 }

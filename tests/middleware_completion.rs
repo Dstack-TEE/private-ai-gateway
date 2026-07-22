@@ -214,13 +214,14 @@ impl UpstreamVerifier for SessionVerifier {
 }
 
 fn build_service_failing_verify() -> Arc<AciService> {
+    let forwarded = Arc::new(Mutex::new(Vec::new()));
     Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(MockUpstream {
+            Arc::new(TeeAwareUpstream {
+                forwarded,
                 status: 200,
-                body: b"{}".to_vec(),
             }),
             Arc::new(FailVerifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -380,7 +381,6 @@ fn chat_input() -> CompletionInput {
         api_key_hash: Some("deadbeef".to_string()),
         requester: None,
         e2ee: None,
-        upstream_required: true,
         aci_required: false,
         aci_session_ids: Vec::new(),
         request_id: "req-1".to_string(),
@@ -464,8 +464,7 @@ async fn allow_forwards_and_finalizes_receipt() {
     let upstream_body = br#"{"id":"chat-1","object":"chat.completion","choices":[]}"#.to_vec();
     let service = build_service_with_upstream(200, upstream_body);
 
-    let mut input = chat_input();
-    input.upstream_required = false;
+    let input = chat_input();
     let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 200);
     assert!(
@@ -498,8 +497,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     });
     let service = build_service_with_upstream(200, serde_json::to_vec(&anthropic_body).unwrap());
 
-    let mut input = chat_input();
-    input.upstream_required = false;
+    let input = chat_input();
     let (status, _headers, body) =
         response_parts(mw.handle_completion(&service, input).await).await;
 
@@ -599,8 +597,7 @@ async fn malformed_2xx_body_returns_502_upstream() {
     let mw = middleware(control_url);
     // Upstream returns HTTP 200 with a non-JSON body.
     let service = build_service_with_upstream(200, b"<html>not json</html>".to_vec());
-    let mut input = chat_input();
-    input.upstream_required = false;
+    let input = chat_input();
 
     let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(
@@ -617,14 +614,14 @@ async fn malformed_2xx_body_returns_502_upstream() {
 async fn total_forward_failure_reports_upstream_failure() {
     let (control_url, posts) = spawn_control_capturing(
         200,
-        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+        json!({ "allow": true, "candidates": [{ "routeId": "tee-a:gpt-test", "format": "openai" }] }),
     )
     .await;
     let mw = middleware(control_url);
-    // Upstream verification fails for every candidate, so the forward returns Err.
+    // ACI verification fails for the constrained candidate, so forwarding fails.
     let service = build_service_failing_verify();
     let mut input = chat_input();
-    input.upstream_required = true;
+    input.aci_required = true;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503);
@@ -648,7 +645,6 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     let mw = middleware(control_url);
     let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
     let mut input = chat_input();
-    input.upstream_required = false;
     input.stream = true;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
@@ -699,7 +695,6 @@ async fn repeated_route_id_still_reports_distinct_attempt_indices() {
     let mw = middleware(control_url);
     let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
     let mut input = chat_input();
-    input.upstream_required = false;
     input.stream = true;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
@@ -745,7 +740,6 @@ async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
     let service = build_service_with_upstream(500, upstream_body.into_bytes());
 
     let mut input = chat_input();
-    input.upstream_required = false;
     input.params = json!({
         "model": "gpt-test",
         "messages": [{
@@ -854,7 +848,6 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         endpoint_path: "/v1/chat/completions",
         received_body: br#"{"model":"gpt-test","messages":[]}"#,
         forwarded_body: None,
-        upstream_required: Some(false),
         aci_required: true,
         aci_session_ids: session_ids,
         upstream_verification_event: None,
@@ -1063,12 +1056,11 @@ async fn an_ineligible_trailing_route_does_not_swallow_a_real_upstream_status() 
 }
 
 #[tokio::test]
-async fn aci_constraint_cannot_be_waived_by_the_verification_opt_out() {
+async fn aci_constraint_fails_closed_when_attestation_fails() {
     // A route classed as TEE is not the same as a route whose attestation held.
-    // `provider.aci_verified` pins the request to an attested upstream, so the caller's
-    // `X-Upstream-Verification: none` must not also waive the attestation —
-    // otherwise the constraint degrades into a static provider-name check and a
-    // TEE route with a failed or missing attestation still receives the prompt.
+    // `provider.aci_verified` pins the request to an attested upstream. The
+    // constraint must not degrade into a static provider-name check: a TEE route
+    // with a failed or missing attestation must not receive the prompt.
     let control_url = spawn_control(
         200,
         json!({
@@ -1096,7 +1088,6 @@ async fn aci_constraint_cannot_be_waived_by_the_verification_opt_out() {
     );
     let mut input = chat_input();
     input.aci_required = true;
-    input.upstream_required = false;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503, "a failed attestation must still fail closed");

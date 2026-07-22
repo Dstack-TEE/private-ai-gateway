@@ -694,20 +694,13 @@ pub(super) async fn openai_completion_endpoint(
     };
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
-    let upstream_required = match headers
-        .get("x-upstream-verification")
-        .and_then(|v| v.to_str().ok())
-    {
-        None | Some("required") => true,
-        Some("none") => false,
-        Some(other) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("invalid X-Upstream-Verification: {other}"),
-            );
-        }
-    };
+    if headers.contains_key("x-upstream-verification") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "X-Upstream-Verification is no longer supported; use provider.aci_verified",
+        );
+    }
 
     let aci = match aci_constraint(&parsed) {
         Ok(constraint) => constraint,
@@ -749,15 +742,13 @@ pub(super) async fn openai_completion_endpoint(
             Surface::Openai
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
-        // TEE-only host: force attested serving and refuse to be opted out of it.
-        // `aci_required` makes verification non-waivable at serve time, and forcing
-        // `upstream_required` closes the `X-Upstream-Verification: none` escape; the
-        // `tee_only` flag is carried to the control plane so a non-TEE model is a
-        // 404 before any forward. Client `provider.aci_verified:false` is ignored.
+        // TEE-only host: force attested serving. The `tee_only` flag is carried
+        // to the control plane so a non-TEE model is a 404 before any forward,
+        // while `aci_required` makes verification fail closed at serve time.
+        // Client `provider.aci_verified:false` is ignored.
         let tee_only = request_host_domain(&headers)
             .as_deref()
             .is_some_and(|host| middleware.is_tee_only_domain(host));
-        let upstream_required = upstream_required || tee_only;
         let aci_required = aci.required || tee_only;
         let input = CompletionInput {
             endpoint,
@@ -768,7 +759,6 @@ pub(super) async fn openai_completion_endpoint(
             api_key_hash,
             requester,
             e2ee,
-            upstream_required,
             aci_required,
             aci_session_ids: aci.session_ids,
             request_id: context.request_id,
@@ -803,7 +793,6 @@ pub(super) async fn openai_completion_endpoint(
             endpoint_path,
             received_body: service_body,
             forwarded_body,
-            upstream_required,
             aci_required: aci.required,
             aci_session_ids: aci.session_ids,
             requester,

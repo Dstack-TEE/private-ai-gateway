@@ -24,10 +24,9 @@ pub struct ModelRoute {
     /// caller-supplied path. See [`ModelRouterBackend::prepare`] for the
     /// resolution.
     pub path: Option<String>,
-    /// Whether this route's provider is an attested (TEE) provider.
-    /// `None` means unclassified (routes built directly via
-    /// [`Self::new`], e.g. in tests, defer to request-level
-    /// `upstream_required`). See [`PreparedUpstreamRequest::is_tee`].
+    /// Whether this route's provider is an attested (TEE) provider. `None`
+    /// means unclassified and therefore ineligible for requests constrained by
+    /// `provider.aci_verified`. See [`PreparedUpstreamRequest::is_tee`].
     pub is_tee: Option<bool>,
 }
 

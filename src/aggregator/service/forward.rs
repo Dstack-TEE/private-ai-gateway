@@ -70,10 +70,8 @@ pub(super) fn cite_served_session(
 }
 
 /// Whether a route with this TEE classification may serve a request restricted
-/// to ACI-verified upstreams. Half of that policy; the other half is
-/// [`AciService::upstream_required_for_prepared`], which keeps verification
-/// required so the fail-closed gate still runs. Every forwarding path applies
-/// both.
+/// to ACI-verified upstreams. Every forwarding path applies this eligibility
+/// check before running the fail-closed verifier gate.
 ///
 /// Only `Some(true)` qualifies: an unclassified route is not *known* to be
 /// attested, so no verifier (nor a caller-supplied event) can stand in for the
@@ -87,7 +85,7 @@ impl AciService {
         &self,
         received_body: &[u8],
         forwarded_body: Option<Vec<u8>>,
-        upstream_required: Option<bool>,
+        aci_required: bool,
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<ForwardResult, ServiceError> {
         self.forward_chat_completion_request(ChatCompletionRequest {
@@ -95,8 +93,7 @@ impl AciService {
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body,
             forwarded_body,
-            upstream_required,
-            aci_required: false,
+            aci_required,
             aci_session_ids: Vec::new(),
             upstream_verification_event,
             requester: None,
@@ -139,12 +136,11 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let upstream_required =
-            self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
+        let verification_required = aci_required;
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
-                upstream_required,
+                verification_required,
                 req.upstream_verification_event,
             )
             .await?;
@@ -158,7 +154,7 @@ impl AciService {
             .forward_with_binding_reverify(
                 &prepared,
                 &mut recorded_event,
-                upstream_required,
+                verification_required,
                 caller_supplied_upstream_event,
                 &req.aci_session_ids,
                 // Single forward: only flush the cache for an event we own.
@@ -324,12 +320,11 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let upstream_required =
-            self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
+        let verification_required = aci_required;
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
-                upstream_required,
+                verification_required,
                 req.upstream_verification_event,
             )
             .await?;
@@ -343,7 +338,7 @@ impl AciService {
             .forward_with_binding_reverify(
                 &prepared,
                 &mut recorded_event,
-                upstream_required,
+                verification_required,
                 caller_supplied_upstream_event,
                 &req.aci_session_ids,
                 // Single forward: only flush the cache for an event we own.
@@ -467,15 +462,15 @@ impl AciService {
     pub(super) async fn recorded_upstream_event(
         &self,
         prepared: &PreparedUpstreamRequest,
-        upstream_required: Option<bool>,
+        verification_required: bool,
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<UpstreamVerifiedEvent, ServiceError> {
-        let upstream_required = upstream_required.unwrap_or(self.config.upstream_required_default);
         let mut upstream_verification_event = match upstream_verification_event {
             Some(event) => Some(event),
             None => match &self.upstream_verifier {
                 Some(verifier) => {
-                    let request = self.upstream_verification_request(prepared, upstream_required);
+                    let request =
+                        self.upstream_verification_request(prepared, verification_required);
                     Some(verifier.verify(request).await)
                 }
                 None => None,
@@ -485,7 +480,7 @@ impl AciService {
             // `required` is the client's effective mode for this request. The
             // verifier may report the upstream result, but the service owns the
             // client-facing downgrade decision recorded in the receipt.
-            event.required = upstream_required;
+            event.required = verification_required;
         }
 
         let missing_verifier_result = upstream_verification_event.is_none();
@@ -495,14 +490,14 @@ impl AciService {
             url_origin: prepared.url_origin.clone(),
             verifier_id: "none".to_string(),
             result: VerificationResult::Failed,
-            required: upstream_required,
+            required: verification_required,
             reason: Some("no upstream verifier configured".to_string()),
             ..Default::default()
         });
         self.metrics.record_upstream_verification(&event);
 
         // Fail-closed gate. Run before any upstream IO.
-        if upstream_required {
+        if verification_required {
             if missing_verifier_result {
                 return Err(ServiceError::UpstreamVerification(
                     UpstreamVerificationError::NoVerifierResult,
@@ -519,9 +514,9 @@ impl AciService {
             }
         }
 
-        // Aggregator receipts always carry an `upstream.verified`
-        // event. The opt-out path records a synthesized failed event
-        // so downstream verifiers see the actual state.
+        // Aggregator receipts always carry an `upstream.verified` event. An
+        // unconstrained request records a synthesized failed event so
+        // downstream verifiers see the actual state.
         Ok(event)
     }
 
@@ -541,7 +536,7 @@ impl AciService {
         &self,
         prepared: &PreparedUpstreamRequest,
         recorded_event: &mut UpstreamVerifiedEvent,
-        upstream_required: Option<bool>,
+        verification_required: bool,
         caller_supplied_event: bool,
         aci_session_ids: &[String],
         always_invalidate_on_mismatch: bool,
@@ -564,7 +559,7 @@ impl AciService {
                 {
                     reverify_attempts += 1;
                     match self
-                        .refresh_upstream_event(prepared, upstream_required)
+                        .refresh_upstream_event(prepared, verification_required)
                         .await
                     {
                         Ok(mut event) => {
@@ -589,7 +584,7 @@ impl AciService {
                     if matches!(err, UpstreamError::ChannelBindingMismatch(_))
                         && (always_invalidate_on_mismatch || !caller_supplied_event)
                     {
-                        self.invalidate_upstream_event(prepared, upstream_required);
+                        self.invalidate_upstream_event(prepared, verification_required);
                     }
                     return ReverifyOutcome::Failed(err);
                 }
@@ -597,48 +592,25 @@ impl AciService {
         }
     }
 
-    /// Resolve the effective verification mode for one prepared route.
-    ///
-    /// Non-TEE routes are normally exempt from the fail-closed gate — they are
-    /// forwarded with TLS endpoint binding only. `aci_required` removes that
-    /// exemption, including the caller's `X-Upstream-Verification: none`
-    /// opt-out. See [`attested_route_eligible`] for the other half.
-    pub(super) fn upstream_required_for_prepared(
-        &self,
-        prepared: &PreparedUpstreamRequest,
-        requested: Option<bool>,
-        aci_required: bool,
-    ) -> Option<bool> {
-        if aci_required {
-            Some(true)
-        } else if prepared.is_tee == Some(false) {
-            Some(false)
-        } else {
-            requested
-        }
-    }
-
     pub(super) async fn refresh_upstream_event(
         &self,
         prepared: &PreparedUpstreamRequest,
-        upstream_required: Option<bool>,
+        verification_required: bool,
     ) -> Result<UpstreamVerifiedEvent, ServiceError> {
-        let upstream_required = upstream_required.unwrap_or(self.config.upstream_required_default);
-        self.invalidate_upstream_event(prepared, Some(upstream_required));
-        self.recorded_upstream_event(prepared, Some(upstream_required), None)
+        self.invalidate_upstream_event(prepared, verification_required);
+        self.recorded_upstream_event(prepared, verification_required, None)
             .await
     }
 
     pub(super) fn invalidate_upstream_event(
         &self,
         prepared: &PreparedUpstreamRequest,
-        upstream_required: Option<bool>,
+        verification_required: bool,
     ) {
         let Some(verifier) = &self.upstream_verifier else {
             return;
         };
-        let required = upstream_required.unwrap_or(self.config.upstream_required_default);
-        let request = self.upstream_verification_request(prepared, required);
+        let request = self.upstream_verification_request(prepared, verification_required);
         verifier.invalidate(&request);
     }
 

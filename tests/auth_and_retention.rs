@@ -11,7 +11,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use private_ai_gateway::aci::types::ServiceCapabilities;
 use private_ai_gateway::aci::upstream::{
-    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use private_ai_gateway::aci::verifier::PreverifiedUpstreamVerifier;
 use private_ai_gateway::aggregator::service::{
@@ -25,6 +25,7 @@ use common::{StaticKeyProvider, StubQuoter};
 
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"aci-model","messages":[{"role":"user","content":"hello"}]}"#;
+const ACI_CHAT_REQUEST: &[u8] = br#"{"model":"aci-model","messages":[{"role":"user","content":"hello"}],"provider":{"aci_verified":true}}"#;
 const CHAT_RESPONSE: &[u8] = br#"{"id":"chat-auth-1","object":"chat.completion","choices":[]}"#;
 
 struct StubUpstream;
@@ -36,6 +37,16 @@ impl UpstreamBackend for StubUpstream {
     }
     fn url_origin(&self) -> Option<&str> {
         Some("https://stub-upstream.example")
+    }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "aci-model".to_string(),
+            route_id: req.target_route_id.clone(),
+            is_tee: Some(true),
+            request: req,
+        })
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
@@ -359,7 +370,7 @@ async fn aci_headers_present_on_bad_request_error() {
 // ---------- StaticUpstreamVerifier ----------
 
 #[tokio::test]
-async fn static_verifier_failed_with_required_blocks_forwarding() {
+async fn static_verifier_failed_for_aci_request_blocks_forwarding() {
     use private_ai_gateway::aci::verifier::StaticUpstreamVerifier;
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
@@ -389,7 +400,7 @@ async fn static_verifier_failed_with_required_blocks_forwarding() {
             .method("POST")
             .uri("/v1/chat/completions")
             .header("content-type", "application/json")
-            .body(Body::from(CHAT_REQUEST.to_vec()))
+            .body(Body::from(ACI_CHAT_REQUEST.to_vec()))
             .unwrap(),
     )
     .await;

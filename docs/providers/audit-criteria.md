@@ -428,7 +428,7 @@ Avoid adding unnecessary complexity to the protocol or gateway:
 - no per-request attestation when a verified lease and channel binding are
   sufficient
 - no trust in catalog flags without a verified lease
-- no upstream verification rules in the ACI core spec
+- no provider-specific upstream verification rules in the ACI core spec
 - no provider-specific measurement pinning in generic dstack verifier config
 
 The right abstraction is a provider adapter that establishes a verified lease.

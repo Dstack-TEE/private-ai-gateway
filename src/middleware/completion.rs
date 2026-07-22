@@ -47,7 +47,6 @@ pub struct CompletionInput {
     pub api_key_hash: Option<String>,
     pub requester: Option<ReceiptOwner>,
     pub e2ee: Option<E2eeRequestContext>,
-    pub upstream_required: bool,
     /// Request is restricted to ACI-verified attested upstreams.
     pub aci_required: bool,
     /// Optional hard allowlist of attested session ids.
@@ -241,7 +240,6 @@ pub async fn run(
         api_key_hash,
         requester,
         e2ee,
-        upstream_required,
         aci_required,
         aci_session_ids,
         request_id,
@@ -425,7 +423,6 @@ pub async fn run(
                 endpoint_path,
                 received_body: &received_body,
                 forwarded_body: None,
-                upstream_required: Some(upstream_required),
                 aci_required,
                 aci_session_ids,
                 upstream_verification_event: None,

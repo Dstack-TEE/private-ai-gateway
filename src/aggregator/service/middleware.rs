@@ -343,11 +343,9 @@ impl AciService {
                 continue;
             }
 
-            // Per-route fail-closed mode. Under `aci_required` it cannot be
-            // waived: a request pinned to an attested upstream must not also
-            // opt out of the attestation.
-            let candidate_required =
-                self.upstream_required_for_prepared(&prepared, req.upstream_required, aci_required);
+            // Only an explicit ACI constraint makes verification fail-closed.
+            // Unconstrained requests still record the verifier outcome.
+            let candidate_required = aci_required;
 
             let mut recorded_event = match self
                 .recorded_upstream_event(&prepared, candidate_required, single_caller_event.clone())
