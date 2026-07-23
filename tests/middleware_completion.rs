@@ -639,7 +639,9 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // load behind the 429s is never shed.
     let (control_url, posts) = spawn_control_capturing(
         200,
-        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+        // Preemptible tier: no capacity-retry second pass — this test asserts
+        // the single walk's terminal report.
+        json!({ "allow": true, "userTier": "basic", "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
     )
     .await;
     let mw = middleware(control_url);
@@ -685,6 +687,9 @@ async fn repeated_route_id_still_reports_distinct_attempt_indices() {
         200,
         json!({
             "allow": true,
+            // Preemptible tier: no capacity-retry second pass — this test
+            // asserts the single walk's per-attempt attribution.
+            "userTier": "basic",
             "candidates": [
                 { "routeId": "openai:dup", "format": "openai" },
                 { "routeId": "openai:dup", "format": "openai" }
@@ -962,6 +967,9 @@ async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
             200,
             json!({
                 "allow": true,
+                // Preemptible tier: no capacity-retry second pass — this test
+                // asserts the single walk's status precedence.
+                "userTier": "basic",
                 "candidates": [
                     { "routeId": "plain:gpt-test", "format": "openai" },
                     { "routeId": "missing-b:gpt-test", "format": "openai" }
@@ -1279,4 +1287,403 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         .filter(|r| r["requestId"] == json!("r-late"))
         .count();
     assert_eq!(count, 1, "no second, conflicting report after settle");
+}
+
+// A mock upstream that answers each forward with the next status in a script,
+// recording every contacted route — the capacity-retry tests need "429 first,
+// 200 on the delayed second pass" to be observable per attempt.
+struct SequencedUpstream {
+    forwarded: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    statuses: Mutex<std::collections::VecDeque<u16>>,
+}
+
+#[async_trait]
+impl UpstreamBackend for SequencedUpstream {
+    fn name(&self) -> &str {
+        "sequenced-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://sequenced-upstream.example")
+    }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        let route_id = req.target_route_id.clone().unwrap_or_default();
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "gpt-test".to_string(),
+            is_tee: Some(false),
+            route_id: Some(route_id),
+            request: req,
+        })
+    }
+    async fn forward_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forwarded
+            .lock()
+            .unwrap()
+            .push(req.route_id.clone().unwrap_or_default());
+        self.bodies.lock().unwrap().push(req.request.body.clone());
+        let status = self
+            .statuses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("script exhausted");
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        let body = match status {
+            200 => br#"{"id":"ok","choices":[]}"#.to_vec(),
+            // The recognized upstream capacity/no-targets signal, under a
+            // status OUTSIDE the retryable whitelist — guards the shared
+            // classification contract, not the whitelist path.
+            520 => br#"{"error":"exhausted all available targets"}"#.to_vec(),
+            _ => br#"{"error":{"message":"capacity"}}"#.to_vec(),
+        };
+        Ok(UpstreamResponse {
+            status_code: status,
+            body,
+            headers,
+            served_instance_id: None,
+        })
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+    async fn forward_stream_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        let response = self.forward_prepared(req).await?;
+        let body = Bytes::from(response.body);
+        Ok(UpstreamStreamResponse {
+            status_code: response.status_code,
+            headers: response.headers,
+            body: Box::pin(futures_util::stream::once(async move { Ok(body) })),
+            served_instance_id: response.served_instance_id,
+        })
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!("sequenced upstream forwards via prepared paths only")
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Ok(UpstreamResponse {
+            status_code: 200,
+            body: b"{}".to_vec(),
+            headers: HashMap::new(),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn build_sequenced_service(
+    statuses: Vec<u16>,
+) -> (
+    Arc<AciService>,
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<Vec<u8>>>>,
+) {
+    let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(SequencedUpstream {
+                forwarded: forwarded.clone(),
+                bodies: bodies.clone(),
+                statuses: Mutex::new(statuses.into_iter().collect()),
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test("private-ai-gateway"),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    (service, forwarded, bodies)
+}
+
+fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'static> {
+    ChatCompletionRequest {
+        context: GatewayRequestContext {
+            user_model: Some("gpt-test".to_string()),
+            user_tier: user_tier.map(str::to_string),
+            ..GatewayRequestContext::default()
+        },
+        endpoint_path: "/v1/chat/completions",
+        received_body: br#"{"model":"gpt-test","messages":[]}"#,
+        forwarded_body: None,
+        aci_required: false,
+        aci_session_ids: Vec::new(),
+        upstream_verification_event: None,
+        requester: None,
+        e2ee: None,
+    }
+}
+
+fn plain_candidate(route: &str) -> ForwardCandidate {
+    ForwardCandidate {
+        route_id: route.to_string(),
+        body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
+    }
+}
+
+// Virtual time: the retry sleep auto-advances, so the test runs instantly.
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_gives_non_preemptible_traffic_a_delayed_second_pass() {
+    let (service, forwarded, _) = build_sequenced_service(vec![429, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("plain:gpt-test")],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            // The first attempt's 429 stays observable behind the commit.
+            assert_eq!(
+                forward.failed_attempts,
+                vec![("plain:gpt-test".to_string(), 429)]
+            );
+        }
+        _ => panic!("the delayed second pass must commit the 200"),
+    }
+    assert_eq!(
+        *forwarded.lock().unwrap(),
+        vec!["plain:gpt-test".to_string(), "plain:gpt-test".to_string()],
+        "exactly one delayed re-contact"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_skips_preemptible_traffic() {
+    let (service, forwarded, _) = build_sequenced_service(vec![429, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(Some("basic")),
+            vec![plain_candidate("plain:gpt-test")],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            // Preemptible traffic keeps the fast 429: the walk commits the
+            // held-back answer without a second pass.
+            assert_eq!(forward.upstream_status, 429);
+        }
+        _ => panic!("expected the committed 429"),
+    }
+    assert_eq!(
+        *forwarded.lock().unwrap(),
+        vec!["plain:gpt-test".to_string()],
+        "preemptible traffic must not re-contact the upstream"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_replays_only_the_capacity_rejections() {
+    // Pass 1: a answers 500, b answers 429. The second pass replays b alone —
+    // re-hitting the hard-failed a would feed the breaker another failure for
+    // a request it cannot serve.
+    let (service, forwarded, _) = build_sequenced_service(vec![500, 429, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("a:gpt-test"), plain_candidate("b:gpt-test")],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            assert_eq!(forward.selected_route, "b:gpt-test");
+            assert_eq!(
+                forward.failed_attempts,
+                vec![
+                    ("a:gpt-test".to_string(), 500),
+                    ("b:gpt-test".to_string(), 429)
+                ]
+            );
+        }
+        _ => panic!("the retried capacity rejection must commit"),
+    }
+    assert_eq!(
+        *forwarded.lock().unwrap(),
+        vec![
+            "a:gpt-test".to_string(),
+            "b:gpt-test".to_string(),
+            "b:gpt-test".to_string()
+        ],
+        "the hard failure is not replayed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_triggers_regardless_of_candidate_order() {
+    // The mirror of the mixed-chain test: the capacity rejection comes FIRST
+    // and the hard failure last. The retry decision keys on "did this pass see
+    // any capacity signal", not on which candidate happened to sit last.
+    let (service, forwarded, _) = build_sequenced_service(vec![429, 500, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("a:gpt-test"), plain_candidate("b:gpt-test")],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            assert_eq!(forward.selected_route, "a:gpt-test");
+            assert_eq!(
+                forward.failed_attempts,
+                vec![
+                    ("a:gpt-test".to_string(), 429),
+                    ("b:gpt-test".to_string(), 500)
+                ]
+            );
+        }
+        _ => panic!("the retried capacity rejection must commit"),
+    }
+    assert_eq!(
+        *forwarded.lock().unwrap(),
+        vec![
+            "a:gpt-test".to_string(),
+            "b:gpt-test".to_string(),
+            "a:gpt-test".to_string()
+        ],
+        "only the capacity rejection is replayed, wherever it sits in the chain"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
+    // Callers may repeat a route id with distinct bodies. The first twin hard-
+    // fails, the second hits capacity: the replay must re-send the SECOND
+    // twin's body only — reconstructing the target set from route ids would
+    // replay the hard-failed twin too.
+    let (service, forwarded, bodies) = build_sequenced_service(vec![500, 429, 200]);
+    let twin = |body: &[u8]| ForwardCandidate {
+        route_id: "dup:gpt-test".to_string(),
+        body: body.to_vec(),
+    };
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![twin(br#"{"n":1}"#), twin(br#"{"n":2}"#)],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, MiddlewareForwardResult::Forwarded(_)));
+    assert_eq!(forwarded.lock().unwrap().len(), 3, "exactly one replay");
+    assert_eq!(
+        *bodies.lock().unwrap(),
+        vec![
+            br#"{"n":1}"#.to_vec(),
+            br#"{"n":2}"#.to_vec(),
+            br#"{"n":2}"#.to_vec()
+        ],
+        "the replay carries the capacity-rejected twin's body, not the hard-failed one"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_covers_the_recognized_5xx_capacity_signal() {
+    // An upstream that reports "exhausted all available targets" under a 5xx
+    // is surfaced to clients as 429 by error normalization — the retry (and
+    // failover) must treat it as capacity too, even when the status sits
+    // outside the retryable whitelist (520 here), or a request could be told
+    // 429 without ever getting the second chance that 429s get.
+    let (service, forwarded, _) = build_sequenced_service(vec![520, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("plain:gpt-test")],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Forwarded(forward) => {
+            assert_eq!(
+                forward.failed_attempts,
+                vec![("plain:gpt-test".to_string(), 520)]
+            );
+        }
+        _ => panic!("the capacity-signal 5xx must be replayed and commit the 200"),
+    }
+    assert_eq!(forwarded.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_streaming_replays_and_commits_the_final_429() {
+    // The streaming walk has its own retention/exit code: a single-candidate
+    // 429 must take the delayed second pass, and a second 429 must commit as
+    // the terminal upstream error with both contacts observable.
+    let (service, forwarded, _) = build_sequenced_service(vec![429, 429]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("plain:gpt-test")],
+            true,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::UpstreamError(err) => {
+            assert_eq!(err.error.upstream_status, 429);
+            assert_eq!(err.selected_route, "plain:gpt-test");
+            // The pass-1 429 stays observable behind the terminal report.
+            assert_eq!(
+                err.failed_attempts,
+                vec![("plain:gpt-test".to_string(), 429)]
+            );
+        }
+        _ => panic!("both passes 429 must surface the terminal upstream error"),
+    }
+    assert_eq!(forwarded.lock().unwrap().len(), 2, "exactly one replay");
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_streaming_second_pass_commits_the_stream() {
+    let (service, forwarded, _) = build_sequenced_service(vec![429, 200]);
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("plain:gpt-test")],
+            true,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Stream(stream) => {
+            assert_eq!(stream.upstream_status, 200);
+            assert_eq!(
+                stream.failed_attempts,
+                vec![("plain:gpt-test".to_string(), 429)]
+            );
+        }
+        _ => panic!("the delayed second pass must commit the stream"),
+    }
+    assert_eq!(forwarded.lock().unwrap().len(), 2);
 }

@@ -23,8 +23,10 @@ use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifie
 use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::SessionClaims;
+use crate::middleware::errors::is_upstream_capacity_signal;
 use crate::sse_framing::SseFramingObserver;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 // Provider statuses that make this candidate worth abandoning for the next one.
 // Beyond the transient 429/5xx signals, an auth/account failure specific to this
@@ -39,8 +41,33 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // provider-specific/transient failure AND the error must not be the client's own
 // fault: a fetch failure on a client-supplied image URL fails identically on every
 // candidate, so it is terminal (committed and surfaced as a 400) rather than retried.
+// One delayed second pass for a request whose whole candidate chain died on
+// capacity. An upstream 429 is a transient: the upstream's free capacity
+// fluctuates on the scale of seconds, so a rejection often clears moments
+// later. After the chain is exhausted, the request sleeps briefly and
+// re-tries exactly the candidates that answered 429 — once. Requests whose
+// x-user-tier marks them preemptible ('basic') keep the fast 429 instead
+// (their callers are expected to handle capacity signals themselves), and a
+// request that already spent long in the chain is returned rather than
+// delayed further. The jittered delay de-synchronizes requests bounced by
+// the same capacity dip.
+const CAPACITY_RETRY_DELAY_MS: u64 = 2_000;
+const CAPACITY_RETRY_MAX_ELAPSED: Duration = Duration::from_secs(10);
+const PREEMPTIBLE_TIER: &str = "basic";
+
+/// Whether this request may still take the delayed capacity-retry pass.
+fn capacity_retry_eligible(done: bool, user_tier: Option<&str>, started: Instant) -> bool {
+    !done && user_tier != Some(PREEMPTIBLE_TIER) && started.elapsed() <= CAPACITY_RETRY_MAX_ELAPSED
+}
+
 fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> bool {
-    is_retryable_provider_status(status)
+    // The capacity signal must be failover-able regardless of the literal
+    // status: error normalization surfaces the recognized capacity body under
+    // ANY 5xx as a client 429, so a status outside the retryable whitelist
+    // (e.g. 520) carrying that body would otherwise be told "capacity" while
+    // having been denied both the failover and the capacity retry that
+    // capacity outcomes get.
+    (is_retryable_provider_status(status) || is_upstream_capacity_signal(status, upstream_body))
         && crate::middleware::errors::classify_image_input_error(
             received_body,
             status,
@@ -270,7 +297,6 @@ impl AciService {
         };
         let candidate_route_ids: Vec<String> =
             candidates.iter().map(|c| c.route_id.clone()).collect();
-        let last_index = candidates.len() - 1;
 
         // Optional x-user-tier passed through to every upstream attempt.
         let mut upstream_headers: HashMap<String, String> = HashMap::new();
@@ -299,91 +325,263 @@ impl AciService {
         // nothing better follows. See [`RetainedResponse`].
         let mut retained: Option<RetainedResponse> = None;
 
-        for (index, candidate) in candidates.iter().enumerate() {
-            let route_id = candidate.route_id.clone();
-            let is_last = index == last_index;
+        // Capacity-retry pass state (see CAPACITY_RETRY_DELAY_MS). The walk
+        // below runs at most twice; `failed_attempts`, `retained` and
+        // `aggregated_err` deliberately carry across passes so every attempt
+        // stays observable and attempt indices never collide.
+        let forward_started = Instant::now();
+        let mut capacity_retry_done = false;
+        let mut current: Vec<ForwardCandidate> = candidates;
 
-            let prepared = match self.upstream.prepare(UpstreamRequest {
-                body: candidate.body.clone(),
-                headers: upstream_headers.clone(),
-                path: Some(endpoint_path.to_string()),
-                target_route_id: Some(route_id.clone()),
-            }) {
-                Ok(prepared) => prepared,
-                Err(UpstreamError::Routing(message)) => {
-                    failed_attempts.push((route_id.clone(), 502));
+        // Candidate indices (into `current`) whose attempt this pass came back
+        // as a capacity signal — the exact set a retry pass replays. Tracked by
+        // index, not route id: route ids may repeat in a caller-supplied chain,
+        // and reconstructing the set from ids would replay a hard-failed twin.
+        let mut capacity_indices: Vec<usize> = Vec::new();
+
+        loop {
+            capacity_indices.clear();
+            let last_index = current.len() - 1;
+            for (index, candidate) in current.iter().enumerate() {
+                let route_id = candidate.route_id.clone();
+                let is_last = index == last_index;
+
+                let prepared = match self.upstream.prepare(UpstreamRequest {
+                    body: candidate.body.clone(),
+                    headers: upstream_headers.clone(),
+                    path: Some(endpoint_path.to_string()),
+                    target_route_id: Some(route_id.clone()),
+                }) {
+                    Ok(prepared) => prepared,
+                    Err(UpstreamError::Routing(message)) => {
+                        failed_attempts.push((route_id.clone(), 502));
+                        upgrade_err(
+                            &mut aggregated_err,
+                            1,
+                            ServiceError::Upstream(UpstreamError::Routing(message)),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        failed_attempts.push((route_id.clone(), 502));
+                        upgrade_err(&mut aggregated_err, 2, err.into());
+                        continue;
+                    }
+                };
+
+                // A route not known to be attested cannot serve an
+                // `aci_verified` request. Kept out of `failed_attempts`: this is a
+                // policy decision, and those are reported per route, which would
+                // charge a provider for a request it never saw.
+                if aci_required && !attested_route_eligible(prepared.is_tee) {
                     upgrade_err(
                         &mut aggregated_err,
-                        1,
-                        ServiceError::Upstream(UpstreamError::Routing(message)),
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    failed_attempts.push((route_id.clone(), 502));
-                    upgrade_err(&mut aggregated_err, 2, err.into());
-                    continue;
-                }
-            };
-
-            // A route not known to be attested cannot serve an
-            // `aci_verified` request. Kept out of `failed_attempts`: this is a
-            // policy decision, and those are reported per route, which would
-            // charge a provider for a request it never saw.
-            if aci_required && !attested_route_eligible(prepared.is_tee) {
-                upgrade_err(
-                    &mut aggregated_err,
-                    0,
-                    ServiceError::UpstreamVerification(
-                        UpstreamVerificationError::NoEligibleAttestedRoute(
-                            user_model.clone().unwrap_or_default(),
+                        0,
+                        ServiceError::UpstreamVerification(
+                            UpstreamVerificationError::NoEligibleAttestedRoute(
+                                user_model.clone().unwrap_or_default(),
+                            ),
                         ),
-                    ),
-                );
-                continue;
-            }
-
-            // Only an explicit ACI constraint makes verification fail-closed.
-            // Unconstrained requests still record the verifier outcome.
-            let candidate_required = aci_required;
-
-            let mut recorded_event = match self
-                .recorded_upstream_event(&prepared, candidate_required, single_caller_event.clone())
-                .await
-            {
-                Ok(event) => event,
-                Err(ServiceError::UpstreamVerification(uv)) => {
-                    failed_attempts.push((route_id.clone(), 502));
-                    upgrade_err(
-                        &mut aggregated_err,
-                        3,
-                        ServiceError::UpstreamVerification(uv),
                     );
                     continue;
                 }
-                Err(err) => return Err(err),
-            };
 
-            if let Err(err) = self.apply_aci_session_constraint(
-                &mut recorded_event,
-                &req.aci_session_ids,
-                &prepared.model_id,
-            ) {
-                if matches!(
-                    err,
-                    ServiceError::UpstreamVerification(
-                        UpstreamVerificationError::NoEligibleAttestedSession(_)
+                // Only an explicit ACI constraint makes verification fail-closed.
+                // Unconstrained requests still record the verifier outcome.
+                let candidate_required = aci_required;
+
+                let mut recorded_event = match self
+                    .recorded_upstream_event(
+                        &prepared,
+                        candidate_required,
+                        single_caller_event.clone(),
                     )
+                    .await
+                {
+                    Ok(event) => event,
+                    Err(ServiceError::UpstreamVerification(uv)) => {
+                        failed_attempts.push((route_id.clone(), 502));
+                        upgrade_err(
+                            &mut aggregated_err,
+                            3,
+                            ServiceError::UpstreamVerification(uv),
+                        );
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+
+                if let Err(err) = self.apply_aci_session_constraint(
+                    &mut recorded_event,
+                    &req.aci_session_ids,
+                    &prepared.model_id,
                 ) {
-                    upgrade_err(&mut aggregated_err, 0, err);
-                    continue;
+                    if matches!(
+                        err,
+                        ServiceError::UpstreamVerification(
+                            UpstreamVerificationError::NoEligibleAttestedSession(_)
+                        )
+                    ) {
+                        upgrade_err(&mut aggregated_err, 0, err);
+                        continue;
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
 
-            let forwarded_body = prepared.request.body.clone();
+                let forwarded_body = prepared.request.body.clone();
 
-            if stream {
+                if stream {
+                    let upstream_response = match self
+                        .forward_with_binding_reverify(
+                            &prepared,
+                            &mut recorded_event,
+                            candidate_required,
+                            caller_supplied_upstream_event,
+                            &req.aci_session_ids,
+                            // Failover path: flush a possibly-stale binding on any
+                            // terminal mismatch so the next candidate/request re-verifies.
+                            true,
+                            |prepared, event| async move {
+                                self.upstream
+                                    .forward_stream_verified_prepared(prepared, &event)
+                                    .await
+                            },
+                        )
+                        .await
+                    {
+                        ReverifyOutcome::Forwarded(response) => Some(response),
+                        ReverifyOutcome::RefreshFailed(err) => {
+                            let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
+                                3
+                            } else {
+                                2
+                            };
+                            upgrade_err(&mut aggregated_err, priority, err);
+                            None
+                        }
+                        ReverifyOutcome::Failed(err) => {
+                            // Terminal binding mismatch and transport errors
+                            // intentionally share failover priority 2 (a failed
+                            // reverify outranks them at 3).
+                            upgrade_err(&mut aggregated_err, 2, err.into());
+                            None
+                        }
+                    };
+                    let Some(upstream_response) = upstream_response else {
+                        failed_attempts.push((route_id.clone(), 502));
+                        continue;
+                    };
+
+                    let status = upstream_response.status_code;
+                    if status != 200 {
+                        self.metrics.record_upstream_response(
+                            endpoint_path,
+                            RequestMode::Streaming,
+                            status,
+                            None,
+                        );
+                        // Collect the (small) error body up front so the failover
+                        // decision can inspect it. A truncated/unreadable error body
+                        // must not abort the remaining candidates, so it degrades to
+                        // empty — the caller's normalizer emits its generic message.
+                        let upstream_headers = upstream_response.headers;
+                        let upstream_body = collect_upstream_body(upstream_response.body)
+                            .await
+                            .unwrap_or_default();
+                        // A last-candidate answer is retained rather than returned while
+                        // a capacity-retry pass is still available and this pass produced
+                        // any capacity signal: the walk exit decides whether to replay the
+                        // capacity rejections or commit the retained answer.
+                        let is_capacity = is_upstream_capacity_signal(status, &upstream_body);
+                        let last_may_retry = (is_capacity || !capacity_indices.is_empty())
+                            && capacity_retry_eligible(
+                                capacity_retry_done,
+                                req.context.user_tier.as_deref(),
+                                forward_started,
+                            );
+                        if (!is_last || last_may_retry)
+                            && should_fail_over(status, received_body, &upstream_body)
+                        {
+                            if is_capacity {
+                                capacity_indices.push(index);
+                            }
+                            retained = Some(RetainedResponse::Streaming {
+                                error: StreamingUpstreamError {
+                                    upstream_status: status,
+                                    upstream_headers,
+                                    upstream_body,
+                                },
+                                route_id: route_id.clone(),
+                                attempt_slot: failed_attempts.len(),
+                            });
+                            failed_attempts.push((route_id.clone(), status));
+                            continue;
+                        }
+                        self.metrics
+                            .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
+                        return Ok(MiddlewareForwardResult::UpstreamError(Box::new(
+                            MiddlewareUpstreamError {
+                                error: StreamingUpstreamError {
+                                    upstream_status: status,
+                                    upstream_headers,
+                                    upstream_body,
+                                },
+                                selected_route: route_id,
+                                failed_attempts,
+                            },
+                        )));
+                    }
+
+                    // Commit this candidate.
+                    let upstream_headers = upstream_response.headers;
+                    let receipt_id = generate_receipt_id();
+                    let served_at = self.clock.now_secs();
+                    let sealed = self.record_attested_upstream_session(&recorded_event)?;
+                    let recorded = cite_served_session(
+                        &sealed,
+                        upstream_response.served_instance_id.as_deref(),
+                    );
+                    let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+                    let builder =
+                        self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+                            receipt_id: &receipt_id,
+                            chat_id: None,
+                            model: user_model.clone(),
+                            served_at,
+                            endpoint_path,
+                            received_body,
+                            middleware_forwarded_body: &candidate.body,
+                            selected_route_id: &route_id,
+                            forwarded_body: &forwarded_body,
+                            recorded_event,
+                            recorded,
+                        })?;
+                    receipt_journal.reserve_receipt_id(receipt_id.clone());
+
+                    let body = MiddlewareProviderResponseDraftingStream::new(
+                        upstream_response.body,
+                        builder,
+                        receipt_journal,
+                        receipt_id.clone(),
+                        endpoint_path.to_string(),
+                        self.metrics.clone(),
+                        status,
+                    );
+
+                    return Ok(MiddlewareForwardResult::Stream(Box::new(
+                        MiddlewareStreamingForwarded {
+                            receipt_id: receipt_id.clone(),
+                            upstream_status: status,
+                            upstream_headers,
+                            body: Box::pin(body),
+                            selected_route: route_id.clone(),
+                            failed_attempts: std::mem::take(&mut failed_attempts),
+                            session_id,
+                        },
+                    )));
+                }
+
+                // Buffered forward.
                 let upstream_response = match self
                     .forward_with_binding_reverify(
                         &prepared,
@@ -396,7 +594,7 @@ impl AciService {
                         true,
                         |prepared, event| async move {
                             self.upstream
-                                .forward_stream_verified_prepared(prepared, &event)
+                                .forward_verified_prepared(prepared, &event)
                                 .await
                         },
                     )
@@ -425,180 +623,90 @@ impl AciService {
                     continue;
                 };
 
+                // Counted once, here, where the response arrives — a response that is
+                // held back and committed after the walk must not be counted again
+                // on commit.
                 let status = upstream_response.status_code;
-                if status != 200 {
-                    self.metrics.record_upstream_response(
-                        endpoint_path,
-                        RequestMode::Streaming,
-                        status,
-                        None,
+                let response_model = accepted_response_model(status, &upstream_response.body);
+                self.metrics.record_upstream_response(
+                    endpoint_path,
+                    RequestMode::Buffered,
+                    status,
+                    response_model.as_deref(),
+                );
+                // A last-candidate answer is retained rather than returned while
+                // a capacity-retry pass is still available and this pass produced
+                // any capacity signal: the walk exit decides whether to replay the
+                // capacity rejections or commit the retained answer.
+                let is_capacity = is_upstream_capacity_signal(status, &upstream_response.body);
+                let last_may_retry = (is_capacity || !capacity_indices.is_empty())
+                    && capacity_retry_eligible(
+                        capacity_retry_done,
+                        req.context.user_tier.as_deref(),
+                        forward_started,
                     );
-                    // Collect the (small) error body up front so the failover
-                    // decision can inspect it. A truncated/unreadable error body
-                    // must not abort the remaining candidates, so it degrades to
-                    // empty — the caller's normalizer emits its generic message.
-                    let upstream_headers = upstream_response.headers;
-                    let upstream_body = collect_upstream_body(upstream_response.body)
-                        .await
-                        .unwrap_or_default();
-                    if !is_last && should_fail_over(status, received_body, &upstream_body) {
-                        retained = Some(RetainedResponse::Streaming {
-                            error: StreamingUpstreamError {
-                                upstream_status: status,
-                                upstream_headers,
-                                upstream_body,
-                            },
-                            route_id: route_id.clone(),
-                            attempt_slot: failed_attempts.len(),
-                        });
-                        failed_attempts.push((route_id.clone(), status));
-                        continue;
+                if (!is_last || last_may_retry)
+                    && should_fail_over(status, received_body, &upstream_response.body)
+                {
+                    if is_capacity {
+                        capacity_indices.push(index);
                     }
-                    self.metrics
-                        .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
-                    return Ok(MiddlewareForwardResult::UpstreamError(Box::new(
-                        MiddlewareUpstreamError {
-                            error: StreamingUpstreamError {
-                                upstream_status: status,
-                                upstream_headers,
-                                upstream_body,
-                            },
-                            selected_route: route_id,
-                            failed_attempts,
-                        },
-                    )));
+                    retained = Some(RetainedResponse::Buffered {
+                        inputs: Box::new(BufferedCommit {
+                            response: upstream_response,
+                            response_model,
+                            recorded_event,
+                            route_id: route_id.clone(),
+                            middleware_forwarded_body: candidate.body.clone(),
+                            forwarded_body,
+                        }),
+                        attempt_slot: failed_attempts.len(),
+                    });
+                    failed_attempts.push((route_id.clone(), status));
+                    continue;
                 }
 
                 // Commit this candidate.
-                let upstream_headers = upstream_response.headers;
-                let receipt_id = generate_receipt_id();
-                let served_at = self.clock.now_secs();
-                let sealed = self.record_attested_upstream_session(&recorded_event)?;
-                let recorded =
-                    cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-                let session_id = recorded.as_ref().map(|(id, _)| id.clone());
-                let builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
-                    receipt_id: &receipt_id,
-                    chat_id: None,
-                    model: user_model.clone(),
-                    served_at,
-                    endpoint_path,
-                    received_body,
-                    middleware_forwarded_body: &candidate.body,
-                    selected_route_id: &route_id,
-                    forwarded_body: &forwarded_body,
-                    recorded_event,
-                    recorded,
-                })?;
-                receipt_journal.reserve_receipt_id(receipt_id.clone());
-
-                let body = MiddlewareProviderResponseDraftingStream::new(
-                    upstream_response.body,
-                    builder,
-                    receipt_journal,
-                    receipt_id.clone(),
-                    endpoint_path.to_string(),
-                    self.metrics.clone(),
-                    status,
-                );
-
-                return Ok(MiddlewareForwardResult::Stream(Box::new(
-                    MiddlewareStreamingForwarded {
-                        receipt_id: receipt_id.clone(),
-                        upstream_status: status,
-                        upstream_headers,
-                        body: Box::pin(body),
-                        selected_route: route_id.clone(),
-                        failed_attempts: std::mem::take(&mut failed_attempts),
-                        session_id,
-                    },
-                )));
-            }
-
-            // Buffered forward.
-            let upstream_response = match self
-                .forward_with_binding_reverify(
-                    &prepared,
-                    &mut recorded_event,
-                    candidate_required,
-                    caller_supplied_upstream_event,
-                    &req.aci_session_ids,
-                    // Failover path: flush a possibly-stale binding on any
-                    // terminal mismatch so the next candidate/request re-verifies.
-                    true,
-                    |prepared, event| async move {
-                        self.upstream
-                            .forward_verified_prepared(prepared, &event)
-                            .await
-                    },
-                )
-                .await
-            {
-                ReverifyOutcome::Forwarded(response) => Some(response),
-                ReverifyOutcome::RefreshFailed(err) => {
-                    let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
-                        3
-                    } else {
-                        2
-                    };
-                    upgrade_err(&mut aggregated_err, priority, err);
-                    None
-                }
-                ReverifyOutcome::Failed(err) => {
-                    // Terminal binding mismatch and transport errors
-                    // intentionally share failover priority 2 (a failed
-                    // reverify outranks them at 3).
-                    upgrade_err(&mut aggregated_err, 2, err.into());
-                    None
-                }
-            };
-            let Some(upstream_response) = upstream_response else {
-                failed_attempts.push((route_id.clone(), 502));
-                continue;
-            };
-
-            // Counted once, here, where the response arrives — a response that is
-            // held back and committed after the walk must not be counted again
-            // on commit.
-            let status = upstream_response.status_code;
-            let response_model = accepted_response_model(status, &upstream_response.body);
-            self.metrics.record_upstream_response(
-                endpoint_path,
-                RequestMode::Buffered,
-                status,
-                response_model.as_deref(),
-            );
-            if !is_last && should_fail_over(status, received_body, &upstream_response.body) {
-                retained = Some(RetainedResponse::Buffered {
-                    inputs: Box::new(BufferedCommit {
+                return self.commit_buffered_response(
+                    BufferedCommit {
                         response: upstream_response,
                         response_model,
                         recorded_event,
-                        route_id: route_id.clone(),
+                        route_id,
                         middleware_forwarded_body: candidate.body.clone(),
                         forwarded_body,
-                    }),
-                    attempt_slot: failed_attempts.len(),
-                });
-                failed_attempts.push((route_id.clone(), status));
-                continue;
+                    },
+                    std::mem::take(&mut failed_attempts),
+                    endpoint_path,
+                    received_body,
+                    user_model.clone(),
+                );
             }
 
-            // Commit this candidate.
-            return self.commit_buffered_response(
-                BufferedCommit {
-                    response: upstream_response,
-                    response_model,
-                    recorded_event,
-                    route_id,
-                    middleware_forwarded_body: candidate.body.clone(),
-                    forwarded_body,
-                },
-                std::mem::take(&mut failed_attempts),
-                endpoint_path,
-                received_body,
-                user_model.clone(),
-            );
+            // Chain exhausted without a 2xx. Non-preemptible traffic gets one
+            // delayed second pass over the candidates that answered 429 — a
+            // capacity wall is a second-scale transient, unlike the hard
+            // failures which stay abandoned.
+            if !capacity_indices.is_empty()
+                && capacity_retry_eligible(
+                    capacity_retry_done,
+                    req.context.user_tier.as_deref(),
+                    forward_started,
+                )
+            {
+                capacity_retry_done = true;
+                let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    CAPACITY_RETRY_DELAY_MS + jitter,
+                ))
+                .await;
+                current = capacity_indices
+                    .iter()
+                    .map(|&i| current[i].clone())
+                    .collect();
+                continue;
+            }
+            break;
         }
 
         // No candidate produced a 2xx, but one may still have answered — commit

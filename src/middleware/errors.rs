@@ -295,6 +295,22 @@ const UPSTREAM_CAPACITY_MARKER: &[u8] = b"exhausted all available targets";
 /// (rate-limited) rather than a `5xx` outage, so it is treated as load, not an
 /// error. Peer to [`image_input_error_parts`] — both remap a recognized upstream
 /// error body to a specific client status.
+/// Whether an upstream outcome is a capacity signal: a literal 429, or the
+/// recognized 5xx capacity/no-targets body that error normalization also
+/// surfaces to clients as 429. The single classification shared by error
+/// normalization and the forwarder's capacity-retry targeting — the two must
+/// never disagree about what "capacity" means, or a request could be told
+/// 429 without ever having been eligible for the retry that 429s get.
+pub(crate) fn is_upstream_capacity_signal(status: u16, body: &[u8]) -> bool {
+    if status == 429 {
+        return true;
+    }
+    (500..600).contains(&status)
+        && body
+            .windows(UPSTREAM_CAPACITY_MARKER.len())
+            .any(|w| w == UPSTREAM_CAPACITY_MARKER)
+}
+
 fn capacity_error_parts(
     surface: Surface,
     upstream_status: u16,
@@ -304,10 +320,7 @@ fn capacity_error_parts(
     if !(500..600).contains(&upstream_status) {
         return None;
     }
-    if !upstream_body
-        .windows(UPSTREAM_CAPACITY_MARKER.len())
-        .any(|w| w == UPSTREAM_CAPACITY_MARKER)
-    {
+    if !is_upstream_capacity_signal(upstream_status, upstream_body) {
         return None;
     }
     Some((
@@ -391,6 +404,24 @@ pub fn normalize_upstream_error(
 
 #[cfg(test)]
 mod tests {
+    use super::is_upstream_capacity_signal;
+
+    #[test]
+    fn capacity_signal_is_429_or_the_marked_5xx_body() {
+        assert!(is_upstream_capacity_signal(429, b"anything"));
+        assert!(is_upstream_capacity_signal(
+            503,
+            br#"{"error":"exhausted all available targets"}"#
+        ));
+        // A plain 5xx is an outage, not capacity.
+        assert!(!is_upstream_capacity_signal(503, br#"{"error":"boom"}"#));
+        // The marker under a non-5xx status is not the recognized signal.
+        assert!(!is_upstream_capacity_signal(
+            400,
+            b"exhausted all available targets"
+        ));
+    }
+
     use super::*;
     use axum::body::to_bytes;
 
