@@ -4,6 +4,13 @@ This directory contains the one-file dstack compose path for launching
 Private AI Gateway through
 [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
 
+Two complete deployment files are provided:
+
+| File | Services |
+| --- | --- |
+| `compose.yaml` | Gateway only. |
+| `compose.privatemode.yaml` | Gateway plus the official digest-pinned Privatemode proxy in the same measured workload. |
+
 The launcher fetches a pinned `private-ai-gateway` commit, verifies `HEAD`,
 scrubs the checkout, preserves the container environment, and runs the gateway
 repo's own [`../entrypoint.sh`](../entrypoint.sh). The launcher remains
@@ -35,6 +42,55 @@ phala deploy -n private-ai-gateway -c compose.yaml \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 ```
 
+For Privatemode, use the co-deployed variant. It requires a reviewed manifest
+file and its digest; [`privatemode.env.example`](./privatemode.env.example)
+lists all inputs.
+
+```bash
+export PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha>
+export PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
+export PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)"
+export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN=<long-random-client-token>
+export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" | sha256sum | cut -d' ' -f1)"
+export PRIVATEMODE_API_KEY=<privatemode-api-key>
+export PRIVATEMODE_MANIFEST_PATH=/absolute/path/to/exact-reviewed-manifest.json
+
+./render-privatemode-compose.sh /tmp/private-ai-gateway-privatemode.json
+phala-h4xuser deploy -n private-ai-gateway \
+  -c /tmp/private-ai-gateway-privatemode.json \
+  -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+  -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY"
+```
+
+Render before deployment so the exact byte-for-byte manifest, its digest, the
+credential digest, admin-token digest, downstream inference-token digest,
+image digest, and git commit are part of the measured Compose. The admin token
+itself is deliberately absent from the rendered file and is passed through
+Phala's encrypted environment instead. The downstream inference token remains
+client-side and is not passed to the deployment; callers send it as the Bearer
+credential on inference requests. The
+Privatemode API key follows the same path into one Compose-managed secret
+mounted into both services. The proxy reads it through its official
+`--apiKey @<file>` interface; the gateway reads it only at startup to verify the
+renderer-derived measured digest, then drops the bytes.
+The renderer replaces the local manifest path with inline JSON content and
+verifies that the rendered bytes retain the source file's SHA-256, including
+whitespace and its final newline.
+Those non-secret content pins are also service labels, ensuring Compose
+recreates both services when a mounted inline config changes instead of
+restarting a container with stale config bytes.
+
+That compose pins
+`ghcr.io/edgelesssys/privatemode/privatemode-proxy` at OCI digest
+`sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307`,
+mounts the same manifest and credential secret into both services, and does not
+publish the proxy port. Add only the mutable model route through the admin API
+after boot; `bearer_token` is forbidden for Privatemode. The official proxy
+loads one credential at startup, so rotating it requires rerendering with the
+new `PRIVATEMODE_API_KEY` and redeploying the gateway and proxy together. A
+gateway-only restart with a secret that does not match measured policy fails
+closed.
+
 For local/dev deploys, you can also copy
 [`gateway.env.example`](./gateway.env.example), fill in its values, and pass it
 as `-e gateway.env`. For production, pass variables with repeated `-e KEY=VALUE`
@@ -44,7 +100,11 @@ arguments so secrets such as admin tokens do not remain in a plaintext env file.
 initial upstream config. dstack measures the raw manifest into `compose_hash`,
 and the published `app_compose` contains variable references rather than their
 values.
-After deployment, the gateway listens on port `8086`.
+After deployment, the gateway listens on port `8086`. The Privatemode variant
+rejects inference requests unless `Authorization: Bearer
+$PRIVATE_AI_GATEWAY_INFERENCE_TOKEN` hashes to the digest measured in its
+static config. Health, attestation, transparency, and model-catalog endpoints
+remain public; the admin API uses its separate admin token.
 
 The gateway consumes two JSON files:
 
@@ -220,8 +280,9 @@ Example seed:
 ]
 ```
 
-Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
-`near-ai`, `chutes`, `secret-ai`, and `phala-direct`.
+Supported provider values are `openai-compatible`, `anthropic`, `aci-service`,
+`tinfoil`, `near-ai`, `chutes`, `secret-ai`, `privatemode`, and
+`phala-direct`.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
 `/v1/attestation/report`. The router fetches the report through normal TLS,
@@ -264,9 +325,10 @@ config is part of the trust surface.
 
 ## Toolchain Posture
 
-The current `entrypoint.sh` can bootstrap Rust with apt + rustup inside the
-TEE. That keeps the first deploy path simple, but it is a development-grade
-trust surface.
+The current `entrypoint.sh` can bootstrap a missing native compiler/linker
+with apt + build-essential and Rust with apt + rustup inside the TEE. That
+keeps the first deploy path simple, but it is a development-grade trust
+surface.
 
 The production target is a gateway-owned image that already contains the
 Rust toolchain, or eventually the prebuilt gateway binary. The launcher still

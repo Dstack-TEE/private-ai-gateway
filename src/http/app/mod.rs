@@ -7,9 +7,9 @@
 //!   `report_data` (URL-decoded UTF-8 string, or JSON `null` when
 //!   absent).
 //! * `POST /v1/chat/completions` - OpenAI-shaped chat-completion
-//!   forwarding with ACI-side hashing and receipt signing. An
-//!   optional `Authorization: Bearer <token>` is recorded on the
-//!   receipt so later lookups can authenticate the original requester.
+//!   forwarding with ACI-side hashing and receipt signing. When an inference
+//!   token digest is configured, `Authorization: Bearer <token>` must match it;
+//!   the bearer also owns the receipt for later authenticated retrieval.
 //! * `POST /v1/completions` - compatibility surface. The aggregator
 //!   forwards legacy prompt completions through the same ACI receipt
 //!   path as chat completions. ACI E2EE is an optional add-on here;
@@ -109,19 +109,27 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
+    pub inference_token_sha256: Option<[u8; 32]>,
     middleware: Option<Arc<Middleware>>,
 }
 
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None)
+    build_router_inner(service, None, None, None, None)
 }
 
 pub fn build_router_with_admin(
     service: Arc<AciService>,
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
+    inference_token_sha256: Option<[u8; 32]>,
 ) -> Router {
-    build_router_inner(service, Some(upstream_config), admin_token, None)
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        inference_token_sha256,
+        None,
+    )
 }
 
 /// Build the gateway router with the middleware, which consults the
@@ -130,12 +138,14 @@ pub fn build_router_with_admin_and_middleware(
     service: Arc<AciService>,
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
+    inference_token_sha256: Option<[u8; 32]>,
     middleware: Arc<Middleware>,
 ) -> Router {
     build_router_inner(
         service,
         Some(upstream_config),
         admin_token,
+        inference_token_sha256,
         Some(middleware),
     )
 }
@@ -144,12 +154,14 @@ fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
+    inference_token_sha256: Option<[u8; 32]>,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
+        inference_token_sha256,
         middleware,
     };
     Router::new()

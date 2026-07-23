@@ -32,6 +32,7 @@ use private_ai_gateway::aggregator::upstream_config::{
 };
 use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use common::{verified_event, StaticKeyProvider, StubQuoter};
@@ -397,6 +398,40 @@ async fn attestation_report_nonce_null_when_absent() {
             .unwrap(),
         expected_hex
     );
+}
+
+#[tokio::test]
+async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
+    let h = make_harness();
+    let manager = load_manager("[]");
+    let expected: [u8; 32] = Sha256::digest(b"client-inference-token").into();
+    let app = build_router_with_admin(h.service.clone(), manager, None, Some(expected));
+
+    for (token, expected_status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("wrong-token"), StatusCode::FORBIDDEN),
+        (Some("client-inference-token"), StatusCode::OK),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+    }
+
+    assert!(h.received.lock().unwrap().is_some());
 }
 
 #[tokio::test]
@@ -931,10 +966,11 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 30,
         verifier_request_timeout_seconds: 30,
+        privatemode_proxy: None,
     }
 }
 
-fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
+fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
     // Unique per call: a coarse system clock can hand concurrent tests the same
     // nanos, so an atomic counter guarantees distinct temp paths.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -944,7 +980,11 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&path, config_json).unwrap();
-    let manager = Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap());
+    Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap())
+}
+
+fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
+    let manager = load_manager(config_json);
     let keys = Arc::new(StaticKeyProvider::default());
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -958,7 +998,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         )
         .unwrap(),
     );
-    let app = build_router_with_admin(service.clone(), manager, None);
+    let app = build_router_with_admin(service.clone(), manager, None, None);
     (service, app)
 }
 

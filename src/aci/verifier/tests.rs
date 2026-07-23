@@ -31,6 +31,35 @@ fn public_key_compressed_hex(key: &SigningKey) -> String {
     hex::encode(key.verifying_key().to_sec1_bytes())
 }
 
+#[tokio::test]
+async fn routing_verifier_prefers_selected_route_name_over_shared_origin() {
+    let origin_verifier = Arc::new(StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+        verifier_id: "wrong-origin-verifier/v1".to_string(),
+        result: VerificationResult::Verified,
+        ..Default::default()
+    }));
+    let name_verifier = Arc::new(StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+        verifier_id: "selected-name-verifier/v1".to_string(),
+        result: VerificationResult::Verified,
+        ..Default::default()
+    }));
+    let verifier = RoutingUpstreamVerifier::new()
+        .add_route("other-route", "http://shared-proxy:8080", origin_verifier)
+        .add_route("selected-route", "http://shared-proxy:8080", name_verifier);
+
+    let event = verifier
+        .verify(UpstreamVerificationRequest {
+            upstream_name: "selected-route".to_string(),
+            url_origin: Some("http://shared-proxy:8080".to_string()),
+            model_id: "provider-model".to_string(),
+            forwarded_body_hash: format!("sha256:{}", "11".repeat(32)),
+            required: true,
+        })
+        .await;
+
+    assert_eq!(event.verifier_id, "selected-name-verifier/v1");
+}
+
 fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
     let digest = Keccak256::new_with_prefix(message);
     let (signature, recid) = key.sign_digest_recoverable(digest).unwrap();
@@ -97,7 +126,7 @@ fn custody_report(identity: &SigningKey, signature_chain: Vec<String>) -> Attest
 /// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "near-ai" | "tinfoil" | "secret-ai" | "privatemode" => Some("router"),
         _ => None,
     }
 }
