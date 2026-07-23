@@ -25,6 +25,24 @@ def verify_provider(
     timeout: int = 300,
     artifact_dir: Path | None = None,
 ) -> dict[str, Any]:
+    if provider.provider == "privatemode":
+        # Privatemode verification is inseparable from the official proxy
+        # co-deployed with the gateway. A standalone Python probe would not bind
+        # that service to the measured deployment and must not compete with it.
+        output = {
+            "status": "deferred_to_gateway",
+            "verifier_id": "privatemode-proxy/co-deployed-contrast/v1",
+            "reason": (
+                "verification occurs when the gateway probes the measured proxy; "
+                "the lifecycle phase exercises that binding with real inference"
+            ),
+        }
+        if artifact_dir:
+            write_json(
+                artifact_dir / provider.name / "provider-verifier-output.json",
+                output,
+            )
+        return output
     # The bridge runs from the gateway project (cwd=ROOT) so it uses the gateway's
     # own uv env and the vendored confidential_verifier package. An external verifier
     # checkout is selected only when PRIVATE_AI_VERIFIER_DIR is set in the environment.

@@ -59,7 +59,9 @@ An attested session is a verified secure channel, and we never create more than
 one session per channel. The channel boundary a provider attests is a first-class
 property, `UpstreamProvider::attestation_scope()` → `AttestationScope`: per E2EE
 instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
-(NEAR AI) or model router (Tinfoil), where one channel fronts many models. The
+(NEAR AI), model router (Tinfoil), or manifest-bound encryption proxy
+(Privatemode's measured co-deployed proxy), where one channel fronts
+many models. The
 scope is the single source of truth: it drives channel-keyed verification (the
 model is dropped from the verifier cache key for routers, so every model resolves
 to one verified channel and one attested session) and is enforced fail-closed at

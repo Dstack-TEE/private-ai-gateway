@@ -40,6 +40,9 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
+    privatemode_manifest_path: str | None
+    privatemode_manifest_sha256: str | None
+    privatemode_proxy_image_digest: str | None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -65,6 +68,15 @@ class Provider:
             ),
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
+            ),
+            privatemode_manifest_path=optional_str(
+                value, "privatemode_manifest_path"
+            ),
+            privatemode_manifest_sha256=optional_str(
+                value, "privatemode_manifest_sha256"
+            ),
+            privatemode_proxy_image_digest=optional_str(
+                value, "privatemode_proxy_image_digest"
             ),
         )
 

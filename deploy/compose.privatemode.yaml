@@ -1,0 +1,109 @@
+# dstack deployment with the official Privatemode proxy in the same measured
+# Compose workload as Private AI Gateway. Only the gateway port is published.
+
+services:
+  private-ai-gateway:
+    image: docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b
+    command: ["/etc/git-launcher/gateway.conf"]
+    # Compose identifies mounted configs by source name, so also bind their
+    # immutable content pins into the service definition. A pin change then
+    # recreates the container instead of restarting it with stale config bytes.
+    labels:
+      ai.private-gateway.source-commit: ${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
+      ai.private-gateway.admin-token-sha256: ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256}
+      ai.private-gateway.inference-token-sha256: ${PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256}
+      ai.private-gateway.privatemode-manifest-sha256: ${PRIVATEMODE_MANIFEST_SHA256:?set PRIVATEMODE_MANIFEST_SHA256 to the reviewed manifest digest}
+      ai.private-gateway.privatemode-credential-sha256: ${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}
+    ports:
+      - "8086:8086"
+    configs:
+      - source: gateway-pin
+        target: /etc/git-launcher/gateway.conf
+      - source: gateway-config
+        target: /etc/private-ai-gateway/gateway.config.json
+      - source: gateway-upstreams
+        target: /etc/private-ai-gateway/upstreams.seed.json
+      - source: privatemode-manifest
+        target: /run/privatemode/manifest.json
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
+    environment:
+      PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
+      PRIVATE_AI_GATEWAY_CACHE_DIR: /var/lib/private-ai-gateway/cache
+      PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env
+    volumes:
+      - gateway-checkout:/var/lib/git-launcher
+      - gateway-state:/var/lib/private-ai-gateway
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /dstack/.host-shared/.decrypted-env:/run/secrets/dstack-encrypted-env:ro
+    depends_on:
+      - privatemode-proxy
+    restart: unless-stopped
+
+  privatemode-proxy:
+    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307
+    labels:
+      ai.private-gateway.privatemode-manifest-sha256: ${PRIVATEMODE_MANIFEST_SHA256:?set PRIVATEMODE_MANIFEST_SHA256 to the reviewed manifest digest}
+      ai.private-gateway.privatemode-credential-sha256: ${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}
+    command:
+      - --manifestPath
+      - /run/privatemode/manifest.json
+      - --workspace
+      - /var/lib/privatemode
+      - --port
+      - "8080"
+      - --apiKey
+      - "@/run/secrets/privatemode-api-key"
+      - --nvidiaOCSPAllowUnknown=false
+      - --nvidiaOCSPRevokedGracePeriod=0
+    configs:
+      - source: privatemode-manifest
+        target: /run/privatemode/manifest.json
+    tmpfs:
+      - /var/lib/privatemode:mode=0700
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
+    restart: unless-stopped
+
+configs:
+  gateway-pin:
+    content: |
+      REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+      COMMIT_SHA=${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
+      WORK_DIR=/var/lib/git-launcher/private-ai-gateway
+
+  gateway-config:
+    content: |
+      {
+        "bind": "0.0.0.0:8086",
+        "state_dir": "/var/lib/private-ai-gateway",
+        "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+        "admin_token_sha256": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256}",
+        "inference_token_sha256": "${PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256}",
+        "dstack_endpoint": "unix:/var/run/dstack.sock",
+        "privatemode_proxy": {
+          "base_url": "http://privatemode-proxy:8080",
+          "manifest_path": "/run/privatemode/manifest.json",
+          "manifest_sha256": "${PRIVATEMODE_MANIFEST_SHA256:?set PRIVATEMODE_MANIFEST_SHA256 to the reviewed manifest digest}",
+          "credential_path": "/run/secrets/privatemode-api-key",
+          "credential_sha256": "${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}",
+          "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+        }
+      }
+
+  gateway-upstreams:
+    content: |
+      []
+
+  privatemode-manifest:
+    file: ${PRIVATEMODE_MANIFEST_PATH:?set PRIVATEMODE_MANIFEST_PATH to the exact reviewed manifest file}
+
+volumes:
+  gateway-checkout:
+  gateway-state:
+
+secrets:
+  privatemode-api-key:
+    environment: PRIVATEMODE_API_KEY

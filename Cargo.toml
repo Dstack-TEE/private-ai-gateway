@@ -24,12 +24,14 @@ rust_decimal = "1"
 # Cryptography.
 sha2 = "0.10"
 sha3 = "0.10"
+subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
 curve25519-dalek = "4"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 aes-gcm = "0.10"
 base64 = "0.22"
+dotenvy = "0.15.7"
 chacha20poly1305 = "0.10"
 flate2 = "1"
 hkdf = "0.12"

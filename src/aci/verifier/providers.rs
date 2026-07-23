@@ -2,17 +2,20 @@
 //! origin/name routing verifier that dispatches to them.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::ChutesSessionStore;
+use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::upstream::{ChutesSessionStore, PrivatemodeProxyDeployment, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::UpstreamProvider;
+
+const MAX_PRIVATEMODE_MODELS_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ChutesProviderVerifier {
@@ -309,6 +312,216 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {
         self.verifier.invalidate(request);
+    }
+}
+
+/// Verifier for the exact official Privatemode proxy deployment measured with
+/// the gateway. The proxy completes its initial Contrast verification and
+/// secret exchange before serving, so the model-list probe corroborates startup
+/// and liveness. The unencrypted probe does not inspect the current secret;
+/// inference calls `LatestSecret` before the proxy encrypts each request.
+#[derive(Debug, Clone)]
+pub struct PrivatemodeProviderVerifier {
+    deployment: Arc<PrivatemodeProxyDeployment>,
+    client: reqwest::Client,
+    cache_ttl_seconds: u64,
+    cache: Arc<RwLock<Option<CachedPrivatemodeEvent>>>,
+    verify_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPrivatemodeEvent {
+    expires_at: u64,
+    event: UpstreamVerifiedEvent,
+}
+
+impl CachedPrivatemodeEvent {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let mut event = self.event.clone();
+        event.upstream_name = request.upstream_name.clone();
+        event.model_id = request.model_id.clone();
+        event.url_origin = request.url_origin.clone();
+        event.required = request.required;
+        event
+    }
+}
+
+impl PrivatemodeProviderVerifier {
+    pub fn new(
+        deployment: Arc<PrivatemodeProxyDeployment>,
+        connect_timeout_seconds: u64,
+        request_timeout_seconds: u64,
+        cache_ttl_seconds: u64,
+    ) -> Result<Self, UpstreamError> {
+        let client =
+            deployment.readiness_client(connect_timeout_seconds, request_timeout_seconds)?;
+        Ok(Self {
+            deployment,
+            client,
+            cache_ttl_seconds,
+            cache: Arc::new(RwLock::new(None)),
+            verify_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
+    async fn verify_deployment(
+        &self,
+        request: UpstreamVerificationRequest,
+    ) -> UpstreamVerifiedEvent {
+        if let Err(err) = self.probe().await {
+            return UpstreamVerifiedEvent {
+                upstream_name: request.upstream_name,
+                provider_type: Some("privatemode".to_string()),
+                model_id: request.model_id,
+                url_origin: Some(self.deployment.base_url().to_string()),
+                verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+                result: VerificationResult::Failed,
+                required: request.required,
+                reason: Some(err.to_string()),
+                ..Default::default()
+            };
+        }
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name,
+            provider_type: Some("privatemode".to_string()),
+            model_id: request.model_id,
+            url_origin: Some(self.deployment.base_url().to_string()),
+            verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: request.required,
+            evidence: Some(self.deployment.manifest_evidence()),
+            channel_bindings: vec![ChannelBinding::ManifestImageSha256 {
+                provider: "privatemode".to_string(),
+                manifest_sha256: self.deployment.manifest_sha256().to_string(),
+                coordinator_policy_hash: self.deployment.coordinator_policy_hash().to_string(),
+                proxy_image_digest: self.deployment.proxy_image_digest().to_string(),
+                credential_sha256: self.deployment.credential_sha256().to_string(),
+            }],
+            provider_claims: Some(serde_json::json!({
+                "trust_boundary": "attested-compose-privatemode-proxy",
+                "request_encryption": "privatemode-oae",
+            })),
+            reason: None,
+        }
+    }
+
+    async fn probe(&self) -> Result<(), UpstreamError> {
+        let response = self
+            .client
+            .get(format!("{}/v1/models", self.deployment.base_url()))
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|err| {
+                UpstreamError::Transport(format!("Privatemode proxy probe failed: {err}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(UpstreamError::Transport(format!(
+                "Privatemode proxy readiness probe returned {status}"
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PRIVATEMODE_MODELS_RESPONSE_BYTES as u64)
+        {
+            return Err(UpstreamError::Transport(format!(
+                "Privatemode proxy readiness response exceeds {MAX_PRIVATEMODE_MODELS_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| {
+                UpstreamError::Transport(format!("Privatemode proxy readiness body failed: {err}"))
+            })?;
+            let next_len = body.len().checked_add(chunk.len()).ok_or_else(|| {
+                UpstreamError::Transport(
+                    "Privatemode proxy readiness response length overflowed".to_string(),
+                )
+            })?;
+            if next_len > MAX_PRIVATEMODE_MODELS_RESPONSE_BYTES {
+                return Err(UpstreamError::Transport(format!(
+                    "Privatemode proxy readiness response exceeds {MAX_PRIVATEMODE_MODELS_RESPONSE_BYTES} bytes"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|err| {
+            UpstreamError::Transport(format!(
+                "Privatemode proxy readiness returned invalid JSON: {err}"
+            ))
+        })?;
+        if !payload.get("data").is_some_and(serde_json::Value::is_array) {
+            return Err(UpstreamError::Transport(
+                "Privatemode proxy readiness returned an invalid model list".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn cached_event(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        if self.cache_ttl_seconds == 0 {
+            return None;
+        }
+        let cached = self
+            .cache
+            .read()
+            .expect("Privatemode verifier cache poisoned")
+            .clone();
+        match cached {
+            Some(cached) if super::current_unix_secs() < cached.expires_at => {
+                Some(cached.event_for(request))
+            }
+            // Leave an expired entry in place until the serialized verify or
+            // refresh replaces it. Clearing it after dropping the read lock
+            // could erase a fresh event written concurrently by refresh.
+            Some(_) => None,
+            None => None,
+        }
+    }
+
+    fn maybe_cache(&self, event: &UpstreamVerifiedEvent) {
+        if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
+            return;
+        }
+        *self
+            .cache
+            .write()
+            .expect("Privatemode verifier cache poisoned") = Some(CachedPrivatemodeEvent {
+            expires_at: super::current_unix_secs().saturating_add(self.cache_ttl_seconds),
+            event: event.clone(),
+        });
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for PrivatemodeProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached_event(&request) {
+            return event;
+        }
+        let _verify_guard = self.verify_lock.lock().await;
+        if let Some(event) = self.cached_event(&request) {
+            return event;
+        }
+        let event = self.verify_deployment(request).await;
+        self.maybe_cache(&event);
+        event
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let _verify_guard = self.verify_lock.lock().await;
+        let event = self.verify_deployment(request).await;
+        self.maybe_cache(&event);
+        event
+    }
+
+    fn invalidate(&self, _request: &UpstreamVerificationRequest) {
+        *self
+            .cache
+            .write()
+            .expect("Privatemode verifier cache poisoned") = None;
     }
 }
 

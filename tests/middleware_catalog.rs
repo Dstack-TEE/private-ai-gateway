@@ -4,7 +4,7 @@
 //! catalog endpoints to the control plane, and that direct-upstream mode keeps
 //! its unchanged sub-catalog behavior (404).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod common;
 
@@ -12,7 +12,7 @@ use axum::{
     body::{to_bytes, Body},
     extract::RawQuery,
     http::{Request, StatusCode},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use private_ai_gateway::aggregator::service::{
@@ -22,7 +22,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{hash_api_key, Middleware, MiddlewareConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -51,6 +51,7 @@ fn runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 600,
         verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     }
 }
 
@@ -104,6 +105,27 @@ async fn spawn_stub_control() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_control_capturing_auth() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_by_route = captured.clone();
+    let app = Router::new().route(
+        "/consult/pre",
+        post(move |Json(body): Json<Value>| {
+            let captured = captured_by_route.clone();
+            async move {
+                captured.lock().unwrap().push(body);
+                Json(json!({ "allow": false }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
 async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let resp = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -113,6 +135,53 @@ async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, body)
+}
+
+#[tokio::test]
+async fn middleware_preserves_distinct_client_bearers_for_authorization() {
+    let (control_url, captured) = spawn_control_capturing_auth().await;
+    let middleware = Arc::new(
+        Middleware::new(&MiddlewareConfig {
+            control_url,
+            control_token: None,
+            control_timeout_ms: Some(2_000),
+            control_post_timeout_ms: Some(2_000),
+            sse_keepalive_ms: None,
+            tee_only_domains: Vec::new(),
+        })
+        .unwrap(),
+    );
+    let (service, manager) = build_service();
+    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+
+    for token in ["client-one", "client-two"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        br#"{"model":"private-model","messages":[]}"#.to_vec(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "the request must reach the control plane's denial"
+        );
+    }
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["apiKeyHash"], hash_api_key("client-one"));
+    assert_eq!(captured[1]["apiKeyHash"], hash_api_key("client-two"));
+    assert_ne!(captured[0]["apiKeyHash"], captured[1]["apiKeyHash"]);
 }
 
 #[tokio::test]
@@ -193,7 +262,7 @@ async fn relays_catalog_query_string_to_control() {
 #[tokio::test]
 async fn direct_mode_sub_catalogs_remain_not_found() {
     let (service, manager) = build_service();
-    let app = build_router_with_admin(service, manager, None);
+    let app = build_router_with_admin(service, manager, None, None);
 
     let (status, _) = get_json(app.clone(), "/v1/models/my-namespace").await;
     assert_eq!(status, StatusCode::NOT_FOUND);

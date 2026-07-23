@@ -11,12 +11,13 @@ use super::{
 use crate::aci::canonical;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
-    OpenAICompatibleBackend, UpstreamBackend,
+    OpenAICompatibleBackend, PrivatemodeProviderBackend, UpstreamBackend,
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
     NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    PrivatemodeProviderVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
+    TinfoilProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -79,6 +80,7 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
+        | UpstreamProvider::Privatemode
         | UpstreamProvider::PhalaDirect => true,
     }
 }
@@ -107,6 +109,23 @@ fn build_provider_backend(
                 options,
                 session_store,
             )?))
+        }
+        UpstreamProvider::Privatemode => {
+            let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
+                UpstreamConfigError::InvalidConfig(format!(
+                    "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
+                    cfg.name
+                ))
+            })?;
+            enforce_privatemode_deployment(cfg, &deployment)?;
+            let backend = PrivatemodeProviderBackend::new_with_timeouts(
+                deployment,
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone());
+            Ok(Arc::new(backend))
         }
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
@@ -262,6 +281,25 @@ fn build_provider_verifier(
                 .with_accepted_workload_ids(cfg.accepted_workload_ids.clone().unwrap_or_default());
                 Some(Arc::new(verifier))
             }
+            UpstreamProvider::Privatemode => {
+                let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
+                    UpstreamConfigError::InvalidConfig(format!(
+                        "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
+                        cfg.name
+                    ))
+                })?;
+                enforce_privatemode_deployment(cfg, &deployment)?;
+                Some(Arc::new(
+                    PrivatemodeProviderVerifier::new(
+                        deployment,
+                        cfg.connect_timeout_seconds
+                            .unwrap_or(options.connect_timeout_seconds),
+                        request_timeout_seconds,
+                        cache_seconds,
+                    )
+                    .map_err(|err| UpstreamConfigError::InvalidConfig(err.to_string()))?,
+                ))
+            }
             UpstreamProvider::PhalaDirect => {
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
@@ -282,6 +320,21 @@ fn build_provider_verifier(
         }
     }
     Ok(Some(Arc::new(router)))
+}
+
+fn enforce_privatemode_deployment(
+    cfg: &UpstreamConfig,
+    deployment: &crate::aci::upstream::PrivatemodeProxyDeployment,
+) -> Result<(), UpstreamConfigError> {
+    if cfg.base_url.trim_end_matches('/') != deployment.base_url() {
+        return Err(UpstreamConfigError::InvalidConfig(format!(
+            "Privatemode upstream {:?} base_url {:?} does not match static proxy endpoint {:?}",
+            cfg.name,
+            cfg.base_url,
+            deployment.base_url()
+        )));
+    }
+    Ok(())
 }
 
 fn build_global_verifier_for_config(

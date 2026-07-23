@@ -1,4 +1,4 @@
-use super::builders::build_verifier;
+use super::builders::{build_state, build_verifier};
 use super::dynamic::{DynamicUpstreamVerifier, EmptyUpstreamBackend};
 use super::*;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
@@ -78,6 +78,7 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::Privatemode.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
     assert_eq!(
@@ -130,6 +131,109 @@ fn parse_secret_ai_rejects_invalid_origins() {
             "{base_url:?}: {err}"
         );
     }
+}
+
+#[test]
+fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_static() {
+    let valid_text = r#"[{
+          "name": "privatemode",
+          "provider": "privatemode",
+          "base_url": "http://privatemode-proxy:8080",
+          "models": {"public-model": "provider-model"}
+        }]"#;
+    let valid = parse_config_text(valid_text).expect("Privatemode route should parse");
+    assert_eq!(valid[0].provider, UpstreamProvider::Privatemode);
+
+    for (field, expected) in [
+        (
+            r#""bearer_token": "must-not-cross-the-internal-hop""#,
+            "forbids bearer_token",
+        ),
+        (r#""path": "/v1/models""#, "forbids path"),
+        (
+            r#""privatemode_manifest_path": "/run/privatemode/manifest.json""#,
+            "unknown field",
+        ),
+    ] {
+        let candidate = valid_text.replace(
+            r#""models": {"public-model": "provider-model"}"#,
+            &format!(r#""models": {{"public-model": "provider-model"}}, {field}"#),
+        );
+        let err = parse_config_text(&candidate).expect_err("field must be rejected");
+        assert!(err.to_string().contains(expected), "{field}: {err}");
+    }
+}
+
+#[test]
+fn privatemode_route_must_match_the_static_proxy_deployment() {
+    let policy_hash = "11".repeat(32);
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "Policies": {
+            (&policy_hash): {"Role": "coordinator"}
+        }
+    }))
+    .unwrap();
+    let manifest_path = std::env::temp_dir().join(format!(
+        "private-ai-gateway-privatemode-policy-{}-{}.json",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let credential_path = manifest_path.with_extension("credential");
+    std::fs::write(&manifest_path, &manifest).unwrap();
+    std::fs::write(&credential_path, b"secret").unwrap();
+    let deployment = Arc::new(
+        crate::aci::upstream::PrivatemodeProxyDeployment::new(
+            "http://privatemode-proxy:8080",
+            &manifest_path,
+            crate::aci::canonical::sha256_hex(&manifest),
+            &credential_path,
+            crate::aci::canonical::sha256_hex(b"secret"),
+            format!("sha256:{}", "22".repeat(32)),
+        )
+        .unwrap(),
+    );
+    let _ = std::fs::remove_file(manifest_path);
+    let _ = std::fs::remove_file(credential_path);
+
+    let mut route = test_upstream_config(
+        "privatemode",
+        UpstreamProvider::Privatemode,
+        "public-model",
+        "provider-model",
+    );
+    route.base_url = deployment.base_url().to_string();
+    let mut options = UpstreamRuntimeOptions {
+        verifier_mode: UpstreamVerifierMode::None,
+        accepted_workload_ids: Vec::new(),
+        accepted_image_digests: Vec::new(),
+        accepted_dstack_kms_root_public_keys: Vec::new(),
+        pccs_url: None,
+        verifier_cache_seconds: 300,
+        connect_timeout_seconds: 10,
+        read_timeout_seconds: 600,
+        verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
+    };
+
+    let err = match build_state(&[route.clone()], &options) {
+        Ok(_) => panic!("Privatemode route without static deployment must fail"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("requires static privatemode_proxy"));
+
+    options.privatemode_proxy = Some(deployment);
+    build_state(&[route.clone()], &options)
+        .expect("matching static Privatemode deployment should build");
+    route.base_url = "http://different-proxy:8080".to_string();
+    let err = match build_state(&[route], &options) {
+        Ok(_) => panic!("mutable route must not redirect the static proxy"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("does not match static proxy endpoint"));
 }
 
 #[async_trait]
@@ -242,6 +346,7 @@ fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstre
         connect_timeout_seconds: 10,
         read_timeout_seconds: 600,
         verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     };
 
     let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
@@ -333,6 +438,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
             connect_timeout_seconds: 10,
             read_timeout_seconds: 600,
             verifier_request_timeout_seconds: 60,
+            privatemode_proxy: None,
         },
         state,
         session_sink: Arc::new(RwLock::new(None)),
