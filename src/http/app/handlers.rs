@@ -38,8 +38,8 @@ use super::error_responses::{
     unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
-    enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
-    request_host_domain,
+    enforce_admin, enforce_inference, enforce_owner, extract_bearer, force_tee_true,
+    has_e2ee_headers, header_str, request_host_domain,
 };
 use super::AppState;
 use crate::middleware::errors::Surface;
@@ -649,6 +649,10 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    if let Some(response) = enforce_inference(&state, &headers) {
+        return response;
+    }
+
     // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
     // request would use; stop serving inference under it (§4.7).
     if state.service.is_keyset_revoked() {

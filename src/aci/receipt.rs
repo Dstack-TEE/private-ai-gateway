@@ -55,7 +55,7 @@ pub struct UpstreamVerifiedEvent {
     /// "tinfoil-glm51") — a label chosen by whoever wrote the config.
     pub upstream_name: String,
     /// The verifier adapter *type* the verification logic keys on (e.g.
-    /// "tinfoil", "near-ai", "chutes", "phala-direct"). Many `upstream_name`
+    /// "tinfoil", "near-ai", "chutes", "privatemode", "phala-direct"). Many `upstream_name`
     /// entries can share one `provider_type` (two configs both pointing at
     /// Tinfoil). Used to map provider evidence onto typed session claims;
     /// `None` for generic/static verifiers that have no provider type.
@@ -113,6 +113,31 @@ pub enum ChannelBinding {
         key_id: Option<String>,
         algorithm: String,
         public_key_sha256: String,
+    },
+    /// Legacy binding for a gateway-supervised provider-proxy child. Retained
+    /// so existing `aci/1` receipts and persisted sessions remain readable.
+    ManifestSha256 {
+        provider: String,
+        manifest_sha256: String,
+        coordinator_policy_hash: String,
+        proxy_binary_sha256: String,
+        proxy_tls_certificate_sha256: String,
+    },
+    /// Digests binding a provider proxy co-deployed in the gateway's measured
+    /// dstack Compose. The proxy verifies the provider's attestation chain and
+    /// owns the resulting E2EE secret. The gateway verifies the exact manifest
+    /// bytes and pins the Compose-owned proxy image digest.
+    ManifestImageSha256 {
+        provider: String,
+        manifest_sha256: String,
+        coordinator_policy_hash: String,
+        proxy_image_digest: String,
+        /// Digest of the exact Compose secret mounted into both the measured
+        /// gateway and proxy. Optional only so receipts issued by an earlier
+        /// `aci/1` deployment remain deserializable; current forwarding
+        /// requires it to be present and equal to static policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_sha256: Option<String>,
     },
 }
 

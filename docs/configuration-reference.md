@@ -42,8 +42,25 @@ This is the smallest practical container config.
 | `state_dir` | `/var/lib/private-ai-gateway` | Gateway-owned writable state directory. The active upstream config and attested-session log are derived from this directory. |
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
+| `admin_token_sha256` | unset | Optional SHA-256 policy for the admin token supplied by config or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`. Startup fails on a missing or mismatched token. |
+| `inference_token_sha256` | unset | SHA-256 of the downstream bearer accepted by inference POST endpoints; required when `privatemode_proxy` is configured. The high-entropy bearer remains client-side. Missing or mismatched credentials are rejected before request parsing or forwarding. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
 | `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
+| `privatemode_proxy` | unset | Static policy for an official Privatemode proxy co-deployed in the same measured dstack Compose. Required before a `privatemode` route can load. |
+
+### Privatemode proxy
+
+`privatemode_proxy` belongs in static deployment config, not the mutable
+upstream database. All fields are required when the section is present.
+
+| Field | Meaning |
+| --- | --- |
+| `privatemode_proxy.base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
+| `privatemode_proxy.manifest_path` | Absolute path to the reviewed manifest mounted into the gateway. |
+| `privatemode_proxy.manifest_sha256` | SHA-256 of the exact manifest bytes. The optional `sha256:` prefix is accepted. |
+| `privatemode_proxy.credential_path` | Absolute path to the Compose secret source mounted into both gateway and proxy. The gateway validates and drops its bytes at startup; the proxy owns their use. |
+| `privatemode_proxy.credential_sha256` | SHA-256 of that mounted API credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch in the live shared secret fails startup. |
+| `privatemode_proxy.proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, in `sha256:<64-hex>` form. |
 
 ## Middleware
 
@@ -189,6 +206,7 @@ Supported `provider` values:
 | `near-ai` | NEAR AI provider adapter. |
 | `chutes` | Chutes provider adapter. |
 | `secret-ai` | Direct SecretAI SecretVM origin with optional workload pinning; see [SecretAI verification](providers/secret-ai/verification.md). |
+| `privatemode` | Official Privatemode proxy co-deployed in the measured Compose. Forbids `bearer_token` and `path`, and requires a `base_url` exactly matching static `privatemode_proxy.base_url`. |
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
 
 Provider verification policy belongs on the upstream entry. For ACI service
@@ -213,6 +231,24 @@ For `aci-service`, `base_url` is the HTTPS origin used for both model traffic an
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.
 
+For `privatemode`, dstack Compose owns the proxy process, image pin, manifest
+mount, restart policy, and private network. The gateway verifies the static
+manifest pin at startup and refuses a mutable route whose `base_url` differs
+from the static internal origin. It also validates the actual shared Compose
+secret against measured `credential_sha256`. An unauthenticated internal
+model-list probe must succeed before the verifier emits the manifest/image and
+credential binding. Configure at most one
+`privatemode` entry per proxy; place every model using that credential in the
+entry's `models` map. The official proxy loads that credential from a
+Compose-managed secret file at startup. The static `credential_sha256` makes it
+immutable across route removal and gateway-only restarts. Separate credentials
+require separate measured proxy deployments rather than extra entries pointing
+to one service. The backend independently accepts only the encrypted v1.48
+handlers (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and
+`/v1/messages`) so a mutable route cannot select the proxy's unencrypted model
+catalog.
+See [Privatemode verification](providers/privatemode/verification.md).
+
 ## Environment Variables
 
 The gateway runtime reads only these environment variables. Provider verifier
@@ -222,6 +258,8 @@ bridges may consume provider-specific environment variables such as
 | Variable | Use |
 | --- | --- |
 | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required. Selects the static gateway config file. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime secret overriding static `admin_token`. |
+| `PRIVATE_AI_GATEWAY_ENV_FILE` | Optional dotenv file consulted for `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` when that variable is absent. The Privatemode Compose points it at dstack's decrypted, TEE-internal deployment environment. |
 | `RUST_LOG` | Tracing filter consumed by `tracing_subscriber`. |
 
 Deployment tooling also uses these variables:
@@ -233,4 +271,9 @@ Deployment tooling also uses these variables:
 | `RUSTUP_HOME` | Optional override for Rustup state. Defaults under `PRIVATE_AI_GATEWAY_CACHE_DIR`. |
 | `CARGO_TARGET_DIR` | Optional override for Cargo build output. Defaults under `PRIVATE_AI_GATEWAY_CACHE_DIR`. |
 | `PRIVATE_AI_GATEWAY_REPO_COMMIT` | Used by `deploy/compose.yaml` interpolation for the git-launcher `COMMIT_SHA` pin. |
-| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Used by `deploy/compose.yaml` interpolation for the static config's `admin_token`. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | `deploy/compose.yaml` interpolates this legacy input; `compose.privatemode.yaml` instead reads it from dstack's TEE-internal decrypted environment file. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256` | Non-secret digest rendered into `compose.privatemode.yaml`; binds the encrypted admin token to measured static policy. |
+| `PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256` | Non-secret digest rendered into `compose.privatemode.yaml`; binds the client-held bearer required by paid inference endpoints. |
+| `PRIVATEMODE_MANIFEST_PATH` | Absolute path to the exact reviewed manifest file. The renderer preserves its bytes in the generated Compose config mounted into both services. |
+| `PRIVATEMODE_MANIFEST_SHA256` | Used by `deploy/compose.privatemode.yaml` to pin those exact manifest bytes in static gateway policy. |
+| `PRIVATEMODE_API_KEY` | Encrypted deployment input mounted as one Compose secret into both services. The renderer derives `PRIVATEMODE_CREDENTIAL_SHA256` for measured static policy; the gateway verifies the live mounted bytes before serving. |

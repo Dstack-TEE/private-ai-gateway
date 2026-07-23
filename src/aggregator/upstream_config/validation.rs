@@ -154,6 +154,17 @@ pub fn parse_config_text(text: &str) -> Result<Vec<UpstreamConfig>, UpstreamConf
 }
 
 pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError> {
+    if config
+        .iter()
+        .filter(|upstream| upstream.provider == UpstreamProvider::Privatemode)
+        .count()
+        > 1
+    {
+        return Err(UpstreamConfigError::InvalidConfig(
+            "only one Privatemode upstream entry is supported per co-deployed proxy; put all models that share its credential in that entry"
+                .to_string(),
+        ));
+    }
     let mut names = HashSet::new();
     let mut route_ids = HashSet::new();
     for upstream in config {
@@ -278,6 +289,18 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} has Chutes E2EE fields but provider is not chutes",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.bearer_token.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids bearer_token; the measured proxy reads its credential from the shared Compose secret",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.path.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids path; the measured proxy backend pins encrypted handler paths",
                 upstream.name
             )));
         }

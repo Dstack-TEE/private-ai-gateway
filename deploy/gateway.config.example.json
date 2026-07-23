@@ -3,7 +3,16 @@
   "state_dir": "/var/lib/private-ai-gateway",
   "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
   "admin_token": "<long-random-admin-token>",
+  "inference_token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "dstack_endpoint": "unix:/var/run/dstack.sock",
+  "privatemode_proxy": {
+    "base_url": "http://privatemode-proxy:8080",
+    "manifest_path": "/run/privatemode/manifest.json",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "credential_path": "/run/secrets/privatemode-api-key",
+    "credential_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+  },
   "middleware": {
     "control_url": "https://control.example",
     "control_token": "<control-plane-bearer-token>"

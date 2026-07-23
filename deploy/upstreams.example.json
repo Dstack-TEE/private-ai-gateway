@@ -48,6 +48,14 @@
     "bearer_token": "<phala-direct-api-key>"
   },
   {
+    "name": "privatemode-gpt-oss",
+    "provider": "privatemode",
+    "base_url": "http://privatemode-proxy:8080",
+    "models": {
+      "gpt-oss-120b-private": "gpt-oss-120b"
+    }
+  },
+  {
     "name": "phala-direct-qwen3",
     "provider": "phala-direct",
     "base_url": "https://qwen3.model-b.phala.network",
