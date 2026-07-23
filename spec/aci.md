@@ -26,10 +26,9 @@ artifacts:
 | Inference receipt | `GET /v1/aci/receipts/{id}` | What happened for this specific request? |
 | Attested session | `GET /v1/aci/sessions/{session_id}` | Which verified upstream TEE served the inference (for aggregators)? |
 
-Beyond the explicit upstream constraints in §6.2, ACI v1 does **not** define
-routing policy, billing, pricing, model catalogs, canonical model identifiers,
-or a universal trust policy. It standardizes bindings; each relying party
-chooses the verifier policy it trusts (§1.3).
+ACI v1 does **not** define routing policy, billing, pricing, model catalogs,
+canonical model identifiers, or a universal trust policy. It standardizes
+bindings; each relying party chooses the verifier policy it trusts (§1.3).
 For how ACI relates to other confidential-inference systems and standards,
 see [ACI and Related Work](related-work.md).
 
@@ -72,14 +71,11 @@ services. The aggregator is itself the client-facing workload: it proves its
 own identity to clients exactly like a single-model service.
 
 For the upstream hop, ACI v1 standardizes the aggregator's **transparency
-surface** and an explicit client constraint, not its general routing policy:
+surface**, not its routing policy:
 
-- When a request sets `provider.aci_verified: true` or pins an ACI session, the
-  aggregator MUST select a route classified as attested, verify it, and obtain
-  an enforceable channel binding (a TLS key pin or an upstream E2EE key) before
-  forwarding the prompt. If it cannot, it MUST fail closed.
-- For an unconstrained request, verification is best effort and its result is
-  informational; the aggregator MAY forward through an unattested route.
+- Before forwarding a prompt constrained by §6.1, the aggregator MUST verify
+  the selected upstream and obtain an enforceable channel binding (a TLS key
+  pin or an upstream E2EE key), or fail closed.
 - Each receipt records the verification outcome in an `upstream.verified`
   event (§8.4).
 - Each successful verification is captured as an immutable, content-addressed
@@ -566,8 +562,8 @@ for the hostname it actually uses.
 ## 6. Inference Endpoints
 
 ACI v1 covers OpenAI-compatible completion-style endpoints. Request and
-response bodies follow the OpenAI API. ACI adds headers, artifacts, and the
-aggregator-only request constraints in §6.2.
+response bodies follow the OpenAI API, with the aggregator constraints in
+§6.1. ACI also adds headers and artifacts.
 
 | Endpoint | Status |
 | --- | --- |
@@ -580,7 +576,7 @@ aggregator-only request constraints in §6.2.
 Trust metadata is service-level and lives in the attestation report. Clients
 MUST NOT infer trust from `/v1/models` entries.
 
-### 6.1 Request headers
+### 6.1 Requests
 
 | Header | When | Meaning |
 | --- | --- | --- |
@@ -591,36 +587,17 @@ MUST NOT infer trust from `/v1/models` entries.
 | `X-E2EE-Nonce` | E2EE | Unique request nonce (§7.5). |
 | `X-E2EE-Timestamp` | E2EE | Unix seconds (§7.5). |
 
-### 6.2 Aggregator upstream constraints
+#### Aggregator upstream constraints
 
-An inference request MAY include this gateway-owned routing block:
+`provider.aci_verified: true` restricts routing to attested routes and requires
+a verified, enforceable channel binding before forwarding. If absent or
+`false`, routing is unconstrained and verification is best effort.
+`provider.aci_session_ids` MUST be a non-empty array of `as_<64-hex>` ids; it
+implies `aci_verified: true`, and at least one id MUST match the route's current
+verified bindings, including after refresh. Combining it with
+`aci_verified: false` is invalid. The aggregator MUST NOT forward either field.
 
-```json
-{
-  "provider": {
-    "aci_verified": true,
-    "aci_session_ids": ["as_<64-hex>"]
-  }
-}
-```
-
-`aci_verified: true` restricts the request to routes the aggregator classifies
-as attested and makes upstream verification fail-closed. The aggregator MUST
-NOT forward the prompt until verification succeeds and produces an enforceable
-channel binding. When the field is absent or `false`, routing is unconstrained
-and verification is best effort.
-
-`aci_session_ids`, when present, MUST be a non-empty array of attested-session
-ids. It implies `aci_verified: true`. Before forwarding, the aggregator MUST
-derive sessions from the route's current verified channel bindings and require
-at least one to match the allowlist. It MUST reapply the allowlist after any
-binding refresh. A request that combines `aci_verified: false` with
-`aci_session_ids` is invalid.
-
-These fields are instructions to the aggregator and MUST NOT be forwarded to
-the selected upstream.
-
-### 6.3 Response headers
+### 6.2 Response headers
 
 | Header | When | Meaning |
 | --- | --- | --- |
@@ -916,9 +893,8 @@ appear):
 }
 ```
 
-`required` is `true` exactly when the request used the §6.2 ACI verification
-constraint. When it is `false`, the result is informational and a failed
-verification does not by itself make the receipt invalid.
+`required` records whether effective policy required verification. If `false`,
+the result is informational.
 
 `session_id` and `claims` are present exactly when `result` is `"verified"`
 and an attested session was sealed; `session_id` is the content-addressed
@@ -1149,11 +1125,9 @@ Given an established identity and keyset, plus a response and its receipt:
 
 ### 10.3 Audit the upstream (aggregators)
 
-1. A client that requires an attested upstream sets the §6.2 constraint before
-   sending its prompt, then requires the receipt's serving `upstream.verified`
-   event to contain `required: true`, `result: "verified"`, and a channel
-   binding its policy accepts. A client that sent an unconstrained request MUST
-   apply local policy to `required: false` results.
+1. The receipt contains `upstream.verified` with `required: true` and `result:
+   "verified"` for the serving upstream, with a channel binding the policy
+   accepts.
 2. Shallow audit: read the typed claims in the event and apply local policy
    (for example require `tee_attested` to be `asserted` with source
    `hardware_proven`).
@@ -1203,7 +1177,7 @@ act on the status.
   story (§4.5), checked by the verifier profile.
 - **Quote and endorsement are both required** (§4.4); every rotation needs a
   fresh report binding the new digest.
-- **Headers are hints** (§6.3): unauthenticated; act on a change only by
+- **Headers are hints** (§6.2): unauthenticated; act on a change only by
   re-fetching attestation.
 - **Under E2EE, cleartext hashes are service-observed.** For E2EE requests,
   `request.received.body_hash` commits to the JSON body after field
@@ -1248,7 +1222,7 @@ use the `/v1/aci/*` endpoints and ignore compatibility fields.
 
 ## 14. Out of Scope for ACI v1
 
-- Provider routing policy beyond §6.2, upstream preferences, BYOK credentials,
+- Provider routing policy beyond §6.1, upstream preferences, BYOK credentials,
   billing, quotas, pricing, and canonical model ids.
 - A universal verifier profile, profile registries, negotiation, or
   service-advertised profile lists.
@@ -1314,4 +1288,4 @@ these sets requires a published extension document.
 | TEE types | `tdx`, `sev_snp` | Requires a published verifier extension (§5.2) |
 | Identifier formats | `sha256:<64-hex>` (digests), `as_<64-hex>` (session ids) | — |
 | Error types | §11 table | Treat as opaque; act on HTTP status |
-| Headers | §6.1, §6.3 tables | Ignore unrecognized `X-ACI-*` / `X-E2EE-*` headers |
+| Headers | §6.1, §6.2 tables | Ignore unrecognized `X-ACI-*` / `X-E2EE-*` headers |
