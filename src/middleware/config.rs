@@ -29,4 +29,11 @@ pub struct MiddlewareConfig {
     /// `0` disables the heartbeat.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
+    /// Hosts (matched against the request `Host` header) that serve TEE models
+    /// only. On these hosts the model catalog is forced to `?tee=true`,
+    /// non-TEE models are refused (404) at consult, and serving is forced to
+    /// attested (`aci_verified`) upstreams — a client cannot opt out. Empty
+    /// (the default) leaves every host unrestricted.
+    #[serde(default)]
+    pub tee_only_domains: Vec<String>,
 }

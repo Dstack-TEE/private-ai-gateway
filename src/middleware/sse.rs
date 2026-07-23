@@ -833,6 +833,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            tee_only_domains: Vec::new(),
         })
         .unwrap();
         let report = StreamReport {

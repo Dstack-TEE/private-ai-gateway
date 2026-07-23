@@ -16,6 +16,8 @@ pub mod sse;
 pub mod stream_transform;
 pub mod types;
 
+use std::collections::HashSet;
+
 use axum::{
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -32,6 +34,8 @@ use errors::Surface;
 pub struct Middleware {
     control: ControlClient,
     sse_keepalive_ms: Option<u64>,
+    /// Normalized (lowercased) TEE-only host set; see `MiddlewareConfig::tee_only_domains`.
+    tee_only_domains: HashSet<String>,
 }
 
 impl Middleware {
@@ -39,7 +43,20 @@ impl Middleware {
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
+            tee_only_domains: config
+                .tee_only_domains
+                .iter()
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect(),
         })
+    }
+
+    /// Whether `host` (an already-normalized `Host` domain from
+    /// `request_host_domain`) is a TEE-only host. On these hosts the catalog is
+    /// forced to `?tee=true` and completions are forced to attested serving.
+    pub fn is_tee_only_domain(&self, host: &str) -> bool {
+        self.tee_only_domains.contains(host)
     }
 
     /// Relay a `/v1/...` catalog request to the control plane, which serves
@@ -109,6 +126,7 @@ mod tests {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            tee_only_domains: Vec::new(),
         })
         .unwrap();
 
@@ -134,10 +152,30 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            tee_only_domains: Vec::new(),
         })
         .unwrap();
 
         let response = middleware.handle_catalog("/v1/models").await;
         assert_eq!(response.status().as_u16(), 502);
+    }
+
+    #[test]
+    fn is_tee_only_domain_matches_normalized_hosts() {
+        let middleware = Middleware::new(&MiddlewareConfig {
+            control_url: "http://control.invalid".to_string(),
+            control_token: None,
+            control_timeout_ms: Some(200),
+            control_post_timeout_ms: Some(200),
+            sse_keepalive_ms: None,
+            tee_only_domains: vec!["Tee.Example.com".to_string(), "  ".to_string()],
+        })
+        .unwrap();
+        // Config entries are lowercased on load; the lookup key is an
+        // already-normalized host from `request_host_domain`.
+        assert!(middleware.is_tee_only_domain("tee.example.com"));
+        assert!(!middleware.is_tee_only_domain("api.example.com"));
+        // Blank entries are dropped, so an empty host never matches.
+        assert!(!middleware.is_tee_only_domain(""));
     }
 }

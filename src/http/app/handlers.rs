@@ -38,12 +38,13 @@ use super::error_responses::{
     unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
-    enforce_admin, enforce_owner, extract_bearer, has_e2ee_headers, header_str, request_host_domain,
+    enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
+    request_host_domain,
 };
 use super::AppState;
 use crate::middleware::errors::Surface;
 use crate::middleware::request_transform::Endpoint;
-use crate::middleware::{hash_api_key, CompletionInput};
+use crate::middleware::{hash_api_key, CompletionInput, Middleware};
 
 #[derive(Deserialize)]
 pub(super) struct AttestationQuery {
@@ -88,8 +89,13 @@ fn catalog_path(base: &str, query: Option<String>) -> String {
     }
 }
 
-pub(super) async fn models(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
+pub(super) async fn models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
     if let Some(middleware) = state.middleware.clone() {
+        let query = tee_only_catalog_query(&middleware, &headers, query);
         return middleware
             .handle_catalog(&catalog_path("/v1/models", query))
             .await;
@@ -100,12 +106,26 @@ pub(super) async fn models(State(state): State<AppState>, RawQuery(query): RawQu
     }
 }
 
+/// On a TEE-only host, rewrite the relayed catalog query to force `?tee=true`
+/// (see `force_tee_true`); otherwise pass the client's query through unchanged.
+fn tee_only_catalog_query(
+    middleware: &Middleware,
+    headers: &HeaderMap,
+    query: Option<String>,
+) -> Option<String> {
+    match request_host_domain(headers) {
+        Some(host) if middleware.is_tee_only_domain(&host) => Some(force_tee_true(query)),
+        _ => query,
+    }
+}
+
 // Relay every /v1/models/<sub> sub-catalog to the middleware, which owns the
 // real routing (namespace, providers, ...). matchit 0.7.3 forbids a param and
 // a static sibling at the same position, so we relay the whole subtree rather
 // than enumerate routes here. Only meaningful in the middleware topology.
 pub(super) async fn models_subpath(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(rest): Path<String>,
     RawQuery(query): RawQuery,
 ) -> Response {
@@ -116,6 +136,7 @@ pub(super) async fn models_subpath(
             "model sub-catalogs are not available in direct-upstream mode",
         );
     };
+    let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
         .handle_catalog(&catalog_path(&format!("/v1/models/{rest}"), query))
         .await
@@ -125,6 +146,7 @@ pub(super) async fn models_subpath(
 // topology.
 pub(super) async fn embeddings_models(
     State(state): State<AppState>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Response {
     let Some(middleware) = state.middleware.clone() else {
@@ -134,6 +156,7 @@ pub(super) async fn embeddings_models(
             "embedding model catalog is not available in direct-upstream mode",
         );
     };
+    let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
         .handle_catalog(&catalog_path("/v1/embeddings/models", query))
         .await
@@ -726,6 +749,16 @@ pub(super) async fn openai_completion_endpoint(
             Surface::Openai
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
+        // TEE-only host: force attested serving and refuse to be opted out of it.
+        // `aci_required` makes verification non-waivable at serve time, and forcing
+        // `upstream_required` closes the `X-Upstream-Verification: none` escape; the
+        // `tee_only` flag is carried to the control plane so a non-TEE model is a
+        // 404 before any forward. Client `provider.aci_verified:false` is ignored.
+        let tee_only = request_host_domain(&headers)
+            .as_deref()
+            .is_some_and(|host| middleware.is_tee_only_domain(host));
+        let upstream_required = upstream_required || tee_only;
+        let aci_required = aci.required || tee_only;
         let input = CompletionInput {
             endpoint,
             endpoint_path,
@@ -736,11 +769,12 @@ pub(super) async fn openai_completion_endpoint(
             requester,
             e2ee,
             upstream_required,
-            aci_required: aci.required,
+            aci_required,
             aci_session_ids: aci.session_ids,
             request_id: context.request_id,
             user_model: context.user_model,
             stream,
+            tee_only,
         };
         return middleware.handle_completion(&state.service, input).await;
     }
