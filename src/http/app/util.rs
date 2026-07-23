@@ -112,6 +112,28 @@ pub(super) fn enforce_owner(
     }
 }
 
+pub(super) fn enforce_admin(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let Some(expected) = state.admin_token.as_deref() else {
+        return Some(admin_not_found_response());
+    };
+    let Some(token) = extract_bearer(headers) else {
+        return Some(error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "admin bearer token required",
+        ));
+    };
+    if token == expected {
+        None
+    } else {
+        Some(error_response(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "invalid admin bearer token",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::force_tee_true;
@@ -134,27 +156,5 @@ mod tests {
             force_tee_true(Some("zdr=true".to_string())),
             "zdr=true&tee=true"
         );
-    }
-}
-
-pub(super) fn enforce_admin(state: &AppState, headers: &HeaderMap) -> Option<Response> {
-    let Some(expected) = state.admin_token.as_deref() else {
-        return Some(admin_not_found_response());
-    };
-    let Some(token) = extract_bearer(headers) else {
-        return Some(error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "admin bearer token required",
-        ));
-    };
-    if token == expected {
-        None
-    } else {
-        Some(error_response(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "invalid admin bearer token",
-        ))
     }
 }

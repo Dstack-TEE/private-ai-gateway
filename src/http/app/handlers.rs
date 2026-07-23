@@ -756,7 +756,7 @@ pub(super) async fn openai_completion_endpoint(
         // 404 before any forward. Client `provider.aci_verified:false` is ignored.
         let tee_only = request_host_domain(&headers)
             .as_deref()
-            .map_or(false, |host| middleware.is_tee_only_domain(host));
+            .is_some_and(|host| middleware.is_tee_only_domain(host));
         let upstream_required = upstream_required || tee_only;
         let aci_required = aci.required || tee_only;
         let input = CompletionInput {
