@@ -208,12 +208,6 @@ impl PrivatemodeProxyDeployment {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum PrivatemodeBackendConfigError {
-    #[error("invalid Privatemode backend: {0}")]
-    Backend(String),
-}
-
 pub struct PrivatemodeProviderBackend {
     inner: OpenAICompatibleBackend,
     deployment: Arc<PrivatemodeProxyDeployment>,
@@ -224,16 +218,13 @@ impl PrivatemodeProviderBackend {
         deployment: Arc<PrivatemodeProxyDeployment>,
         connect_timeout_seconds: u64,
         read_timeout_seconds: u64,
-    ) -> Result<Self, PrivatemodeBackendConfigError> {
-        let client = deployment
-            .forwarding_client(connect_timeout_seconds, read_timeout_seconds)
-            .map_err(|err| PrivatemodeBackendConfigError::Backend(err.to_string()))?;
+    ) -> Result<Self, UpstreamError> {
+        let client = deployment.forwarding_client(connect_timeout_seconds, read_timeout_seconds)?;
         let inner = OpenAICompatibleBackend::new_with_timeouts(
             deployment.base_url(),
             connect_timeout_seconds,
             read_timeout_seconds,
-        )
-        .map_err(|err| PrivatemodeBackendConfigError::Backend(err.to_string()))?
+        )?
         .with_client(client);
         Ok(Self { inner, deployment })
     }
@@ -278,7 +269,7 @@ impl PrivatemodeProviderBackend {
             || manifest_sha256 != self.deployment.manifest_sha256()
             || coordinator_policy_hash != self.deployment.coordinator_policy_hash()
             || proxy_image_digest != self.deployment.proxy_image_digest()
-            || credential_sha256.as_deref() != Some(self.deployment.credential_sha256())
+            || credential_sha256 != self.deployment.credential_sha256()
         {
             return Err(binding_mismatch(
                 "Privatemode event does not match the measured proxy deployment",
@@ -312,6 +303,10 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
         self.inner.url_origin()
     }
 
+    fn preserves_chat_surface_path(&self) -> bool {
+        true
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         self.inner.prepare(req)
     }
@@ -335,10 +330,6 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
         self.enforce_encrypted_path(&req)?;
         self.enforce_proxy_binding(event)?;
         self.inner.forward_prepared(req).await
-    }
-
-    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
-        self.inner.models().await
     }
 
     async fn forward_stream(

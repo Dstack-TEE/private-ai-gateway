@@ -38,19 +38,20 @@ The gateway's static config separately pins:
 - the official proxy OCI image digest recorded in the Compose file.
 
 These fields cannot be changed through `PUT /v1/admin/upstreams`. A dynamic
-Privatemode route is accepted only when its `base_url` exactly matches the
-static origin; `bearer_token` is forbidden because the proxy owns provider
-authentication, and `path` is forbidden because v1.48 has both encrypted and
-unencrypted handlers. This prevents an admin-config update from redirecting
-plaintext to a different proxy, injecting a second credential path, or selecting
-an unencrypted proxy handler.
+Privatemode route is accepted only when its `base_url` matches the static
+origin after optional trailing-slash normalization; `bearer_token` is forbidden
+because the proxy owns provider authentication, and `path` is forbidden because
+v1.48 has both encrypted and unencrypted handlers. This prevents an admin-config
+update from redirecting plaintext to a different proxy, injecting a second
+credential path, or selecting an unencrypted proxy handler.
 
 ## Verification and forwarding
 
 At startup, the gateway reads the mounted manifest and the same Compose secret
-source mounted into the proxy. It verifies both measured digests, drops the
-credential bytes, and requires exactly one Coordinator policy. When a route is
-verified, the gateway sends an unauthenticated `GET /v1/models` to the pinned
+source mounted into the proxy. It verifies both measured digests, retains no
+credential bytes in its deployment state, and requires exactly one Coordinator
+policy. When a route is verified, the gateway sends an unauthenticated
+`GET /v1/models` to the pinned
 internal origin using a client that ignores HTTP proxy environment variables.
 The proxy started only after using its static `--apiKey` to complete Contrast
 verification and inference-secret exchange; it attaches that credential to the
@@ -61,16 +62,26 @@ internal origin. The probe has an end-to-end deadline and rejects model-list
 bodies over 1 MiB, including chunked responses without a declared length.
 
 The verifier emits a verified event only after this probe returns a JSON model
-list. The forwarding backend accepts only that exact manifest/image binding,
-then sends OpenAI-compatible requests to the same internal origin. Independently
-of config validation, it permits only the pinned v1.48 encrypted handler set:
+list. This corroborates that the measured proxy completed initial startup and
+that its authenticated catalog path remains reachable. It does not expose or
+prove the current inference-secret ID, expiration, or latest Coordinator
+attestation: `/v1/models` is an unencrypted handler and does not call
+`LatestSecret`.
+
+The forwarding backend accepts only that exact manifest/image binding, then
+sends OpenAI-compatible requests to the same internal origin. Independently of
+config validation, it permits only the pinned v1.48 encrypted handler set:
 `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and
 `/v1/messages`. In particular, inference can never target the proxy's
 unencrypted `/v1/models` forwarder. The proxy performs Privatemode full-body
-encryption and response decryption.
-Successful probes use the configured `verifier_cache_seconds` lease. Normal
-requests reuse the binding until expiry, proactive refresh performs a fresh
-probe, and invalidation discards the cached event.
+encryption and response decryption. Before encrypting each request, the proxy
+calls `LatestSecret`; an expired secret must be refreshed, and refresh failure
+fails that inference instead of sending plaintext.
+Successful probes use the configured `verifier_cache_seconds` lease. This
+controls only readiness-probe reuse; it is unrelated to stored session
+`expires_at` and inference-secret freshness. Normal requests reuse the binding
+until lease expiry, proactive refresh performs a fresh probe, and invalidation
+discards the cached event.
 
 Plain HTTP is intentional at this hop. It is not a remote trust channel: both
 endpoints and their private network are inside the same attested dstack
@@ -81,75 +92,16 @@ its port is never published.
 
 ## Configuration
 
-Use [`deploy/compose.privatemode.yaml`](../../../deploy/compose.privatemode.yaml)
-and set the reviewed manifest file and digest before deployment:
+Use the canonical [deployment and verification runbook](../../../deploy/README.md#verify-a-privatemode-deployment)
+for rendering, deployment, route installation, real inference, receipt
+assertions, rotation, and diagnostics. The
+[configuration reference](../../configuration-reference.md#privatemode-proxy)
+defines each static and mutable field.
 
-```bash
-export PRIVATE_AI_GATEWAY_REPO_COMMIT=<audited-commit>
-export PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<admin-token>
-export PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)"
-export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN=<long-random-client-token>
-export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" | sha256sum | cut -d' ' -f1)"
-export PRIVATEMODE_API_KEY=<privatemode-api-key>
-export PRIVATEMODE_MANIFEST_PATH=/absolute/path/to/exact-reviewed-manifest.json
-
-deploy/render-privatemode-compose.sh /tmp/private-ai-gateway-privatemode.json
-phala deploy -n private-ai-gateway \
-  -c /tmp/private-ai-gateway-privatemode.json \
-  -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY"
-```
-
-Rendering makes the exact manifest bytes and non-secret pins part of the
-measured Compose. The renderer verifies that inline serialization preserves the
-manifest file's SHA-256, including its whitespace and final newline.
-The admin and Privatemode secrets remain outside it and enter only through the
-encrypted deployment environment. The renderer derives the credential digest
-from `PRIVATEMODE_API_KEY`; Compose mounts one secret source into the gateway
-and the proxy. The gateway verifies the actual mounted bytes against that
-measured digest at startup, while the proxy consumes the same source through
-`--apiKey @<file>`. The downstream inference token never enters the deployment:
-only its digest is measured, and clients present the token as a Bearer
-credential on every inference request.
-
-The measured static gateway config has this shape:
-
-```json
-{
-  "inference_token_sha256": "<sha256-of-high-entropy-client-bearer>",
-  "privatemode_proxy": {
-    "base_url": "http://privatemode-proxy:8080",
-    "manifest_path": "/run/privatemode/manifest.json",
-    "manifest_sha256": "<64-lowercase-hex-characters>",
-    "credential_path": "/run/secrets/privatemode-api-key",
-    "credential_sha256": "<sha256-of-privatemode-api-key>",
-    "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
-  }
-}
-```
-
-Configure the mutable model route after boot:
-
-```json
-[
-  {
-    "name": "privatemode",
-    "provider": "privatemode",
-    "base_url": "http://privatemode-proxy:8080",
-    "models": {
-      "gpt-oss-120b-private": "gpt-oss-120b"
-    }
-  }
-]
-```
-
-One co-deployed proxy supports one gateway upstream entry. Put all models that
-share its credential in that entry. The official proxy loads one credential
-from its Compose secret file at startup, and the gateway validates that same
-mounted source against static `credential_sha256`. To rotate the key, rerender
-with the new `PRIVATEMODE_API_KEY` and redeploy both services. If distinct
-credentials are required, deploy distinct measured proxy services rather than
-pointing multiple entries at one service.
+All Privatemode routes must use the statically configured proxy origin and
+therefore share its Compose credential. The mutable route cannot carry a bearer,
+override a path, or change deployment pins. Distinct credentials require
+distinct measured gateway/proxy deployments.
 
 ## Session binding
 

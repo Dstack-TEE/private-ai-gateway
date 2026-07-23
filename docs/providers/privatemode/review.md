@@ -91,63 +91,21 @@ Open or conditional:
 - The exact served worker is not named in a per-request signed receipt. ACI
   records the selected model and verified router-scoped manifest session.
 
-## Live observations from the original audit
+## Validation evidence
 
-- The official proxy completed attestation and became ready in roughly ten
-  seconds.
-- A live chat request and an SSE streaming request succeeded over the encrypted
-  path.
-- A direct plaintext request to the public API returned HTTP 400 with the
-  `privatemode-encrypted: false` signal.
-- Streaming latency was stable in the sampled runs: time to first byte was
-  approximately 0.24 seconds across the tested models, with low run-to-run
-  throughput variance. These figures are operational observations, not
-  security guarantees.
+The original audit reproduced initial attestation, secret exchange, buffered
+chat, and SSE streaming against production; a direct plaintext request to the
+public API was rejected. The co-deployed v1.48 boundary was then exercised on
+Phala Cloud on 2026-07-13 with a real `gpt-oss-120b` response and a signed
+receipt.
 
-## Adapter validation
-
-The adapter tests run a persistent HTTP service at the same boundary as the
-Compose sidecar. They verify that manifest bytes are checked and retained at
-static-policy construction, the actual shared credential file matches measured
-policy, an unauthenticated internal model-list probe gates verified events, no
-Bearer crosses the gateway-to-proxy hop, and both buffered and streaming
-forwards reject v1.48's unencrypted handlers before network I/O. Remaining
-forwards require the exact receipt binding, and receipts record the manifest,
-Coordinator policy, credential digest, proxy image digest, and internal origin.
-Config tests reject provider credentials, path overrides, and deployment fields
-in mutable upstream config; deployment tests pin the official image while
-ensuring its port is not published.
-
-The earlier child-supervisor prototype was exercised end to end against the
-production service on 2026-07-10, but that process-management boundary is no
-longer part of the adapter. The replacement boundary was deployed and tested on
-Phala Cloud on 2026-07-13:
-
-- CVM `d0639110-1749-4c8f-9d1c-b49bb50afe32`, app ID
-  `900ea355e7a448a2b27ad0a361eb6d71959bd8eb`, ran gateway commit
-  `957b66aec31105a9fa6ca195536338443a24a055` under measured Compose hash
-  `36b3611cdad52124bd5218bb4ccae84200c75dc91d9cc4bda045b79f2084fab1`.
-- The official v1.48.0 proxy loaded the Clawdi-vault-backed API key from a
-  Compose secret, verified the production SNP report, accepted the exact
-  reviewed manifest, obtained its inference secret, and returned HTTP 200 from
-  its proxy-authenticated outbound model-list request.
-- A real `gpt-oss-120b` chat returned HTTP 200 and exactly
-  `compose-sidecar-live-ok`. Signed receipt
-  `rcpt-11a09da8994a59a5826d08a8` recorded the internal origin, manifest SHA-256
-  `b4a4e1c372a507a1771f7f2f9b7c2fa7f04202855588e26f795d0249454572bf`,
-  Coordinator policy
-  `180d10463bdeccaf6c0ae6e0c01d26149f7cd1d2c1b2b4f3352224ef4510b9bf`,
-  and proxy image digest
-  `sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307`.
-
-A later v1.48 source trace found that an inbound Bearer is ignored once
-`--apiKey` has initialized the proxy: the proxy overwrites outbound
-`Authorization` with its static credential. The July 13 run therefore remains
-valid transport and attestation evidence, but its receipt did not independently
-prove the credential digest. The current adapter fixes that gap by mounting one
-secret source into both services, validating its measured digest in the gateway,
-sending no internal Bearer, and recording the credential digest in the channel
-binding.
+A later source trace showed that the proxy replaces inbound authorization with
+its startup credential. The current adapter therefore sends no internal Bearer,
+validates the shared Compose credential digest itself, and records that digest
+in the enforced binding. Tests cover the static pins, bounded readiness probe,
+redirect refusal, encrypted-handler allowlist, buffered and streaming paths,
+and receipt binding. See [verification.md](verification.md) for the current
+contract and its freshness limits.
 
 ## Adapter decision
 

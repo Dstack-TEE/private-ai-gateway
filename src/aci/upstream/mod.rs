@@ -111,6 +111,15 @@ pub trait UpstreamBackend: Send + Sync {
     /// Origin (scheme + host + port) recorded in receipts.
     fn url_origin(&self) -> Option<&str>;
 
+    /// Whether chat-shaped downstream endpoints keep their native paths.
+    ///
+    /// Most OpenAI-compatible backends map both chat surfaces to one configured
+    /// path. Multi-protocol backends such as Privatemode serve
+    /// `/v1/chat/completions` and `/v1/messages` as distinct handlers.
+    fn preserves_chat_surface_path(&self) -> bool {
+        false
+    }
+
     /// Prepare an upstream request before verification and receipt
     /// hashing. Routers use this phase to select the concrete upstream
     /// and rewrite request bytes such as model aliases. Plain backends

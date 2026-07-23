@@ -114,15 +114,6 @@ pub enum ChannelBinding {
         algorithm: String,
         public_key_sha256: String,
     },
-    /// Legacy binding for a gateway-supervised provider-proxy child. Retained
-    /// so existing `aci/1` receipts and persisted sessions remain readable.
-    ManifestSha256 {
-        provider: String,
-        manifest_sha256: String,
-        coordinator_policy_hash: String,
-        proxy_binary_sha256: String,
-        proxy_tls_certificate_sha256: String,
-    },
     /// Digests binding a provider proxy co-deployed in the gateway's measured
     /// dstack Compose. The proxy verifies the provider's attestation chain and
     /// owns the resulting E2EE secret. The gateway verifies the exact manifest
@@ -133,11 +124,8 @@ pub enum ChannelBinding {
         coordinator_policy_hash: String,
         proxy_image_digest: String,
         /// Digest of the exact Compose secret mounted into both the measured
-        /// gateway and proxy. Optional only so receipts issued by an earlier
-        /// `aci/1` deployment remain deserializable; current forwarding
-        /// requires it to be present and equal to static policy.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        credential_sha256: Option<String>,
+        /// gateway and proxy.
+        credential_sha256: String,
     },
 }
 

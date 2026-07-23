@@ -214,10 +214,13 @@ mapping. A `failed` result asserts nothing.
   official proxy co-deployed inside the gateway's measured dstack Compose. The
   gateway pins the internal origin, manifest, Coordinator policy, shared
   credential digest, and proxy OCI image digest, then requires an internal
-  model-list probe before it emits that binding. The proxy applies its static
-  credential outbound; the gateway sends no internal Bearer. It does not
-  independently receive the hardware quote, so the typed claim is
-  `VerifierDerived`; raw manifest facts remain in `claims.extra`.
+  model-list readiness probe before it emits that binding. The unencrypted
+  probe corroborates proxy startup and liveness but does not inspect its current
+  inference secret. Each encrypted inference performs the proxy's fail-closed
+  secret lookup. The proxy applies its static credential outbound; the gateway
+  sends no internal Bearer. It does not independently receive the hardware
+  quote, so the typed claim is `VerifierDerived`; raw manifest facts remain in
+  `claims.extra`.
 - ¹ `tcb_up_to_date` is an honest tri-state from the verifier's reported
   `tcb_status` (`HardwareProven`): `UpToDate` asserts, any other reported status
   **refutes** (the quote proves a stale TCB — the gateway records the bad claim

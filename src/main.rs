@@ -117,9 +117,16 @@ fn parse_sha256_policy(name: &str, expected: Option<&str>) -> Result<Option<[u8;
 
 fn validate_inference_auth_policy(
     privatemode_configured: bool,
+    middleware_configured: bool,
     inference_token_sha256: Option<[u8; 32]>,
 ) -> Result<(), String> {
-    if privatemode_configured && inference_token_sha256.is_none() {
+    if middleware_configured && inference_token_sha256.is_some() {
+        return Err(
+            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
+                .to_string(),
+        );
+    }
+    if privatemode_configured && !middleware_configured && inference_token_sha256.is_none() {
         return Err("privatemode_proxy requires inference_token_sha256".to_string());
     }
     Ok(())
@@ -137,8 +144,9 @@ struct GatewayConfigFile {
     upstream_config_seed_path: Option<String>,
     admin_token: Option<String>,
     admin_token_sha256: Option<String>,
-    /// Optional measured digest of the downstream bearer accepted by inference
-    /// endpoints. The bearer itself remains client-side.
+    /// Optional measured digest of the downstream bearer accepted by direct-mode
+    /// inference endpoints. Middleware mode preserves each client's bearer for
+    /// control-plane authorization instead.
     inference_token_sha256: Option<String>,
     /// Bounded keyset-epoch validity window in seconds (§4.7). Defaults to
     /// [`DEFAULT_KEYSET_EPOCH_WINDOW_SECONDS`] (~4 weeks).
@@ -455,6 +463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(invalid_input)?;
     validate_inference_auth_policy(
         gateway_config.privatemode_proxy.is_some(),
+        gateway_config.middleware.is_some(),
         inference_token_sha256,
     )
     .map_err(invalid_input)?;
@@ -625,13 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             control_url = %middleware_config.control_url,
             "private-ai-gateway middleware enabled"
         );
-        build_router_with_admin_and_middleware(
-            service,
-            upstream_config,
-            admin_token,
-            inference_token_sha256,
-            middleware,
-        )
+        build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
     } else {
         build_router_with_admin(
             service,
@@ -841,10 +844,18 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn privatemode_static_policy_requires_downstream_inference_auth() {
-        assert!(validate_inference_auth_policy(false, None).is_ok());
-        assert!(validate_inference_auth_policy(true, Some([7; 32])).is_ok());
-        let err = validate_inference_auth_policy(true, None).unwrap_err();
+        assert!(validate_inference_auth_policy(false, false, None).is_ok());
+        assert!(validate_inference_auth_policy(false, false, Some([7; 32])).is_ok());
+        assert!(validate_inference_auth_policy(true, false, Some([7; 32])).is_ok());
+        let err = validate_inference_auth_policy(true, false, None).unwrap_err();
         assert_eq!(err, "privatemode_proxy requires inference_token_sha256");
+
+        assert!(validate_inference_auth_policy(true, true, None).is_ok());
+        let err = validate_inference_auth_policy(true, true, Some([7; 32])).unwrap_err();
+        assert_eq!(
+            err,
+            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
+        );
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

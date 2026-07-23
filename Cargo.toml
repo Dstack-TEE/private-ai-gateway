@@ -24,6 +24,7 @@ rust_decimal = "1"
 # Cryptography.
 sha2 = "0.10"
 sha3 = "0.10"
+subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
 curve25519-dalek = "4"

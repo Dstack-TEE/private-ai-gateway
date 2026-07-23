@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::aggregator::service::ReceiptOwner;
 
@@ -145,7 +146,7 @@ pub(super) fn enforce_inference(state: &AppState, headers: &HeaderMap) -> Option
         ));
     };
     let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    if actual == expected {
+    if bool::from(actual.ct_eq(&expected)) {
         None
     } else {
         Some(error_response(

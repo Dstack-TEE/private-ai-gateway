@@ -12,9 +12,5 @@
     "credential_path": "/run/secrets/privatemode-api-key",
     "credential_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
-  },
-  "middleware": {
-    "control_url": "https://control.example",
-    "control_token": "<control-plane-bearer-token>"
   }
 }

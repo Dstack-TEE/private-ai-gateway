@@ -154,17 +154,6 @@ pub fn parse_config_text(text: &str) -> Result<Vec<UpstreamConfig>, UpstreamConf
 }
 
 pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError> {
-    if config
-        .iter()
-        .filter(|upstream| upstream.provider == UpstreamProvider::Privatemode)
-        .count()
-        > 1
-    {
-        return Err(UpstreamConfigError::InvalidConfig(
-            "only one Privatemode upstream entry is supported per co-deployed proxy; put all models that share its credential in that entry"
-                .to_string(),
-        ));
-    }
     let mut names = HashSet::new();
     let mut route_ids = HashSet::new();
     for upstream in config {

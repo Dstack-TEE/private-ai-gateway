@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -18,7 +19,7 @@ mod common;
 
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{HeaderMap, Request, StatusCode},
     response::IntoResponse,
     routing::{any, get, post},
@@ -117,11 +118,12 @@ struct ProviderState {
 
 async fn chat_handler(
     State(state): State<ProviderState>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
     state.calls.lock().unwrap().push(ProviderCall {
-        path: "/v1/chat/completions".to_string(),
+        path: uri.path().to_string(),
         authorization: headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
@@ -174,13 +176,14 @@ async fn privatemode_models_handler(headers: HeaderMap) -> axum::response::Respo
 
 async fn privatemode_chat_handler(
     State(state): State<ProviderState>,
+    uri: OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
     if headers.contains_key("authorization") {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    chat_handler(State(state), headers, body)
+    chat_handler(State(state), uri, headers, body)
         .await
         .into_response()
 }
@@ -250,6 +253,9 @@ async fn serve_privatemode_provider_fixture(
     let plaintext_path_hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/v1/chat/completions", post(privatemode_chat_handler))
+        .route("/v1/completions", post(privatemode_chat_handler))
+        .route("/v1/embeddings", post(privatemode_chat_handler))
+        .route("/v1/messages", post(privatemode_chat_handler))
         .route(
             "/v1/models",
             get(privatemode_models_handler).post(privatemode_plaintext_path_handler),
@@ -355,6 +361,116 @@ async fn serve_counted_models_fixture() -> (String, Arc<AtomicUsize>) {
     )
     .await;
     (base_url, hits)
+}
+
+struct PrivatemodeTestDeployment {
+    base_url: String,
+    policy_hash: String,
+    manifest_path: PathBuf,
+    credential_path: PathBuf,
+    manifest_digest: String,
+    credential_digest: String,
+    image_digest: String,
+    deployment: Arc<PrivatemodeProxyDeployment>,
+}
+
+impl PrivatemodeTestDeployment {
+    fn new(base_url: String) -> Self {
+        let policy_hash = "11".repeat(32);
+        let manifest = serde_json::to_vec(&json!({
+            "Policies": {
+                (&policy_hash): {"Role": "coordinator"}
+            }
+        }))
+        .unwrap();
+        let manifest_path = temp_config_path();
+        let credential_path = temp_config_path();
+        let credential = b"provider-secret";
+        std::fs::write(&manifest_path, &manifest).unwrap();
+        std::fs::write(&credential_path, credential).unwrap();
+        let manifest_digest = normalized_sha256(&manifest);
+        let credential_digest = normalized_sha256(credential);
+        let image_digest = format!("sha256:{}", "33".repeat(32));
+        let deployment = Arc::new(
+            PrivatemodeProxyDeployment::new(
+                &base_url,
+                &manifest_path,
+                &manifest_digest,
+                &credential_path,
+                &credential_digest,
+                &image_digest,
+            )
+            .unwrap(),
+        );
+        Self {
+            base_url,
+            policy_hash,
+            manifest_path,
+            credential_path,
+            manifest_digest,
+            credential_digest,
+            image_digest,
+            deployment,
+        }
+    }
+
+    fn verifier(
+        &self,
+        request_timeout_seconds: u64,
+        cache_ttl_seconds: u64,
+    ) -> PrivatemodeProviderVerifier {
+        PrivatemodeProviderVerifier::new(
+            self.deployment.clone(),
+            2,
+            request_timeout_seconds,
+            cache_ttl_seconds,
+        )
+        .unwrap()
+    }
+
+    fn verification_request(&self, model_id: &str) -> UpstreamVerificationRequest {
+        UpstreamVerificationRequest {
+            upstream_name: "privatemode-provider".to_string(),
+            url_origin: Some(self.base_url.clone()),
+            model_id: model_id.to_string(),
+            forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
+            required: true,
+        }
+    }
+
+    fn verified_event(&self) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: "privatemode-provider".to_string(),
+            provider_type: Some("privatemode".to_string()),
+            model_id: "provider-model".to_string(),
+            url_origin: Some(self.base_url.clone()),
+            verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: true,
+            channel_bindings: vec![ChannelBinding::ManifestImageSha256 {
+                provider: "privatemode".to_string(),
+                manifest_sha256: self.manifest_digest.clone(),
+                coordinator_policy_hash: self.policy_hash.clone(),
+                proxy_image_digest: self.image_digest.clone(),
+                credential_sha256: self.credential_digest.clone(),
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+impl Drop for PrivatemodeTestDeployment {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.manifest_path);
+        let _ = std::fs::remove_file(&self.credential_path);
+    }
+}
+
+fn normalized_sha256(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+        .strip_prefix("sha256:")
+        .unwrap()
+        .to_string()
 }
 
 #[derive(Clone)]
@@ -916,66 +1032,30 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
 async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_binding() {
     let (base_url, provider_calls, plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
-    let policy_hash = "11".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {
-                "Role": "coordinator",
-                "SANs": ["coordinator", "*"]
-            }
-        },
-        "ReferenceValues": {"snp": [{}]}
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"provider-secret").unwrap();
-    let manifest_digest = sha256_hex(&manifest)
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_string();
-    let credential_digest = sha256_hex(b"provider-secret")
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_string();
-    let image_digest = format!("sha256:{}", "33".repeat(32));
-    let deployment = Arc::new(
-        PrivatemodeProxyDeployment::new(
-            &base_url,
-            &manifest_path,
-            &manifest_digest,
-            &credential_path,
-            &credential_digest,
-            &image_digest,
-        )
-        .unwrap(),
-    );
+    let fixture = PrivatemodeTestDeployment::new(base_url.clone());
     let err = PrivatemodeProxyDeployment::new(
         &base_url,
-        &manifest_path,
-        &manifest_digest,
-        &credential_path,
+        &fixture.manifest_path,
+        &fixture.manifest_digest,
+        &fixture.credential_path,
         sha256_hex(b"wrong-secret"),
-        &image_digest,
+        &fixture.image_digest,
     )
     .expect_err("the measured credential digest must bind the mounted secret");
     assert!(err.to_string().contains("does not match configured digest"));
     // Receipt evidence retains the verified startup bytes even if the mounted
     // path changes after deployment policy construction.
-    std::fs::write(&manifest_path, b"tampered after deployment construction").unwrap();
-    let backend = PrivatemodeProviderBackend::new_with_timeouts(deployment.clone(), 2, 10)
+    std::fs::write(
+        &fixture.manifest_path,
+        b"tampered after deployment construction",
+    )
+    .unwrap();
+    let backend = PrivatemodeProviderBackend::new_with_timeouts(fixture.deployment.clone(), 2, 10)
         .unwrap()
         .with_name("privatemode-provider");
-    let verifier = PrivatemodeProviderVerifier::new(deployment.clone(), 2, 10, 300).unwrap();
-    let event = verifier
-        .verify(UpstreamVerificationRequest {
-            upstream_name: "privatemode-provider".to_string(),
-            url_origin: Some(base_url.clone()),
-            model_id: "provider-model".to_string(),
-            forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
-            required: true,
-        })
+    let event = fixture
+        .verifier(10, 300)
+        .verify(fixture.verification_request("provider-model"))
         .await;
     assert_eq!(event.result.as_str(), "verified");
     assert_eq!(event.url_origin.as_deref(), Some(base_url.as_str()));
@@ -987,30 +1067,16 @@ async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_bindi
             proxy_image_digest,
             credential_sha256,
             ..
-        }] if manifest_sha256 == &manifest_digest
-            && coordinator_policy_hash == &policy_hash
-            && proxy_image_digest == &image_digest
-            && credential_sha256.as_deref() == Some(credential_digest.as_str())
+        }] if manifest_sha256 == &fixture.manifest_digest
+            && coordinator_policy_hash == &fixture.policy_hash
+            && proxy_image_digest == &fixture.image_digest
+            && credential_sha256 == &fixture.credential_digest
     ));
 
     let request = || UpstreamRequest {
         body: PROVIDER_CHAT_REQUEST.to_vec(),
         ..Default::default()
     };
-    let mut legacy_event = event.clone();
-    let [ChannelBinding::ManifestImageSha256 {
-        credential_sha256, ..
-    }] = legacy_event.channel_bindings.as_mut_slice()
-    else {
-        panic!("expected Privatemode binding");
-    };
-    *credential_sha256 = None;
-    let err = backend
-        .forward_verified_prepared(backend.prepare(request()).unwrap(), &legacy_event)
-        .await
-        .expect_err("a legacy receipt without the credential binding cannot authorize forwarding");
-    assert!(err.to_string().contains("measured proxy deployment"));
-
     let plaintext_path_request = UpstreamRequest {
         body: PROVIDER_CHAT_REQUEST.to_vec(),
         path: Some("/v1/models".to_string()),
@@ -1055,76 +1121,21 @@ async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_bindi
     let calls = provider_calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|call| call.authorization.is_none()));
-
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]
 async fn privatemode_never_follows_cross_origin_redirects() {
     let (base_url, sink_hits) = serve_cross_origin_privatemode_redirect_fixture().await;
-    let policy_hash = "55".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {"Role": "coordinator"}
-        }
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"credential-must-not-leak").unwrap();
-    let manifest_digest = sha256_hex(&manifest)
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_string();
-    let credential_digest = sha256_hex(b"credential-must-not-leak")
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_string();
-    let image_digest = format!("sha256:{}", "66".repeat(32));
-    let deployment = Arc::new(
-        PrivatemodeProxyDeployment::new(
-            &base_url,
-            &manifest_path,
-            &manifest_digest,
-            &credential_path,
-            &credential_digest,
-            &image_digest,
-        )
-        .unwrap(),
-    );
-    let verifier = PrivatemodeProviderVerifier::new(deployment.clone(), 2, 10, 300).unwrap();
-    let readiness = verifier
-        .verify(UpstreamVerificationRequest {
-            upstream_name: "privatemode-provider".to_string(),
-            url_origin: Some(base_url.clone()),
-            model_id: "provider-model".to_string(),
-            forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
-            required: true,
-        })
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let readiness = fixture
+        .verifier(10, 300)
+        .verify(fixture.verification_request("provider-model"))
         .await;
     assert_eq!(readiness.result, VerificationResult::Failed);
     assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
 
-    let verified = UpstreamVerifiedEvent {
-        upstream_name: "privatemode-provider".to_string(),
-        provider_type: Some("privatemode".to_string()),
-        model_id: "provider-model".to_string(),
-        url_origin: Some(base_url.clone()),
-        verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
-        result: VerificationResult::Verified,
-        required: true,
-        channel_bindings: vec![ChannelBinding::ManifestImageSha256 {
-            provider: "privatemode".to_string(),
-            manifest_sha256: manifest_digest,
-            coordinator_policy_hash: policy_hash,
-            proxy_image_digest: image_digest,
-            credential_sha256: Some(credential_digest),
-        }],
-        ..Default::default()
-    };
-    let backend = PrivatemodeProviderBackend::new_with_timeouts(deployment, 2, 10)
+    let verified = fixture.verified_event();
+    let backend = PrivatemodeProviderBackend::new_with_timeouts(fixture.deployment.clone(), 2, 10)
         .unwrap()
         .with_name("privatemode-provider");
     let request = || UpstreamRequest {
@@ -1150,9 +1161,6 @@ async fn privatemode_never_follows_cross_origin_redirects() {
         .collect::<Vec<_>>()
         .await;
     assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
-
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]
@@ -1164,40 +1172,12 @@ async fn privatemode_readiness_rejects_declared_and_chunked_oversized_bodies() {
     let chunked =
         serve_models_fixture(Router::new().route("/v1/models", get(oversized_chunked_models)))
             .await;
-    let policy_hash = "77".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {"Role": "coordinator"}
-        }
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"provider-secret").unwrap();
-    let manifest_digest = sha256_hex(&manifest);
 
     for base_url in [declared, chunked] {
-        let deployment = Arc::new(
-            PrivatemodeProxyDeployment::new(
-                &base_url,
-                &manifest_path,
-                &manifest_digest,
-                &credential_path,
-                sha256_hex(b"provider-secret"),
-                format!("sha256:{}", "88".repeat(32)),
-            )
-            .unwrap(),
-        );
-        let event = PrivatemodeProviderVerifier::new(deployment, 2, 10, 0)
-            .unwrap()
-            .verify(UpstreamVerificationRequest {
-                upstream_name: "privatemode-provider".to_string(),
-                url_origin: Some(base_url),
-                model_id: "provider-model".to_string(),
-                forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
-                required: true,
-            })
+        let fixture = PrivatemodeTestDeployment::new(base_url);
+        let event = fixture
+            .verifier(10, 0)
+            .verify(fixture.verification_request("provider-model"))
             .await;
         assert_eq!(event.result, VerificationResult::Failed);
         assert!(
@@ -1209,9 +1189,6 @@ async fn privatemode_readiness_rejects_declared_and_chunked_oversized_bodies() {
             event.reason
         );
     }
-
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]
@@ -1219,140 +1196,58 @@ async fn privatemode_readiness_has_an_end_to_end_deadline() {
     let base_url =
         serve_models_fixture(Router::new().route("/v1/models", get(indefinitely_trickled_models)))
             .await;
-    let policy_hash = "99".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {"Role": "coordinator"}
-        }
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"provider-secret").unwrap();
-    let deployment = Arc::new(
-        PrivatemodeProxyDeployment::new(
-            &base_url,
-            &manifest_path,
-            sha256_hex(&manifest),
-            &credential_path,
-            sha256_hex(b"provider-secret"),
-            format!("sha256:{}", "aa".repeat(32)),
-        )
-        .unwrap(),
-    );
-    let verifier = PrivatemodeProviderVerifier::new(deployment, 1, 1, 0).unwrap();
+    let fixture = PrivatemodeTestDeployment::new(base_url);
     let event = tokio::time::timeout(
         Duration::from_secs(3),
-        verifier.verify(UpstreamVerificationRequest {
-            upstream_name: "privatemode-provider".to_string(),
-            url_origin: Some(base_url),
-            model_id: "provider-model".to_string(),
-            forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
-            required: true,
-        }),
+        fixture
+            .verifier(1, 0)
+            .verify(fixture.verification_request("provider-model")),
     )
     .await
     .expect("readiness request must honor its total deadline");
     assert_eq!(event.result, VerificationResult::Failed);
-
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]
 async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease() {
     let (base_url, hits) = serve_counted_models_fixture().await;
-    let policy_hash = "ab".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {"Role": "coordinator"}
-        }
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"provider-secret").unwrap();
-    let deployment = Arc::new(
-        PrivatemodeProxyDeployment::new(
-            &base_url,
-            &manifest_path,
-            sha256_hex(&manifest),
-            &credential_path,
-            sha256_hex(b"provider-secret"),
-            format!("sha256:{}", "bc".repeat(32)),
-        )
-        .unwrap(),
-    );
-    let verifier = PrivatemodeProviderVerifier::new(deployment, 2, 10, 300).unwrap();
-    let request = |model_id: &str| UpstreamVerificationRequest {
-        upstream_name: "privatemode-provider".to_string(),
-        url_origin: Some(base_url.clone()),
-        model_id: model_id.to_string(),
-        forwarded_body_hash: sha256_hex(PROVIDER_CHAT_REQUEST),
-        required: true,
-    };
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 300);
 
-    let first = verifier.verify(request("model-a")).await;
-    let cached = verifier.verify(request("model-b")).await;
+    let first = verifier
+        .verify(fixture.verification_request("model-a"))
+        .await;
+    let cached = verifier
+        .verify(fixture.verification_request("model-b"))
+        .await;
     assert_eq!(first.result, VerificationResult::Verified);
     assert_eq!(cached.result, VerificationResult::Verified);
     assert_eq!(cached.model_id, "model-b");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
-    let refreshed = verifier.refresh(request("model-c")).await;
+    let refreshed = verifier
+        .refresh(fixture.verification_request("model-c"))
+        .await;
     assert_eq!(refreshed.result, VerificationResult::Verified);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 
-    verifier.invalidate(&request("model-d"));
-    let after_invalidate = verifier.verify(request("model-d")).await;
+    verifier.invalidate(&fixture.verification_request("model-d"));
+    let after_invalidate = verifier
+        .verify(fixture.verification_request("model-d"))
+        .await;
     assert_eq!(after_invalidate.result, VerificationResult::Verified);
     assert_eq!(hits.load(Ordering::SeqCst), 3);
-
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]
 async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() {
-    let (base_url, _provider_calls, _plaintext_path_hits) =
+    let (base_url, provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
-    let policy_hash = "22".repeat(32);
-    let manifest = serde_json::to_vec(&json!({
-        "Policies": {
-            (&policy_hash): {
-                "Role": "coordinator",
-                "SANs": ["coordinator", "*"]
-            }
-        },
-        "ReferenceValues": {"snp": [{}]}
-    }))
-    .unwrap();
-    let manifest_path = temp_config_path();
-    let credential_path = temp_config_path();
-    std::fs::write(&manifest_path, &manifest).unwrap();
-    std::fs::write(&credential_path, b"provider-secret").unwrap();
-    let manifest_digest = sha256_hex(&manifest)
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_string();
-    let image_digest = format!("sha256:{}", "44".repeat(32));
-    let deployment = Arc::new(
-        PrivatemodeProxyDeployment::new(
-            &base_url,
-            &manifest_path,
-            &manifest_digest,
-            &credential_path,
-            sha256_hex(b"provider-secret"),
-            &image_digest,
-        )
-        .unwrap(),
-    );
+    let fixture = PrivatemodeTestDeployment::new(base_url.clone());
 
     let config_path = temp_config_path();
     let mut options = runtime_options(UpstreamVerifierMode::None);
-    options.privatemode_proxy = Some(deployment);
+    options.privatemode_proxy = Some(fixture.deployment.clone());
     let manager = Arc::new(UpstreamConfigManager::load(&config_path, options).unwrap());
     manager
         .replace(vec![UpstreamConfig {
@@ -1381,7 +1276,8 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
         .unwrap();
     let service = service_for_manager(manager);
     let app = build_router(service.clone());
-    let (status, headers, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
+    let (status, headers, body) =
+        call(app.clone(), "POST", "/v1/chat/completions", CHAT_REQUEST).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(body, CHAT_RESPONSE);
 
@@ -1399,21 +1295,75 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     );
     assert_eq!(
         event["channel_bindings"][0]["manifest_sha256"],
-        manifest_digest
+        fixture.manifest_digest
     );
     assert_eq!(
         event["channel_bindings"][0]["proxy_image_digest"],
-        image_digest
+        fixture.image_digest
     );
     assert_eq!(
         event["channel_bindings"][0]["coordinator_policy_hash"],
-        policy_hash
+        fixture.policy_hash
     );
     assert_eq!(event["url_origin"], base_url);
 
+    for stream in [false, true] {
+        let request = serde_json::to_vec(&json!({
+            "model": "public-model",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream
+        }))
+        .unwrap();
+        let (status, _, body) = call(app.clone(), "POST", "/v1/messages", request).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(body, CHAT_RESPONSE);
+    }
+    for stream in [false, true] {
+        let request = serde_json::to_vec(&json!({
+            "model": "public-model",
+            "prompt": "hello",
+            "stream": stream
+        }))
+        .unwrap();
+        let (status, _, _) = call(app.clone(), "POST", "/v1/completions", request).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let embeddings_request = serde_json::to_vec(&json!({
+        "model": "public-model",
+        "input": "hello"
+    }))
+    .unwrap();
+    let (status, _, _) = call(app, "POST", "/v1/embeddings", embeddings_request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let calls = provider_calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/messages",
+            "/v1/completions",
+            "/v1/completions",
+            "/v1/embeddings",
+        ]
+    );
+    for call in calls.iter() {
+        assert!(call.authorization.is_none());
+    }
+    for call in &calls[1..3] {
+        assert_eq!(call.path, "/v1/messages");
+        let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
+        assert_eq!(forwarded["model"], "provider-model");
+        assert_eq!(forwarded["max_tokens"], 16);
+        assert_eq!(forwarded["messages"][0]["content"], "hello");
+    }
+
     let _ = std::fs::remove_file(config_path);
-    let _ = std::fs::remove_file(manifest_path);
-    let _ = std::fs::remove_file(credential_path);
 }
 
 #[tokio::test]

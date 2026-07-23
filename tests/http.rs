@@ -3,7 +3,11 @@
 //! Uses `tower::ServiceExt::oneshot` to drive the router directly,
 //! avoiding a TCP listener.
 
-use std::sync::{Arc, Mutex};
+use std::convert::Infallible;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 mod common;
 
@@ -407,8 +411,31 @@ async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
     let expected: [u8; 32] = Sha256::digest(b"client-inference-token").into();
     let app = build_router_with_admin(h.service.clone(), manager, None, Some(expected));
 
+    let body_polled = Arc::new(AtomicBool::new(false));
+    let body_polled_by_stream = body_polled.clone();
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        body_polled_by_stream.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
+    }));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !body_polled.load(Ordering::SeqCst),
+        "authentication must reject the request before polling its body"
+    );
+
     for (token, expected_status) in [
-        (None, StatusCode::UNAUTHORIZED),
         (Some("wrong-token"), StatusCode::FORBIDDEN),
         (Some("client-inference-token"), StatusCode::OK),
     ] {

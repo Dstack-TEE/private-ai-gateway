@@ -316,9 +316,10 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
 }
 
 /// Verifier for the exact official Privatemode proxy deployment measured with
-/// the gateway. A successful model-list request proves that the proxy completed
-/// startup, where its static credential established the Contrast
-/// inference-secret exchange, and that its current provider path is live.
+/// the gateway. The proxy completes its initial Contrast verification and
+/// secret exchange before serving, so the model-list probe corroborates startup
+/// and liveness. The unencrypted probe does not inspect the current secret;
+/// inference calls `LatestSecret` before the proxy encrypts each request.
 #[derive(Debug, Clone)]
 pub struct PrivatemodeProviderVerifier {
     deployment: Arc<PrivatemodeProxyDeployment>,
@@ -394,14 +395,10 @@ impl PrivatemodeProviderVerifier {
                 manifest_sha256: self.deployment.manifest_sha256().to_string(),
                 coordinator_policy_hash: self.deployment.coordinator_policy_hash().to_string(),
                 proxy_image_digest: self.deployment.proxy_image_digest().to_string(),
-                credential_sha256: Some(self.deployment.credential_sha256().to_string()),
+                credential_sha256: self.deployment.credential_sha256().to_string(),
             }],
             provider_claims: Some(serde_json::json!({
                 "trust_boundary": "attested-compose-privatemode-proxy",
-                "proxy_image_digest": self.deployment.proxy_image_digest(),
-                "manifest_sha256": self.deployment.manifest_sha256(),
-                "coordinator_policy_hash": self.deployment.coordinator_policy_hash(),
-                "credential_sha256": self.deployment.credential_sha256(),
                 "request_encryption": "privatemode-oae",
             })),
             reason: None,
@@ -421,7 +418,7 @@ impl PrivatemodeProviderVerifier {
         if !response.status().is_success() {
             let status = response.status();
             return Err(UpstreamError::Transport(format!(
-                "Privatemode proxy attestation probe returned {status}"
+                "Privatemode proxy readiness probe returned {status}"
             )));
         }
         if response

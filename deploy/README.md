@@ -47,6 +47,14 @@ file and its digest; [`privatemode.env.example`](./privatemode.env.example)
 lists all inputs.
 
 ```bash
+cd deploy
+phala status
+docker compose version
+command -v jq
+command -v cargo
+command -v python3
+command -v sha256sum
+
 export PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha>
 export PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 export PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)"
@@ -59,7 +67,8 @@ export PRIVATEMODE_MANIFEST_PATH=/absolute/path/to/exact-reviewed-manifest.json
 phala deploy -n private-ai-gateway \
   -c /tmp/private-ai-gateway-privatemode.json \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY"
+  -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY" \
+  --wait
 ```
 
 Render before deployment so the exact byte-for-byte manifest, its digest, the
@@ -72,7 +81,8 @@ credential on inference requests. The
 Privatemode API key follows the same path into one Compose-managed secret
 mounted into both services. The proxy reads it through its official
 `--apiKey @<file>` interface; the gateway reads it only at startup to verify the
-renderer-derived measured digest, then drops the bytes.
+renderer-derived measured digest. `PrivatemodeProxyDeployment` neither retains
+the credential nor forwards it over the internal hop.
 The renderer replaces the local manifest path with inline JSON content and
 verifies that the rendered bytes retain the source file's SHA-256, including
 whitespace and its final newline.
@@ -104,7 +114,155 @@ After deployment, the gateway listens on port `8086`. The Privatemode variant
 rejects inference requests unless `Authorization: Bearer
 $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN` hashes to the digest measured in its
 static config. Health, attestation, transparency, and model-catalog endpoints
-remain public; the admin API uses its separate admin token.
+remain public. The admin API uses its separate admin token, and receipts owned
+by an authenticated inference request require that same inference bearer.
+
+### Verify a Privatemode deployment
+
+Resolve the public gateway URL, wait for the gateway to become ready, install
+the mutable model route, and exercise real attested inference:
+
+```bash
+set -euo pipefail
+CVM_NAME=private-ai-gateway
+APP_ID="$(
+  phala cvms list --search "$CVM_NAME" --json |
+    jq -er --arg name "$CVM_NAME" '
+      [.items[] | select(.cvmName == $name) | .appId] as $matches |
+      if ($matches | length) == 1
+      then $matches[0]
+      else error("expected exactly one exact CVM name match")
+      end
+    '
+)"
+GATEWAY_DOMAIN="$(
+  phala runtime-config "$APP_ID" --json | jq -er '.default_gateway_domain'
+)"
+GATEWAY_URL="https://${APP_ID}-8086.${GATEWAY_DOMAIN}"
+
+health_deadline=$((SECONDS + 600))
+until health_json="$(
+  curl -fsS --connect-timeout 5 --max-time 10 "$GATEWAY_URL/health"
+)" && jq -e '.status == "ok"' <<<"$health_json" >/dev/null; do
+  if (( SECONDS >= health_deadline )); then
+    echo "Gateway did not become ready within 10 minutes" >&2
+    phala ps "$APP_ID" || true
+    phala logs private-ai-gateway --cvm-id "$APP_ID" --stderr -n 200 || true
+    phala logs privatemode-proxy --cvm-id "$APP_ID" --stderr -n 200 || true
+    exit 1
+  fi
+  sleep 5
+done
+printf '%s\n' "$health_json" | jq .
+
+curl -fsS -X PUT "$GATEWAY_URL/v1/admin/upstreams" \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary '[{
+    "name":"privatemode-gpt-oss",
+    "provider":"privatemode",
+    "base_url":"http://privatemode-proxy:8080",
+    "models":{"gpt-oss-120b-private":"gpt-oss-120b"}
+  }]' |
+  jq -e '.upstreams[] | select(.name == "privatemode-gpt-oss")'
+
+artifact_dir="$(mktemp -d)"
+jq -n '{
+  model: "gpt-oss-120b-private",
+  messages: [{role: "user", content: "Reply with exactly: private-ok"}],
+  provider: {aci_verified: true}
+}' >"$artifact_dir/request.json"
+curl -fsS -D "$artifact_dir/inference.headers" \
+  -o "$artifact_dir/inference.json" \
+  -X POST "$GATEWAY_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @"$artifact_dir/request.json"
+receipt_id="$(
+  awk 'BEGIN{IGNORECASE=1} /^x-receipt-id:/{gsub("\r",""); print $2}' \
+    "$artifact_dir/inference.headers"
+)"
+test -n "$receipt_id"
+curl -fsS "$GATEWAY_URL/v1/aci/receipts/$receipt_id" \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" \
+  -o "$artifact_dir/receipt.json"
+
+nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+curl -fsS "$GATEWAY_URL/v1/attestation/report?nonce=$nonce" \
+  -o "$artifact_dir/report.json"
+cargo run --quiet --manifest-path ../Cargo.toml \
+  --example verify_aci_artifacts -- \
+  --report "$artifact_dir/report.json" \
+  --receipt "$artifact_dir/receipt.json" \
+  --nonce "$nonce" \
+  --request-body "$artifact_dir/request.json" \
+  --response-body "$artifact_dir/inference.json"
+
+manifest_sha256="$(sha256sum "$PRIVATEMODE_MANIFEST_PATH" | cut -d' ' -f1)"
+credential_sha256="$(
+  printf %s "$PRIVATEMODE_API_KEY" | sha256sum | cut -d' ' -f1
+)"
+proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+jq -e \
+  --arg commit "$PRIVATE_AI_GATEWAY_REPO_COMMIT" \
+  --arg manifest "$manifest_sha256" \
+  --arg credential "$credential_sha256" \
+  --arg image "$proxy_image" \
+  --arg image_digest "${proxy_image##*@}" '
+    input as $receipt |
+    (.attestation.evidence.app_compose | fromjson |
+      .docker_compose_file | fromjson) as $compose |
+    $compose.services["private-ai-gateway"].labels as $labels |
+    $labels["ai.private-gateway.source-commit"] == $commit and
+    $labels[
+      "ai.private-gateway.privatemode-manifest-sha256"
+    ] == $manifest and
+    $labels[
+      "ai.private-gateway.privatemode-credential-sha256"
+    ] == $credential and
+    $compose.services["privatemode-proxy"].image == $image and
+    ($compose.services["privatemode-proxy"].ports == null) and
+    any($receipt.event_log[];
+      .type == "upstream.verified" and
+      .required == true and
+      .result == "verified" and
+      .provider_type == "privatemode" and
+      any(.channel_bindings[];
+        .type == "manifest_image_sha256" and
+        .manifest_sha256 == $manifest and
+        .credential_sha256 == $credential and
+        .proxy_image_digest == $image_digest))
+  ' "$artifact_dir/report.json" "$artifact_dir/receipt.json"
+```
+
+Every command above must exit zero. The inference must return HTTP 2xx and a
+non-empty `x-receipt-id`. The Rust verifier checks report binding, the attested
+keyset, receipt signature, and exact request/response hashes. The final
+assertion applies local policy to the attested Compose and signed channel
+binding; extend it when your review requires more Compose fields. See
+[Verify A Response](../README.md#verify-a-response) for the verification model.
+The first Rust verifier run may compile dependencies locally.
+
+Credential, manifest, image, or gateway-source rotation is a measured
+deployment update, not a container restart. Update the inputs, rerender, and
+reconcile both services:
+
+```bash
+./render-privatemode-compose.sh /tmp/private-ai-gateway-privatemode.json
+phala deploy --cvm-id "$APP_ID" \
+  -c /tmp/private-ai-gateway-privatemode.json \
+  -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+  -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY" \
+  --wait
+```
+
+For diagnostics:
+
+```bash
+phala ps "$APP_ID"
+phala logs private-ai-gateway --cvm-id "$APP_ID" --stderr -n 200
+phala logs privatemode-proxy --cvm-id "$APP_ID" --stderr -n 200
+```
 
 The gateway consumes two JSON files:
 
@@ -123,7 +281,8 @@ For a real deployment, replace the `gateway-upstreams` `content:` block in
 `compose.yaml` with the provider routes you want to boot with, or keep it
 empty and set the config after boot through `PUT /v1/admin/upstreams`.
 [`upstreams.example.json`](./upstreams.example.json) shows the current
-three-provider shape.
+generic provider shape. Privatemode routes require
+`compose.privatemode.yaml`; use the route in the verification sequence above.
 
 ## Ownership boundary
 

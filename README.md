@@ -268,7 +268,10 @@ Use the helper script when the gateway is reachable:
 uv run python scripts/live_e2e/user_verify.py \
   --base-url http://127.0.0.1:8086 \
   --chat-id "$RECEIPT_ID" \
-  --nonce "$NONCE"
+  --bearer-token "$INFERENCE_TOKEN" \
+  --nonce "$NONCE" \
+  --request-body request.json \
+  --response-body response.json
 ```
 
 The script's `--chat-id` argument accepts either a chat id or a receipt id. To
@@ -278,8 +281,18 @@ verify already captured artifacts, run the Rust verifier directly:
 cargo run --quiet --example verify_aci_artifacts -- \
   --report report.json \
   --receipt receipt.json \
-  --nonce "$NONCE"
+  --nonce "$NONCE" \
+  --request-body request.json \
+  --response-body response.json
 ```
+
+These commands verify cryptographic consistency. They surface the
+`upstream.verified` events but do not decide which gateway commit, measured
+Compose, provider manifest, image digest, or credential digest your policy
+accepts. Compare the attested `app_compose` and signed channel bindings against
+separately reviewed values; the
+[Privatemode deployment runbook](deploy/README.md#verify-a-privatemode-deployment)
+shows concrete assertions.
 
 ## Configure Upstreams
 
@@ -342,8 +355,10 @@ Tinfoil, NEAR AI, Chutes, SecretAI, and PhalaDirect use the Python provider
 verifier bridge. Set `PRIVATE_AI_VERIFIER_DIR` only when you need to override
 the bridge's vendored `confidential_verifier` package with an external checkout.
 Privatemode verification is delegated to the official proxy co-deployed with
-the gateway; the Rust adapter enforces its measured endpoint, manifest, and
-image binding.
+the gateway. The measured Compose binds the proxy image and topology; the Rust
+adapter validates the mounted manifest and credential and enforces the pinned
+origin, encrypted handler set, and receipt binding. A relying party must verify
+that the attested `app_compose` contains the reviewed proxy image digest.
 
 For one-command Compose deployments, set `upstream_config_seed_path` in the
 static gateway config to a read-only seed file. The gateway validates and

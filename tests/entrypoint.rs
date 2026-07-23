@@ -25,118 +25,98 @@ fn script_text() -> String {
     std::fs::read_to_string(script_path()).expect("entrypoint.sh must exist at repo root")
 }
 
-fn privatemode_compose_text() -> String {
-    std::fs::read_to_string(repo_root().join("deploy/compose.privatemode.yaml"))
-        .expect("Privatemode deployment compose must exist")
-}
-
-#[test]
-fn privatemode_proxy_is_a_pinned_unpublished_compose_service() {
-    let body = privatemode_compose_text();
-    let service = body
-        .split("\n  privatemode-proxy:\n")
+fn compose_service<'a>(body: &'a str, name: &str, next_section: &str) -> &'a str {
+    let heading = format!("\n  {name}:\n");
+    body.split(&heading)
         .nth(1)
-        .and_then(|rest| rest.split("\nconfigs:\n").next())
-        .expect("compose must declare a privatemode-proxy service");
-    assert!(service.contains(
-        "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
-    ));
-    assert!(
-        !service.contains("ports:"),
-        "proxy port must not be published"
-    );
-    assert!(service.contains("--manifestPath"));
-    assert!(service.contains("--apiKey"));
-    assert!(service.contains("@/run/secrets/privatemode-api-key"));
-    assert!(service.contains("--nvidiaOCSPAllowUnknown=false"));
-    assert!(service.contains("--nvidiaOCSPRevokedGracePeriod=0"));
-    assert!(service.contains("source: privatemode-manifest"));
-    assert!(service.contains("tmpfs:"));
-    assert!(service.contains("source: privatemode-api-key"));
-    assert!(!service.contains("privatemode-state"));
-    assert!(body.contains("environment: PRIVATEMODE_API_KEY"));
-    assert!(!body.contains("--apiKey=${PRIVATEMODE_API_KEY}"));
+        .and_then(|rest| rest.split(next_section).next())
+        .unwrap_or_else(|| panic!("compose must declare a {name} service"))
 }
 
 #[test]
-fn privatemode_gateway_and_proxy_share_measured_pins() {
-    let body = privatemode_compose_text();
-    assert!(body.contains(r#""base_url": "http://privatemode-proxy:8080""#));
-    assert!(body.contains(r#""manifest_path": "/run/privatemode/manifest.json""#));
-    assert!(body.contains(r#""credential_path": "/run/secrets/privatemode-api-key""#));
-    assert!(body.contains("PRIVATEMODE_MANIFEST_SHA256:?"));
-    assert!(body.contains("PRIVATEMODE_CREDENTIAL_SHA256:?"));
-    assert!(body.contains("PRIVATEMODE_MANIFEST_PATH:?"));
-    assert!(body.contains("PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?"));
-    assert!(body.contains("PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?"));
-    assert!(body.contains("/dstack/.host-shared/.decrypted-env"));
-    assert!(body.contains("PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env"));
-    assert!(!body.contains(r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#));
-    assert_eq!(body.matches("source: privatemode-manifest").count(), 2);
-    assert_eq!(body.matches("source: privatemode-api-key").count(), 2);
-}
-
-#[test]
-fn privatemode_renderer_preserves_exact_manifest_bytes() {
-    let path = repo_root().join("deploy/render-privatemode-compose.sh");
-    let body = std::fs::read_to_string(&path).expect("Privatemode renderer must exist");
-    assert!(body.contains("jq --rawfile manifest"));
-    assert!(body.contains("jq -j"));
-    assert!(body.contains("rendered_manifest_sha256"));
-    assert!(body.contains("PRIVATEMODE_CREDENTIAL_SHA256=$("));
-    assert!(body.contains(r#"printf '%s' "$PRIVATEMODE_API_KEY""#));
-    for secret in [
-        "PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
-        "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN",
-        "PRIVATEMODE_API_KEY",
-    ] {
-        assert!(
-            body.contains(secret),
-            "renderer must reject embedding {secret}"
-        );
+fn privatemode_deployment_contract_is_pinned() {
+    let compose = std::fs::read_to_string(repo_root().join("deploy/compose.privatemode.yaml"))
+        .expect("Privatemode deployment compose must exist");
+    let gateway = compose_service(&compose, "private-ai-gateway", "\n  privatemode-proxy:\n");
+    let proxy = compose_service(&compose, "privatemode-proxy", "\nconfigs:\n");
+    let renderer_path = repo_root().join("deploy/render-privatemode-compose.sh");
+    let renderer =
+        std::fs::read_to_string(&renderer_path).expect("Privatemode renderer must exist");
+    let checks: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "proxy service",
+            proxy,
+            &[
+                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307",
+                "--manifestPath", "--apiKey", "@/run/secrets/privatemode-api-key",
+                "--nvidiaOCSPAllowUnknown=false", "--nvidiaOCSPRevokedGracePeriod=0",
+                "source: privatemode-manifest", "source: privatemode-api-key", "tmpfs:",
+                "ai.private-gateway.privatemode-manifest-sha256",
+                "ai.private-gateway.privatemode-credential-sha256",
+            ],
+            &["ports:", "privatemode-state"],
+        ),
+        (
+            "whole compose",
+            &compose,
+            &[
+                r#""base_url": "http://privatemode-proxy:8080""#,
+                r#""manifest_path": "/run/privatemode/manifest.json""#,
+                r#""credential_path": "/run/secrets/privatemode-api-key""#,
+                "PRIVATEMODE_MANIFEST_SHA256:?", "PRIVATEMODE_CREDENTIAL_SHA256:?",
+                "PRIVATEMODE_MANIFEST_PATH:?", "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
+                "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?",
+                "/dstack/.host-shared/.decrypted-env",
+                "PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env",
+                "environment: PRIVATEMODE_API_KEY",
+            ],
+            &[
+                r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#,
+                "--apiKey=${PRIVATEMODE_API_KEY}",
+            ],
+        ),
+        (
+            "gateway service",
+            gateway,
+            &[
+                "ai.private-gateway.source-commit", "ai.private-gateway.admin-token-sha256",
+                "ai.private-gateway.inference-token-sha256",
+                "ai.private-gateway.privatemode-manifest-sha256",
+                "ai.private-gateway.privatemode-credential-sha256",
+            ],
+            &[],
+        ),
+        (
+            "renderer",
+            &renderer,
+            &[
+                "jq --rawfile manifest", "jq -j", "rendered_manifest_sha256",
+                "PRIVATEMODE_CREDENTIAL_SHA256=$(",
+                r#"printf '%s' "$PRIVATEMODE_API_KEY""#,
+                "PRIVATE_AI_GATEWAY_ADMIN_TOKEN", "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN",
+                "PRIVATEMODE_API_KEY",
+            ],
+            &[],
+        ),
+    ];
+    for (scope, body, required, forbidden) in checks {
+        for needle in *required {
+            assert!(body.contains(needle), "{scope} missing {needle}");
+        }
+        for needle in *forbidden {
+            assert!(!body.contains(needle), "{scope} contains {needle}");
+        }
     }
+    assert_eq!(compose.matches("source: privatemode-manifest").count(), 2);
+    assert_eq!(compose.matches("source: privatemode-api-key").count(), 2);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        let mode = std::fs::metadata(renderer_path)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_ne!(mode & 0o111, 0, "Privatemode renderer must be executable");
-    }
-}
-
-#[test]
-fn privatemode_config_pins_force_container_reconciliation() {
-    let body = privatemode_compose_text();
-    let gateway = body
-        .split("\n  private-ai-gateway:\n")
-        .nth(1)
-        .and_then(|rest| rest.split("\n  privatemode-proxy:\n").next())
-        .expect("compose must declare a private-ai-gateway service");
-    let proxy = body
-        .split("\n  privatemode-proxy:\n")
-        .nth(1)
-        .and_then(|rest| rest.split("\nconfigs:\n").next())
-        .expect("compose must declare a privatemode-proxy service");
-
-    for pin in [
-        "ai.private-gateway.source-commit",
-        "ai.private-gateway.admin-token-sha256",
-        "ai.private-gateway.inference-token-sha256",
-        "ai.private-gateway.privatemode-manifest-sha256",
-        "ai.private-gateway.privatemode-credential-sha256",
-    ] {
-        assert!(
-            gateway.contains(pin),
-            "gateway service labels must include {pin} so an inline config change recreates a stale container"
-        );
-    }
-    for pin in [
-        "ai.private-gateway.privatemode-manifest-sha256",
-        "ai.private-gateway.privatemode-credential-sha256",
-    ] {
-        assert!(
-            proxy.contains(pin),
-            "proxy service labels must include {pin} so startup manifest or credential changes recreate a stale proxy"
-        );
     }
 }
 

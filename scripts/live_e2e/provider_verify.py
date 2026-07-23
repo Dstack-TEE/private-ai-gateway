@@ -30,8 +30,12 @@ def verify_provider(
         # co-deployed with the gateway. A standalone Python probe would not bind
         # that service to the measured deployment and must not compete with it.
         output = {
-            "status": "performed_by_co_deployed_proxy",
+            "status": "deferred_to_gateway",
             "verifier_id": "privatemode-proxy/co-deployed-contrast/v1",
+            "reason": (
+                "verification occurs when the gateway probes the measured proxy; "
+                "the lifecycle phase exercises that binding with real inference"
+            ),
         }
         if artifact_dir:
             write_json(
