@@ -168,13 +168,13 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
-            tee_only_domains: vec!["Tee.Redpill.ai".to_string(), "  ".to_string()],
+            tee_only_domains: vec!["Tee.Example.com".to_string(), "  ".to_string()],
         })
         .unwrap();
         // Config entries are lowercased on load; the lookup key is an
         // already-normalized host from `request_host_domain`.
-        assert!(middleware.is_tee_only_domain("tee.redpill.ai"));
-        assert!(!middleware.is_tee_only_domain("api.redpill.ai"));
+        assert!(middleware.is_tee_only_domain("tee.example.com"));
+        assert!(!middleware.is_tee_only_domain("api.example.com"));
         // Blank entries are dropped, so an empty host never matches.
         assert!(!middleware.is_tee_only_domain(""));
     }
