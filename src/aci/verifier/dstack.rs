@@ -1,24 +1,18 @@
 //! dstack-specific verification helpers: event-log/app-id checks, RTMR replay,
 //! KMS identity custody, and secp256k1 key recovery.
 
+use dstack_sdk::dstack_client::EventLog as DstackEventLog;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
-use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha384};
+use sha2::{Digest, Sha256, Sha384};
 use sha3::Keccak256;
 
 use super::aci_service::{dcap_rtmr3, AciServiceVerificationError, AciServiceVerifierPolicy};
 use super::decode_hex;
 use crate::aci::types::AttestationReport;
 
-#[derive(Debug, Deserialize)]
-struct DstackEventLog {
-    imr: u32,
-    digest: String,
-    event: String,
-    event_payload: String,
-}
+const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
 
 pub(super) fn verify_dstack_event_log_and_app_id(
     evidence: &Value,
@@ -39,12 +33,64 @@ pub(super) fn verify_dstack_event_log_and_app_id(
     if rtmr3.as_slice() != quote_rtmr3 {
         return Err(AciServiceVerificationError::EventLogRtmrMismatch);
     }
-    let app_id = events
-        .iter()
-        .take_while(|event| !(event.imr == 3 && event.event == "system-ready"))
-        .find(|event| event.imr == 3 && event.event == "app-id")
+    let app_id = runtime_event_before_system_ready(&events, "app-id")?
         .ok_or(AciServiceVerificationError::MissingAppId)?;
-    decode_hex(&app_id.event_payload).map_err(AciServiceVerificationError::InvalidEventLog)
+    let app_id =
+        decode_hex(&app_id.event_payload).map_err(AciServiceVerificationError::InvalidEventLog)?;
+    let compose_hash = runtime_event_before_system_ready(&events, "compose-hash")?
+        .ok_or(AciServiceVerificationError::MissingComposeHash)?;
+    let compose_hash = decode_hex(&compose_hash.event_payload)
+        .map_err(AciServiceVerificationError::InvalidEventLog)?;
+    let compose_hash: [u8; 32] = compose_hash.as_slice().try_into().map_err(|_| {
+        AciServiceVerificationError::InvalidEventLog(format!(
+            "compose-hash event must contain 32 bytes, got {}",
+            compose_hash.len()
+        ))
+    })?;
+    verify_dstack_app_compose(evidence, &compose_hash)?;
+    Ok(app_id)
+}
+
+fn runtime_event_before_system_ready<'a>(
+    events: &'a [DstackEventLog],
+    event_name: &str,
+) -> Result<Option<&'a DstackEventLog>, AciServiceVerificationError> {
+    let mut matches = events
+        .iter()
+        .take_while(|event| {
+            !(event.imr == 3
+                && event.event_type == DSTACK_RUNTIME_EVENT_TYPE
+                && event.event == "system-ready")
+        })
+        .filter(|event| {
+            event.imr == 3
+                && event.event_type == DSTACK_RUNTIME_EVENT_TYPE
+                && event.event == event_name
+        });
+    let event = matches.next();
+    if matches.next().is_some() {
+        return Err(AciServiceVerificationError::InvalidEventLog(format!(
+            "multiple pre-system-ready {event_name} events"
+        )));
+    }
+    Ok(event)
+}
+
+/// Verify that `app_compose` is the preimage of the compose measurement bound
+/// into RTMR3 by the verified event log.
+pub(super) fn verify_dstack_app_compose(
+    evidence: &Value,
+    measured_compose_hash: &[u8; 32],
+) -> Result<(), AciServiceVerificationError> {
+    let app_compose = evidence
+        .get("app_compose")
+        .and_then(Value::as_str)
+        .ok_or(AciServiceVerificationError::MissingAppCompose)?;
+    let actual_compose_hash: [u8; 32] = Sha256::digest(app_compose.as_bytes()).into();
+    if &actual_compose_hash != measured_compose_hash {
+        return Err(AciServiceVerificationError::AppComposeHashMismatch);
+    }
+    Ok(())
 }
 
 fn replay_dstack_rtmr(
@@ -53,8 +99,7 @@ fn replay_dstack_rtmr(
 ) -> Result<[u8; 48], AciServiceVerificationError> {
     let mut mr = vec![0u8; 48];
     for event in events.iter().filter(|event| event.imr == imr) {
-        let mut digest =
-            decode_hex(&event.digest).map_err(AciServiceVerificationError::InvalidEventLog)?;
+        let mut digest = dstack_event_digest(event)?;
         if digest.len() < 48 {
             digest.resize(48, 0);
         }
@@ -64,6 +109,22 @@ fn replay_dstack_rtmr(
     mr.as_slice().try_into().map_err(|_| {
         AciServiceVerificationError::InvalidEventLog("replayed RTMR is not 48 bytes".to_string())
     })
+}
+
+fn dstack_event_digest(event: &DstackEventLog) -> Result<Vec<u8>, AciServiceVerificationError> {
+    if event.event_type != DSTACK_RUNTIME_EVENT_TYPE {
+        return decode_hex(&event.digest).map_err(AciServiceVerificationError::InvalidEventLog);
+    }
+
+    let payload =
+        decode_hex(&event.event_payload).map_err(AciServiceVerificationError::InvalidEventLog)?;
+    let mut hasher = Sha384::new();
+    hasher.update(event.event_type.to_ne_bytes());
+    hasher.update(b":");
+    hasher.update(event.event.as_bytes());
+    hasher.update(b":");
+    hasher.update(payload);
+    Ok(hasher.finalize().to_vec())
 }
 
 pub(super) fn verify_dstack_kms_identity_custody(
@@ -206,4 +267,66 @@ pub(super) fn compressed_k256_public_key_hex(public_key_hex: &str) -> Result<Str
     let key = K256VerifyingKey::from_encoded_point(&point)
         .map_err(|e| format!("invalid secp256k1 public key: {e}"))?;
     Ok(hex::encode(key.to_sec1_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_event(event: &str, payload: &[u8]) -> DstackEventLog {
+        let mut event = DstackEventLog {
+            imr: 3,
+            event_type: DSTACK_RUNTIME_EVENT_TYPE,
+            digest: String::new(),
+            event: event.to_string(),
+            event_payload: hex::encode(payload),
+        };
+        event.digest = hex::encode(dstack_event_digest(&event).unwrap());
+        event
+    }
+
+    #[test]
+    fn replay_recomputes_runtime_event_digest_from_semantic_fields() {
+        let measured = runtime_event("app-id", &[0x11; 20]);
+        let expected_rtmr = replay_dstack_rtmr(std::slice::from_ref(&measured), 3).unwrap();
+
+        let mut tampered = runtime_event("compose-hash", &[0x22; 32]);
+        tampered.digest = measured.digest;
+        let tampered_rtmr = replay_dstack_rtmr(&[tampered], 3).unwrap();
+
+        assert_ne!(tampered_rtmr, expected_rtmr);
+    }
+
+    #[test]
+    fn semantic_events_must_be_dstack_runtime_events() {
+        let disguised_firmware_event = DstackEventLog {
+            imr: 3,
+            event_type: 0,
+            digest: hex::encode([0x33; 48]),
+            event: "compose-hash".to_string(),
+            event_payload: hex::encode([0x44; 32]),
+        };
+
+        assert!(
+            runtime_event_before_system_ready(&[disguised_firmware_event], "compose-hash")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_semantic_events() {
+        let compose_hash = runtime_event("compose-hash", &[0x44; 32]);
+        let err = runtime_event_before_system_ready(
+            &[compose_hash.clone(), compose_hash],
+            "compose-hash",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(
+            err,
+            "invalid dstack event_log evidence: multiple pre-system-ready compose-hash events"
+        );
+    }
 }

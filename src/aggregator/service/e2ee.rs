@@ -195,6 +195,9 @@ impl AciService {
             "event_log": quote.event_log,
             "vm_config": quote.vm_config,
         });
+        if let Some(app_compose) = quote.app_compose {
+            evidence["app_compose"] = Value::String(app_compose);
+        }
         let key_custody = self.keys.key_custody_evidence();
         if !key_custody.is_null() {
             evidence["key_custody"] = key_custody;

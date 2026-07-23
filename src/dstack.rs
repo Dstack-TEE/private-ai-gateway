@@ -348,6 +348,7 @@ impl DstackAciProvider {
             report_data: returned_report_data,
             event_log: serde_json::Value::String(event_log),
             vm_config: serde_json::Value::String(response.vm_config),
+            app_compose: Some(info.tcb_info.app_compose),
         })
     }
 }

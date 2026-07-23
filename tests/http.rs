@@ -187,6 +187,10 @@ async fn attestation_report_endpoint_shape() {
         .get("value")
         .unwrap()
         .is_string());
+    assert_eq!(
+        body["attestation"]["evidence"]["app_compose"],
+        serde_json::json!(r#"{"stub":true}"#)
+    );
     // The capability advertisement is empty by default; no E2EE
     // version is wired.
     assert_eq!(

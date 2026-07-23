@@ -30,20 +30,20 @@ Prepare an audited gateway commit, then run:
 
 ```bash
 cd deploy
-PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha> \
-PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token> \
-phala-h4xuser deploy -n private-ai-gateway -c compose.yaml
+phala deploy -n private-ai-gateway -c compose.yaml \
+  -e PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha> \
+  -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 ```
 
 For local/dev deploys, you can also copy
-[`gateway.env.example`](./gateway.env.example), export those values from your
-shell, and run the same `phala-h4xuser deploy` command. For production, pass
-secrets such as admin tokens through the deployment secret mechanism rather
-than keeping them in a plaintext env file.
+[`gateway.env.example`](./gateway.env.example), fill in its values, and pass it
+as `-e gateway.env`. For production, pass variables with repeated `-e KEY=VALUE`
+arguments so secrets such as admin tokens do not remain in a plaintext env file.
 
 `compose.yaml` inlines the launcher config, the static gateway config, and the
-initial upstream config. dstack therefore measures the whole launch policy into
-`compose_hash`.
+initial upstream config. dstack measures the raw manifest into `compose_hash`,
+and the published `app_compose` contains variable references rather than their
+values.
 After deployment, the gateway listens on port `8086`.
 
 The gateway consumes two JSON files:
@@ -191,16 +191,18 @@ Changing `gateway-upstreams` in a later compose revision does not overwrite an
 existing active config volume. Use the admin API to replace the config, or
 delete the `gateway-state` volume intentionally before redeploying.
 
-The static gateway config, seed, and bootstrap env are part of the attested
-compose. API keys in the seed and secrets interpolated into the static config
-are therefore part of the deployment input and must be handled as secrets by
-the deployment environment. For production, pass secrets through dstack
-encrypted secrets, KMS, or mounted secret files rather than inline compose
-values.
+The static gateway config, seed, and bootstrap environment references are part
+of the attested Compose. The canonical attestation endpoint publishes that raw
+Compose preimage for independent verification. Do not place plaintext secrets
+in it. Pass secrets through dstack encrypted environment variables, KMS, or
+mounted secret files. Keep only variable references in Compose.
 
 Source provenance is not set in the gateway config. The gateway reports the
-`REPO_URL` and `COMMIT_SHA` from the git-launcher config, which is also covered
-by the attested compose.
+`REPO_URL` and `COMMIT_SHA` observed by git-launcher. The canonical report also
+returns the raw measured `app_compose`, so a verifier can hash it and match the
+RTMR3-bound `compose-hash`. The checked-in manifest measures the commit variable
+name, not its encrypted value. Binding the reported commit and accepted image
+digests to reviewed source is intentionally left as a verifier-policy TODO.
 
 Example seed:
 

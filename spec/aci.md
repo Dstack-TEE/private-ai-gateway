@@ -520,7 +520,9 @@ Field rules:
   by proving that an attested, provenance-checked launcher fetched and ran a
   pinned commit. A report without acceptable provenance MUST be rejected by
   the verifier (the wire field may be absent on non-conformant or development
-  deployments).
+  deployments). The provenance claim alone is not evidence. A verifier MUST
+  connect it to a measurement in `attestation.evidence` and reject a claim that
+  does not match the measured deployment artifact.
 - **Freshness**: recency comes from the **nonce** — a client that checks its
   fresh `nonce` is bound into `report_data` knows the quote postdates the
   challenge. `fetched_at` / `stale_after` are the service's declared validity
@@ -546,8 +548,9 @@ publishes:
 {
   "quote": "<hex TDX quote>",
   "quote_report_data": "<hex report-data bytes bound by the quote>",
-  "event_log": [ "...boot / RTMR event log..." ],
-  "vm_config": { "...VM and TCB configuration..." },
+  "event_log": "<JSON-encoded boot / RTMR event-log array>",
+  "vm_config": "<JSON-encoded VM and TCB configuration>",
+  "app_compose": "<exact raw app-compose JSON>",
   "key_custody": { "provider": "dstack-kms", "keys": [ "...KMS signature chains..." ] },
   "downstream_tls_binding": { "domain": "<host>", "spki_sha256": "<hex>" }
 }

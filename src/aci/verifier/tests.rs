@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 
 use super::aci_service::{aci_report_tls_channel_bindings, CachedAciServiceVerification};
-use super::dstack::verify_dstack_kms_identity_custody;
+use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_identity_custody};
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ECDSA_SECP256K1;
@@ -1016,5 +1016,31 @@ fn rejects_dstack_kms_identity_key_custody_under_unaccepted_root() {
     assert_eq!(
         err,
         "dstack KMS root public key is not accepted by verifier policy"
+    );
+}
+
+#[test]
+fn verifies_dstack_app_compose_preimage_against_measured_hash() {
+    let app_compose = r#"{"manifest_version":"2","name":"gateway"}"#;
+    let compose_hash: [u8; 32] = sha2::Sha256::digest(app_compose.as_bytes()).into();
+    let evidence = json!({ "app_compose": app_compose });
+
+    verify_dstack_app_compose(&evidence, &compose_hash).unwrap();
+}
+
+#[test]
+fn rejects_dstack_app_compose_that_is_not_the_measured_preimage() {
+    let measured_app_compose = r#"{"manifest_version":"2","name":"gateway"}"#;
+    let compose_hash: [u8; 32] = sha2::Sha256::digest(measured_app_compose.as_bytes()).into();
+    let evidence = json!({
+        "app_compose": r#"{"manifest_version":"2","name":"other"}"#,
+    });
+
+    let err = verify_dstack_app_compose(&evidence, &compose_hash)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        err,
+        "dstack app_compose preimage does not match the RTMR3-bound compose hash"
     );
 }
