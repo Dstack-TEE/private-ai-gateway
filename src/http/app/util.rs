@@ -54,6 +54,24 @@ pub(super) fn normalize_host_domain(raw: &str) -> Option<String> {
     Some(domain)
 }
 
+/// Force `tee=true` onto a relayed catalog query string, dropping any
+/// client-supplied `tee` value and preserving every other param (e.g. `zdr`).
+/// Forcing rather than appending is deliberate: on a TEE-only host a client
+/// must not be able to widen the catalog back to the full set via `?tee=false`
+/// (nor trip the control plane's strict-`true` 400 on `?tee=anything-else`).
+pub(super) fn force_tee_true(query: Option<String>) -> String {
+    let mut params: Vec<String> = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .filter(|p| *p != "tee" && !p.starts_with("tee="))
+        .map(str::to_string)
+        .collect();
+    params.push("tee=true".to_string());
+    params.join("&")
+}
+
 pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
     [
         "x-signing-algo",
@@ -91,6 +109,31 @@ pub(super) fn enforce_owner(
             "redaction_required",
             "the presented credential does not match the receipt owner",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::force_tee_true;
+
+    #[test]
+    fn force_tee_true_forces_and_dedupes() {
+        // No query at all -> just the forced param.
+        assert_eq!(force_tee_true(None), "tee=true");
+        assert_eq!(force_tee_true(Some(String::new())), "tee=true");
+        // A client `tee` value (including `false`) is dropped, never widening
+        // the catalog back to the full set.
+        assert_eq!(force_tee_true(Some("tee=false".to_string())), "tee=true");
+        assert_eq!(force_tee_true(Some("tee".to_string())), "tee=true");
+        // Other params survive, and only the client `tee` is stripped.
+        assert_eq!(
+            force_tee_true(Some("zdr=true&tee=false".to_string())),
+            "zdr=true&tee=true"
+        );
+        assert_eq!(
+            force_tee_true(Some("zdr=true".to_string())),
+            "zdr=true&tee=true"
+        );
     }
 }
 

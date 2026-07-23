@@ -55,6 +55,10 @@ pub struct CompletionInput {
     pub request_id: String,
     pub user_model: Option<String>,
     pub stream: bool,
+    /// Request arrived on a TEE-only host: the pre-consult carries `tee: true`
+    /// so the control plane 404s a non-TEE model before any forward. Attested
+    /// serving itself is enforced via `aci_required` (forced true alongside this).
+    pub tee_only: bool,
 }
 
 /// Cap on the error-detail snippet in `request_outcome` lines. Long enough to
@@ -243,6 +247,7 @@ pub async fn run(
         request_id,
         user_model,
         stream,
+        tee_only,
     } = input;
 
     let started = Instant::now();
@@ -257,7 +262,7 @@ pub async fn run(
     let provider = params.get("provider");
 
     let consult = control
-        .consult_pre(model, api_key_hash.as_deref(), provider)
+        .consult_pre(model, api_key_hash.as_deref(), provider, tee_only)
         .await;
 
     let meter = Meter {

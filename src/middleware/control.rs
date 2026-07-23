@@ -137,6 +137,7 @@ impl ControlClient {
         model: Option<&str>,
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
+        tee_only: bool,
     ) -> PreConsult {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -149,12 +150,17 @@ impl ControlClient {
             // block must not silently drop the caller's routing restrictions).
             #[serde(skip_serializing_if = "Option::is_none")]
             provider: Option<&'a Value>,
+            // TEE-only host: the control plane 404s a non-TEE model. Only sent
+            // when set so the metadata-minimal payload is unchanged off these hosts.
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            tee: bool,
         }
 
         let body = Body {
             api_key_hash,
             model,
             provider,
+            tee: tee_only,
         };
         let build = || {
             self.authorize(self.client.post(self.url("/consult/pre")))
@@ -265,6 +271,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            tee_only_domains: Vec::new(),
         }
     }
 
@@ -291,7 +298,7 @@ mod tests {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client.consult_pre(Some("m"), None, None).await;
+        let consult = client.consult_pre(Some("m"), None, None, false).await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(

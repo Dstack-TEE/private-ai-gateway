@@ -364,6 +364,7 @@ fn middleware(control_url: String) -> Middleware {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        tee_only_domains: Vec::new(),
     })
     .unwrap()
 }
@@ -385,6 +386,7 @@ fn chat_input() -> CompletionInput {
         request_id: "req-1".to_string(),
         user_model: Some("gpt-test".to_string()),
         stream: false,
+        tee_only: false,
     }
 }
 
@@ -533,6 +535,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        tee_only_domains: Vec::new(),
     })
     .unwrap();
     let report = StreamReport {
@@ -1177,6 +1180,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        tee_only_domains: Vec::new(),
     })
     .unwrap();
     let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1236,6 +1240,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        tee_only_domains: Vec::new(),
     })
     .unwrap();
     let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
