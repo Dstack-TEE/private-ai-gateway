@@ -742,7 +742,6 @@ async fn aci_constraint_rejects_a_route_not_classed_as_attested() {
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: br#"{"model":"public","messages":[]}"#,
             forwarded_body: None,
-            upstream_required: Some(true),
             aci_required: true,
             aci_session_ids: Vec::new(),
             upstream_verification_event: Some(verified_event("surface-upstream", "public")),
@@ -777,7 +776,6 @@ async fn aci_session_ids_imply_verification_for_non_http_callers() {
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: br#"{"model":"public","messages":[]}"#,
             forwarded_body: None,
-            upstream_required: Some(false),
             aci_required: false,
             aci_session_ids: vec![format!("as_{}", "ab".repeat(32))],
             upstream_verification_event: Some(verified_event("surface-upstream", "public")),
@@ -809,7 +807,6 @@ async fn request_rewrite_is_recorded_by_hash_without_retaining_the_body() {
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: original,
             forwarded_body: Some(forwarded.to_vec()),
-            upstream_required: Some(true),
             aci_required: false,
             aci_session_ids: Vec::new(),
             upstream_verification_event: Some(UpstreamVerifiedEvent {

@@ -46,7 +46,6 @@ pub struct AciServiceConfig {
     pub freshness_seconds: u64,
     /// How long receipts stay queryable in the in-memory store.
     pub receipt_ttl_seconds: u64,
-    pub upstream_required_default: bool,
     pub allow_test_keys: bool,
     /// Overrides the TLS-SPKI digests reported by the key provider.
     /// Production deployments should derive this from the mounted
@@ -74,7 +73,6 @@ impl AciServiceConfig {
             service_capabilities: ServiceCapabilities::default(),
             freshness_seconds: 3600,
             receipt_ttl_seconds: 3600,
-            upstream_required_default: true,
             allow_test_keys: true,
             tls_public_keys: None,
         }

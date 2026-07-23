@@ -58,13 +58,10 @@ pub struct PreparedUpstreamRequest {
     pub url_origin: Option<String>,
     pub model_id: String,
     pub route_id: Option<String>,
-    /// Whether the selected route is an attested (TEE) provider.
-    /// `Some(true)` = TEE (verification is fail-closed), `Some(false)` =
-    /// non-TEE (TLS endpoint bound, never fail-closed, and its
-    /// `upstream.verified` event carries no attestation evidence),
-    /// `None` = unclassified (the caller's request-level `upstream_required`
-    /// decides, preserving the behaviour of routes built directly via
-    /// [`ModelRoute::new`]).
+    /// Whether the selected route is an attested (TEE) provider. Only
+    /// `Some(true)` is eligible when a request sets `provider.aci_verified` or
+    /// pins an ACI session. Unconstrained requests may use any classification;
+    /// their receipts still record the verification outcome.
     pub is_tee: Option<bool>,
 }
 

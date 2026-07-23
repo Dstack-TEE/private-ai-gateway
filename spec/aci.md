@@ -73,10 +73,9 @@ own identity to clients exactly like a single-model service.
 For the upstream hop, ACI v1 standardizes the aggregator's **transparency
 surface**, not its routing policy:
 
-- Before forwarding a prompt, the aggregator MUST verify the selected
-  upstream and obtain an enforceable channel binding (a TLS key pin or an
-  upstream E2EE key). If verification is required and fails, the aggregator
-  MUST NOT forward the prompt (fail closed).
+- Before forwarding a prompt constrained by §6.1, the aggregator MUST verify
+  the selected upstream and obtain an enforceable channel binding (a TLS key
+  pin or an upstream E2EE key), or fail closed.
 - Each receipt records the verification outcome in an `upstream.verified`
   event (§8.4).
 - Each successful verification is captured as an immutable, content-addressed
@@ -563,8 +562,8 @@ for the hostname it actually uses.
 ## 6. Inference Endpoints
 
 ACI v1 covers OpenAI-compatible completion-style endpoints. Request and
-response bodies follow the OpenAI API; ACI adds headers and artifacts, not
-body fields.
+response bodies follow the OpenAI API, with the aggregator constraints in
+§6.1. ACI also adds headers and artifacts.
 
 | Endpoint | Status |
 | --- | --- |
@@ -577,7 +576,7 @@ body fields.
 Trust metadata is service-level and lives in the attestation report. Clients
 MUST NOT infer trust from `/v1/models` entries.
 
-### 6.1 Request headers
+### 6.1 Requests
 
 | Header | When | Meaning |
 | --- | --- | --- |
@@ -587,7 +586,16 @@ MUST NOT infer trust from `/v1/models` entries.
 | `X-Model-Pub-Key` | E2EE | The service E2EE public key the client selected from the attested keyset. |
 | `X-E2EE-Nonce` | E2EE | Unique request nonce (§7.5). |
 | `X-E2EE-Timestamp` | E2EE | Unix seconds (§7.5). |
-| `X-Upstream-Verification: required \| none` | aggregator, optional | Default `required`: fail closed if the upstream cannot be verified. `none` lets this request proceed without upstream verification. Any other value is rejected. |
+
+#### Aggregator upstream constraints
+
+`provider.aci_verified: true` restricts routing to attested routes and requires
+a verified, enforceable channel binding before forwarding. If absent or
+`false`, routing is unconstrained and verification is best effort.
+`provider.aci_session_ids` MUST be a non-empty array of `as_<64-hex>` ids; it
+implies `aci_verified: true`, and at least one id MUST match the route's current
+verified bindings, including after refresh. Combining it with
+`aci_verified: false` is invalid. The aggregator MUST NOT forward either field.
 
 ### 6.2 Response headers
 
@@ -885,6 +893,9 @@ appear):
 }
 ```
 
+`required` records whether effective policy required verification. If `false`,
+the result is informational.
+
 `session_id` and `claims` are present exactly when `result` is `"verified"`
 and an attested session was sealed; `session_id` is the content-addressed
 reference to it (§9). A failed verification records `reason` and no session.
@@ -1114,9 +1125,9 @@ Given an established identity and keyset, plus a response and its receipt:
 
 ### 10.3 Audit the upstream (aggregators)
 
-1. The receipt contains `upstream.verified` with `result: "verified"` for
-   the serving upstream, with a channel binding the policy accepts (or the
-   client knowingly sent `X-Upstream-Verification: none`).
+1. The receipt contains `upstream.verified` with `required: true` and `result:
+   "verified"` for the serving upstream, with a channel binding the policy
+   accepts.
 2. Shallow audit: read the typed claims in the event and apply local policy
    (for example require `tee_attested` to be `asserted` with source
    `hardware_proven`).
@@ -1211,8 +1222,8 @@ use the `/v1/aci/*` endpoints and ignore compatibility fields.
 
 ## 14. Out of Scope for ACI v1
 
-- Provider routing policy, upstream selection, preferences, BYOK
-  credentials, billing, quotas, pricing, and canonical model ids.
+- Provider routing policy beyond §6.1, upstream preferences, BYOK credentials,
+  billing, quotas, pricing, and canonical model ids.
 - A universal verifier profile, profile registries, negotiation, or
   service-advertised profile lists.
 - A public append-only transparency log for receipts or sessions (SCITT is

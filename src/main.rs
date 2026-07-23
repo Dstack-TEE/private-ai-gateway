@@ -438,7 +438,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         freshness_seconds: 3600,
         receipt_ttl_seconds: 3600,
-        upstream_required_default: true,
         allow_test_keys: false,
         tls_public_keys,
     };

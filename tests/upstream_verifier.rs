@@ -120,7 +120,7 @@ async fn service_fails_if_selected_backend_cannot_enforce_channel_binding() {
         .forward_chat_completion(
             br#"{"model":"model-a","messages":[]}"#,
             None,
-            Some(true),
+            false,
             Some(event),
         )
         .await
