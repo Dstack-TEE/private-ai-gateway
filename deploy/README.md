@@ -56,7 +56,7 @@ export PRIVATEMODE_API_KEY=<privatemode-api-key>
 export PRIVATEMODE_MANIFEST_PATH=/absolute/path/to/exact-reviewed-manifest.json
 
 ./render-privatemode-compose.sh /tmp/private-ai-gateway-privatemode.json
-phala-h4xuser deploy -n private-ai-gateway \
+phala deploy -n private-ai-gateway \
   -c /tmp/private-ai-gateway-privatemode.json \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
   -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY"
