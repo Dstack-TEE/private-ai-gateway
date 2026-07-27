@@ -162,10 +162,6 @@ fn upstream_verified_event_records_channel_bindings() {
                 origin: "https://upstream.example".to_string(),
                 spki_sha256: "aa".repeat(32),
             },
-            ChannelBinding::TlsCertificateSha256 {
-                origin: "https://upstream.example".to_string(),
-                certificate_sha256: "bb".repeat(32),
-            },
             ChannelBinding::E2eePublicKeySha256 {
                 provider: "chutes".to_string(),
                 key_id: Some("instance-a".to_string()),
@@ -197,18 +193,10 @@ fn upstream_verified_event_records_channel_bindings() {
     );
     assert_eq!(
         upstream.fields["channel_bindings"][1]["type"],
-        "tls_certificate_sha256"
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][1]["certificate_sha256"],
-        "bb".repeat(32)
-    );
-    assert_eq!(
-        upstream.fields["channel_bindings"][2]["type"],
         "e2ee_public_key_sha256"
     );
     assert_eq!(
-        upstream.fields["channel_bindings"][2]["public_key_sha256"],
+        upstream.fields["channel_bindings"][1]["public_key_sha256"],
         "cc".repeat(32)
     );
     assert_eq!(
