@@ -905,7 +905,6 @@ upstream. Defined shapes:
 
 ```json
 { "type": "tls_spki_sha256",        "origin": "<https-origin>", "spki_sha256": "<hex>" }
-{ "type": "tls_certificate_sha256", "origin": "<https-origin>", "certificate_sha256": "<hex>" }
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
 
@@ -1282,7 +1281,7 @@ these sets requires a published extension document.
 | Signature algorithms | `ed25519` (RECOMMENDED), `ecdsa-secp256k1` | Reject |
 | E2EE suites | `x25519-aes-256-gcm-hkdf-sha256` (RECOMMENDED; HKDF info `aci.e2ee.v2.x25519`), `secp256k1-aes-256-gcm-hkdf-sha256` (HKDF info `aci.e2ee.v2.secp256k1`) | Reject; other keyset entries with unknown `algo` are ignored for E2EE |
 | Receipt event types | `request.received`, `request.forwarded`, `response.returned`, `response.received`, `upstream.verified`, `transparency.request_modified`, `transparency.response_modified` | Ignore; preserve for signature recomputation (§3.2) |
-| Channel binding types | `tls_spki_sha256`, `tls_certificate_sha256`, `e2ee_public_key_sha256` | Treat as not enforceable |
+| Channel binding types | `tls_spki_sha256`, `e2ee_public_key_sha256` | Treat as not enforceable |
 | Claim names | `tee_attested`, `gpu_attested`, `tcb_up_to_date`, `os_known_good`, `serving_software_known_good`, `model_weights_provenance` | Extra facts live in `claims.extra`; unknown entries are informational |
 | Claim statuses / sources | `asserted`, `refuted`, `unknown` / `hardware_proven`, `verifier_derived`, `provider_asserted`, `operator_asserted` | Treat the claim as `unknown` |
 | TEE types | `tdx`, `sev_snp` | Requires a published verifier extension (§5.2) |

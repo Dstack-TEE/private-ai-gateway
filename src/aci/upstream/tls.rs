@@ -25,7 +25,6 @@ pub(super) fn response_headers(resp: &reqwest::Response) -> HashMap<String, Stri
 
 pub(super) fn pinned_spki_client(
     accepted_spkis: Vec<String>,
-    accepted_certificates: Vec<String>,
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, UpstreamError> {
@@ -37,7 +36,6 @@ pub(super) fn pinned_spki_client(
     let verifier = Arc::new(SpkiPinVerifier {
         inner,
         accepted: accepted_spkis.into_iter().collect(),
-        accepted_certificates: accepted_certificates.into_iter().collect(),
     });
     let tls = rustls::ClientConfig::builder()
         .dangerous()
@@ -54,17 +52,12 @@ pub(super) fn pinned_spki_client(
 struct SpkiPinVerifier {
     inner: Arc<dyn ServerCertVerifier>,
     accepted: HashSet<String>,
-    accepted_certificates: HashSet<String>,
 }
 
 impl fmt::Debug for SpkiPinVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpkiPinVerifier")
             .field("accepted_count", &self.accepted.len())
-            .field(
-                "accepted_certificate_count",
-                &self.accepted_certificates.len(),
-            )
             .finish()
     }
 }
@@ -78,14 +71,11 @@ impl ServerCertVerifier for SpkiPinVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        if self.accepted.is_empty() && self.accepted_certificates.is_empty() {
+        if self.accepted.is_empty() {
             return Err(RustlsError::InvalidCertificate(
                 CertificateError::ApplicationVerificationFailure,
             ));
         }
-
-        let certificate_digest = hex::encode(Sha256::digest(end_entity.as_ref()));
-        let certificate_matches = self.accepted_certificates.contains(&certificate_digest);
 
         let (_, cert) = parse_x509_certificate(end_entity.as_ref())
             .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
@@ -93,7 +83,7 @@ impl ServerCertVerifier for SpkiPinVerifier {
         let digest = hex::encode(digest);
         let spki_matches = self.accepted.contains(&digest);
 
-        if certificate_matches || spki_matches {
+        if spki_matches {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(RustlsError::InvalidCertificate(

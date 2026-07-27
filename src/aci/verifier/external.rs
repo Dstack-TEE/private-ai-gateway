@@ -502,7 +502,6 @@ struct ExternalChannelBinding {
     binding_type: String,
     origin: Option<String>,
     spki_sha256: Option<String>,
-    certificate_sha256: Option<String>,
     provider: Option<String>,
     key_id: Option<String>,
     algorithm: Option<String>,
@@ -525,19 +524,6 @@ fn parse_external_channel_bindings(
                 out.push(ChannelBinding::TlsSpkiSha256 {
                     origin,
                     spki_sha256: normalize_sha256_hex(&spki_sha256)?,
-                });
-            }
-            "tls_certificate_sha256" => {
-                let origin = binding.origin.ok_or_else(|| {
-                    "tls_certificate_sha256 channel binding is missing origin".to_string()
-                })?;
-                let certificate_sha256 = binding.certificate_sha256.ok_or_else(|| {
-                    "tls_certificate_sha256 channel binding is missing certificate_sha256"
-                        .to_string()
-                })?;
-                out.push(ChannelBinding::TlsCertificateSha256 {
-                    origin,
-                    certificate_sha256: normalize_sha256_hex(&certificate_sha256)?,
                 });
             }
             "e2ee_public_key_sha256" => {

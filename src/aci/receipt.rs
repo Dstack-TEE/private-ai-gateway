@@ -103,10 +103,6 @@ pub enum ChannelBinding {
         origin: String,
         spki_sha256: String,
     },
-    TlsCertificateSha256 {
-        origin: String,
-        certificate_sha256: String,
-    },
     E2eePublicKeySha256 {
         provider: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
