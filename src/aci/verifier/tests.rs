@@ -127,13 +127,23 @@ fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<Str
         output["attested_scope"] = json!(scope);
     }
     let output = output.to_string();
-    let script = format!(
-        r#"payload="$(cat)"
+    let script = if provider == "near-ai" {
+        format!(
+            r#"payload="$(cat)"
+case "$payload" in
+  *'"provider":"near-ai"'*'"model_id":"provider-model"'*'"near_ai_api_key":"secret-token"'*) printf '%s' '{output}' ;;
+  *) printf '%s' '{{"result":"failed","reason":"unexpected verifier input"}}' ;;
+esac"#
+        )
+    } else {
+        format!(
+            r#"payload="$(cat)"
 case "$payload" in
   *'"provider":"{provider}"'*'"model_id":"provider-model"'*) printf '%s' '{output}' ;;
   *) printf '%s' '{{"result":"failed","reason":"unexpected verifier input"}}' ;;
 esac"#
-    );
+        )
+    };
     vec!["/bin/sh".to_string(), "-c".to_string(), script]
 }
 
@@ -401,7 +411,8 @@ async fn near_ai_provider_verifier_runs_provider_owned_external_verifier() {
         ),
         5,
     )
-    .unwrap();
+    .unwrap()
+    .with_api_key("secret-token");
     assert_provider_script_verifier(
         &verifier,
         "near-ai",
