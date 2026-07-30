@@ -213,6 +213,11 @@ impl NearAiProviderVerifier {
         }
     }
 
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.verifier = self.verifier.with_option("near_ai_api_key", api_key);
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_command(
         command: Vec<String>,

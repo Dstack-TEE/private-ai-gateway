@@ -34,7 +34,11 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             verifier_id=verifier_id,
         )
         return
-    near_provider = NearaiProvider(include_tls_fingerprint=True)
+    provider_options = request.get("provider_options") or {}
+    near_provider = NearaiProvider(
+        include_tls_fingerprint=True,
+        api_key=provider_options.get("near_ai_api_key"),
+    )
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
     with contextlib.redirect_stdout(sys.stderr):
         report = await asyncio.to_thread(near_provider.fetch_report, request["model_id"])

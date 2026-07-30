@@ -6,9 +6,10 @@ from ..types import AttestationReport
 
 
 class NearaiProvider(ServiceProvider):
-    def __init__(self, include_tls_fingerprint: bool = False):
+    def __init__(self, include_tls_fingerprint: bool = False, api_key: Optional[str] = None):
         self.api_base = "https://cloud-api.near.ai/v1"
         self.include_tls_fingerprint = include_tls_fingerprint
+        self.api_key = api_key
 
     def fetch_report(
         self,
@@ -44,7 +45,8 @@ class NearaiProvider(ServiceProvider):
         if use_tls_fingerprint:
             print(f"[Near] TLS fingerprint binding enabled")
 
-        response = requests.get(url, params=params)
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
         data = response.json()
 

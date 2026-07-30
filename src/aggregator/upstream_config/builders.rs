@@ -250,10 +250,14 @@ fn build_provider_verifier(
                 request_timeout_seconds,
                 cache_seconds,
             ))),
-            UpstreamProvider::NearAi => Some(Arc::new(NearAiProviderVerifier::new_with_cache(
-                request_timeout_seconds,
-                cache_seconds,
-            ))),
+            UpstreamProvider::NearAi => {
+                let mut verifier =
+                    NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
+                if let Some(token) = &cfg.bearer_token {
+                    verifier = verifier.with_api_key(token.clone());
+                }
+                Some(Arc::new(verifier))
+            }
             UpstreamProvider::SecretAi => {
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,
