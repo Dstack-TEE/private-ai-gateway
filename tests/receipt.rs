@@ -168,6 +168,11 @@ fn upstream_verified_event_records_channel_bindings() {
                 algorithm: "chutes-ml-kem-768".to_string(),
                 public_key_sha256: "cc".repeat(32),
             },
+            ChannelBinding::ProxyImageSha256 {
+                provider: "privatemode".to_string(),
+                proxy_image_digest: format!("sha256:{}", "ff".repeat(32)),
+                credential_sha256: "56".repeat(32),
+            },
         ],
         provider_claims: Some(serde_json::json!({
             "trust_boundary": "fixture",
@@ -198,6 +203,18 @@ fn upstream_verified_event_records_channel_bindings() {
     assert_eq!(
         upstream.fields["channel_bindings"][1]["public_key_sha256"],
         "cc".repeat(32)
+    );
+    assert_eq!(
+        upstream.fields["channel_bindings"][2]["type"],
+        "proxy_image_sha256"
+    );
+    assert_eq!(
+        upstream.fields["channel_bindings"][2]["proxy_image_digest"],
+        format!("sha256:{}", "ff".repeat(32))
+    );
+    assert_eq!(
+        upstream.fields["channel_bindings"][2]["credential_sha256"],
+        "56".repeat(32)
     );
     assert_eq!(
         upstream.fields["provider_claims"]["trust_boundary"],

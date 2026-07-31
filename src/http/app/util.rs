@@ -5,6 +5,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::aggregator::service::ReceiptOwner;
 
@@ -130,6 +132,27 @@ pub(super) fn enforce_admin(state: &AppState, headers: &HeaderMap) -> Option<Res
             StatusCode::FORBIDDEN,
             "forbidden",
             "invalid admin bearer token",
+        ))
+    }
+}
+
+pub(super) fn enforce_inference(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    let expected = state.inference_token_sha256?;
+    let Some(token) = extract_bearer(headers) else {
+        return Some(error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "inference bearer token required",
+        ));
+    };
+    let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    if bool::from(actual.ct_eq(&expected)) {
+        None
+    } else {
+        Some(error_response(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "invalid inference bearer token",
         ))
     }
 }

@@ -171,23 +171,15 @@ impl UpstreamBackend for ModelRouterBackend {
         };
         let mut request = req;
         request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
-        // The chat-shaped downstream surfaces (`/v1/chat/completions` and the
-        // Anthropic `/v1/messages`) are converted to the upstream's chat
-        // request format before they reach here, so both must target the
-        // upstream's chat path rather than the downstream surface path: a
-        // configured per-upstream path when set (e.g. native Anthropic
-        // upstreams use `/v1/messages`), otherwise the OpenAI-compatible
-        // `/v1/chat/completions`. The path is resolved explicitly (rather than
-        // deferred to the backend default) so the forwarded request is
-        // deterministic. Other surfaces (`/v1/completions`, `/v1/embeddings`,
-        // `/v1/responses`) keep the caller-supplied path so they route to the
-        // matching upstream path.
+        // Most backends map both chat-shaped downstream surfaces onto one
+        // configured upstream chat path. Multi-protocol backends explicitly
+        // preserve `/v1/chat/completions` versus `/v1/messages`.
         let on_chat_surface = request
             .path
             .as_deref()
             .map(|path| path == "/v1/chat/completions" || path == "/v1/messages")
             .unwrap_or(true);
-        if on_chat_surface {
+        if on_chat_surface && !route.upstream.preserves_chat_surface_path() {
             request.path = Some(
                 route
                     .path
@@ -314,6 +306,10 @@ mod tests {
             None
         }
 
+        fn preserves_chat_surface_path(&self) -> bool {
+            self.name == "native-multiprotocol"
+        }
+
         async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             Err(UpstreamError::Transport("not used".to_string()))
         }
@@ -375,13 +371,20 @@ mod tests {
     }
 
     fn single_route_router(path: Option<String>) -> ModelRouterBackend {
+        single_route_router_for_backend(path, "openai")
+    }
+
+    fn single_route_router_for_backend(
+        path: Option<String>,
+        backend_name: &'static str,
+    ) -> ModelRouterBackend {
         let mut router = ModelRouterBackend::new("model-router");
         router
             .add_route(
                 ModelRoute::new(
                     "openai/gpt-4o",
                     "gpt-4o",
-                    Arc::new(StubBackend { name: "openai" }),
+                    Arc::new(StubBackend { name: backend_name }),
                     "openai:gpt-4o",
                 )
                 .unwrap()
@@ -429,6 +432,19 @@ mod tests {
         assert_eq!(
             prepared_path(&router, "/v1/chat/completions").as_deref(),
             Some("/v1/messages")
+        );
+        assert_eq!(
+            prepared_path(&router, "/v1/messages").as_deref(),
+            Some("/v1/messages")
+        );
+    }
+
+    #[test]
+    fn multi_protocol_backends_preserve_native_chat_surface_paths() {
+        let router = single_route_router_for_backend(None, "native-multiprotocol");
+        assert_eq!(
+            prepared_path(&router, "/v1/chat/completions").as_deref(),
+            Some("/v1/chat/completions")
         );
         assert_eq!(
             prepared_path(&router, "/v1/messages").as_deref(),

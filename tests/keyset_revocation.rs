@@ -47,6 +47,7 @@ fn runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 600,
         verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     }
 }
 
@@ -74,7 +75,7 @@ fn build_harness(dir: &std::path::Path) -> Harness {
         .with_revocation_store(revocation_store),
     );
     Harness {
-        app: build_router_with_admin(service, manager, Some(ADMIN_TOKEN.to_string())),
+        app: build_router_with_admin(service, manager, Some(ADMIN_TOKEN.to_string()), None),
         revocations_path,
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! The aggregator forwards a chat-completion request to an upstream
 //! after ACI-side hashing. Different upstream providers (Chutes,
-//! Tinfoil, NEAR AI, Phala dstack-vllm-proxy, raw OpenAI-compatible
+//! Tinfoil, NEAR AI, Privatemode, Phala dstack-vllm-proxy, raw OpenAI-compatible
 //! endpoints) speak slightly different dialects on top of the OpenAI
 //! base. We isolate that with the small trait defined here so:
 //!
@@ -29,6 +29,7 @@ use crate::aci::receipt::UpstreamVerifiedEvent;
 
 mod chutes;
 mod openai;
+mod privatemode;
 mod router;
 mod tls;
 
@@ -36,6 +37,9 @@ pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
 pub use openai::OpenAICompatibleBackend;
+pub use privatemode::{
+    PrivatemodeDeploymentConfigError, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
+};
 pub use router::{ModelRoute, ModelRouterBackend};
 
 use openai::request_model_id;
@@ -106,6 +110,15 @@ pub trait UpstreamBackend: Send + Sync {
 
     /// Origin (scheme + host + port) recorded in receipts.
     fn url_origin(&self) -> Option<&str>;
+
+    /// Whether chat-shaped downstream endpoints keep their native paths.
+    ///
+    /// Most OpenAI-compatible backends map both chat surfaces to one configured
+    /// path. Multi-protocol backends such as Privatemode serve
+    /// `/v1/chat/completions` and `/v1/messages` as distinct handlers.
+    fn preserves_chat_surface_path(&self) -> bool {
+        false
+    }
 
     /// Prepare an upstream request before verification and receipt
     /// hashing. Routers use this phase to select the concrete upstream

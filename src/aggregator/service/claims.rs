@@ -30,6 +30,7 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
+        Some("privatemode") => &PrivatemodeClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
     }
@@ -209,6 +210,22 @@ impl ProviderClaimMapper for SecretAiClaims {
             serving_software_known_good: secret_ai_software_claim(event),
             os_known_good: secret_ai_os_claim(event),
             gpu_attested: secret_ai_gpu_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Privatemode: the measured official proxy establishes a Contrast-attested
+/// E2EE secret before serving. Its dynamic manifest observation is not bound to
+/// the active secret, so manifest-specific transitive claims stay unknown.
+pub(super) struct PrivatemodeClaims;
+impl ProviderClaimMapper for PrivatemodeClaims {
+    fn claims(&self, _event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: Claim::asserted(
+                ClaimSource::VerifierDerived,
+                "measured Privatemode proxy established a Contrast-attested E2EE secret before serving",
+            ),
             ..SessionClaims::default()
         }
     }
@@ -697,6 +714,29 @@ mod claim_mapping_tests {
             claims.serving_software_known_good.status,
             ClaimStatus::Unknown
         );
+    }
+
+    #[test]
+    fn privatemode_asserts_only_manifest_independent_proof() {
+        let claims = session_claims_for_event(&event(
+            Some("privatemode"),
+            VerificationResult::Verified,
+            None,
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        for claim in [
+            &claims.gpu_attested,
+            &claims.os_known_good,
+            &claims.serving_software_known_good,
+            &claims.model_weights_provenance,
+        ] {
+            assert_eq!(claim.status, ClaimStatus::Unknown);
+        }
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
     }
 
     #[test]

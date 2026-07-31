@@ -8,14 +8,12 @@ from ..common import Provider, json_bytes, request_json, run_cmd_json, write_byt
 from .attested_sessions import assert_upstream_attested_sessions
 
 
-REQUESTER_TOKEN = "live-e2e-requester"
-
-
 def run_lifecycle_case(
     *,
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
+    inference_token: str,
 ) -> dict[str, Any]:
     provider_dir = artifact_dir / provider.name / "lifecycle"
     body = {
@@ -36,7 +34,7 @@ def run_lifecycle_case(
         "POST",
         f"{base_url}/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
+            "Authorization": f"Bearer {inference_token}",
             "Content-Type": "application/json",
         },
         body=request_body,
@@ -72,7 +70,7 @@ def run_lifecycle_case(
     receipt_status, _, receipt_body, receipt_json = request_json(
         "GET",
         f"{base_url}/v1/signature/{chat_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        headers={"Authorization": f"Bearer {inference_token}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
