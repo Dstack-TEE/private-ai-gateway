@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -101,6 +100,7 @@ def main() -> None:
                         base_url=aggregator.base_url,
                         provider=provider,
                         artifact_dir=artifact_dir,
+                        inference_token=aggregator.inference_token,
                     )
                 )
             summary["phases"]["lifecycle"] = lifecycle
@@ -114,6 +114,7 @@ def main() -> None:
                         base_url=aggregator.base_url,
                         provider=provider,
                         artifact_dir=artifact_dir,
+                        inference_token=aggregator.inference_token,
                     )
                 )
             summary["phases"]["embeddings"] = embeddings
@@ -126,6 +127,7 @@ def main() -> None:
                             base_url=aggregator.base_url,
                             provider=provider,
                             artifact_dir=artifact_dir,
+                            inference_token=aggregator.inference_token,
                         )
                     )
                 summary["phases"]["structured_outputs"] = structured

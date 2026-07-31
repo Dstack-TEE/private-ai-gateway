@@ -101,12 +101,19 @@ fn channel_binding_shapes_serialize_to_spec_wire_form() {
             algorithm: "chutes-ml-kem-768".to_string(),
             public_key_sha256: "cc".repeat(32),
         },
+        ChannelBinding::ProxyImageSha256 {
+            provider: "privatemode".to_string(),
+            proxy_image_digest: format!("sha256:{}", "ff".repeat(32)),
+            credential_sha256: "56".repeat(32),
+        },
     ];
     let value = serde_json::to_value(&bindings).unwrap();
     assert_eq!(value[0]["type"], "tls_spki_sha256");
     assert_eq!(value[0]["spki_sha256"], "aa".repeat(32));
     assert_eq!(value[1]["type"], "e2ee_public_key_sha256");
     assert_eq!(value[1]["public_key_sha256"], "cc".repeat(32));
+    assert_eq!(value[2]["type"], "proxy_image_sha256");
+    assert_eq!(value[2]["credential_sha256"], "56".repeat(32));
 }
 
 #[test]

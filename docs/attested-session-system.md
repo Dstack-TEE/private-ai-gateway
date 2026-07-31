@@ -67,16 +67,16 @@ carries a stable `provider_type` (distinct from the operator's per-endpoint
 config `name`) that selects the mapping. A `failed` result asserts
 nothing.
 
-| Claim | tinfoil | near-ai | chutes | phala-direct | secret-ai⁴ | generic |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived |
-| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | unknown |
-| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown |
-| `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | unknown |
-| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown |
-| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown |
+| Claim | tinfoil | near-ai | chutes | phala-direct | secret-ai⁴ | privatemode | generic |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `tee_attested` | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ hardware | ✅ verifier-derived⁵ | ✅ verifier-derived |
+| `tcb_up_to_date` | tri-state¹ | tri-state¹ | tri-state¹ | tri-state¹ | TDX ✅ / SEV unknown | unknown | unknown |
+| `serving_software_known_good` | ✅ Sigstore² | unknown | unknown | unknown | optional pin | unknown | unknown |
+| `os_known_good` | unknown | unknown | unknown | unknown | ✅ registry | unknown | unknown |
+| `gpu_attested` | unknown | unknown | ✅³ | ✅³ | ✅ required | unknown | unknown |
+| `model_weights_provenance` | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 
-- For the five real provider verifiers `tee_attested` is `hardware_proven`: a
+- For the five direct provider verifiers `tee_attested` is `hardware_proven`: a
   genuine TEE quote was verified and the request channel bound to it.
 - NEAR AI's quote covers its **gateway** TD, a router fronting many models
   behind one TEE. Its attested session is that gateway *channel* — one session
@@ -113,6 +113,10 @@ nothing.
   facts stay in `extra`.
 - ⁴ SecretAI policy and claim details are documented in
   [SecretAI verification](providers/secret-ai/verification.md).
+- ⁵ Privatemode's measured proxy verifies the upstream and establishes E2EE.
+  The gateway cannot bind the proxy's latest observed manifest to the secret
+  used for a request, so manifest-specific claims stay unknown. See
+  [Privatemode verification](providers/privatemode/verification.md).
 - "generic" is a verifier path with no provider-specific identity: it asserts
   only `tee_attested` (`verifier_derived`), nothing else.
 

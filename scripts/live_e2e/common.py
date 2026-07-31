@@ -40,6 +40,8 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
+    privatemode_manifest_log_path: str | None
+    privatemode_proxy_image_digest: str | None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -65,6 +67,12 @@ class Provider:
             ),
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
+            ),
+            privatemode_manifest_log_path=optional_str(
+                value, "privatemode_manifest_log_path"
+            ),
+            privatemode_proxy_image_digest=optional_str(
+                value, "privatemode_proxy_image_digest"
             ),
         )
 
@@ -230,6 +238,78 @@ def run_cmd_json(
     if not isinstance(parsed, dict):
         raise RuntimeError("command returned non-object JSON")
     return parsed
+
+
+def audit_aci_artifacts(
+    *,
+    report: Path,
+    receipt: Path,
+    session: Path,
+    nonce: str,
+    request_body: Path,
+    response_body: Path,
+) -> dict[str, Any]:
+    # An offline audit skips the live quote-root check and exits 1 for PARTIAL.
+    # Require every receipt/session check to pass and no check to fail; the
+    # separate online `aci verify` establishes the hardware root.
+    result = run_cmd(
+        [
+            "aci",
+            "audit",
+            "--report",
+            str(report),
+            "--receipt",
+            str(receipt),
+            "--session",
+            str(session),
+            "--nonce",
+            nonce,
+            "--request-body",
+            str(request_body),
+            "--response-body",
+            str(response_body),
+            "--require-verified",
+            "--json",
+        ],
+        timeout=240,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(
+            f"ACI audit failed: {result.stderr.decode(errors='replace')}"
+        )
+    try:
+        transcript = json.loads(result.stdout)
+        checks = {item["id"]: item["status"] for item in transcript["checks"]}
+        failed = transcript["verdict"]["failed"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("ACI audit did not return a valid transcript") from exc
+    required = {
+        "receipt-1",
+        "receipt-2",
+        "receipt-3",
+        "receipt-4",
+        "upstream-1",
+        "upstream-2",
+    }
+    if failed != 0 or any(checks.get(check) != "pass" for check in required):
+        raise RuntimeError(f"ACI receipt/session audit did not pass: {transcript}")
+    return transcript
+
+
+def verify_aci_report(
+    base_url: str, nonce: str, report: dict[str, Any]
+) -> dict[str, Any]:
+    transcript = run_cmd_json(
+        ["aci", "verify", base_url, "--nonce", nonce, "--json"], timeout=240
+    )
+    verdict = transcript.get("verdict") or {}
+    if verdict.get("verified") is not True or verdict.get(
+        "workload_keyset_digest"
+    ) != report.get("workload_keyset_digest"):
+        raise RuntimeError(
+            "live ACI verification did not match the saved report keyset"
+        )
+    return transcript
 
 
 def request_json(

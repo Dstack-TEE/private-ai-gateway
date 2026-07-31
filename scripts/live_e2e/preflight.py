@@ -43,7 +43,7 @@ def preflight(
     if missing:
         raise RuntimeError(f"missing required env vars: {', '.join(sorted(set(missing)))}")
 
-    for binary in ("cargo", "uv"):
+    for binary in ("cargo", "uv", "aci"):
         if shutil.which(binary) is None:
             raise RuntimeError(f"required binary not found on PATH: {binary}")
 

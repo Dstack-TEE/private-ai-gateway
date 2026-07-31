@@ -281,6 +281,18 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.bearer_token.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids bearer_token; the measured proxy reads its credential from the shared Compose secret",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.path.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids path; the measured proxy backend pins encrypted handler paths",
+                upstream.name
+            )));
+        }
         // The native Anthropic API only serves /v1/messages; without an
         // explicit path the router falls back to /v1/chat/completions and
         // every request 404s with no config-time signal.

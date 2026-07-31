@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from scripts.live_e2e.common import audit_aci_artifacts, verify_aci_report
+
+
+REQUIRED = (
+    "receipt-1",
+    "receipt-2",
+    "receipt-3",
+    "receipt-4",
+    "upstream-1",
+    "upstream-2",
+)
+
+
+class AuditTests(unittest.TestCase):
+    def audit(self, transcript: dict, exit_code: int = 1) -> dict:
+        result = subprocess.CompletedProcess(
+            ["aci", "audit"], exit_code, json.dumps(transcript).encode(), b""
+        )
+        with patch("scripts.live_e2e.common.run_cmd", return_value=result):
+            return audit_aci_artifacts(
+                report=Path("report.json"),
+                receipt=Path("receipt.json"),
+                session=Path("session.json"),
+                nonce="a" * 64,
+                request_body=Path("request.json"),
+                response_body=Path("response.json"),
+            )
+
+    def test_offline_partial_requires_all_receipt_and_session_checks(self) -> None:
+        transcript = {
+            "verdict": {"verified": False, "failed": 0},
+            "checks": [{"id": "id-1", "status": "skip"}]
+            + [{"id": check, "status": "pass"} for check in REQUIRED],
+        }
+        self.assertEqual(self.audit(transcript), transcript)
+        transcript["checks"][-1]["status"] = "skip"
+        with self.assertRaisesRegex(RuntimeError, "did not pass"):
+            self.audit(transcript)
+
+    def test_online_verification_must_match_saved_keyset(self) -> None:
+        transcript = {
+            "verdict": {"verified": True, "workload_keyset_digest": "sha256:abc"}
+        }
+        with patch("scripts.live_e2e.common.run_cmd_json", return_value=transcript):
+            self.assertEqual(
+                verify_aci_report(
+                    "https://gateway.example",
+                    "a" * 64,
+                    {"workload_keyset_digest": "sha256:abc"},
+                ),
+                transcript,
+            )
+            with self.assertRaisesRegex(RuntimeError, "did not match"):
+                verify_aci_report(
+                    "https://gateway.example",
+                    "a" * 64,
+                    {"workload_keyset_digest": "sha256:other"},
+                )

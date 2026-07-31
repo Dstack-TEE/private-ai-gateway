@@ -216,6 +216,8 @@ Reference updates must be reviewed. The script may print a proposed diff with
 Checks:
 
 - Required API keys are present but never printed.
+- The installed [`aci` CLI](private-ai-proxy-install.md) is available for live
+  report verification and offline receipt/session auditing.
 - The vendored `scripts/confidential_verifier` package exists, or
   `PRIVATE_AI_VERIFIER_DIR` points at an explicit verifier override.
 - `DSTACK_VERIFIER_URL` responds for NEAR AI and ACI service tests.
