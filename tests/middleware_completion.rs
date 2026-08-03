@@ -1,7 +1,4 @@
-//! In-process completion orchestration tests: the consult-driven paths (denial,
-//! control-unavailable fail-closed, rate-limit, empty candidates) which return
-//! before any upstream forward, plus the success path (consult allow → candidate
-//! transform → forward → receipt finalization) against a mock upstream.
+//! In-process consult, forwarding, transform, metering, and finalization tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -71,10 +68,7 @@ impl UpstreamBackend for MockUpstream {
     }
 }
 
-// A mock upstream that classifies a route as attested by its `tee-` prefix and
-// records every route it was actually asked to forward to. Classification
-// happens in `prepare`, as the real config-driven router does it, so a route
-// the ACI constraint rejects can be told apart from one never reached.
+// Classifies `tee-` routes and records actual forwards.
 struct TeeAwareUpstream {
     forwarded: Arc<Mutex<Vec<String>>>,
     status: u16,
@@ -119,9 +113,7 @@ impl UpstreamBackend for TeeAwareUpstream {
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.forward_prepared(req).await
     }
-    // Streaming resolves through `forward_stream_prepared`, not
-    // `forward_prepared`, so it needs its own recording hook — otherwise a
-    // streaming test cannot tell "never forwarded" from "not observed".
+    // Streaming needs its own forwarding record.
     async fn forward_stream_prepared(
         &self,
         req: PreparedUpstreamRequest,
@@ -422,6 +414,17 @@ async fn control_unavailable_fails_closed() {
     assert_eq!(status, 503);
     assert_eq!(body["error"]["type"], json!("service_unavailable"));
     assert_eq!(body["error"]["message"], json!("control plane unavailable"));
+}
+
+#[tokio::test]
+async fn reasoning_conflict_precedes_control() {
+    let mw = middleware("http://127.0.0.1:1".to_string());
+    let service = build_service();
+    let mut input = chat_input();
+    input.params["reasoning"] = json!({"effort":"high"});
+    input.params["reasoning_effort"] = json!("low");
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]

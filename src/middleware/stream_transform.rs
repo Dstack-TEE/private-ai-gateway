@@ -1,16 +1,9 @@
-//! Stateful SSE response transforms: convert an upstream provider's streaming
-//! events into the downstream client surface, event by event, threading mutable
-//! state across events (a per-stream transform state).
-//!
-//! Three conversions are supported; same-format streaming is native passthrough
-//! and never reaches this module. Cost injection, TTFT, and outcome are a
-//! separate metering pass downstream (`sse`).
+//! Stateful, event-by-event SSE provider transforms. Metering is downstream.
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use futures_util::Stream;
@@ -20,6 +13,9 @@ use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::Endpoint;
+use super::response_transform::{
+    self, i64_field, map_finish_reason, now_millis, now_secs, transform_finish_reason,
+};
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
 
@@ -31,29 +27,28 @@ pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
     AnthropicCompleteToOpenai,
+    ExcludeReasoning,
 }
 
 impl StreamTransform {
     fn provider(self) -> &'static str {
         match self {
             StreamTransform::OpenaiToAnthropicMessages => "openai",
+            StreamTransform::ExcludeReasoning => "openai",
             _ => "anthropic",
         }
     }
 
-    // Parse a raw event text (lines joined by `\n`) and transform it.
-    // `Err(())` means the provider sent an unparseable event; on the Anthropic
-    // paths this ends the stream and classifies it failed rather than skipping.
-    // Each transform dispatches known control events by name first, then skips
-    // any event whose payload is empty (per the SSE spec an empty data buffer
-    // aborts dispatch — covers `: PROCESSING` heartbeats, ignored fields, and
-    // name-only or empty-`data:` keep-alives).
+    // Transform one event; malformed provider data ends the stream.
     fn apply(
         self,
         event: &str,
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Option<String>, ()> {
+        if matches!(self, StreamTransform::ExcludeReasoning) {
+            return exclude_reasoning_event(event).map(Some);
+        }
         let event = parse_event(event);
         match self {
             StreamTransform::AnthropicToOpenaiChat => {
@@ -68,6 +63,7 @@ impl StreamTransform {
                 ))
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
+            StreamTransform::ExcludeReasoning => unreachable!(),
         }
     }
 }
@@ -88,8 +84,7 @@ pub fn select_stream_transform(
     }
 }
 
-/// Mutable per-stream state threaded across events. Fields are split by
-/// direction; a given stream only touches the ones for its transform.
+/// Per-stream state, grouped by transform direction.
 #[derive(Default)]
 struct StreamState {
     // Anthropic -> OpenAI chat.
@@ -107,36 +102,13 @@ struct StreamState {
     finish_reason: Option<String>,
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-/// One SSE event reduced to the fields the transforms consume: the last
-/// `event:` name and the `data:` lines joined with `\n` (per the SSE spec).
+/// Last event name plus data lines joined per the SSE spec.
 struct ParsedEvent {
     name: Option<String>,
     data: Option<String>,
 }
 
-// Parse an event's text per the SSE field rules: `:`-prefixed lines are
-// comments, a field's value starts after the colon with at most one leading
-// space stripped, and every field other than `event:`/`data:` (`id:`,
-// `retry:`, vendor extensions) is ignored per the spec. Lines with no field
-// shape at all — bare `[DONE]`, bare JSON (colons inside JSON do not make it a
-// field: a `{`/`[`/`"` opener marks a payload line), plain garbage — are
-// collected and become the data when no `data:` field is present, so a
-// prefix-less payload survives even when a comment or `event:` line shares
-// the event block, and garbage still reaches the transforms' fail-fast parse.
+// Parse SSE fields, accepting bare payloads only when no data field is present.
 fn parse_event(event: &str) -> ParsedEvent {
     let mut name = None;
     let mut data: Option<String> = None;
@@ -146,8 +118,7 @@ fn parse_event(event: &str) -> ParsedEvent {
         if line.is_empty() || line.starts_with(':') {
             continue;
         }
-        // Judge the JSON opener on the trimmed line (upstreams may indent a
-        // bare payload) but keep the raw line as the payload.
+        // Detect indented bare JSON while preserving its bytes.
         let json_like = matches!(
             line.trim_start().as_bytes().first(),
             Some(b'{' | b'[' | b'"')
@@ -158,8 +129,7 @@ fn parse_event(event: &str) -> ParsedEvent {
                 let value = &line[idx + 1..];
                 let value = value.strip_prefix(' ').unwrap_or(value);
                 match &line[..idx] {
-                    // The name is trimmed: exact-match dispatch must tolerate
-                    // trailing whitespace an upstream leaves after the value.
+                    // Tolerate trailing whitespace in event names.
                     "event" => name = Some(value.trim().to_string()),
                     "data" => {
                         let buf = data.get_or_insert_with(String::new);
@@ -186,34 +156,6 @@ fn parse_event(event: &str) -> ParsedEvent {
     ParsedEvent { name, data }
 }
 
-fn i64_field(value: &Value, key: &str) -> i64 {
-    value.get(key).and_then(Value::as_i64).unwrap_or(0)
-}
-
-fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
-    let Some(reason) = stop_reason else {
-        return "stop".to_string();
-    };
-    if !strict {
-        return reason.to_string();
-    }
-    match reason {
-        "stop_sequence" | "end_turn" | "pause_turn" => "stop",
-        "tool_use" => "tool_calls",
-        "max_tokens" => "length",
-        _ => "stop",
-    }
-    .to_string()
-}
-
-fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
-    match finish_reason {
-        Some("length") => "max_tokens",
-        Some("tool_calls") | Some("function_call") => "tool_use",
-        _ => "end_turn",
-    }
-}
-
 // ── Anthropic Messages SSE → OpenAI chat.completion.chunk ────────────────────
 
 fn anthropic_chat_stream(
@@ -228,8 +170,7 @@ fn anthropic_chat_stream(
         _ => {}
     }
     let payload = event.data.as_deref().unwrap_or("").trim();
-    // No payload → no dispatch (name-only keep-alives included); a non-empty
-    // malformed payload must still fail the stream rather than be skipped.
+    // Empty payloads do not dispatch; malformed ones fail.
     if payload.is_empty() {
         return Ok(None);
     }
@@ -356,8 +297,7 @@ fn anthropic_chat_chunk(
             .and_then(Value::as_str)
             == Some("tool_use");
     if is_tool_block_start {
-        // Index logic: a falsy (None/0) index yields 0, otherwise increments.
-        // (A known quirk for >1 tool; kept for wire compatibility.)
+        // Preserve the source transform's tool-index wire behavior.
         state.tool_index = Some(match state.tool_index {
             Some(n) if n != 0 => n + 1,
             _ => 0,
@@ -665,14 +605,7 @@ fn json_str(value: &Value) -> String {
 
 // ── Stream adapter ───────────────────────────────────────────────────────────
 
-/// Incremental SSE tokenizer: splits raw upstream bytes into events at blank
-/// lines. A line terminator is LF, CRLF, or bare CR — a CR-LF pair counts as a
-/// single terminator, tracked across chunk boundaries via `pending_cr`, so a
-/// chunk ending in `\r` never mis-splits. The pending event is one contiguous
-/// byte buffer (lines joined by `\n`), so the cap on its length — the same cap
-/// as the meter's line buffer, and covering the open line as a prefix of it —
-/// bounds actual memory, not just a logical byte count. Exceeding it is
-/// reported as an error (the caller ends the stream as failed).
+/// Bounded incremental SSE tokenizer supporting LF, CRLF, and bare CR.
 #[derive(Default)]
 struct SseEventReader {
     event_buf: Vec<u8>,
@@ -682,8 +615,7 @@ struct SseEventReader {
 }
 
 impl SseEventReader {
-    // Feed one upstream chunk; events completed by it are appended to `events`.
-    // `Err(())` means the pending event (hence any single line) ran past the cap.
+    // Append events completed by this chunk; reject cap overflow.
     fn push_chunk(&mut self, chunk: &[u8], events: &mut Vec<String>) -> Result<(), ()> {
         for &byte in chunk {
             if std::mem::take(&mut self.pending_cr) && byte == b'\n' {
@@ -705,8 +637,7 @@ impl SseEventReader {
 
     fn end_line(&mut self, events: &mut Vec<String>) {
         if self.event_buf.len() == self.line_start {
-            // Blank line: dispatch the pending event, if any. Consecutive blank
-            // lines are empty events and dispatch nothing.
+            // Blank lines dispatch nonempty events.
             if !self.event_buf.is_empty() {
                 events.push(event_string(std::mem::take(&mut self.event_buf)));
             }
@@ -717,18 +648,81 @@ impl SseEventReader {
         self.line_start = self.event_buf.len();
     }
 
-    // Flush the residual at a clean end of stream: an event without a trailing
-    // blank line is still dispatched. The cap already held during accumulation.
+    // Salvage a residual event at clean EOF.
     fn finish(&mut self) -> Option<String> {
         self.line_start = 0;
         (!self.event_buf.is_empty()).then(|| event_string(std::mem::take(&mut self.event_buf)))
     }
 }
 
-// Reuse the event buffer's allocation when it is valid UTF-8 (the
-// overwhelmingly common case); fall back to a lossy copy only on invalid bytes.
+// Reuse valid UTF-8 buffers; repair invalid input lossily.
 fn event_string(buf: Vec<u8>) -> String {
     String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn framed_event(event: &str) -> String {
+    let mut output = event.to_string();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn replace_data_fields(event: &str, replacement: &str) -> String {
+    let has_data_field = event.lines().any(|line| {
+        line.trim_end_matches('\r')
+            .split_once(':')
+            .is_some_and(|(field, _)| field == "data")
+    });
+    let mut output = String::new();
+    let mut replaced = false;
+    for line in event.lines() {
+        let line = line.trim_end_matches('\r');
+        let is_data = line
+            .split_once(':')
+            .is_some_and(|(field, _)| field == "data");
+        let trimmed = line.trim_start();
+        let json_like = matches!(trimmed.as_bytes().first(), Some(b'{' | b'[' | b'"'));
+        let is_bare_payload = !has_data_field
+            && !line.is_empty()
+            && !line.starts_with(':')
+            && (json_like || !line.contains(':'));
+        if is_data || is_bare_payload {
+            if !replaced {
+                if has_data_field {
+                    output.push_str("data: ");
+                }
+                output.push_str(replacement);
+                output.push('\n');
+                replaced = true;
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+    output
+}
+
+fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
+    let parsed = parse_event(event);
+    let Some(payload) = parsed.data.as_deref() else {
+        return Ok(framed_event(event));
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(framed_event(event));
+    }
+    let mut body: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let original = body.clone();
+    response_transform::exclude_reasoning(&mut body);
+    if body == original {
+        Ok(framed_event(event))
+    } else {
+        Ok(replace_data_fields(event, &json_str(&body)))
+    }
 }
 
 /// Splits the provider byte stream into SSE events and applies a stateful
@@ -741,10 +735,7 @@ pub struct SseTransformStream {
     reader: SseEventReader,
     queue: VecDeque<Bytes>,
     inner_done: bool,
-    // Why the stream ended, when it ended badly. Held until the queue drains so
-    // events completed before the failure still reach the client, then yielded
-    // as the final item. Ending on a plain `None` would instead read downstream
-    // as a clean end-of-stream.
+    // Delay an error until already-completed events drain.
     pending_error: Option<ServiceError>,
 }
 
@@ -763,8 +754,7 @@ impl SseTransformStream {
         }
     }
 
-    // A transform-side failure is still an upstream failure: the provider sent
-    // bytes this surface cannot represent.
+    // Transform failures are malformed upstream data.
     fn fail(&mut self, reason: &'static str) {
         self.inner_done = true;
         self.pending_error.get_or_insert_with(|| {
@@ -772,9 +762,7 @@ impl SseTransformStream {
         });
     }
 
-    // Returns false if the transform rejected the event (unparseable provider
-    // data): the stream must end there, with no terminal marker emitted, so the
-    // meter classifies it as failed.
+    // False ends without a terminal marker so metering records failure.
     fn emit(&mut self, event: &str) -> bool {
         match self
             .transform
@@ -806,8 +794,7 @@ impl Stream for SseTransformStream {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     let mut events = Vec::new();
-                    // A cap overflow ends the stream, but events completed
-                    // earlier in the same chunk are still emitted first.
+                    // Drain earlier events before reporting cap overflow.
                     let overflowed = this.reader.push_chunk(&bytes, &mut events).is_err();
                     for event in &events {
                         if !this.emit(event) {
@@ -822,14 +809,7 @@ impl Stream for SseTransformStream {
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
-                    // Flush a residual event once (no trailing blank line).
-                    // Deliberate cross-format framing normalization: a final
-                    // event whose lines are complete but which the upstream
-                    // never closed with a blank line is salvaged and re-framed,
-                    // rather than dropped as WHATWG would at EOF. Delivering a
-                    // valid last event beats losing it; a truncated (unparseable)
-                    // one still fails in `emit`. A byte passthrough cannot do
-                    // this, so the two paths differ for this one malformed shape.
+                    // Salvage and reframe a complete residual event once.
                     if let Some(event) = this.reader.finish() {
                         if !this.emit(&event) {
                             this.fail("provider sent an event this surface cannot represent");
@@ -837,10 +817,7 @@ impl Stream for SseTransformStream {
                     }
                     // loop to drain any queued output, then end.
                 }
-                // On an upstream error, end without flushing the (truncated)
-                // residual, so a partial event can't synthesize a spurious
-                // terminal marker. The error itself is propagated: swallowing
-                // it would read downstream as a clean end-of-stream.
+                // Propagate errors without flushing a truncated residual.
                 Poll::Ready(Some(Err(err))) => {
                     this.inner_done = true;
                     this.pending_error.get_or_insert(err);
@@ -858,8 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_anthropic_event_ends_stream_without_terminal() {
-        // A bad provider event must end the stream before [DONE], so the meter
-        // sees no terminal marker and classifies the stream as failed.
+        // Malformed events end before [DONE].
         let events: Vec<Result<Bytes, ServiceError>> = vec![
             Ok(Bytes::from(
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"c\",\"usage\":{\"input_tokens\":1}}}\n\n",
@@ -888,11 +864,7 @@ mod tests {
         );
     }
 
-    // A CRLF-framed upstream must be split per event, not buffered whole: with a
-    // fixed `\n\n` delimiter the events would only surface as one unparseable
-    // residual at end of stream (no [DONE], stream classified failed). The
-    // doubled blank line after the first event is an empty SSE event; it must be
-    // skipped, not surfaced as a lone-`\r` pseudo-event that fails the stream.
+    // CRLF events split independently; extra blank events are ignored.
     #[tokio::test]
     async fn crlf_framed_events_are_split_and_transformed() {
         let events: Vec<Result<Bytes, ServiceError>> = vec![
@@ -920,10 +892,7 @@ mod tests {
         );
     }
 
-    // Comment-only events (proxy heartbeats) and space-less `data:` lines are
-    // valid SSE; neither may end the stream. Both previously hit the
-    // malformed-event path on the Anthropic transforms (no terminal marker, so
-    // a healthy stream was metered as failed).
+    // Comments and space-less data fields are valid SSE.
     #[tokio::test]
     async fn comment_and_spaceless_data_events_are_tolerated() {
         let events: Vec<Result<Bytes, ServiceError>> = vec![
@@ -949,10 +918,7 @@ mod tests {
         );
     }
 
-    // Bare-CR line terminators are valid SSE (a `\r\r` blank line ends an
-    // event); a CR-framed stream must split per event, not run into the cap.
-    // The first chunk ends in `\r` to exercise the cross-chunk CR/CRLF
-    // ambiguity: the reader must not mis-split when the next byte arrives.
+    // Exercise bare CR and cross-chunk CR/CRLF ambiguity.
     #[tokio::test]
     async fn cr_framed_events_are_split_and_transformed() {
         let events: Vec<Result<Bytes, ServiceError>> = vec![
@@ -977,9 +943,7 @@ mod tests {
         );
     }
 
-    // A comment line attached to the head of an event (a heartbeat injected
-    // without its own blank line) and a space-less `event:` field are both
-    // valid SSE; neither may derail the transform.
+    // Attached comments and space-less event fields remain valid.
     #[test]
     fn comment_lines_and_spaceless_event_field_are_parsed() {
         let mut state = StreamState::default();
@@ -994,11 +958,7 @@ mod tests {
         assert!(out.contains("[DONE]"), "{out}");
     }
 
-    // Regressions of the field parser against the old prefix-stripping code:
-    // a bare (data:-less) payload must survive an `event:` line or an injected
-    // comment in the same event block; `id:`/`retry:`-only and empty-data
-    // events must dispatch nothing instead of failing the stream; a trailing
-    // space after an event name must not break exact-match dispatch.
+    // Cover bare payloads, ignored fields, empty data, and padded names.
     #[test]
     fn bare_payloads_and_ignorable_events_are_handled() {
         let mut state = StreamState::default();
@@ -1064,9 +1024,7 @@ mod tests {
         assert!(out.contains("message_stop"), "{out}");
     }
 
-    // A body that never yields an event boundary must not accumulate without
-    // bound: past the cap the stream ends with no terminal marker (metered
-    // failed), mirroring the meter's own line cap.
+    // Unterminated input is bounded and fails without a terminal marker.
     #[tokio::test]
     async fn boundless_body_is_capped() {
         let events: Vec<Result<Bytes, ServiceError>> = vec![
@@ -1080,9 +1038,7 @@ mod tests {
         assert!(collected[0].is_err(), "and not a clean EOF");
     }
 
-    // Replay a fixture's input events through the transform (fixed fallback id),
-    // collecting emitted data objects with `created` stripped (and a `__done`
-    // sentinel for `[DONE]`), to compare against the Node-generated output.
+    // Normalize replayed fixture output for comparison with Node goldens.
     fn replay_fixture(transform: StreamTransform, events: &[Value]) -> Vec<Value> {
         let mut state = StreamState::default();
         let mut out = Vec::new();
@@ -1173,6 +1129,21 @@ mod tests {
         let error = out.iter().find(|e| e["type"] == json!("error")).unwrap();
         assert_eq!(error["error"]["type"], json!("overloaded_error"));
         assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
+    }
+
+    #[test]
+    fn reasoning_exclusion_preserves_non_data_sse_fields() {
+        let output = exclude_reasoning_event(
+            "event: chunk\nid: 7\nretry: 100\n: keep\n{\"choices\":[{\"delta\":{\"content\":\"answer\",\"reasoning\":\"hidden\"}}],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
+        )
+        .unwrap();
+        assert!(output.contains("event: chunk\n"), "{output}");
+        assert!(output.contains("id: 7\n"), "{output}");
+        assert!(output.contains("retry: 100\n"), "{output}");
+        assert!(output.contains(": keep\n"), "{output}");
+        assert!(output.contains("\"content\":\"answer\""), "{output}");
+        assert!(output.contains("\"reasoning_tokens\":3"), "{output}");
+        assert!(!output.contains("hidden"), "{output}");
     }
 
     #[test]

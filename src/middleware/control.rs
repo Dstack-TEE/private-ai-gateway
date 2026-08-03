@@ -1,13 +1,4 @@
-//! Control-plane HTTP client.
-//!
-//! Reaches the control plane at `control_url` with an optional bearer token. The
-//! pre-request consult gates authorization and fails closed: any failure blocks
-//! the request rather than letting it through unauthorized. The post-request
-//! report is best-effort: it never fails the already-served response.
-//! Connections are kept alive and reused (default pooling); every request here
-//! retries once on a connection-level failure, so a keep-alive connection the
-//! control plane closed does not surface as a spurious denial or a dropped
-//! usage report.
+//! Control client: pre-consult fails closed; idempotent calls retry stale pools.
 
 use std::time::Duration;
 
@@ -16,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::config::MiddlewareConfig;
-use super::types::{PostReport, PreConsult};
+use super::types::{PostReport, PreConsult, ReasoningConfig};
 
 const DEFAULT_CONTROL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_CONTROL_POST_TIMEOUT_MS: u64 = 10_000;
@@ -61,11 +52,7 @@ impl ControlClient {
         if control_url.is_empty() {
             return Err("middleware.control_url must not be empty".to_string());
         }
-        // Keep control-plane connections alive (reqwest's default pooling) so the
-        // hot consult path avoids a fresh TCP + TLS handshake per request. A
-        // pooled connection the control plane closed can surface as a broken
-        // send; the idempotent consult/catalog requests retry once on a fresh
-        // connection (see `send_idempotent`) rather than failing the request.
+        // Reuse pooled connections; `send_idempotent` handles stale ones.
         let client = reqwest::Client::builder()
             .build()
             .map_err(|err| format!("failed to build control HTTP client: {err}"))?;
@@ -101,17 +88,7 @@ impl ControlClient {
         }
     }
 
-    /// Send an idempotent request, rebuilding it per attempt. Retries once on a
-    /// connection-level failure: a keep-alive connection the control plane
-    /// closed surfaces as a broken send that a fresh connection succeeds on. It
-    /// does not retry a timeout (the control plane is genuinely slow; a retry
-    /// would only double the wait) or a connect failure (the control plane is
-    /// unreachable; a retry cannot help).
-    ///
-    /// Every request routed through here must be safe to repeat. consult_pre and
-    /// the catalog GETs are decision queries with no persisted side effect.
-    /// consult_post carries a `request_id` so that a control plane can recognize
-    /// a replay; the contract requires it to ingest usage idempotently.
+    /// Retry an idempotent request once after a pooled-connection failure.
     async fn send_idempotent(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
@@ -129,14 +106,13 @@ impl ControlClient {
         }
     }
 
-    /// Pre-request consult: `{ apiKeyHash?, model?, provider? }` -> decision.
-    /// Fails closed — any non-200, invalid JSON, timeout, or transport error
-    /// returns a 503 denial.
+    /// Fail-closed `{ apiKeyHash?, model?, provider?, reasoning? }` decision.
     pub async fn consult_pre(
         &self,
         model: Option<&str>,
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
+        reasoning: Option<&ReasoningConfig>,
         tee_only: bool,
     ) -> PreConsult {
         #[derive(Serialize)]
@@ -146,12 +122,13 @@ impl ControlClient {
             api_key_hash: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             model: Option<&'a str>,
-            // Forwarded verbatim so the control plane validates it (a malformed
-            // block must not silently drop the caller's routing restrictions).
+            // Control validates this verbatim routing block.
             #[serde(skip_serializing_if = "Option::is_none")]
             provider: Option<&'a Value>,
-            // TEE-only host: the control plane 404s a non-TEE model. Only sent
-            // when set so the metadata-minimal payload is unchanged off these hosts.
+            // Response visibility stays local to the gateway.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reasoning: Option<&'a ReasoningConfig>,
+            // Sent only when a TEE-only host requires control enforcement.
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             tee: bool,
         }
@@ -160,6 +137,7 @@ impl ControlClient {
             api_key_hash,
             model,
             provider,
+            reasoning,
             tee: tee_only,
         };
         let build = || {
@@ -199,13 +177,7 @@ impl ControlClient {
         }
     }
 
-    /// Post-request usage report. Best-effort: a control-plane hiccup must never
-    /// fail the already-served response. Retried once on a broken pooled
-    /// connection, like the consult — otherwise a keep-alive connection the peer
-    /// has closed silently drops the report. A broken send cannot tell us whether
-    /// the report was already processed, so the replay relies on the contract's
-    /// idempotent-ingest requirement: the report carries a `request_id` for
-    /// exactly that purpose.
+    /// Best-effort idempotent usage report.
     pub async fn consult_post(&self, report: &PostReport) {
         let build = || {
             self.authorize(self.client.post(self.url("/consult/post")))
@@ -217,9 +189,7 @@ impl ControlClient {
         }
     }
 
-    /// Fetch a model catalog from the control plane and relay it verbatim.
-    /// Bounded by the consult timeout so a hung control plane cannot stall a
-    /// catalog request.
+    /// Relay a timeout-bounded model catalog.
     pub async fn catalog_get(&self, path: &str) -> Result<CatalogResponse, ControlError> {
         let build = || {
             self.authorize(self.client.get(self.url(path)))
@@ -295,10 +265,9 @@ mod tests {
 
     #[tokio::test]
     async fn consult_pre_fails_closed_on_transport_error() {
-        // Port 1 is unroutable in practice; the request fails fast within the
-        // configured timeout and must deny.
+        // An unroutable control must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client.consult_pre(Some("m"), None, None, false).await;
+        let consult = client.consult_pre(Some("m"), None, None, None, false).await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(

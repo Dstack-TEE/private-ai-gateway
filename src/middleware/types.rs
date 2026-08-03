@@ -1,9 +1,4 @@
-//! Control-plane consult types.
-//!
-//! The control plane speaks a camelCase wire shape; these structs mirror it so a
-//! pre-consult response deserializes and a post-consult report serializes without
-//! hand-built JSON. Pricing is carried as an opaque value, interpreted by the
-//! cost computation.
+//! Typed camelCase control contracts; pricing stays opaque until metering.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,13 +14,51 @@ pub enum ProviderFormat {
     Anthropic,
 }
 
-/// Serving engine of a self-hosted OpenAI-compatible upstream. Selects
-/// engine-specific request shaping; absent for managed third-party APIs.
+/// Self-hosted OpenAI-compatible engine; absent for managed APIs.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Sglang,
     Vllm,
+}
+
+/// Canonical public/control reasoning effort.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Max,
+    Xhigh,
+    High,
+    Medium,
+    Low,
+    Minimal,
+    None,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Max => "max",
+            Self::Xhigh => "xhigh",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::Minimal => "minimal",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Route-relevant reasoning; response visibility remains gateway-local.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Billing mode, carried from the pre-consult into the post-consult report.
@@ -45,10 +78,12 @@ pub struct RouteCandidate {
     pub route_id: String,
     /// API format that shapes the request and parses the response.
     pub format: ProviderFormat,
-    /// Serving engine when this upstream is a self-hosted OpenAI-compatible
-    /// server. Absent for managed APIs.
+    /// Self-hosted OpenAI-compatible engine; absent for managed APIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// Request-specific setting selected after capability filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_reasoning: Option<ReasoningConfig>,
 }
 
 /// Provider routing block, forwarded verbatim to the control plane.
@@ -70,8 +105,7 @@ pub struct RateLimit {
     pub reset_at: i64,
 }
 
-/// Pre-request consult response. On `allow: false`, `status` and `message` carry
-/// the client-facing denial; otherwise `candidates` and `pricing` drive routing.
+/// Pre-consult denial or candidate/pricing decision.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreConsult {
@@ -96,10 +130,7 @@ pub struct PreConsult {
     pub rate_limit: Option<RateLimit>,
 }
 
-/// Which component a gateway-synthesized failure (no real upstream attempt) is
-/// attributed to. Drives the control plane's error-source column: `control`
-/// (control-plane consult), `upstream` (provider forwarding/verification or a
-/// malformed upstream success body), or `gateway` (the gateway's own logic).
+/// Attribution for a gateway-synthesized failure.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorSource {
@@ -108,11 +139,7 @@ pub enum ErrorSource {
     Gateway,
 }
 
-/// Post-request usage report. Fire-and-forget; drives billing and request logs.
-///
-/// `selected_route_id`, `usage`, and `pricing` are always present (serialized as
-/// `null` when absent) to match the control plane's expected shape; the rest are
-/// omitted when unset.
+/// Fire-and-forget billing/log report.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostReport {
@@ -126,14 +153,7 @@ pub struct PostReport {
     pub is_streaming: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_index: Option<u32>,
-    /// `<provider>:<model>` from the backend's selected route, or `null`.
-    ///
-    /// Wire contract for consumers: a request may emit multiple per-attempt
-    /// reports — aggregate by `request_id`. A report with
-    /// `selected_route_id == null` and a non-empty `error_source` is a
-    /// request-level summary (e.g. the aggregate error after every candidate
-    /// failed), not an attempt; attempt counting must only consider reports
-    /// that carry a route.
+    /// Selected route; null with `error_source` denotes a request summary.
     pub selected_route_id: Option<String>,
     pub request_model: String,
     /// Raw upstream usage before any cost injection, or `null`.

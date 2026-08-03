@@ -1,10 +1,4 @@
-//! Buffered response transforms: convert an upstream provider's 2xx response
-//! body into the downstream client surface. Non-2xx responses are normalized by
-//! `errors` before reaching here, so these assume a success body. Streaming (SSE)
-//! transforms live in `stream_transform`.
-//!
-//! Cost injection is a separate metering pass; these transforms only normalize
-//! the body shape (including the canonical `usage`).
+//! Buffered 2xx transforms; errors, SSE, and metering are separate.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,8 +9,7 @@ use super::types::ProviderFormat;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
-/// Transform a 2xx upstream body for `format`/`endpoint` into the client surface.
-/// Returns the body unchanged when no transform applies (native passthrough).
+/// Transform a 2xx body, or return it unchanged for native passthrough.
 pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Value) -> Value {
     use Endpoint::*;
     use ProviderFormat::*;
@@ -24,20 +17,37 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Valu
         (Anthropic, ChatComplete) => anthropic_chat_to_openai(body, STRICT_OPENAI_COMPLIANCE),
         (Anthropic, Complete) => anthropic_complete_to_openai(body),
         (Openai, Messages) => openai_to_anthropic_messages(body),
-        // Native passthrough: openai chat/complete/embed, anthropic messages,
-        // responses (createModelResponse).
+        // Native passthrough.
         _ => body,
     }
 }
 
-fn now_secs() -> u64 {
+/// Remove chat reasoning traces without touching usage.
+pub fn exclude_reasoning(body: &mut Value) {
+    for choice in body
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        for container in ["message", "delta"] {
+            if let Some(object) = choice.get_mut(container).and_then(Value::as_object_mut) {
+                for key in ["reasoning", "reasoning_content", "reasoning_details"] {
+                    object.remove(key);
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn now_millis() -> u128 {
+pub(super) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -45,7 +55,7 @@ fn now_millis() -> u128 {
 }
 
 // Read a token count, accepting integer- or float-encoded numbers.
-fn i64_field(value: &Value, key: &str) -> i64 {
+pub(super) fn i64_field(value: &Value, key: &str) -> i64 {
     value
         .get(key)
         .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
@@ -53,7 +63,7 @@ fn i64_field(value: &Value, key: &str) -> i64 {
 }
 
 // Anthropic stop_reason -> OpenAI finish_reason (strict compliance maps it).
-fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
+pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
     let Some(reason) = stop_reason else {
         return "stop".to_string();
     };
@@ -70,7 +80,7 @@ fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
 }
 
 // OpenAI finish_reason -> Anthropic stop_reason (downstream surface).
-fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
+pub(super) fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
         Some("length") => "max_tokens",
         Some("tool_calls") | Some("function_call") => "tool_use",
@@ -121,8 +131,7 @@ fn anthropic_chat_to_openai(response: Value, strict: bool) -> Value {
         "completion_tokens": output,
         "total_tokens": input + output + cache_creation + cache_read,
     });
-    // Echo the cache buckets only when present in the source: spread the raw
-    // fields and drop undefined ones.
+    // Echo only source cache buckets.
     if cache_creation != 0 || cache_read != 0 {
         let map = usage.as_object_mut().unwrap();
         if let Some(value) = usage_src.get("cache_read_input_tokens") {
@@ -140,8 +149,7 @@ fn anthropic_chat_to_openai(response: Value, strict: bool) -> Value {
             .unwrap()
             .insert("tool_calls".into(), Value::Array(tool_calls));
     }
-    // When not strict, the raw Anthropic blocks (minus tool_use) are attached as
-    // a content_blocks extension. Strict mode (the default) omits them.
+    // Non-strict mode attaches raw non-tool blocks.
     if !strict {
         let blocks: Vec<Value> = content_items
             .iter()
@@ -269,5 +277,17 @@ mod tests {
         let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body);
         assert_eq!(out["content"], json!([{ "type": "text", "text": "" }]));
         assert_eq!(out["stop_reason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn reasoning_exclusion_preserves_usage() {
+        let mut body = json!({"choices":[{"message":{"content":"ok","reasoning":"secret"}}],
+            "usage":{"completion_tokens_details":{"reasoning_tokens":3}}});
+        exclude_reasoning(&mut body);
+        assert!(body["choices"][0]["message"].get("reasoning").is_none());
+        assert_eq!(
+            body["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            3
+        );
     }
 }
