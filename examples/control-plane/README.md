@@ -8,10 +8,12 @@ endpoints below).
 ## What it does
 
 - `GET /models` — lists the models from the config.
-- `POST /consult/pre` — `{apiKeyHash?, model}` → allow/deny + pricing + ordered
-  route candidates, all from the config. Denies unknown models; if `keys` is
-  non-empty it requires the request's `apiKeyHash` to be in the list (empty list
-  = anonymous allowed).
+- `POST /consult/pre` — `{apiKeyHash?, model, reasoning?}` → allow/deny + pricing
+  + ordered route candidates, all from the config. Denies unknown models; if
+  `keys` is non-empty it requires the request's `apiKeyHash` to be in the list
+  (empty list = anonymous allowed). Reasoning-aware routing is optional and this
+  minimal example does not implement it. A candidate can return
+  `effectiveReasoning` to override the normalized request.
 - `POST /consult/post` — accepts the usage report and drops it (no billing).
 
 No database; configuration only.
@@ -39,7 +41,8 @@ Then point the gateway at it by setting `middleware.control_url` to
 ## Remote mode
 
 The control plane can run on a separate host that the gateway reaches over the
-network. The consult payloads carry only `{apiKeyHash, model}` and usage counts.
+network. The consult payloads carry only request metadata, including
+`apiKeyHash`, `model`, optional normalized `reasoning`, and usage counts.
 
 - **Authentication** — set `PRIVATE_AI_GATEWAY_CONTROL_TOKEN` on the control. When
   set, it enforces `Authorization: Bearer <token>` on `/consult/*` and `/models`;

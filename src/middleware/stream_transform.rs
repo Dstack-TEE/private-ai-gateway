@@ -2,15 +2,14 @@
 //! events into the downstream client surface, event by event, threading mutable
 //! state across events (a per-stream transform state).
 //!
-//! Three conversions are supported; same-format streaming is native passthrough
-//! and never reaches this module. Cost injection, TTFT, and outcome are a
-//! separate metering pass downstream (`sse`).
+//! Three provider conversions are supported. Same-format streaming reaches this
+//! module only when response reasoning must be excluded. Cost injection, TTFT,
+//! and outcome are a separate metering pass downstream (`sse`).
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use futures_util::Stream;
@@ -20,6 +19,9 @@ use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::Endpoint;
+use super::response_transform::{
+    self, i64_field, map_finish_reason, now_millis, now_secs, transform_finish_reason,
+};
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
 
@@ -31,12 +33,14 @@ pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
     AnthropicCompleteToOpenai,
+    ExcludeReasoning,
 }
 
 impl StreamTransform {
     fn provider(self) -> &'static str {
         match self {
             StreamTransform::OpenaiToAnthropicMessages => "openai",
+            StreamTransform::ExcludeReasoning => "openai",
             _ => "anthropic",
         }
     }
@@ -54,6 +58,9 @@ impl StreamTransform {
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Option<String>, ()> {
+        if matches!(self, StreamTransform::ExcludeReasoning) {
+            return exclude_reasoning_event(event).map(Some);
+        }
         let event = parse_event(event);
         match self {
             StreamTransform::AnthropicToOpenaiChat => {
@@ -68,6 +75,7 @@ impl StreamTransform {
                 ))
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
+            StreamTransform::ExcludeReasoning => unreachable!(),
         }
     }
 }
@@ -105,20 +113,6 @@ struct StreamState {
     current_content_index: i64,
     tool_calls_started: BTreeSet<i64>,
     finish_reason: Option<String>,
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -184,34 +178,6 @@ fn parse_event(event: &str) -> ParsedEvent {
         data = bare.filter(|b| !b.trim().is_empty());
     }
     ParsedEvent { name, data }
-}
-
-fn i64_field(value: &Value, key: &str) -> i64 {
-    value.get(key).and_then(Value::as_i64).unwrap_or(0)
-}
-
-fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
-    let Some(reason) = stop_reason else {
-        return "stop".to_string();
-    };
-    if !strict {
-        return reason.to_string();
-    }
-    match reason {
-        "stop_sequence" | "end_turn" | "pause_turn" => "stop",
-        "tool_use" => "tool_calls",
-        "max_tokens" => "length",
-        _ => "stop",
-    }
-    .to_string()
-}
-
-fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
-    match finish_reason {
-        Some("length") => "max_tokens",
-        Some("tool_calls") | Some("function_call") => "tool_use",
-        _ => "end_turn",
-    }
 }
 
 // ── Anthropic Messages SSE → OpenAI chat.completion.chunk ────────────────────
@@ -731,6 +697,71 @@ fn event_string(buf: Vec<u8>) -> String {
     String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+fn framed_event(event: &str) -> String {
+    let mut output = event.to_string();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn replace_data_fields(event: &str, replacement: &str) -> String {
+    let has_data_field = event.lines().any(|line| {
+        line.trim_end_matches('\r')
+            .split_once(':')
+            .is_some_and(|(field, _)| field == "data")
+    });
+    let mut output = String::new();
+    let mut replaced = false;
+    for line in event.lines() {
+        let line = line.trim_end_matches('\r');
+        let is_data = line
+            .split_once(':')
+            .is_some_and(|(field, _)| field == "data");
+        let trimmed = line.trim_start();
+        let json_like = matches!(trimmed.as_bytes().first(), Some(b'{' | b'[' | b'"'));
+        let is_bare_payload = !has_data_field
+            && !line.is_empty()
+            && !line.starts_with(':')
+            && (json_like || !line.contains(':'));
+        if is_data || is_bare_payload {
+            if !replaced {
+                if has_data_field {
+                    output.push_str("data: ");
+                }
+                output.push_str(replacement);
+                output.push('\n');
+                replaced = true;
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+    output
+}
+
+fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
+    let parsed = parse_event(event);
+    let Some(payload) = parsed.data.as_deref() else {
+        return Ok(framed_event(event));
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(framed_event(event));
+    }
+    let mut body: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let original = body.clone();
+    response_transform::exclude_reasoning(&mut body);
+    if body == original {
+        Ok(framed_event(event))
+    } else {
+        Ok(replace_data_fields(event, &json_str(&body)))
+    }
+}
+
 /// Splits the provider byte stream into SSE events and applies a stateful
 /// transform to each, emitting client-surface bytes.
 pub struct SseTransformStream {
@@ -1173,6 +1204,21 @@ mod tests {
         let error = out.iter().find(|e| e["type"] == json!("error")).unwrap();
         assert_eq!(error["error"]["type"], json!("overloaded_error"));
         assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
+    }
+
+    #[test]
+    fn reasoning_exclusion_preserves_non_data_sse_fields() {
+        let output = exclude_reasoning_event(
+            "event: chunk\nid: 7\nretry: 100\n: keep\n{\"choices\":[{\"delta\":{\"content\":\"answer\",\"reasoning\":\"hidden\"}}],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
+        )
+        .unwrap();
+        assert!(output.contains("event: chunk\n"), "{output}");
+        assert!(output.contains("id: 7\n"), "{output}");
+        assert!(output.contains("retry: 100\n"), "{output}");
+        assert!(output.contains(": keep\n"), "{output}");
+        assert!(output.contains("\"content\":\"answer\""), "{output}");
+        assert!(output.contains("\"reasoning_tokens\":3"), "{output}");
+        assert!(!output.contains("hidden"), "{output}");
     }
 
     #[test]

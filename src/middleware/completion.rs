@@ -27,9 +27,10 @@ use crate::aggregator::service::{
 
 use super::control::ControlClient;
 use super::errors::{self, Surface};
+use super::reasoning;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
-use super::stream_transform::SseTransformStream;
+use super::stream_transform::{SseTransformStream, StreamTransform};
 use super::types::{ErrorSource, PostReport, ProviderFormat, SpendMode};
 use super::{pricing, response_transform, stream_transform};
 
@@ -191,6 +192,9 @@ pub(super) fn detail_snippet(raw: &[u8]) -> String {
 /// client-facing terminal as `phase=finalize_error`.
 #[derive(Clone, Copy)]
 struct OutcomeCtx<'a> {
+    surface: Surface,
+    service: &'a AciService,
+    endpoint_path: &'a str,
     request_id: &'a str,
     model: &'a str,
     started: Instant,
@@ -249,8 +253,54 @@ pub async fn run(
     } = input;
 
     let started = Instant::now();
+    let (params, reasoning_requirements, exclude_reasoning) = if endpoint == Endpoint::ChatComplete
+    {
+        match reasoning::normalize_chat_request(&params) {
+            Ok(normalized) => normalized,
+            Err(err) => {
+                let model = params.get("model").and_then(Value::as_str).unwrap_or("");
+                let message = err.to_string();
+                log_generated_outcome(
+                    &request_id,
+                    model,
+                    "reasoning_validation",
+                    400,
+                    0,
+                    "",
+                    0,
+                    started,
+                    &detail_snippet(message.as_bytes()),
+                );
+                let body = errors::envelope_bytes(
+                    surface,
+                    errors::error_type(surface, 400),
+                    &message,
+                    Some(&request_id),
+                );
+                return finalize_generated(
+                    400,
+                    body,
+                    &[],
+                    e2ee,
+                    OutcomeCtx {
+                        surface,
+                        service,
+                        endpoint_path,
+                        request_id: &request_id,
+                        model,
+                        started,
+                    },
+                );
+            }
+        }
+    } else {
+        (params, None, false)
+    };
     let model = params.get("model").and_then(Value::as_str);
     let outcome_ctx = OutcomeCtx {
+        surface,
+        service,
+        endpoint_path,
         request_id: &request_id,
         model: model.unwrap_or(""),
         started,
@@ -260,7 +310,13 @@ pub async fn run(
     let provider = params.get("provider");
 
     let consult = control
-        .consult_pre(model, api_key_hash.as_deref(), provider, tee_only)
+        .consult_pre(
+            model,
+            api_key_hash.as_deref(),
+            provider,
+            reasoning_requirements.as_ref(),
+            tee_only,
+        )
         .await;
 
     let meter = Meter {
@@ -302,16 +358,7 @@ pub async fn run(
             if let Some(rate_limit) = &consult.rate_limit {
                 let body = errors::rate_limit_envelope_bytes(surface, message, Some(&request_id));
                 let extra = errors::rate_limit_headers(rate_limit.limit, rate_limit.reset_at);
-                return finalize_generated(
-                    surface,
-                    service,
-                    endpoint_path,
-                    429,
-                    body,
-                    &extra,
-                    e2ee,
-                    outcome_ctx,
-                );
+                return finalize_generated(429, body, &extra, e2ee, outcome_ctx);
             }
         }
         let body = errors::envelope_bytes(
@@ -320,16 +367,7 @@ pub async fn run(
             message,
             Some(&request_id),
         );
-        return finalize_generated(
-            surface,
-            service,
-            endpoint_path,
-            status,
-            body,
-            &[],
-            e2ee,
-            outcome_ctx,
-        );
+        return finalize_generated(status, body, &[], e2ee, outcome_ctx);
     }
 
     let candidates = consult.candidates.clone().unwrap_or_default();
@@ -349,20 +387,16 @@ pub async fn run(
             );
         }
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
-        return finalize_generated(
-            surface,
-            service,
-            endpoint_path,
-            400,
-            body,
-            &[],
-            e2ee,
-            outcome_ctx,
-        );
+        return finalize_generated(400, body, &[], e2ee, outcome_ctx);
     }
 
     // Shape one body per candidate (typed per-route contract).
-    let shaped = match build_candidates(&params, endpoint, &candidates) {
+    let shaped = match build_candidates(
+        &params,
+        endpoint,
+        &candidates,
+        reasoning_requirements.as_ref(),
+    ) {
         Ok(shaped) => shaped,
         Err(err) => {
             let message = format!("failed to shape provider request: {err}");
@@ -386,16 +420,7 @@ pub async fn run(
                 &message,
                 Some(&request_id),
             );
-            return finalize_generated(
-                surface,
-                service,
-                endpoint_path,
-                500,
-                body,
-                &[],
-                e2ee,
-                outcome_ctx,
-            );
+            return finalize_generated(500, body, &[], e2ee, outcome_ctx);
         }
     };
     let forward_candidates: Vec<ForwardCandidate> = shaped
@@ -485,16 +510,7 @@ pub async fn run(
                             message,
                             Some(&request_id),
                         );
-                        return finalize_generated(
-                            surface,
-                            service,
-                            endpoint_path,
-                            502,
-                            body,
-                            &[],
-                            e2ee,
-                            outcome_ctx,
-                        );
+                        return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
                 let mut transformed = response_transform::transform_response(
@@ -502,6 +518,9 @@ pub async fn run(
                     endpoint,
                     upstream_json,
                 );
+                if exclude_reasoning {
+                    response_transform::exclude_reasoning(&mut transformed);
+                }
 
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
@@ -634,7 +653,7 @@ pub async fn run(
                             &detail_snippet(err.to_string().as_bytes()),
                         );
                     }
-                    service_error_response(surface, endpoint_path, service, outcome_ctx, err, None)
+                    service_error_response(outcome_ctx, err, None)
                 }
             }
         }
@@ -675,11 +694,11 @@ pub async fn run(
                 ms => Some(Duration::from_millis(ms)),
             };
             // Order: provider stream (drafts response.received) -> format
-            // transform (if cross-format) -> meter/cost -> keep-alive -> finalizer
-            // (hashes response.returned). Same-format streaming is native
-            // passthrough (no transform). Metering sits inside the keep-alive so
-            // it only ever buffers real upstream SSE bytes; the heartbeat comments
-            // are injected downstream and never enter its line reassembly.
+            // transform (if cross-format) -> response visibility -> meter/cost ->
+            // keep-alive -> finalizer (hashes response.returned). Same-format
+            // streaming skips only the format transform. Metering sits inside the
+            // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
+            // comments are injected downstream and never enter its line reassembly.
             let response_header_map = response_headers(&forward.upstream_headers, &content_type);
             let selected_format = candidates
                 .iter()
@@ -692,8 +711,16 @@ pub async fn run(
                     Some(transform) => Box::pin(SseTransformStream::new(forward.body, transform)),
                     None => forward.body,
                 };
+            let visible: ServiceResponseStream = if exclude_reasoning {
+                Box::pin(SseTransformStream::new(
+                    transformed,
+                    StreamTransform::ExcludeReasoning,
+                ))
+            } else {
+                transformed
+            };
             let metered: ServiceResponseStream = Box::pin(MeterStream::new(
-                transformed,
+                visible,
                 report,
                 errors::sse_protocol(endpoint_path),
             ));
@@ -796,7 +823,7 @@ pub async fn run(
                             &detail_snippet(err.to_string().as_bytes()),
                         );
                     }
-                    service_error_response(surface, endpoint_path, service, outcome_ctx, err, None)
+                    service_error_response(outcome_ctx, err, None)
                 }
             }
         }
@@ -831,16 +858,7 @@ pub async fn run(
                 attempt_index,
                 &forward.selected_route,
             );
-            finalize_generated(
-                surface,
-                service,
-                endpoint_path,
-                status,
-                body,
-                &[],
-                e2ee,
-                outcome_ctx,
-            )
+            finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
         // Every candidate was attempted and failed without an HTTP response to
         // relay (a chain that ends in an upstream HTTP status — including an
@@ -873,14 +891,7 @@ pub async fn run(
                     stream,
                 );
             }
-            service_error_response(
-                surface,
-                endpoint_path,
-                service,
-                outcome_ctx,
-                forward.error,
-                e2ee,
-            )
+            service_error_response(outcome_ctx, forward.error, e2ee)
         }
         // Failures where no attempt chain is available (pre-forward errors,
         // plus the forwarder's rare mid-walk internal-error abort): record the
@@ -906,7 +917,7 @@ pub async fn run(
             if status >= 500 {
                 meter.gateway_failure(status, forward_error_source(&err), &err.to_string(), stream);
             }
-            service_error_response(surface, endpoint_path, service, outcome_ctx, err, e2ee)
+            service_error_response(outcome_ctx, err, e2ee)
         }
     }
 }
@@ -1070,13 +1081,11 @@ fn forward_error_status(err: &ServiceError) -> u16 {
 // E2EE clients still get an encrypted error body, except for `E2ee` errors
 // themselves (the E2EE setup failed, so the response cannot be encrypted).
 fn service_error_response(
-    surface: Surface,
-    endpoint_path: &str,
-    service: &AciService,
     outcome: OutcomeCtx<'_>,
     err: ServiceError,
     e2ee: Option<E2eeRequestContext>,
 ) -> Response {
+    let surface = outcome.surface;
     let request_id = outcome.request_id;
     let status = forward_error_status(&err);
     let e2ee = match &err {
@@ -1089,16 +1098,7 @@ fn service_error_response(
         &err.to_string(),
         Some(request_id),
     );
-    finalize_generated(
-        surface,
-        service,
-        endpoint_path,
-        status,
-        body,
-        &[],
-        e2ee,
-        outcome,
-    )
+    finalize_generated(status, body, &[], e2ee, outcome)
 }
 
 // Build a generated (no-receipt) response, E2EE-encrypting the body when a
@@ -1106,15 +1106,18 @@ fn service_error_response(
 // error is returned rather than the cleartext body.
 #[allow(clippy::too_many_arguments)]
 fn finalize_generated(
-    surface: Surface,
-    service: &AciService,
-    endpoint_path: &str,
     status: u16,
     body: Vec<u8>,
     extra_headers: &[(&'static str, String)],
     e2ee: Option<E2eeRequestContext>,
     outcome: OutcomeCtx<'_>,
 ) -> Response {
+    let OutcomeCtx {
+        surface,
+        service,
+        endpoint_path,
+        ..
+    } = outcome;
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

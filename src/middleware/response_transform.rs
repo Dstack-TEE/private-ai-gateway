@@ -30,14 +30,34 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Valu
     }
 }
 
-fn now_secs() -> u64 {
+/// Remove reasoning traces from an OpenAI Chat Completions response while
+/// leaving usage (including `completion_tokens_details.reasoning_tokens`)
+/// untouched.
+pub fn exclude_reasoning(body: &mut Value) {
+    for choice in body
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        for container in ["message", "delta"] {
+            if let Some(object) = choice.get_mut(container).and_then(Value::as_object_mut) {
+                for key in ["reasoning", "reasoning_content", "reasoning_details"] {
+                    object.remove(key);
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn now_millis() -> u128 {
+pub(super) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -45,7 +65,7 @@ fn now_millis() -> u128 {
 }
 
 // Read a token count, accepting integer- or float-encoded numbers.
-fn i64_field(value: &Value, key: &str) -> i64 {
+pub(super) fn i64_field(value: &Value, key: &str) -> i64 {
     value
         .get(key)
         .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
@@ -53,7 +73,7 @@ fn i64_field(value: &Value, key: &str) -> i64 {
 }
 
 // Anthropic stop_reason -> OpenAI finish_reason (strict compliance maps it).
-fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
+pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
     let Some(reason) = stop_reason else {
         return "stop".to_string();
     };
@@ -70,7 +90,7 @@ fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -> String {
 }
 
 // OpenAI finish_reason -> Anthropic stop_reason (downstream surface).
-fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
+pub(super) fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
         Some("length") => "max_tokens",
         Some("tool_calls") | Some("function_call") => "tool_use",
@@ -269,5 +289,17 @@ mod tests {
         let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body);
         assert_eq!(out["content"], json!([{ "type": "text", "text": "" }]));
         assert_eq!(out["stop_reason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn reasoning_exclusion_preserves_usage() {
+        let mut body = json!({"choices":[{"message":{"content":"ok","reasoning":"secret"}}],
+            "usage":{"completion_tokens_details":{"reasoning_tokens":3}}});
+        exclude_reasoning(&mut body);
+        assert!(body["choices"][0]["message"].get("reasoning").is_none());
+        assert_eq!(
+            body["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            3
+        );
     }
 }

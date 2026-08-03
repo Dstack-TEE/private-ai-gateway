@@ -1,7 +1,6 @@
-//! In-process completion orchestration tests: the consult-driven paths (denial,
-//! control-unavailable fail-closed, rate-limit, empty candidates) which return
-//! before any upstream forward, plus the success path (consult allow → candidate
-//! transform → forward → receipt finalization) against a mock upstream.
+//! In-process completion orchestration tests: pre-consult reasoning validation,
+//! consult-driven denials, fail-closed control errors, rate limits, empty
+//! candidates, and successful forwarding through receipt finalization.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -422,6 +421,17 @@ async fn control_unavailable_fails_closed() {
     assert_eq!(status, 503);
     assert_eq!(body["error"]["type"], json!("service_unavailable"));
     assert_eq!(body["error"]["message"], json!("control plane unavailable"));
+}
+
+#[tokio::test]
+async fn reasoning_conflict_precedes_control() {
+    let mw = middleware("http://127.0.0.1:1".to_string());
+    let service = build_service();
+    let mut input = chat_input();
+    input.params["reasoning"] = json!({"effort":"high"});
+    input.params["reasoning_effort"] = json!("low");
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]
