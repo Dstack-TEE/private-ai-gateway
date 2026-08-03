@@ -435,13 +435,6 @@ config; see the [configuration reference](docs/configuration-reference.md#middle
 | `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |
 | `PUT /v1/admin/upstreams` | Authenticated upstream config replacement. |
 
-In middleware mode, Chat Completions accepts the unified `reasoning` object and
-the legacy `reasoning_effort` and `include_reasoning` aliases. Contradictory
-controls return 400. `reasoning.exclude` and `include_reasoning: false` hide
-reasoning content without changing reasoning-token usage. Reasoning-aware
-control-plane routing is optional. A candidate's `effectiveReasoning` overrides
-the normalized request; omitting it leaves the requested setting unchanged.
-
 ## Runtime Configuration
 
 The full field and environment-variable reference is
