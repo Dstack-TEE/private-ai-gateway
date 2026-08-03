@@ -1,4 +1,14 @@
-//! Config-driven request transforms for each candidate's provider format.
+//! Request transforms: shape a downstream request body into each candidate
+//! upstream's request format.
+//!
+//! The design uses a config-driven engine: each ordered `ParamConfig` names its
+//! input key and output parameter. For every present input, the engine applies
+//! an optional transform, substitutes the `"gateway-default"` sentinel, clamps
+//! numeric values, and writes the result to the output (including dot-paths).
+//! Required entries with defaults backfill absent inputs.
+//!
+//! Strongly typed endpoint structs may replace `serde_json::Value` later; for now
+//! the dynamic shape keeps behavior aligned with the source.
 
 use serde_json::{json, Value};
 
@@ -38,7 +48,8 @@ pub enum TransformError {
         format: ProviderFormat,
         endpoint: Endpoint,
     },
-    /// A gateway-attributed request transform rejection.
+    /// A transform rejected the request body (e.g. unparseable tool-call
+    /// arguments). Surfaced as a gateway-attributed failure (error_source "gateway").
     InvalidRequest(String),
 }
 
@@ -127,7 +138,8 @@ macro_rules! pass {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/// Shape parameters for a provider format, endpoint, and optional engine.
+/// Shape `params` into the request body for `format`/`endpoint` (+ optional
+/// engine shaping for self-hosted OpenAI-compatible upstreams).
 pub fn transform_to_provider_request(
     format: ProviderFormat,
     params: &Value,
@@ -140,7 +152,8 @@ pub fn transform_to_provider_request(
     transform_using_provider_config(&config, &params)
 }
 
-/// Shape `(route_id, body)` entries in failover order.
+/// Shape one body per candidate, preserving failover order. Each entry is the
+/// candidate's `route_id` and its transformed body.
 pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
@@ -333,7 +346,8 @@ fn set_nested_property(obj: &mut Value, path: &str, value: Value) {
         .insert(parts[parts.len() - 1].to_string(), value);
 }
 
-// Request streaming usage unless already enabled.
+// Mutate `params` to request usage on streaming: only
+// when `stream === true` and `stream_options.include_usage` is not already true.
 fn inject_stream_options(params: &mut Value) {
     if params.get("stream") != Some(&Value::Bool(true)) {
         return;
@@ -406,7 +420,8 @@ fn transform_assistant_message(msg: &Value) -> Result<Value, TransformError> {
                 .get("function")
                 .and_then(|f| f.get("arguments"))
                 .and_then(Value::as_str);
-            // Reject invalid arguments rather than forwarding changed input.
+            // Non-empty arguments are JSON-parsed; a parse failure rejects the
+            // request rather than forwarding a different input.
             let input = match arguments {
                 Some(s) if !s.is_empty() => serde_json::from_str(s).map_err(|e| {
                     TransformError::InvalidRequest(format!("invalid tool call arguments: {e}"))
@@ -1223,7 +1238,9 @@ mod tests {
         );
         assert_eq!(chat_out["stream_options"], json!({ "include_usage": true }));
 
-        // Legacy completions also need usage-only streaming chunks.
+        // Legacy /v1/completions must also carry include_usage to upstream, or
+        // usage-only streaming providers (e.g. vLLM) never emit a usage chunk
+        // and the meter records 0 tokens.
         let complete_out = transform_to_provider_request(
             ProviderFormat::Openai,
             &json!({ "model": "m", "prompt": "hi", "stream": true }),

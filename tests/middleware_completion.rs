@@ -1,4 +1,6 @@
-//! In-process consult, forwarding, transform, metering, and finalization tests.
+//! In-process completion orchestration tests: pre-consult reasoning validation,
+//! consult-driven denials, fail-closed control errors, rate limits, empty
+//! candidates, and successful forwarding through receipt finalization.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -68,7 +70,10 @@ impl UpstreamBackend for MockUpstream {
     }
 }
 
-// Classifies `tee-` routes and records actual forwards.
+// A mock upstream that classifies a route as attested by its `tee-` prefix and
+// records every route it was actually asked to forward to. Classification
+// happens in `prepare`, as the real config-driven router does it, so a route
+// the ACI constraint rejects can be told apart from one never reached.
 struct TeeAwareUpstream {
     forwarded: Arc<Mutex<Vec<String>>>,
     status: u16,
@@ -113,7 +118,9 @@ impl UpstreamBackend for TeeAwareUpstream {
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.forward_prepared(req).await
     }
-    // Streaming needs its own forwarding record.
+    // Streaming resolves through `forward_stream_prepared`, not
+    // `forward_prepared`, so it needs its own recording hook — otherwise a
+    // streaming test cannot tell "never forwarded" from "not observed".
     async fn forward_stream_prepared(
         &self,
         req: PreparedUpstreamRequest,

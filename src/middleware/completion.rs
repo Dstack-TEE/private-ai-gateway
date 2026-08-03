@@ -1,7 +1,10 @@
 //! Completion forwarding.
 //!
-//! Consults control, shapes candidates, forwards, transforms and meters the
-//! response, then finalizes its receipt/E2EE envelope.
+//! Runs the completion flow: consult the control plane, shape one
+//! body per candidate, call `AciService::forward_chat_completion_for_middleware`
+//! directly, consume the typed result, transform the buffered or streaming
+//! response, inject cost, post the usage report, and finalize through the
+//! existing receipt/E2EE finalizers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,19 +55,38 @@ pub struct CompletionInput {
     pub request_id: String,
     pub user_model: Option<String>,
     pub stream: bool,
-    /// Makes control reject non-TEE models before forwarding.
+    /// Request arrived on a TEE-only host: the pre-consult carries `tee: true`
+    /// so the control plane 404s a non-TEE model before any forward. Attested
+    /// serving itself is enforced via `aci_required` (forced true alongside this).
     pub tee_only: bool,
 }
 
-/// Cap provider-controlled error detail in outcome logs.
+/// Cap on the error-detail snippet in `request_outcome` lines. Long enough to
+/// carry a provider's error envelope, short enough to bound log growth and to
+/// avoid replaying large bodies into the log.
 const MAX_DETAIL_CHARS: usize = 240;
 
-/// Log every terminal failure except 429, which the usage pipeline records.
+/// Whether a terminal failure with this client-facing status gets a
+/// `request_outcome` line. Always-on for every model; the only exclusion is
+/// final 429s — the highest-volume, lowest-information class, already recorded
+/// per-attempt in the usage pipeline. Every other failure (4xx/5xx, client
+/// disconnects, stream failures) is logged with content-free structured
+/// fields (statuses, route, phase, finish reasons, timings); the raw error
+/// detail appears only with `request_outcome=debug`. Silence the target via
+/// `RUST_LOG` if ever needed — there is deliberately no config knob.
 pub(super) fn should_log_failure(status: u16) -> bool {
     status != 429
 }
 
-/// Standard cross-provider finish reasons; other values are logged as anomalies.
+/// Finish/stop reasons that mark a genuinely clean completion on the OpenAI
+/// and Anthropic surfaces. A completed stream whose collected reasons include
+/// anything outside this set is logged as an anomaly: an upstream signalling
+/// an error through a nonstandard finish reason would otherwise be recorded
+/// as a plain success.
+///
+/// This is a heuristic: a miss on a newly introduced legitimate value costs
+/// only an info-level false positive and a one-line addition here. Keep it a
+/// flat list — no provider-specific registries or runtime configuration.
 pub(super) const STANDARD_FINISH_REASONS: &[&str] = &[
     "stop",
     "length",
@@ -86,10 +108,16 @@ pub(super) fn finish_reasons_anomalous<'a, I: IntoIterator<Item = &'a str>>(reas
         .any(|r| !STANDARD_FINISH_REASONS.contains(&r))
 }
 
-/// Per-reason log length cap.
+/// Per-reason length cap for logged finish reasons. Long enough for every
+/// standard value and any plausible provider-specific token, short enough
+/// that a provider-controlled string cannot become a content channel in the
+/// always-on log.
 const MAX_REASON_CHARS: usize = 32;
 
-/// Bound and flatten client-controlled identifiers before logging.
+/// Log-safe form of a client-controlled identifier (the requested model
+/// name): single-line, control characters replaced, length-capped. The
+/// request body allows megabytes, so an unbounded identifier in an always-on
+/// info log would be a log-injection and disk-amplification vector.
 pub(super) fn sanitize_identifier(value: &str) -> String {
     value
         .chars()
@@ -98,7 +126,10 @@ pub(super) fn sanitize_identifier(value: &str) -> String {
         .collect()
 }
 
-/// Bound and flatten provider-controlled finish reasons before logging.
+/// Log-safe form of a single provider-controlled finish reason:
+/// length-capped, with every control character (newlines, ANSI escapes)
+/// replaced — a JSON string can embed them after parsing, enabling forged
+/// log records or terminal-escape injection.
 pub(super) fn sanitize_reason(reason: &str) -> String {
     reason
         .chars()
@@ -107,7 +138,9 @@ pub(super) fn sanitize_reason(reason: &str) -> String {
         .collect()
 }
 
-/// Bound emitted reasons without changing anomaly detection.
+/// Emission form of collected finish reasons: count-capped, each value
+/// sanitized. Anomaly *detection* runs on the raw values; only what gets
+/// stored or logged is bounded.
 pub(super) fn sanitized_reasons<'a, I: IntoIterator<Item = &'a str>>(reasons: I) -> String {
     reasons
         .into_iter()
@@ -117,7 +150,13 @@ pub(super) fn sanitized_reasons<'a, I: IntoIterator<Item = &'a str>>(reasons: I)
         .join(",")
 }
 
-/// Reveal potentially sensitive upstream detail only at debug level.
+/// Whether raw error detail may be included in `request_outcome` lines.
+/// Upstream error bodies can echo request content (validation errors quoting
+/// input, signed URLs), and this gateway's confidentiality model treats logs
+/// as operator-visible — so raw detail is opt-in via the tracing filter
+/// (`RUST_LOG=request_outcome=debug`); at the default level the structured
+/// fields (statuses, route, phase, finish reasons, timings) still identify
+/// the failure class.
 pub(super) fn debug_gated_detail(detail: &str) -> &str {
     if tracing::enabled!(target: "request_outcome", tracing::Level::DEBUG) {
         detail
@@ -126,7 +165,11 @@ pub(super) fn debug_gated_detail(detail: &str) -> &str {
     }
 }
 
-/// Build a bounded, single-line, UTF-8-lossy error snippet.
+/// Single-line, length-capped snippet of an error body/message for the
+/// `request_outcome` `detail` field (char-boundary safe). The input is
+/// byte-capped before the lossy conversion so a large non-UTF-8 body is never
+/// copied whole; a char split at the cap degrades to a replacement character,
+/// which is fine for a log snippet.
 pub(super) fn detail_snippet(raw: &[u8]) -> String {
     let capped = &raw[..raw.len().min(4 * MAX_DETAIL_CHARS)];
     String::from_utf8_lossy(capped)
@@ -136,7 +179,17 @@ pub(super) fn detail_snippet(raw: &[u8]) -> String {
         .collect()
 }
 
-/// Identity needed to supersede an outcome with a late finalization failure.
+/// `request_outcome` line for a terminal path that never settles a stream or a
+/// buffered 2xx: consult denials, routing/shaping failures, upstream error
+/// responses, and forward errors. Together with the stream-settle and
+/// buffered-2xx lines this makes observation exhaustive. Contract: a request
+/// emits at most one primary line, and a late finalization failure may append
+/// one supplemental `phase=finalize_error` line for the same request_id —
+/// aggregate by unique request_id, with `finalize_error` superseding the
+/// earlier record.
+/// Identity fields threaded into response finalization so a late failure
+/// there (E2EE encryption of a generated body) can record the actual
+/// client-facing terminal as `phase=finalize_error`.
 #[derive(Clone, Copy)]
 struct OutcomeCtx<'a> {
     surface: Surface,
@@ -295,7 +348,9 @@ pub async fn run(
                 &detail_snippet(message.as_bytes()),
             );
         }
-        // Record control failures without affecting upstream health.
+        // Record 5xx and 429 denials as gateway failures; other user denials
+        // (401/402/404) are caller-attributable and left unrecorded. Tagging
+        // these ErrorSource::Control keeps them out of upstream-health signals.
         if status == 429 || status >= 500 {
             meter.gateway_failure(status, ErrorSource::Control, message, stream);
         }
@@ -408,7 +463,14 @@ pub async fn run(
     match result {
         Ok(MiddlewareForwardResult::Forwarded(forward)) => {
             let upstream_status = forward.upstream_status;
-            // Failed-attempt count is the serving candidate's stable index.
+            // The forwarder tries candidates in order and pushes exactly one
+            // `failed_attempts` entry per candidate it abandons, so the serving
+            // candidate's index is the number of attempts before it (all three
+            // arms derive it this way). Derived, not looked up by route id: the
+            // candidate list is not deduped here, and a repeated route id would
+            // resolve to the earlier copy — colliding with that attempt's report
+            // under control's (request_id, attempt, status) idempotency gate and
+            // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
             let selected_format = candidates
                 .iter()
@@ -417,12 +479,16 @@ pub async fn run(
                 .map(|c| c.format)
                 .unwrap_or(ProviderFormat::Openai);
 
-            // Normalize non-2xx bodies; transform successful bodies.
+            // The buffered forward commits the candidate even on non-2xx; a
+            // non-2xx body is normalized rather than transformed, but the receipt
+            // is finalized either way.
             let (client_status, final_body) = if (200..300).contains(&upstream_status) {
                 let upstream_json: Value = match serde_json::from_slice(&forward.upstream_body) {
                     Ok(value) => value,
                     Err(_) => {
-                        // Never fabricate success from malformed upstream JSON.
+                        // A malformed 2xx body must not be coerced into a fabricated
+                        // success. Attribute it to the upstream (it sent an
+                        // unparseable success body) and return 502.
                         let message = "upstream returned a malformed success body";
                         if should_log_failure(502) {
                             log_generated_outcome(
@@ -459,7 +525,10 @@ pub async fn run(
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
                 let raw_usage = transformed.get("usage").cloned();
-                // Surface provider errors smuggled through nonstandard reasons.
+                // A buffered 2xx is only observable when its finish reasons are
+                // nonstandard — an upstream error smuggled through a "success".
+                // Covers both response shapes: OpenAI `choices[].finish_reason`
+                // and Anthropic top-level `stop_reason`.
                 let mut finish_reasons: Vec<&str> = transformed
                     .get("choices")
                     .and_then(Value::as_array)
@@ -567,7 +636,9 @@ pub async fn run(
                 // The receipt finalizer consumed the E2EE context, so a generated
                 // error here is necessarily cleartext.
                 Err(err) => {
-                    // Record the final client-visible terminal.
+                    // Any earlier outcome line for this request described the
+                    // upstream outcome; the client actually receives this
+                    // finalization error, so record the real terminal too.
                     let status = forward_error_status(&err);
                     if should_log_failure(status) {
                         log_generated_outcome(
@@ -596,7 +667,9 @@ pub async fn run(
             let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
 
-            // Distinguish downstream finalization failure from disconnect.
+            // Set when the downstream finalizer (receipt drafting / E2EE)
+            // errors while the body is being consumed: the meter's drop must
+            // then record an internal failure, not a client disconnect.
             let downstream_abort = Arc::new(AtomicBool::new(false));
             let meter_settled = Arc::new(AtomicBool::new(false));
             let report = StreamReport {
@@ -620,8 +693,12 @@ pub async fn run(
                 0 => None,
                 ms => Some(Duration::from_millis(ms)),
             };
-            // Provider -> format -> visibility -> meter -> keepalive -> finalizer.
-            // Heartbeats stay outside metering and receipt input.
+            // Order: provider stream (drafts response.received) -> format
+            // transform (if cross-format) -> response visibility -> meter/cost ->
+            // keep-alive -> finalizer (hashes response.returned). Same-format
+            // streaming skips only the format transform. Metering sits inside the
+            // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
+            // comments are injected downstream and never enter its line reassembly.
             let response_header_map = response_headers(&forward.upstream_headers, &content_type);
             let selected_format = candidates
                 .iter()
@@ -680,7 +757,13 @@ pub async fn run(
                         HeaderName::from_static("cache-control"),
                         HeaderValue::from_static("no-cache"),
                     );
-                    // End cleanly on body errors so hyper does not reset the socket.
+                    // A response-stream error must not become a body Err: hyper
+                    // aborts the connection (TCP RST toward the proxy), which
+                    // clients experience as a silently killed stream and a
+                    // poisoned keep-alive pool, invisible to application logs.
+                    // Log the error (this is its only surface) and end the body
+                    // instead — a clean HTTP body termination (h1 terminal
+                    // chunk, h2 END_STREAM), leaving the connection reusable.
                     let stream_request_id = request_id.clone();
                     let stream_model = model.unwrap_or("").to_string();
                     let stream_route = forward.selected_route.clone();
@@ -688,7 +771,10 @@ pub async fn run(
                         std::future::ready(match chunk {
                             Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
                             Err(err) => {
-                                // Mark before meter drop classifies the terminal.
+                                // Mark before the chain drops so the meter's
+                                // drop settles this as an internal failure
+                                // rather than misreading it as a client
+                                // disconnect.
                                 downstream_abort.store(true, Ordering::Relaxed);
                                 tracing::warn!(
                                     target: "stream_abort",
@@ -696,7 +782,10 @@ pub async fn run(
                                     error = %err,
                                     "response stream error; ending body gracefully instead of aborting the connection"
                                 );
-                                // Meter already settled; record this late failure here.
+                                // A finalizer error after a clean end-of-stream
+                                // (receipt store / E2EE finish): the meter has
+                                // already settled Completed and will not emit,
+                                // so record the client-visible failure here.
                                 if meter_settled.load(Ordering::Relaxed) {
                                     log_generated_outcome(
                                         &stream_request_id,
@@ -717,7 +806,9 @@ pub async fn run(
                     (status, headers, body).into_response()
                 }
                 Err(err) => {
-                    // The stream never started, so emit its only outcome here.
+                    // Synchronous finalizer failure: the stream never started,
+                    // so the meter never settles — this is the request's only
+                    // outcome line.
                     let status = forward_error_status(&err);
                     if should_log_failure(status) {
                         log_generated_outcome(
@@ -737,7 +828,9 @@ pub async fn run(
             }
         }
         Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
-            // A streaming non-2xx has no receipt but still reports all attempts.
+            // Streaming non-2xx: no receipt (no completed stream to bind), but the
+            // attempt did reach an upstream, so it reports the serving route and
+            // every failed-over candidate exactly like the Stream arm.
             let (status, body) = errors::normalize_upstream_error_parts(
                 surface,
                 forward.error.upstream_status,
@@ -767,7 +860,12 @@ pub async fn run(
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
-        // Report transport failures per attempt, followed by their summary.
+        // Every candidate was attempted and failed without an HTTP response to
+        // relay (a chain that ends in an upstream HTTP status — including an
+        // all-429 chain — exits via the UpstreamError arm above, which relays
+        // that status). Report each attempt so deployment health and triage
+        // see the full chain, then a summary row placed after them carrying
+        // the aggregated error message.
         Ok(MiddlewareForwardResult::AllFailed(forward)) => {
             let status = forward_error_status(&forward.error);
             meter.failed_attempts(&forward.failed_attempts, stream);
@@ -795,7 +893,12 @@ pub async fn run(
             }
             service_error_response(outcome_ctx, forward.error, e2ee)
         }
-        // Report unattributed forwarding failures; preserve E2EE for the response.
+        // Failures where no attempt chain is available (pre-forward errors,
+        // plus the forwarder's rare mid-walk internal-error abort): record the
+        // failure so the request is visible to billing/health, attributed by
+        // `forward_error_source` (upstream, except the gateway's own TEE-policy
+        // rejection). Client-attributable errors (E2EE/4xx) are not recorded.
+        // The E2EE context is still available to encrypt the body.
         Err(err) => {
             let status = forward_error_status(&err);
             if should_log_failure(status) {
@@ -819,7 +922,9 @@ pub async fn run(
     }
 }
 
-// Posts usage reports to control without blocking the response.
+// Posts usage reports to the control plane (fire-and-forget). Buffered reports
+// have no TTFT and `is_streaming = false`; the status recorded is the raw upstream
+// status, distinct from the client-facing mapped status.
 struct Meter<'a> {
     control: &'a ControlClient,
     request_id: String,
@@ -900,7 +1005,10 @@ impl Meter<'_> {
         self.gateway_failure_at(0, status, source, message, is_streaming);
     }
 
-    // Put summaries after attempt rows to avoid control's idempotency key.
+    // Like `gateway_failure`, but placed at an explicit attempt index. Control
+    // dedupes reports by (request_id, attempt, status), so a summary row that
+    // follows per-attempt rows must sit after them or it collides with (and
+    // silently drops) the first attempt's row.
     fn gateway_failure_at(
         &self,
         attempt_index: u32,
@@ -931,7 +1039,10 @@ fn truncate(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-// Report client-attributable 4xx mappings; otherwise preserve upstream status.
+// The status reported to the control plane for a normalized upstream error: the
+// client-facing status when it is client-attributable (4xx) — a remapped
+// image-fetch failure must not count against the provider's health — otherwise
+// the raw upstream status, preserving the provider's real code in the logs.
 fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
     if (400..500).contains(&mapped) {
         mapped
@@ -940,7 +1051,12 @@ fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
     }
 }
 
-// ACI eligibility is gateway policy; other forwarding failures are upstream.
+// Which component a terminal forward failure is attributable to.
+//
+// Upstream by default: a forward chain that ends in a 5xx is a provider
+// failure. The exceptions are ACI constraints that leave no eligible route or
+// current session — no prompt was forwarded, so attributing them to a provider
+// would report the gateway's policy decision as someone else's failure.
 fn forward_error_source(err: &ServiceError) -> ErrorSource {
     match err {
         ServiceError::UpstreamVerification(
@@ -961,7 +1077,9 @@ fn forward_error_status(err: &ServiceError) -> u16 {
     }
 }
 
-// Encrypt generated errors unless E2EE setup itself failed.
+// Map a forward/finalize `ServiceError` to a client-facing generated response.
+// E2EE clients still get an encrypted error body, except for `E2ee` errors
+// themselves (the E2EE setup failed, so the response cannot be encrypted).
 fn service_error_response(
     outcome: OutcomeCtx<'_>,
     err: ServiceError,
@@ -983,7 +1101,9 @@ fn service_error_response(
     finalize_generated(status, body, &[], e2ee, outcome)
 }
 
-// Build a generated response; E2EE finalization fails closed.
+// Build a generated (no-receipt) response, E2EE-encrypting the body when a
+// request context is present. If encryption fails it is fail-closed: a generic
+// error is returned rather than the cleartext body.
 #[allow(clippy::too_many_arguments)]
 fn finalize_generated(
     status: u16,
@@ -1020,7 +1140,8 @@ fn finalize_generated(
         // Fail-closed: never return the cleartext body when E2EE was requested.
         Err(err) => {
             tracing::error!(error = %err, "E2EE generated-response finalization failed");
-            // Supersede the earlier outcome with the client-visible 500.
+            // Any earlier outcome line recorded the pre-finalization status;
+            // the client actually receives this 500.
             log_generated_outcome(
                 outcome.request_id,
                 outcome.model,
@@ -1043,14 +1164,18 @@ fn finalize_generated(
     }
 }
 
-// Drop gateway-owned/hop-by-hop headers and force content type.
+// Build response headers from the upstream response, dropping gateway-owned and
+// hop-by-hop headers, and forcing the content type. Provider auth/server headers
+// are not forwarded.
 fn response_headers(
     upstream_headers: &std::collections::HashMap<String, String>,
     content_type: &str,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in upstream_headers {
-        // The reserialized body is identity-encoded.
+        // The body we emit is always identity-encoded (re-serialized JSON or a
+        // transformed/passthrough SSE stream), so a relayed `content-encoding`
+        // would mislabel it. `content-type` is set explicitly below.
         if is_gateway_owned(name)
             || is_hop_by_hop(name)
             || name.eq_ignore_ascii_case("content-type")

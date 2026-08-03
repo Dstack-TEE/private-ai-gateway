@@ -1,4 +1,10 @@
-//! Buffered 2xx transforms; errors, SSE, and metering are separate.
+//! Buffered response transforms: convert an upstream provider's 2xx response
+//! body into the downstream client surface. Non-2xx responses are normalized by
+//! `errors` before reaching here, so these assume a success body. Streaming (SSE)
+//! transforms live in `stream_transform`.
+//!
+//! Cost injection is a separate metering pass; these transforms only normalize
+//! the body shape (including the canonical `usage`).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +15,8 @@ use super::types::ProviderFormat;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
-/// Transform a 2xx body, or return it unchanged for native passthrough.
+/// Transform a 2xx upstream body for `format`/`endpoint` into the client surface.
+/// Returns the body unchanged when no transform applies (native passthrough).
 pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Value) -> Value {
     use Endpoint::*;
     use ProviderFormat::*;
@@ -17,12 +24,15 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Valu
         (Anthropic, ChatComplete) => anthropic_chat_to_openai(body, STRICT_OPENAI_COMPLIANCE),
         (Anthropic, Complete) => anthropic_complete_to_openai(body),
         (Openai, Messages) => openai_to_anthropic_messages(body),
-        // Native passthrough.
+        // Native passthrough: openai chat/complete/embed, anthropic messages,
+        // responses (createModelResponse).
         _ => body,
     }
 }
 
-/// Remove chat reasoning traces without touching usage.
+/// Remove reasoning traces from an OpenAI Chat Completions response while
+/// leaving usage (including `completion_tokens_details.reasoning_tokens`)
+/// untouched.
 pub fn exclude_reasoning(body: &mut Value) {
     for choice in body
         .get_mut("choices")
@@ -131,7 +141,8 @@ fn anthropic_chat_to_openai(response: Value, strict: bool) -> Value {
         "completion_tokens": output,
         "total_tokens": input + output + cache_creation + cache_read,
     });
-    // Echo only source cache buckets.
+    // Echo the cache buckets only when present in the source: spread the raw
+    // fields and drop undefined ones.
     if cache_creation != 0 || cache_read != 0 {
         let map = usage.as_object_mut().unwrap();
         if let Some(value) = usage_src.get("cache_read_input_tokens") {
@@ -149,7 +160,8 @@ fn anthropic_chat_to_openai(response: Value, strict: bool) -> Value {
             .unwrap()
             .insert("tool_calls".into(), Value::Array(tool_calls));
     }
-    // Non-strict mode attaches raw non-tool blocks.
+    // When not strict, the raw Anthropic blocks (minus tool_use) are attached as
+    // a content_blocks extension. Strict mode (the default) omits them.
     if !strict {
         let blocks: Vec<Value> = content_items
             .iter()
