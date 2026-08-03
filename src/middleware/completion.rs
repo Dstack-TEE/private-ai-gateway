@@ -395,7 +395,7 @@ pub async fn run(
         &params,
         endpoint,
         &candidates,
-        reasoning_requirements.is_some(),
+        reasoning_requirements.as_ref(),
     ) {
         Ok(shaped) => shaped,
         Err(err) => {

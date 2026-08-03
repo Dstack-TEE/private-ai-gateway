@@ -158,13 +158,13 @@ pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
     candidates: &[RouteCandidate],
-    require_effective_reasoning: bool,
+    requested_reasoning: Option<&ReasoningConfig>,
 ) -> Result<Vec<(String, Value)>, TransformError> {
     candidates
         .iter()
         .map(|candidate| {
             let candidate_params =
-                candidate_params(params, endpoint, candidate, require_effective_reasoning)?;
+                candidate_params(params, endpoint, candidate, requested_reasoning)?;
             let body = transform_to_provider_request(
                 candidate.format,
                 &candidate_params,
@@ -180,7 +180,7 @@ fn candidate_params(
     params: &Value,
     endpoint: Endpoint,
     candidate: &RouteCandidate,
-    require_effective_reasoning: bool,
+    requested_reasoning: Option<&ReasoningConfig>,
 ) -> Result<Value, TransformError> {
     let mut params = params.clone();
     if endpoint != Endpoint::ChatComplete {
@@ -192,10 +192,12 @@ fn candidate_params(
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
-    let effective = match &candidate.effective_reasoning {
-        Some(value) => value,
-        None if !require_effective_reasoning => return Ok(params),
-        None => return invalid_reasoning(candidate, "missing effective reasoning"),
+    let Some(effective) = candidate
+        .effective_reasoning
+        .as_ref()
+        .or(requested_reasoning)
+    else {
+        return Ok(params);
     };
     validate_effective(effective).map_err(|err| {
         TransformError::InvalidRequest(format!(
@@ -1264,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn build_candidates_applies_each_routes_effective_reasoning() {
+    fn build_candidates_uses_effective_or_requested_reasoning() {
         let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 8 });
         let reasoning = |effort| {
             Some(ReasoningConfig {
@@ -1285,11 +1287,25 @@ mod tests {
                 engine: Some(Engine::Sglang),
                 effective_reasoning: reasoning(ReasoningEffort::Minimal),
             },
+            RouteCandidate {
+                route_id: "openai:c".into(),
+                format: ProviderFormat::Openai,
+                engine: None,
+                effective_reasoning: None,
+            },
         ];
-        let bodies = build_candidates(&params, Endpoint::ChatComplete, &candidates, true).unwrap();
-        assert_eq!(bodies.len(), 2);
+        let requested = reasoning(ReasoningEffort::Medium).unwrap();
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &candidates,
+            Some(&requested),
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[0].1["reasoning"]["effort"], "high");
         assert_eq!(bodies[1].1["reasoning_effort"], "low");
+        assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
     }
 
     #[test]
@@ -1320,7 +1336,7 @@ mod tests {
                 effective_reasoning: None,
             },
         ];
-        let bodies = build_candidates(&params, Endpoint::ChatComplete, &candidates, false).unwrap();
+        let bodies = build_candidates(&params, Endpoint::ChatComplete, &candidates, None).unwrap();
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0].0, "openai:m");
         // OpenAI passthrough keeps messages as-is.

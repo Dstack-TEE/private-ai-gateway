@@ -12,8 +12,8 @@ endpoints below).
   + ordered route candidates, all from the config. Denies unknown models; if
   `keys` is non-empty it requires the request's `apiKeyHash` to be in the list
   (empty list = anonymous allowed). Reasoning-aware routing is optional and this
-  minimal example does not implement it. Implementations that do return
-  `effectiveReasoning` on each candidate.
+  minimal example does not implement it. A candidate can return
+  `effectiveReasoning` to override the normalized request.
 - `POST /consult/post` — accepts the usage report and drops it (no billing).
 
 No database; configuration only.
