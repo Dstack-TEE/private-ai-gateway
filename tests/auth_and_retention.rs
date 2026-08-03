@@ -97,11 +97,14 @@ fn harness_with_ttl(receipt_ttl_seconds: u64) -> Harness {
     let quoter = Arc::new(StubQuoter::default());
     let upstream = Arc::new(StubUpstream);
     let verifier = Arc::new(PreverifiedUpstreamVerifier::new("test-verifier/v1"));
-    let mut cfg = AciServiceConfig::for_test("auth-and-retention");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
+        serving: "aggregator".to_string(),
     };
     cfg.receipt_ttl_seconds = receipt_ttl_seconds;
+    // The preverified event carries no enforceable binding; this suite covers
+    // receipt auth/TTL, so run the forward-and-record policy.
     let clock = Arc::new(TestClock::new(1_700_000_000));
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -137,6 +140,11 @@ fn json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).unwrap()
 }
 
+/// The §7.2 receipt document embedded in a legacy signature wrapper.
+fn wrapped_payload(body: &Value) -> Value {
+    body["receipt"].clone()
+}
+
 // ---------- Receipt auth ----------
 
 #[tokio::test]
@@ -166,9 +174,11 @@ async fn anonymous_receipt_is_publicly_retrievable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&body)["receipt"]["receipt_id"], rid);
-    assert_eq!(json(&body)["receipt"]["chat_id"], "chat-auth-1");
-    assert!(json(&body)["signature"].is_string());
+    let body = json(&body);
+    let payload = wrapped_payload(&body);
+    assert_eq!(payload["receipt_id"], rid);
+    assert_eq!(payload["chat_id"], "chat-auth-1");
+    assert!(body["signature"].is_string());
 }
 
 #[tokio::test]
@@ -201,7 +211,7 @@ async fn owned_receipt_lookup_unauthenticated_returns_401() {
 }
 
 #[tokio::test]
-async fn owned_receipt_lookup_wrong_bearer_returns_403() {
+async fn owned_receipt_lookup_wrong_bearer_returns_not_found() {
     let h = harness();
     let (_, headers, _) = call(
         &h.router,
@@ -225,8 +235,8 @@ async fn owned_receipt_lookup_wrong_bearer_returns_403() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(json(&body)["error"]["type"], "redaction_required");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json(&body)["error"]["type"], "not_found");
 }
 
 #[tokio::test]
@@ -255,7 +265,7 @@ async fn owned_receipt_lookup_with_matching_bearer_returns_receipt() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&body)["receipt"]["receipt_id"], rid);
+    assert_eq!(wrapped_payload(&json(&body))["receipt_id"], rid);
 }
 
 // ---------- Receipt TTL ----------
@@ -315,10 +325,7 @@ async fn aci_headers_present_on_success_responses() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("x-aci-version").unwrap(), "aci/1");
-    assert_eq!(
-        headers.get("x-aci-identity").unwrap(),
-        h.service.workload_id()
-    );
+    assert!(headers.get("x-aci-identity").is_none());
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
         h.service.workload_keyset_digest()
@@ -337,10 +344,7 @@ async fn aci_headers_present_on_not_found_error() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(
-        headers.get("x-aci-identity").unwrap(),
-        h.service.workload_id()
-    );
+    assert_eq!(headers.get("x-aci-version").unwrap(), "aci/1");
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
         h.service.workload_keyset_digest()
@@ -362,8 +366,8 @@ async fn aci_headers_present_on_bad_request_error() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        headers.get("x-aci-identity").unwrap(),
-        h.service.workload_id()
+        headers.get("x-aci-keyset-digest").unwrap(),
+        h.service.workload_keyset_digest()
     );
 }
 
@@ -379,7 +383,7 @@ async fn static_verifier_failed_for_aci_request_blocks_forwarding() {
         "test-verifier/v1",
         "deliberate failure",
     ));
-    let mut cfg = AciServiceConfig::for_test("static-failed");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities::default();
     let svc = Arc::new(
         AciService::new_with_upstream_verifier(

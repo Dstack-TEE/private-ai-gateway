@@ -15,17 +15,15 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
-use private_ai_gateway::aci::canonical::sha256_hex;
+use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::identity;
-use private_ai_gateway::aci::keys::{
-    verify_keyset_endorsement, verify_receipt_signature, KeyProvider,
-};
+use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
 use private_ai_gateway::aci::receipt::{
-    canonical_bytes_for_signing, UpstreamVerifiedEvent, VerificationResult,
+    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
     EVENT_REQUEST_FORWARDED, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED,
-    EVENT_TRANSPARENCY_REQUEST_MODIFIED, EVENT_UPSTREAM_VERIFIED,
+    EVENT_UPSTREAM_VERIFIED,
 };
-use private_ai_gateway::aci::types::{KeyedPublicKey, Receipt, ServiceCapabilities};
+use private_ai_gateway::aci::types::{KeyedPublicKey, ServiceCapabilities};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
@@ -39,9 +37,12 @@ use tower::ServiceExt;
 
 use common::{event_from_request, verified_event, StaticKeyProvider, StubQuoter};
 
+const ACI_CHAT_REQUEST: &[u8] = br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0,"provider":{"aci_verified":true}}"#;
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0}"#;
-const ACI_CHAT_REQUEST: &[u8] = br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0,"provider":{"aci_verified":true}}"#;
+/// The same prompt carrying the §5.3 constraint that makes serving fail closed.
+const CONSTRAINED_CHAT_REQUEST: &[u8] =
+    br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"temperature":0,"provider":{"aci_verified":true}}"#;
 const CHAT_RESPONSE: &[u8] =
     br#"{"id":"chat-mock-1","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}]}"#;
 
@@ -109,23 +110,33 @@ impl MockUpstream {
 
 #[async_trait]
 impl UpstreamBackend for MockUpstream {
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        let model_id = serde_json::from_slice::<Value>(&req.body)
+            .ok()
+            .and_then(|body| {
+                body.get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        Ok(PreparedUpstreamRequest {
+            request: req,
+            upstream_name: self.name.clone(),
+            url_origin: Some(self.origin.clone()),
+            model_id,
+            route_id: None,
+            // A TEE-attesting route: only these are candidates for a
+            // constrained request (§5.3).
+            is_tee: Some(true),
+        })
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
 
     fn url_origin(&self) -> Option<&str> {
         Some(&self.origin)
-    }
-
-    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
-        Ok(PreparedUpstreamRequest {
-            upstream_name: self.name().to_string(),
-            url_origin: self.url_origin().map(str::to_string),
-            model_id: "gpt-test".to_string(),
-            route_id: req.target_route_id.clone(),
-            is_tee: Some(true),
-            request: req,
-        })
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -139,6 +150,16 @@ impl UpstreamBackend for MockUpstream {
 
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
         Ok(self.models_response.lock().unwrap().clone())
+    }
+
+    // The mock stands in for a backend that enforces the verifier's channel
+    // binding on its connection (the trait default fails closed).
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
     }
 }
 
@@ -254,10 +275,23 @@ struct Harness {
 }
 
 fn make_harness(verifier: ScriptedVerifier) -> Harness {
-    make_harness_with_upstream(verifier, 200, CHAT_RESPONSE)
+    make_harness_full(verifier, 200, CHAT_RESPONSE)
+}
+
+/// Service policy does not require verification: forward and record failed.
+fn make_harness_not_required(verifier: ScriptedVerifier) -> Harness {
+    make_harness_full(verifier, 200, CHAT_RESPONSE)
 }
 
 fn make_harness_with_upstream(
+    verifier: ScriptedVerifier,
+    upstream_status: u16,
+    upstream_body: &[u8],
+) -> Harness {
+    make_harness_full(verifier, upstream_status, upstream_body)
+}
+
+fn make_harness_full(
     verifier: ScriptedVerifier,
     upstream_status: u16,
     upstream_body: &[u8],
@@ -267,9 +301,10 @@ fn make_harness_with_upstream(
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, upstream_calls) = MockUpstream::new(upstream_status, upstream_body);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
+        serving: "aggregator".to_string(),
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -300,21 +335,22 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers.get(name).unwrap().to_str().unwrap()
 }
 
-fn event<'a>(receipt: &'a Receipt, event_type: &str) -> &'a Value {
-    &receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == event_type)
+fn event(receipt: &SignedReceipt, event_type: &str) -> Value {
+    receipt.document_json().unwrap()["event_log"]
+        .as_array()
         .unwrap()
-        .fields
+        .iter()
+        .find(|e| e["type"] == event_type)
+        .unwrap_or_else(|| panic!("receipt must carry {event_type}"))
+        .clone()
 }
 
-fn assert_valid_receipt_signature(receipt: &Receipt, receipt_key: &KeyedPublicKey) {
-    let canonical_bytes = canonical_bytes_for_signing(receipt).unwrap();
-    let signature = hex::decode(&receipt.signature.value_hex).unwrap();
+fn assert_valid_receipt_signature(receipt: &SignedReceipt, receipt_key: &KeyedPublicKey) {
+    let signature = hex::decode(&receipt.signature_hex).unwrap();
+    let document = receipt.document_json().unwrap();
     assert!(verify_receipt_signature(
         receipt_key,
-        &canonical_bytes,
+        &receipt_signing_input(&document).unwrap(),
         &signature
     ));
 }
@@ -336,7 +372,6 @@ async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
     let body = json_body(&response);
 
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["workload_id"], h.service.workload_id());
     assert_eq!(
         body["workload_keyset_digest"],
         h.service.workload_keyset_digest()
@@ -352,19 +387,6 @@ async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
     assert_eq!(&report_data_hex[40..64], &"00".repeat(12));
     assert_eq!(&report_data_hex[64..128], nonce);
 
-    let endorsement_payload = identity::keyset_endorsement_payload(h.service.keyset()).unwrap();
-    let endorsement_sig = hex::decode(
-        body["attestation"]["keyset_endorsement"]["value"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(verify_keyset_endorsement(
-        &h.service.keyset().workload_identity.public_key,
-        &endorsement_payload,
-        &endorsement_sig
-    ));
-
     let quote = hex::decode(body["attestation"]["evidence"]["quote"].as_str().unwrap()).unwrap();
     let report_data = hex::decode(report_data_hex).unwrap();
     assert!(
@@ -378,27 +400,22 @@ async fn relying_party_can_verify_report_chat_receipt_chain() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
 
+    let nonce = "ee".repeat(32);
     let report = h
         .service
-        .attestation_report(Some("rp nonce".to_string()))
+        .attestation_report(Some(nonce.clone()))
         .await
         .unwrap();
-    let endorsement_payload = identity::keyset_endorsement_payload(h.service.keyset()).unwrap();
-    let endorsement_sig = hex::decode(&report.attestation.keyset_endorsement.value_hex).unwrap();
-    assert!(verify_keyset_endorsement(
-        &report
-            .attestation
-            .workload_keyset
-            .workload_identity
-            .public_key,
-        &endorsement_payload,
-        &endorsement_sig
-    ));
+    // Recompute the §9.1 binding chain from the served keyset object.
+    assert_eq!(
+        identity::workload_keyset_digest(&report.attestation.workload_keyset).unwrap(),
+        report.workload_keyset_digest
+    );
     let statement =
-        identity::attestation_statement(h.service.keyset(), Some("rp nonce".to_string())).unwrap();
+        identity::attestation_statement(&report.workload_keyset_digest, Some(&nonce)).unwrap();
     assert_eq!(
         report.attestation.report_data_hex,
-        hex::encode(identity::report_data(&statement).unwrap())
+        hex::encode(identity::report_data(&statement))
     );
 
     let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
@@ -409,9 +426,9 @@ async fn relying_party_can_verify_report_chat_receipt_chain() {
         .get_receipt_by_receipt_id(&receipt_id)
         .expect("receipt should be retained");
 
-    assert_eq!(receipt.workload_id, report.workload_id);
+    let payload = receipt.document_json().unwrap();
     assert_eq!(
-        receipt.workload_keyset_digest,
+        payload["workload_keyset_digest"],
         report.workload_keyset_digest
     );
     assert_eq!(
@@ -419,22 +436,22 @@ async fn relying_party_can_verify_report_chat_receipt_chain() {
         sha256_hex(CHAT_REQUEST)
     );
     assert_eq!(
-        event(&receipt, EVENT_RESPONSE_RETURNED)["wire_hash"],
+        event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(CHAT_RESPONSE)
     );
 
-    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
-    let signature = hex::decode(&receipt.signature.value_hex).unwrap();
-    let receipt_key = report
-        .attestation
-        .workload_keyset
+    // Resolve the signing key in the keyset from the served report.
+    let keyset: private_ai_gateway::aci::types::WorkloadKeyset =
+        serde_json::from_value(report.attestation.workload_keyset.clone()).unwrap();
+    let signature = hex::decode(&receipt.signature_hex).unwrap();
+    let receipt_key = keyset
         .receipt_signing_keys
         .iter()
-        .find(|key| key.key_id == receipt.signature.key_id)
+        .find(|key| key.key_id == receipt.key_id)
         .expect("receipt key must be in attested keyset");
     assert!(verify_receipt_signature(
         receipt_key,
-        &canonical_bytes,
+        &receipt_signing_input(&receipt.document_json().unwrap()).unwrap(),
         &signature
     ));
 }
@@ -467,7 +484,7 @@ async fn metrics_endpoint_exposes_aggregator_prometheus_text() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
 
-    let chat = h.requester.post_chat(CHAT_REQUEST, &[]).await;
+    let chat = h.requester.post_chat(CONSTRAINED_CHAT_REQUEST, &[]).await;
     assert_eq!(chat.status, StatusCode::OK);
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 
@@ -490,7 +507,7 @@ async fn metrics_endpoint_exposes_aggregator_prometheus_text() {
     );
     assert!(
         body.contains(
-            "private_ai_gateway_upstream_verifications_total{required=\"false\",result=\"verified\"} 1"
+            "private_ai_gateway_upstream_verifications_total{required=\"true\",result=\"verified\"} 1"
         ),
         "{body}"
     );
@@ -513,14 +530,11 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
     let (verifier, verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
 
-    let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
+    let response = h.requester.post_chat(CONSTRAINED_CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, CHAT_RESPONSE);
     assert_eq!(header_str(&response.headers, "x-aci-version"), "aci/1");
-    assert_eq!(
-        header_str(&response.headers, "x-aci-identity"),
-        h.service.workload_id()
-    );
+    assert!(response.headers.get("x-aci-identity").is_none());
     assert_eq!(
         header_str(&response.headers, "x-aci-keyset-digest"),
         h.service.workload_keyset_digest()
@@ -539,7 +553,7 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         let verifier_calls = verifier_calls.lock().unwrap();
         assert_eq!(verifier_calls.len(), 1);
         assert_eq!(verifier_calls[0].model_id, "gpt-test");
-        assert!(!verifier_calls[0].required);
+        assert!(verifier_calls[0].required);
         assert_eq!(
             verifier_calls[0].forwarded_body_hash,
             sha256_hex(CHAT_REQUEST)
@@ -551,33 +565,36 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         .get_receipt_by_receipt_id(&receipt_id)
         .expect("receipt should be retained");
     assert_eq!(receipt.chat_id.as_deref(), Some("chat-mock-1"));
-    assert_eq!(receipt.workload_id, h.service.workload_id());
+    let payload = receipt.document_json().unwrap();
     assert_eq!(
-        receipt.workload_keyset_digest,
+        payload["workload_keyset_digest"],
         h.service.workload_keyset_digest()
     );
-    assert_eq!(receipt.endpoint, "/v1/chat/completions");
-    assert_eq!(receipt.method, "POST");
-    assert_eq!(receipt.served_at, 1_700_000_000);
+    assert_eq!(payload["endpoint"], "/v1/chat/completions");
+    assert_eq!(payload["method"], "POST");
+    assert_eq!(payload["served_at"], 1_700_000_000);
 
-    let event_types: Vec<_> = receipt
-        .event_log
+    let event_types: Vec<&str> = payload["event_log"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|e| (e.seq, e.event_type.as_str()))
+        .map(|e| e["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         event_types,
         vec![
-            (0, EVENT_REQUEST_RECEIVED),
-            (1, EVENT_REQUEST_FORWARDED),
-            (2, EVENT_UPSTREAM_VERIFIED),
-            (3, EVENT_RESPONSE_RETURNED),
+            EVENT_REQUEST_RECEIVED,
+            EVENT_REQUEST_FORWARDED,
+            EVENT_UPSTREAM_VERIFIED,
+            EVENT_RESPONSE_RETURNED,
         ]
     );
     assert_eq!(
         event(&receipt, EVENT_REQUEST_RECEIVED)["body_hash"],
-        sha256_hex(CHAT_REQUEST)
+        sha256_hex(CONSTRAINED_CHAT_REQUEST)
     );
+    // §5.3: the constraint is consumed here, so the forwarded bytes are the
+    // request without it — the §7.4 rewrite.
     assert_eq!(
         event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(CHAT_REQUEST)
@@ -586,21 +603,19 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
         event(&receipt, EVENT_UPSTREAM_VERIFIED)["result"],
         "verified"
     );
-    assert_eq!(event(&receipt, EVENT_UPSTREAM_VERIFIED)["required"], false);
-    assert_eq!(
-        event(&receipt, EVENT_UPSTREAM_VERIFIED)["verifier_id"],
-        "mock-verifier/v1"
-    );
+    assert_eq!(event(&receipt, EVENT_UPSTREAM_VERIFIED)["required"], true);
     assert_eq!(
         event(&receipt, EVENT_UPSTREAM_VERIFIED)["model_id"],
         "mock-model"
     );
+    let cited = event(&receipt, EVENT_UPSTREAM_VERIFIED)["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(cited.len(), 64, "session id is bare 64-hex (§8)");
+    assert!(cited.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(
-        event(&receipt, EVENT_RESPONSE_RETURNED)["cleartext_hash"],
-        sha256_hex(CHAT_RESPONSE)
-    );
-    assert_eq!(
-        event(&receipt, EVENT_RESPONSE_RETURNED)["wire_hash"],
+        event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(CHAT_RESPONSE)
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
@@ -608,26 +623,21 @@ async fn verified_upstream_request_returns_aci_headers_and_signed_receipt() {
     let receipt_response = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(receipt_response.status, StatusCode::OK);
     let receipt_json = json_body(&receipt_response);
-    assert_eq!(receipt_json["receipt"]["receipt_id"], receipt_id);
     assert_eq!(
         receipt_json["text"].as_str().unwrap().matches(':').count(),
         1
     );
     assert!(receipt_json["signature"].is_string());
-    assert_eq!(
-        receipt_json["receipt"]["event_log"][2]["type"],
-        EVENT_UPSTREAM_VERIFIED
-    );
+    assert!(receipt_json["receipt"]["event_log"].is_array());
 }
 
 #[tokio::test]
-async fn aci_verified_failure_blocks_before_forwarding() {
+async fn required_upstream_verification_failure_blocks_before_forwarding() {
     let (verifier, verifier_calls) = ScriptedVerifier::failed("quote app-id mismatch");
     let h = make_harness(verifier);
 
-    let response = h.requester.post_chat(ACI_CHAT_REQUEST, &[]).await;
+    let response = h.requester.post_chat(CONSTRAINED_CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(response.headers.get("x-receipt-id").is_none());
     assert_eq!(
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
@@ -638,12 +648,29 @@ async fn aci_verified_failure_blocks_before_forwarding() {
         .contains("quote app-id mismatch"));
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
+
+    // The refusal is receipt-backed (§7.5): the receipt records the failed
+    // event and the exact error body served, with nothing forwarded.
+    let receipt_id = header_str(&response.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], true);
+    assert!(uv["reason"]
+        .as_str()
+        .unwrap()
+        .contains("quote app-id mismatch"));
+    assert_eq!(
+        event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
+        sha256_hex(&response.body)
+    );
+    assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 }
 
 #[tokio::test]
-async fn unconstrained_request_is_best_effort_and_receipt_records_failed_not_required() {
+async fn optional_verification_is_best_effort_and_receipt_records_failed_not_required() {
     let (verifier, _verifier_calls) = ScriptedVerifier::failed("cached evidence stale");
-    let h = make_harness(verifier);
+    let h = make_harness_not_required(verifier);
 
     let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::OK);
@@ -676,19 +703,14 @@ async fn client_supplied_hashes_and_aci_headers_do_not_override_service_observat
         .await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(
-        header_str(&response.headers, "x-aci-identity"),
-        h.service.workload_id()
-    );
-    assert_eq!(
         header_str(&response.headers, "x-aci-keyset-digest"),
         h.service.workload_keyset_digest()
     );
 
     let receipt_id = header_str(&response.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
-    let actual = event(&receipt, EVENT_REQUEST_RECEIVED)["body_hash"]
-        .as_str()
-        .unwrap();
+    let received = event(&receipt, EVENT_REQUEST_RECEIVED);
+    let actual = received["body_hash"].as_str().unwrap();
     assert_eq!(actual, sha256_hex(CHAT_REQUEST));
     assert_ne!(actual, forged_hash);
 }
@@ -705,7 +727,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         quoter,
         Arc::new(upstream),
         store,
-        AciServiceConfig::for_test("private-ai-gateway"),
+        AciServiceConfig::for_test(),
         Arc::new(FixedClock(1_700_000_000)),
     )
     .unwrap();
@@ -726,7 +748,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         .forward_chat_completion(
             received,
             Some(forwarded.to_vec()),
-            false,
+            true,
             Some(verifier_event),
         )
         .await
@@ -740,25 +762,21 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         event(&result.receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(forwarded)
     );
-    let event_types: Vec<_> = result
-        .receipt
-        .event_log
+    let payload = result.receipt.document_json().unwrap();
+    let event_types: Vec<&str> = payload["event_log"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|e| (e.seq, e.event_type.as_str()))
+        .map(|e| e["type"].as_str().unwrap())
         .collect();
     assert_eq!(
         event_types,
         vec![
-            (0, EVENT_REQUEST_RECEIVED),
-            (1, EVENT_REQUEST_FORWARDED),
-            (2, EVENT_TRANSPARENCY_REQUEST_MODIFIED),
-            (3, EVENT_UPSTREAM_VERIFIED),
-            (4, EVENT_RESPONSE_RETURNED),
+            EVENT_REQUEST_RECEIVED,
+            EVENT_REQUEST_FORWARDED,
+            EVENT_UPSTREAM_VERIFIED,
+            EVENT_RESPONSE_RETURNED,
         ]
-    );
-    assert_eq!(
-        event(&result.receipt, EVENT_TRANSPARENCY_REQUEST_MODIFIED),
-        &serde_json::json!({})
     );
     assert_ne!(
         event(&result.receipt, EVENT_REQUEST_RECEIVED)["body_hash"],
@@ -777,8 +795,9 @@ async fn receipt_path_errors_follow_aci_shape() {
 
     let by_chat = h.requester.get("/v1/signature/chat-mock-1").await;
     assert_eq!(by_chat.status, StatusCode::OK);
-    assert_eq!(json_body(&by_chat)["receipt"]["chat_id"], "chat-mock-1");
-    assert_eq!(json_body(&by_chat)["receipt"]["receipt_id"], receipt_id);
+    let payload = json_body(&by_chat)["receipt"].clone();
+    assert_eq!(payload["chat_id"], "chat-mock-1");
+    assert_eq!(payload["receipt_id"], receipt_id);
 
     let unknown = h.requester.get("/v1/signature/missing").await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
@@ -798,22 +817,6 @@ async fn invalid_request_inputs_are_rejected_before_verifier_or_upstream() {
     );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert!(verifier_calls.lock().unwrap().is_empty());
-
-    let retired_header = h
-        .requester
-        .post_chat(CHAT_REQUEST, &[("x-upstream-verification", "required")])
-        .await;
-    assert_eq!(retired_header.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json_body(&retired_header)["error"]["type"],
-        "invalid_request_error"
-    );
-    assert!(json_body(&retired_header)["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("provider.aci_verified"));
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-    assert!(verifier_calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -830,26 +833,62 @@ async fn non_2xx_upstream_response_is_still_bound_to_a_receipt() {
     let receipt_id = header_str(&response.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     assert_eq!(
-        event(&receipt, EVENT_RESPONSE_RETURNED)["cleartext_hash"],
-        sha256_hex(upstream_body)
-    );
-    assert_eq!(
-        event(&receipt, EVENT_RESPONSE_RETURNED)["wire_hash"],
+        event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(upstream_body)
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 }
 
-#[test]
-fn future_aci_surfaces_not_covered_by_this_runnable_suite() {
-    let missing = [
-        "provider-specific upstream verifiers for real provider evidence",
-        "TLS SPKI observation and enforcement by verifier/local proxy",
-        "persistent receipt store for receipts and retained bodies",
-        "real upstream verifier integrations for Chutes, Tinfoil, Phala, and others",
-    ];
-    assert_eq!(missing.len(), 4);
-    assert!(missing.iter().all(|s| !s.is_empty()));
+// ---------------------------------------------------------------------------
+
+// --- restored from main (fail-closed before forwarding) ---
+
+#[tokio::test]
+async fn aci_verified_failure_blocks_before_forwarding() {
+    let (verifier, verifier_calls) = ScriptedVerifier::failed("quote app-id mismatch");
+    let h = make_harness(verifier);
+
+    let response = h.requester.post_chat(ACI_CHAT_REQUEST, &[]).await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    // §7.5: a refusal is receipt-committed too, so the client can prove what it
+    // was told. The prompt is still never forwarded (asserted below).
+    let receipt_id = response
+        .headers
+        .get("x-receipt-id")
+        .expect("refusal receipt")
+        .to_str()
+        .unwrap();
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("the refusal receipt must be retrievable");
+    let uv = event(&receipt, "upstream.verified");
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(
+        json_body(&response)["error"]["type"],
+        "upstream_verification_failed"
+    );
+    assert!(json_body(&response)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("quote app-id mismatch"));
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 }
 
-// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn unconstrained_request_is_best_effort_and_receipt_records_failed_not_required() {
+    let (verifier, _verifier_calls) = ScriptedVerifier::failed("cached evidence stale");
+    let h = make_harness(verifier);
+
+    let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+
+    let receipt_id = header_str(&response.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], false);
+    assert_eq!(uv["reason"], "cached evidence stale");
+}

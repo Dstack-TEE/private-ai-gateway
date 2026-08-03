@@ -15,7 +15,7 @@ use super::{
     MiddlewareReceiptJournal, ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
 };
 use crate::aci::keys::KeyProvider;
-use crate::aci::receipt::{ReceiptBuilder, ReceiptError, TransparencyEventKind};
+use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 
@@ -114,11 +114,10 @@ impl MiddlewareProviderResponseDraftingStream {
         let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
         builder.set_chat_id(self.sse_parser.chat_id());
         builder.set_upstream_verified_model_id(response_model.clone());
-        builder.add_response_received_hash(provider_response_hash.clone())?;
+        builder.add_response_received_hash(provider_response_hash)?;
         self.journal.set(MiddlewareReceiptDraft {
             receipt_id: self.receipt_id.clone(),
             builder,
-            provider_response_hash,
             endpoint_path: self.endpoint_path.clone(),
             request_mode: RequestMode::Streaming,
             response_model: response_model.clone(),
@@ -138,7 +137,6 @@ impl MiddlewareProviderResponseDraftingStream {
 /// drafted; the hashing, SSE chat-id parsing, optional E2EE re-encryption, and
 /// the receipt-store/metrics plumbing are identical and live here.
 struct FinalizerShared {
-    cleartext_hasher: Sha256,
     wire_hasher: Sha256,
     keys: Arc<dyn KeyProvider>,
     receipt_store: Arc<dyn ReceiptStore>,
@@ -158,7 +156,6 @@ struct FinalizerShared {
     error_tail_settled: bool,
     /// The gateway appended bytes the upstream never sent (a success
     /// terminator, or a client-visible error).
-    synthesized_tail: bool,
     /// The stream feeding this finalizer failed, rather than ending. Nothing is
     /// signed for it, and nothing buffered may be flushed.
     broken: bool,
@@ -174,7 +171,6 @@ impl FinalizerShared {
         is_sse: bool,
     ) -> Self {
         Self {
-            cleartext_hasher: Sha256::new(),
             wire_hasher: Sha256::new(),
             keys: service.keys.clone(),
             receipt_store: service.receipt_store.clone(),
@@ -196,7 +192,6 @@ impl FinalizerShared {
             upstream_ended: false,
             finished: false,
             error_tail_settled: false,
-            synthesized_tail: false,
             broken: false,
         }
     }
@@ -233,10 +228,8 @@ impl FinalizerShared {
         // terminator where it is a fixed marker the gateway can emit, and
         // otherwise append nothing (the outcome is still complete).
         if !self.broken {
-            return stream_success_terminator(protocol).map(|terminator| {
-                self.synthesized_tail = true;
-                terminator.as_bytes().to_vec()
-            });
+            return stream_success_terminator(protocol)
+                .map(|terminator| terminator.as_bytes().to_vec());
         }
 
         // A sequence with no successor cannot be continued, so the error would
@@ -249,7 +242,6 @@ impl FinalizerShared {
         {
             return None;
         }
-        self.synthesized_tail = true;
         Some(
             stream_error_tail(
                 protocol,
@@ -260,17 +252,12 @@ impl FinalizerShared {
         )
     }
 
-    /// `sha256:` hex digests of the cleartext and wire bytes seen so far.
-    fn hashes(&self) -> (String, String) {
-        (
-            format!(
-                "sha256:{}",
-                hex::encode(self.cleartext_hasher.clone().finalize())
-            ),
-            format!(
-                "sha256:{}",
-                hex::encode(self.wire_hasher.clone().finalize())
-            ),
+    /// `sha256:` hex digest of the wire bytes seen so far — the exact
+    /// in-order stream the client received (§7.4 `response.returned`).
+    fn wire_hash(&self) -> String {
+        format!(
+            "sha256:{}",
+            hex::encode(self.wire_hasher.clone().finalize())
         )
     }
 
@@ -312,7 +299,6 @@ fn poll_finalizing_stream<F: FinalizingStream>(
             // exactly like an upstream chunk would.
             if let Some(tail) = f.shared().take_synthesized_tail() {
                 let s = f.shared();
-                s.cleartext_hasher.update(&tail);
                 let wire = match s.e2ee_transformer.as_mut() {
                     Some(transformer) => match transformer.push_chunk(&tail) {
                         Ok(wire) => wire,
@@ -355,11 +341,10 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                 }
             }
             f.shared().finished = true;
-            // A stream that failed is not signed: the gateway cannot claim the
-            // client received a complete, determinate response.
-            if f.shared().broken {
-                return Poll::Ready(None);
-            }
+            // A broken stream is signed too: §7.4's `response.returned` covers
+            // the exact bytes emitted on the wire — including the synthesized
+            // error tail — and §6.5's truncation check needs precisely this
+            // signature. A receipt attests bytes, not completeness.
             return match f.finalize_receipt() {
                 Ok(()) => Poll::Ready(None),
                 Err(err) => {
@@ -375,7 +360,6 @@ fn poll_finalizing_stream<F: FinalizingStream>(
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Some(Ok(chunk))) => {
                 let s = f.shared();
-                s.cleartext_hasher.update(&chunk);
                 s.sse_parser.observe(&chunk);
 
                 if let Some(transformer) = s.e2ee_transformer.as_mut() {
@@ -426,7 +410,6 @@ fn poll_finalizing_stream<F: FinalizingStream>(
 pub(super) struct MiddlewareResponseFinalizingStream {
     inner: ServiceResponseStream,
     journal: MiddlewareReceiptJournal,
-    response_modified_by_wire: bool,
     shared: FinalizerShared,
 }
 
@@ -454,19 +437,12 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
         let Some(mut draft) = self.journal.take() else {
             return Ok(());
         };
-        let (cleartext_hash, wire_hash) = self.shared.hashes();
-
         if self.shared.sse_parser.chat_id().is_some() {
             draft.builder.set_chat_id(self.shared.sse_parser.chat_id());
         }
-        if draft.provider_response_hash != cleartext_hash || self.response_modified_by_wire {
-            draft
-                .builder
-                .add_transparency_event(TransparencyEventKind::ResponseModified)?;
-        }
         draft
             .builder
-            .add_response_returned_hashes(cleartext_hash, wire_hash)?;
+            .add_response_returned_hash(self.shared.wire_hash())?;
         self.shared.sign_and_store(draft.builder)?;
 
         self.shared.metrics.record_receipt_issued(
@@ -487,14 +463,12 @@ impl MiddlewareResponseFinalizingStream {
         requester: Option<ReceiptOwner>,
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
-        response_modified_by_wire: bool,
         request_id: Option<String>,
         is_sse: bool,
     ) -> Self {
         Self {
             inner,
             journal,
-            response_modified_by_wire,
             shared: FinalizerShared::new(
                 service,
                 requester,
@@ -510,7 +484,6 @@ impl MiddlewareResponseFinalizingStream {
 pub(super) struct ReceiptFinalizingStream {
     inner: UpstreamBodyStream,
     builder: Option<ReceiptBuilder>,
-    response_modified: bool,
     shared: FinalizerShared,
 }
 
@@ -540,16 +513,10 @@ impl FinalizingStream for ReceiptFinalizingStream {
     }
 
     fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
-        let (cleartext_hash, wire_hash) = self.shared.hashes();
         let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
         builder.set_chat_id(self.shared.sse_parser.chat_id());
         builder.set_upstream_verified_model_id(self.shared.sse_parser.model_id());
-        // Appending an error tail is a modification of the response, whatever
-        // else did or did not change it.
-        if self.response_modified || self.shared.synthesized_tail {
-            builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
-        }
-        builder.add_response_returned_hashes(cleartext_hash, wire_hash)?;
+        builder.add_response_returned_hash(self.shared.wire_hash())?;
         self.shared.sign_and_store(builder)?;
 
         self.shared.metrics.record_upstream_response(
@@ -577,14 +544,12 @@ impl ReceiptFinalizingStream {
         requester: Option<ReceiptOwner>,
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
-        response_modified: bool,
         request_id: Option<String>,
         is_sse: bool,
     ) -> Self {
         Self {
             inner,
             builder: Some(builder),
-            response_modified,
             shared: FinalizerShared::new(
                 service,
                 requester,

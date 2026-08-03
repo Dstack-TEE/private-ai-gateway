@@ -1,27 +1,24 @@
-use super::config::normalize_downstream_domain;
-use super::wire::{E2eeAadMode, E2eeDecryptor};
-
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
+use super::config::normalize_downstream_domain;
 use super::e2ee_crypto::{
     decrypt_request_payload, legacy_public_keys_match, normalize_legacy_public_key_for_replay,
     validate_aci_e2ee_nonce, validate_aci_payload_model, E2eeFieldCrypto,
 };
+use super::wire::{E2eeAadMode, E2eeDecryptor};
 use super::{
     AciService, E2eeError, E2eePreparedRequest, E2eeReplayKey, E2eeRequestContext,
     E2eeRequestParts, ServiceError,
 };
-use sha2::{Digest, Sha256};
 
 use crate::aci::e2ee::{
     is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
-    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_VERSION_V1, E2EE_VERSION_V2,
+    E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V1, E2EE_VERSION_V2,
 };
-use crate::aci::identity::{self, attestation_statement, report_data};
-use crate::aci::keys::{
-    ethereum_address_from_uncompressed_public_key, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
-};
-use crate::aci::types::{AttestationEnvelope, AttestationReport, Freshness, KeysetEndorsement};
+use crate::aci::identity::{attestation_statement, report_data};
+use crate::aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
+use crate::aci::types::{AttestationEnvelope, AttestationReport};
 
 impl AciService {
     pub async fn attestation_report(
@@ -39,14 +36,10 @@ impl AciService {
         nonce: Option<String>,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
-        // A revoked keyset must stop producing acceptable reports (§4.7).
-        if self.is_keyset_revoked() {
-            return Err(ServiceError::KeysetRevoked);
-        }
-        let statement = attestation_statement(&self.keyset, nonce)?;
-        let rd = report_data(&statement)?;
+        let statement = attestation_statement(self.keyset.digest(), nonce.as_deref())?;
+        let rd = report_data(&statement);
         let quote = self.quoter.get_quote(rd).await?;
-        self.assemble_report(&rd, quote, domain).await
+        self.assemble_report(&rd, quote, domain)
     }
 
     /// Legacy dstack-vllm-proxy compatibility report. The quote binds
@@ -67,7 +60,7 @@ impl AciService {
     ) -> Result<AttestationReport, ServiceError> {
         let rd = self.legacy_report_data(signing_algo, version, nonce, domain)?;
         let quote = self.quoter.get_quote_raw(rd).await?;
-        self.assemble_report(&rd, quote, domain).await
+        self.assemble_report(&rd, quote, domain)
     }
 
     /// Build `identity(32) ‖ nonce(32)`. The nonce is the raw 32 bytes when it
@@ -107,6 +100,8 @@ impl AciService {
     /// The signing-key identity bytes the legacy report_data binds, matching the
     /// `signing_address` the shim reports: the 20-byte secp256k1 Ethereum
     /// address for `ecdsa`, or the 32-byte ed25519 public key for `ed25519`.
+    /// Legacy keys come from [`crate::aci::keys::KeyProvider::legacy_e2ee_keys`];
+    /// they are not part of the ACI keyset.
     fn legacy_signing_key_bytes(
         &self,
         signing_algo: Option<&str>,
@@ -114,26 +109,30 @@ impl AciService {
         let signing_algo = signing_algo
             .unwrap_or(LEGACY_ALGO_ECDSA)
             .to_ascii_lowercase();
-        let e2ee_keys = self.keys.e2ee_keys();
+        let legacy_keys = self.keys.legacy_e2ee_keys();
         let key_err =
             |msg: &str| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg.to_string()));
         match signing_algo.as_str() {
             LEGACY_ALGO_ECDSA => {
-                let key = e2ee_keys
+                let key = legacy_keys
                     .iter()
-                    .find(|key| key.algo == E2EE_ALGO_SECP256K1_AESGCM)
+                    .find(|key| key.algo == E2EE_ALGO_LEGACY_ECDSA)
                     .ok_or_else(|| {
-                        key_err("no secp256k1 E2EE key for legacy report_data binding")
+                        key_err("no secp256k1 legacy key for legacy report_data binding")
                     })?;
-                let address = ethereum_address_from_uncompressed_public_key(&key.public_key_hex)?;
+                let address = crate::aci::keys::ethereum_address_from_uncompressed_public_key(
+                    &key.public_key_hex,
+                )?;
                 hex::decode(address.trim_start_matches("0x"))
                     .map_err(|e| key_err(&format!("invalid signing address hex: {e}")))
             }
             LEGACY_ALGO_ED25519 => {
-                let key = e2ee_keys
+                let key = legacy_keys
                     .iter()
                     .find(|key| key.algo == E2EE_ALGO_LEGACY_ED25519)
-                    .ok_or_else(|| key_err("no ed25519 E2EE key for legacy report_data binding"))?;
+                    .ok_or_else(|| {
+                        key_err("no ed25519 legacy key for legacy report_data binding")
+                    })?;
                 hex::decode(&key.public_key_hex)
                     .map_err(|e| key_err(&format!("invalid ed25519 public key hex: {e}")))
             }
@@ -151,7 +150,7 @@ impl AciService {
         let spki_hex = domain
             .and_then(normalize_downstream_domain)
             .and_then(|domain| {
-                self.keyset
+                self.keyset()
                     .tls_public_keys
                     .iter()
                     .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -170,30 +169,18 @@ impl AciService {
             .map_err(|_| key_err("TLS SPKI fingerprint is not 32 bytes".to_string()))
     }
 
-    async fn assemble_report(
+    fn assemble_report(
         &self,
         report_data_bytes: &[u8],
         quote: crate::aci::keys::Quote,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
-        let endorsement_payload = identity::keyset_endorsement_payload(&self.keyset)?;
-        let endorsement_sig = self.keys.sign_keyset_endorsement(&endorsement_payload)?;
-        let endorsement = KeysetEndorsement {
-            algo: self.keys.identity_public_key().algo,
-            value_hex: hex::encode(endorsement_sig),
-        };
-
-        let now = self.clock.now_secs();
-        let freshness = Freshness {
-            fetched_at: now,
-            stale_after: now + self.config.freshness_seconds,
-        };
-
         let mut evidence = json!({
             "quote": hex::encode(&quote.raw_quote),
             "quote_report_data": hex::encode(&quote.report_data),
             "event_log": quote.event_log,
             "vm_config": quote.vm_config,
+            "app_compose": quote.app_compose,
         });
         if let Some(app_compose) = quote.app_compose {
             evidence["app_compose"] = Value::String(app_compose);
@@ -216,29 +203,23 @@ impl AciService {
             evidence["downstream_tls_binding"] = binding;
         }
 
-        let envelope = AttestationEnvelope {
-            vendor: self.config.vendor.clone(),
-            tee_type: self.config.tee_type.clone(),
-            workload_keyset: self.keyset.clone(),
-            report_data_hex: hex::encode(report_data_bytes),
-            keyset_endorsement: endorsement,
-            source_provenance: self.config.source_provenance.clone(),
-            freshness,
-            evidence,
-        };
-
         Ok(AttestationReport {
             api_version: "aci/1".to_string(),
-            workload_id: self.workload_id.clone(),
-            workload_keyset_digest: self.workload_keyset_digest.clone(),
-            attestation: envelope,
+            workload_keyset_digest: self.keyset.digest().to_string(),
+            attestation: AttestationEnvelope {
+                tee_type: self.config.tee_type.clone(),
+                workload_keyset: self.keyset.to_value(),
+                report_data_hex: hex::encode(report_data_bytes),
+                source_provenance: self.config.source_provenance.clone(),
+                evidence,
+            },
             service_capabilities: self.config.service_capabilities.clone(),
         })
     }
 
     pub(super) fn downstream_tls_binding(&self, domain: &str) -> Option<Value> {
         let domain = normalize_downstream_domain(domain)?;
-        self.keyset
+        self.keyset()
             .tls_public_keys
             .iter()
             .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -251,7 +232,7 @@ impl AciService {
     }
 
     fn requires_host_for_downstream_tls_binding(&self) -> bool {
-        self.keyset
+        self.keyset()
             .tls_public_keys
             .iter()
             .any(|key| key.domain.is_some())
@@ -290,6 +271,7 @@ impl AciService {
         // under that suite's own normalization; the first match fixes the suite.
         let selected_key = self
             .keyset
+            .keyset()
             .e2ee_public_keys
             .iter()
             .find(|key| {
@@ -363,10 +345,11 @@ impl AciService {
         }
         let client_public_key = parts.client_public_key.ok_or(E2eeError::HeaderMissing)?;
         let model_public_key = parts.model_public_key.ok_or(E2eeError::HeaderMissing)?;
-        let _selected_key = self
-            .keyset
-            .e2ee_public_keys
-            .iter()
+        // Legacy keys never appear in the §3.1 keyset; the provider resolves
+        // them for this compatibility surface.
+        self.keys
+            .legacy_e2ee_keys()
+            .into_iter()
             .find(|key| {
                 key.algo == signing_algo
                     && legacy_public_keys_match(

@@ -6,7 +6,7 @@ measured SecretVM workload, and inference TLS key before it forwards traffic.
 
 ## Configure a SecretAI origin
 
-`accepted_workload_ids` is optional. When configured, a workload ID pins the CPU
+`accepted_subjects` is optional. When configured, a workload ID pins the CPU
 technology, SecretVM environment, VM template, SecretVM artifacts version, and
 exact SHA-256 digest of `/docker-compose`:
 
@@ -33,7 +33,7 @@ The following unpinned JEDI configuration was verified live on 2026-07-21:
 To pin that exact measured workload, add:
 
 ```json
-"accepted_workload_ids": [
+"accepted_subjects": [
   "secretvm:sev-snp:gpu_prod:4xlarge:v0.0.33:sha256:ea08d2b8a03bea1d3206286e50da41e437b3fd4a9e6e3415a0d6169f05bb7cf2"
 ]
 ```
@@ -84,7 +84,7 @@ For each verification, the adapter:
    `/docker-compose` response bytes and the registry bundled with the pinned
    verifier package.
 9. Requires one unique registry match in the `prod` or `gpu_prod` environment.
-   If `accepted_workload_ids` is configured, also requires an exact policy match.
+   If `accepted_subjects` is configured, also requires an exact policy match.
 10. Emits a `tls_spki_sha256` channel binding. The Rust forwarding path checks
    that SPKI against the actual inference TLS connection before sending the
    request.

@@ -19,10 +19,9 @@ use super::{
     MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
     StreamingUpstreamError, UpstreamVerificationError,
 };
-use crate::aci::receipt::{ReceiptBuilder, TransparencyEventKind, UpstreamVerifiedEvent};
+use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
-use crate::aggregator::session::SessionClaims;
 use crate::middleware::errors::is_upstream_capacity_signal;
 use crate::sse_framing::SseFramingObserver;
 use std::collections::HashMap;
@@ -161,7 +160,7 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
     pub selected_route_id: &'a str,
     pub forwarded_body: &'a [u8],
     pub recorded_event: UpstreamVerifiedEvent,
-    pub recorded: Option<(String, SessionClaims)>,
+    pub recorded: Option<String>,
 }
 
 impl AciService {
@@ -186,8 +185,7 @@ impl AciService {
             receipt_id.to_string(),
             chat_id,
             model,
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
+            self.keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -196,10 +194,10 @@ impl AciService {
         builder.add_middleware_forwarded(middleware_forwarded_body)?;
         builder.add_route_selected(selected_route_id)?;
         builder.add_request_forwarded(forwarded_body)?;
-        if received_body != forwarded_body {
-            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+        // A direct service has no upstream hop, so §7.5's event does not apply.
+        if !self.serves_directly() {
+            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
         }
-        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
         Ok(builder)
     }
 
@@ -230,7 +228,7 @@ impl AciService {
         let chat_id = extract_chat_id(&response.body);
         let sealed = self.record_attested_upstream_session(&recorded_event)?;
         let recorded = cite_served_session(&sealed, response.served_instance_id.as_deref());
-        let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+        let session_id = recorded.clone();
         let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
             receipt_id: &receipt_id,
             chat_id,
@@ -247,7 +245,7 @@ impl AciService {
         // The session is keyed on the requested (routed) model; record the
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
-        let provider_response_hash = builder.add_response_received(&response.body)?;
+        builder.add_response_received(&response.body)?;
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
@@ -255,7 +253,6 @@ impl AciService {
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
                     builder,
-                    provider_response_hash,
                     endpoint_path: endpoint_path.to_string(),
                     request_mode: RequestMode::Buffered,
                     response_model,
@@ -277,7 +274,10 @@ impl AciService {
         stream: bool,
         receipt_journal: MiddlewareReceiptJournal,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
-        let aci_required = req.requires_aci_verification();
+        // §5.3: a direct service satisfies `aci_verified` by construction — the
+        // workload the client verified (§9.1) is the one serving (§4.1); pinned
+        // session lists are still refused in `apply_aci_session_constraint`.
+        let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         // The user-requested model, recorded as the receipt's top-level `model`.
@@ -397,7 +397,8 @@ impl AciService {
                     continue;
                 }
 
-                // Only an explicit ACI constraint makes verification fail-closed.
+                // Fail-closed when the effective policy requires it: a TEE-only
+                // endpoint or the request's §5.3 constraint (§1.2).
                 // Unconstrained requests still record the verifier outcome.
                 let candidate_required = aci_required;
 
@@ -552,7 +553,7 @@ impl AciService {
                         &sealed,
                         upstream_response.served_instance_id.as_deref(),
                     );
-                    let session_id = recorded.as_ref().map(|(id, _)| id.clone());
+                    let session_id = recorded.clone();
                     let builder =
                         self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
                             receipt_id: &receipt_id,
@@ -808,16 +809,7 @@ impl AciService {
             algo: ctx.algo.clone(),
         });
 
-        let final_cleartext_hash = crate::aci::canonical::sha256_hex(final_cleartext_body);
-        if draft.provider_response_hash != final_cleartext_hash || wire_body != final_cleartext_body
-        {
-            draft
-                .builder
-                .add_transparency_event(TransparencyEventKind::ResponseModified)?;
-        }
-        draft
-            .builder
-            .add_response_returned(final_cleartext_body, &wire_body)?;
+        draft.builder.add_response_returned(&wire_body)?;
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
@@ -886,7 +878,6 @@ impl AciService {
             requester,
             endpoint_path.to_string(),
             e2ee_transformer,
-            e2ee_response.is_some(),
             request_id,
             is_sse,
         );

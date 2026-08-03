@@ -60,6 +60,12 @@ impl Middleware {
         self.tee_only_domains.contains(host)
     }
 
+    /// Whether any TEE-only host is configured. A request whose host cannot
+    /// be resolved must not bypass those hosts (§1.2 fail closed).
+    pub fn has_tee_only_domains(&self) -> bool {
+        !self.tee_only_domains.is_empty()
+    }
+
     /// Relay a `/v1/...` catalog request to the control plane, which serves
     /// catalogs without the `/v1` prefix. The control body is returned verbatim
     /// with its status and a forced JSON content type.

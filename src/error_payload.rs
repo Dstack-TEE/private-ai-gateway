@@ -71,6 +71,8 @@ pub(crate) fn envelope(
             }
             value
         }
-        Surface::Openai => json!({ "error": { "message": message, "type": error_type } }),
+        Surface::Openai => json!({
+            "error": { "message": message, "type": error_type, "code": null, "param": null }
+        }),
     }
 }

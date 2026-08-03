@@ -33,7 +33,7 @@ can *prove* it on this path or only record an operator assertion.
 ## TODOs before strict-release inclusion
 
 - Pin the accepted vllm-proxy image/compose digest (allowlist) on the PhalaDirect path —
-  today the config's `accepted_image_digests` / `accepted_workload_ids` fields are wired to
+  today the config's `accepted_image_digests` / `accepted_subjects` fields are wired to
   the native `aci-service` path, not this external bridge.
 - `production_os_image` is now decided from dstack's published image metadata (bound to the
   attested `os_image_hash`), so dev images are flagged today (the deployed fleet is all

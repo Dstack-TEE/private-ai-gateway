@@ -1,131 +1,211 @@
 # Reference Implementation vs. ACI Spec: Known Gaps
 
 Where this implementation currently falls short of, or diverges from,
-[the ACI Spec](../../spec/aci.md). Spec soundness is authoritative; these are
-implementation compromises and cleanups, not spec changes. None are fixed by
-this document — each item is a candidate work item.
+[the ACI Spec](../../spec/aci.md). The spec is authoritative; these are
+implementation compromises, not spec changes. Each item is a candidate work
+item.
 
-## Wire-format migrations required by the spec
+## Verifier coverage
 
-1. **E2EE AAD format.** The spec defines the AAD as JCS canonical JSON with
-   `aci.e2ee.request.v2` / `aci.e2ee.response.v2` purpose tags and field
-   paths (spec §7.3). The implementation still emits the inherited
-   pipe-delimited strings (`v2|req|algo=...`,
-   `src/aggregator/service/e2ee_crypto.rs:88-140`) and rejects `|`/CR/LF in
-   the model and nonce, which the JSON AAD makes unnecessary. Migrate the
-   encoder/decoder and drop the ambiguity checks.
+1. **The `aci` CLI has no custody policy.** §9.1(5) requires the verifier
+   policy to check private-key custody (for this deployment, the dstack KMS
+   signature chain in `attestation.evidence.key_custody`). The in-tree
+   dstack chain validation (`src/aci/verifier/dstack.rs`) is not wired into
+   the CLI, so `aci verify` reports id-5 as an honest `skip`, never a pass.
+   The top-line verdict and exit code do not distinguish a skip from a pass:
+   a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and
+   its reason are always printed in the transcript and counted in the
+   verdict line; a relying party that requires §9.1(5) must gate on the
+   id-5 status, not on the exit code alone.
 
-2. **Multimodal E2EE coverage.** The spec covers every content-bearing field
-   (spec §7.2): image (`image_url.url`) and audio (`input_audio.data`)
-   request parts, and response `message.audio.data`. The implementation
-   decrypts only whole-string content and `text` parts
-   (`src/aggregator/service/e2ee_crypto.rs:267-303`) and encrypts only
-   `content` / `reasoning_content` / `text` / `data[].embedding`. Whole-content
-   encryption already protects multimodal requests end to end; per-part
-   image/audio ciphertexts and response audio encryption are not implemented.
+2. **Provenance is measured, not rebuilt.** When the service publishes
+   `app_compose`, id-4 verifies `sha256(app_compose)` equals the `compose-hash`
+   measured into the quote's RTMR3, and `--accept-compose` pins that value to
+   an operator allowlist (§1.3). Nothing rebuilds `repo_url`/`repo_commit`
+   from source or ties them to the measurement, so those fields stay a label
+   to read rather than evidence; appraising them is the operator's job.
+   Against a live service both verifiers fail id-4 when no `app_compose`
+   backs the claim (§9.1(4)); only an offline audit of a stored report
+   records the honest skip.
 
-3. **WebCrypto-native defaults.** The spec RECOMMENDS the X25519 E2EE suite
-   (`x25519-aes-256-gcm-hkdf-sha256`, HKDF info `aci.e2ee.v2.x25519`) and
-   Ed25519 receipt signing so browser clients can verify with the Web Crypto
-   API alone (spec §7.1, §8.5). The implementation serves only the secp256k1
-   E2EE suite (`src/aci/e2ee.rs:32-36`; the keyset's `ed25519` E2EE entry is
-   the legacy X-Signing-Algo path, not an ACI suite) and signs receipts with
-   a secp256k1 key only (`src/dstack.rs:307-329`). Add an X25519 E2EE key
-   and an Ed25519 receipt key to the dstack provider and keyset.
+## Service conformance
 
-4. **Receipt top-level `model`.** The spec adds a top-level `model` field to
-   every receipt — the user-requested model, before any rewrite (spec §8.2) —
-   so even a direct single-model service records what was asked for. The
-   receipt builder (`src/aci/receipt.rs`, `Receipt` in `src/aci/types.rs`)
-   has no such field today; only `upstream.verified.model_id` (the
-   upstream-served model) is recorded. Add it to the type, the canonical
-   value, and the builder.
+3. **ACI E2EE is off by default, and the shipped scheme predates §6.**
+   `enable_e2ee` defaults to false, so the gateway advertises no
+   `supported_e2ee_versions` and rejects ACI E2EE requests. It gates the ACI
+   scheme only: the inherited dstack-vllm-proxy path (`x-signing-algo`) stays
+   available, so existing clients are unaffected. §1.4(5) requires
+   E2EE on chat completions, so the default deployment is knowingly
+   non-conformant until the §6 revamp (item 8) lands. Setting `enable_e2ee`
+   restores the earlier field-level v2 scheme carried over unchanged from
+   before this protocol revision — not the §6 whole-body sealing. The
+   launcher warns at startup.
 
-5. **Keyset revocation statement.** The spec defines an identity-key-signed
-   revocation statement (`purpose: aci.keyset.revocation.v1`) and requires a
-   bounded `keyset_epoch.not_after` (spec §4.7). The implementation has no
-   revocation signing/serving path, and pins `not_after: u64::MAX`
-   (`src/main.rs:372`, see item 6). Add a revocation-statement signer that
-   reuses the endorsement machinery (`sign_keyset_endorsement` analogue in
-   `src/dstack.rs`) and a serving surface for it.
+4. **Receipts are in-memory only.** Receipt retention is bounded by
+   `receipt_ttl_seconds` and lost on restart. The spec permits a bounded,
+   implementation-defined retention period (§7.1), but a restart shortens it
+   silently. Sessions do better: the JSONL store survives restarts and
+   extends retention per citing receipt (§8 retention rule).
 
-## Soundness gaps
+5. **Chutes per-instance sessions carry no §8.2 evidence.** The Chutes
+   verifier's raw evidence is fleet-wide and nonce-bound, so sealing it into
+   each per-instance session would mint a new session id for every
+   verification round and every fleet change. The implementation instead
+   seals per-instance sessions with an empty `evidence` object
+   (`record_attested_upstream_session`), keeping them content-addressed on
+   per-instance facts only. Consequence: the §9.2 deep-audit step fails
+   closed on Chutes-cited sessions (`aci` CLI upstream-2; verifier-ts
+   `checkSessionEvidence`) — a §9.2(4) deep audit is impossible for Chutes
+   even once built (see the §9.2 audits item below), while receipt
+   verification and the §9.1/§9.3 checks are unaffected. The
+   session store still accepts these records (its §8.2 check rejects only
+   evidence whose `data` does not hash to `digest`). Candidate work item:
+   have the provider verifier emit each instance's own evidence slice.
 
-6. **Keyset epoch is pinned, not managed.** The launcher hard-codes
-   `keyset_epoch { version: 1, not_after: u64::MAX }` (`src/main.rs:372`).
-   The spec requires a monotonically increasing version per keyset change and
-   a bounded expiry (§4.2, §4.7). There is no rotation machinery yet; until
-   there is, verifiers get no rollback protection from the epoch and no
-   expiry-based exposure bound.
+6. **Streaming upstream errors carry no receipt.** A streaming request whose
+   upstream answers non-200 is returned as a buffered error without a
+   receipt (inherited dstack-vllm-proxy behavior,
+   `forward_chat_completion_stream_request`), while the buffered path issues
+   a receipt for the same upstream error status. Arguably outside §1.4(6) —
+   no inference completed — but the coverage is asymmetric.
 
-7. **E2EE replay cache is per-process.** `claim_e2ee_replay` uses an
-   in-memory map (`src/aggregator/service/e2ee.rs:445`). Replicas sharing one
-   workload identity each keep their own cache, so a captured request could
-   be replayed against a different replica within the 300-second window. The
-   spec permits an in-memory cache for v1; with shared-identity replicas the
-   claim weakens and deserves either a shared cache or a spec-level caveat on
-   replica deployments.
+7. **§5.3 membership is best-effort for multi-instance backends.** The
+   pinned-session gate runs before forwarding against the channel's current
+   session ids. A Chutes-style backend fronts many instances behind one
+   route, and the serving instance is known only after the response, so a
+   non-listed instance can serve when a sibling instance was listed. The
+   receipt's cited id exposes this to the client's §9.3(6) check.
 
-8. **E2EE accepts arbitrarily short nonces.** `validate_e2ee_nonce` only
-   rejects empty/ambiguous values
-   (`src/aggregator/service/e2ee_crypto.rs:13-26`). The spec says nonces
-   SHOULD carry ≥128 bits of randomness; the service could enforce a
-   16-character floor.
+8. **§6 is specified but not implemented.** The spec defines whole-body
+   sealing with the §6.1 key schedule (including the
+   `request_secret || unit_secret` response derivation and in-band response
+   authenticity). The implementation ships the earlier field-level scheme
+   (item 3); the TS client ships no E2EE at all; and `spec/test-vectors.md`
+   carries no §6 vectors yet. Response authenticity today is only post-hoc
+   via the receipt (§9.3). All of it lands with the E2EE revamp.
 
-9. **E2EE `request.received.body_hash` is not client-reproducible.** The
-   hash covers `serde_json::to_vec` of the decrypted payload
-   (`src/aggregator/service/e2ee.rs:317`), so a client would have to
-   reproduce that exact serialization to pre-verify it. The spec documents
-   this honestly (§12), but echoing the observed body bytes or hashing a
-   defined canonical form would make the request-side check usable.
+9. **Session validity is advertised far longer than a session can actually
+    serve.** `expires_at` is set to `now + receipt_ttl_seconds` (default
+    3600), but each verification round mints a fresh nonce, so the evidence
+    digest — part of the channel fingerprint — changes every
+    `verifier_cache_seconds` (default 300) and a new session supersedes the
+    old one. The list endpoint keeps advertising the superseded session as
+    current until its `expires_at`, so a client that verified and pinned it
+    (§5.3) is refused `session_not_accepted` while the service still lists
+    it. Fix direction: end a session's validity period when a re-verification
+    supersedes it, so "current" means current.
 
-## Stale code and doc rot
+10. **A channel with several bindings is split into one session per
+    binding.** `record_attested_upstream_session` seals a session per entry
+    in `channel_bindings`. For a Chutes-style backend that is correct (one
+    session per instance), but an `aci-service` upstream publishing several
+    service-wide TLS pins for one origin yields several sessions whose
+    records each state a tighter binding than the aggregator enforced (the
+    TLS client accepts any of the pins). The receipt cites the first, so a
+    client that pinned a sibling session passes the membership gate and then
+    fails its own §9.3(6) check. Fix direction: group bindings of one channel
+    into one session, keyed on what makes a channel distinct.
 
-10. **`examples/verify_aci_artifacts.rs` reads fields receipts no longer
-    carry.** It looks up `upstream.verified` fields `vendor` and
-    `evidence.digest` (`examples/verify_aci_artifacts.rs:106-115`), but the
-    event emits `provider` and deliberately omits inline `evidence`
-    (`src/aci/receipt.rs:140-160`). The summary prints nulls. It also predates
-    attested sessions: no `session_id` recomputation, no claims, no deep
-    audit.
+11. **Session retention can lapse before the receipts citing it.** Session
+    `retention_until` is fixed at seal time — stream start — while the
+    receipt's expiry is computed at stream end, so for a long stream the
+    session can be evicted while its citing receipt is still served. §8
+    requires the session to outlast every receipt citing it. Sub-second
+    window on the buffered paths, stream-duration window on the streaming
+    ones.
 
-11. **Stale "returned as headers" comments.** `MiddlewareForwarded` /
-    `MiddlewareStreamingForwarded` document `selected_route`, `session_id`,
-    and `failed_attempts` as "returned to the caller as headers"
-    (`src/aggregator/service/wire.rs:76-98`); no such headers are emitted
-    anywhere. By design the receipt is the committed reference — fix the
-    comments.
+12. **A verified, served request can be recorded as `result: "failed"`.**
+    `cite_served_session` matches a reported served instance only against
+    sealed sessions carrying an `instance_key`. An external verifier that
+    returns an `e2ee_public_key_sha256` binding without `key_id` (optional in
+    the contract) while the backend reports a served instance matches
+    nothing, and the receipt records the failed form on a request that was
+    verified and served. Unreachable with the bundled bridges, which always
+    set `key_id`.
 
-12. **`docs/attested-session-system.md` names purpose tags that do not
-    exist.** It cites `aci.identity.v1` / `aci.receipt.v1` as
-    domain-separation strings; the implemented tags are `aci.report_data.v1`
-    and `aci.keyset.endorsement.v1` (`src/aci/types.rs:146-147`), and
-    receipts intentionally carry no purpose tag.
+13. **The Chutes backend adds a member to the forwarded body after
+    hashing.** `request.forwarded` hashes `prepared.request.body`, and
+    `build_chutes_e2ee_request` then inserts `e2e_response_pk` into that JSON
+    before encrypting and sending. The JSON the upstream parses therefore
+    carries one member the signed hash does not commit to. §6.6 permits
+    upstream encryption of the aggregator's choosing, but this is a body
+    member, not encryption framing.
 
-## Confusing naming (pre-launch rename candidates)
+14. **TLS keys are attested without custody evidence.** The keyset publishes
+    the SPKI of a mounted certificate whose private key lives in the external
+    TLS terminator, not the workload, and no `key_custody` entry covers the
+    TLS role — so no verifier policy can check §3.3 custody for it, and a
+    client pinning that SPKI cannot tell whether TLS terminates inside the
+    TEE. E2EE (§6) is the mechanism that does not depend on this. Fix
+    direction: terminate TLS in the workload, or publish custody evidence
+    for the terminator.
 
-13. **`provider` means two things.** On a session, `provider` is the
-    operator's upstream config label (`src/aggregator/session.rs:217`); on the
-    `upstream.verified` event the same information is called `upstream_name`
-    while `provider` there is the verifier adapter type
-    (`src/aci/receipt.rs:53-72`). The spec describes both faithfully, but one
-    consistent pair (e.g. `upstream_name` + `provider_type`) across event and
-    session would remove a real reader trap. Content-addressed session ids
-    depend on the field name, so rename before launch or not at all.
+15. **The dstack custody policy checks only the receipt key.**
+    `verify_dstack_kms_receipt_custody` matches the `receipt` role against
+    `receipt_signing_keys`; the `e2ee-x25519` custody entry is never matched
+    against `e2ee_public_keys`, and TLS is not covered. §3.3 requires a
+    policy to specify custody for the receipt, E2EE and TLS keys.
+
+16. **No plausibility bound on `not_after`.** §3.1 says a verifier SHOULD
+    reject an implausibly distant expiry; no verifier here does, and the
+    service accepts any configured lifetime. §3.4's automatic expiry is the
+    only revocation that needs no coordination, so an absurd `not_after`
+    nullifies it.
+
+17. **The `aci-service` upstream verifier trusts `image_digest`
+    uncorroborated.** Its policy accepts an upstream when the attested
+    app id is allowlisted **or** the report's `source_provenance.image_digest`
+    is (`AciServiceVerifierPolicy::accepts_measured`). The first path is
+    measured: acceptance keys on `app-id:0x<hex>` of the app id the verified
+    RTMR3 event log yields, and the compose preimage is checked against the
+    measured `compose-hash` (an upstream publishing no `app_compose` fails
+    closed). A keyset `subject` is the workload's own claim, so it may only
+    restate that measured value. But `image_digest` is a self-asserted report
+    field that nothing ties to that measurement, so the second path admits an
+    upstream on a claim alone — §4.1 says a verifier trusts provenance "only
+    when corroborated by measured evidence, like the §4.2 compose-hash path".
+    `repo_url` / `repo_commit` are corroborated by neither path. Related: the
+    KMS receipt-custody chain is pinned to the `aci.receipt.ed25519.v1`
+    purpose, but the link from the KMS-derived k256 scalar to the published
+    Ed25519 receipt key rests on the measured workload code — another reason
+    the anchor must stay measured. Fix direction: anchor `image_digest` to the
+    verified compose, or drop it as a policy anchor.
+
+18. **The §9.2 session audits stop short of evidence appraisal.** Both
+    verifiers prove the cited session hashes to its id, the validity window
+    holds, and the evidence data hashes to its digest — §9.2(1)-(2). The
+    `aci` CLI also appraises the typed claims against a caller policy
+    (§9.2(3), `--require-claim` on audit/sessions/send/serve); verifier-ts
+    still only formats claims into the upstream detail. Neither implements
+    §9.2(4), appraising the evidence itself. Candidate work items: a
+    `requiredClaims` input for verifier-ts, and an evidence-appraisal hook
+    reusing the provider-verifier logic.
+
+## Stale surroundings
+
+19. **The live E2E scripts predate the simplified protocol.** Parts of
+   `scripts/live_e2e/` (e.g. `cases/embeddings.py`, `cases/lifecycle.py`)
+   still assert removed mechanism (transparency events), and
+   `scripts/phala_multi_upstream_smoke.sh` /
+   `scripts/local_multi_upstream_smoke.sh` still use `workload_id` and
+   `accepted_workload_ids`. The in-process integration suites (`tests/`)
+   and `docs/live-e2e-test-suite.md` cover the new protocol; the live
+   scripts need the same pass, and the public deployment serves the
+   previous build until redeployed.
+
+20. **Client CI triggers are path-scoped.** `verifier-ts` tests pin the spec
+   test vectors byte-for-byte, but the workflow triggers only on
+   `clients/verifier-ts/**`, so an edit to `spec/test-vectors.md` alone does
+   not rerun them (Rust CI catches drift via `tests/spec_vectors.rs`).
 
 ## Beyond-spec surfaces (intentional, keep honest)
 
-14. **Legacy dstack-vllm-proxy compatibility.** `/v1/attestation/report`
-    (separate 64-byte report-data layout, injected `signing_address` /
-    `intel_quote` / `nvidia_payload` / `all_attestations`), `/v1/signature/{id}`,
-    and `X-Signing-Algo` E2EE modes. The legacy ECDSA path signs with the E2EE
-    secp256k1 key (`src/dstack.rs:384-409`) — deliberate key reuse inherited
-    from vllm-proxy, confined to the legacy surface and documented there. The
-    spec's rule that compatibility surfaces must not alter ACI artifacts
-    holds today.
-
-15. **E2EE can be switched off per deployment.** With empty
-    `supported_e2ee_versions` the gateway rejects E2EE requests
-    (`src/http/app/handlers.rs:493`). Such a deployment is not
-    spec-conformant (the spec requires E2EE on chat completions); fine for
-    dev, worth a startup warning in production mode.
+21. **Legacy dstack-vllm-proxy compatibility** (the Appendix B non-ACI-surfaces rule).
+    `/v1/attestation/report` (separate report-data layout, injected
+    `signing_address` / `intel_quote` / `nvidia_payload`), `/v1/signature/{id}`,
+    and the `X-Signing-Algo` E2EE mode serve pre-ACI clients. The k256 code
+    and the legacy keys' KMS custody evidence are confined to that surface —
+    the `/v1/aci/attestation` report's `key_custody` carries keyset roles
+    only. The spec's rule that compatibility
+    surfaces must not alter ACI artifacts holds: report, receipt, and session
+    bytes are identical with or without compatibility parameters.

@@ -13,13 +13,13 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::aci::e2ee::{
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM,
-};
+use crate::aci::e2ee::{E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519};
 use crate::aci::keys::{
     ethereum_address_from_uncompressed_public_key, KeyError, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
-use crate::aci::types::AttestationReport;
+use crate::aci::types::{
+    AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
+};
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
     COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
@@ -34,8 +34,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, keyset_revoked_response,
-    unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
+    unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
@@ -74,7 +74,6 @@ pub(super) async fn health() -> Json<Value> {
 pub(super) async fn root(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "api_version": "aci/1",
-        "workload_id": state.service.workload_id(),
         "workload_keyset_digest": state.service.workload_keyset_digest(),
     }))
 }
@@ -86,6 +85,19 @@ fn catalog_path(base: &str, query: Option<String>) -> String {
     match query.as_deref().filter(|q| !q.is_empty()) {
         Some(q) => format!("{base}?{q}"),
         None => base.to_string(),
+    }
+}
+
+/// On a TEE-only host, rewrite the relayed catalog query to force `?tee=true`
+/// (see `force_tee_true`); otherwise pass the client's query through unchanged.
+fn tee_only_catalog_query(
+    middleware: &Middleware,
+    headers: &HeaderMap,
+    query: Option<String>,
+) -> Option<String> {
+    match request_host_domain(headers) {
+        Some(host) if middleware.is_tee_only_domain(&host) => Some(force_tee_true(query)),
+        _ => query,
     }
 }
 
@@ -103,19 +115,6 @@ pub(super) async fn models(
     match state.service.upstream().models().await {
         Ok(upstream) => upstream_direct_response(upstream, "application/json"),
         Err(err) => upstream_proxy_error_response(err),
-    }
-}
-
-/// On a TEE-only host, rewrite the relayed catalog query to force `?tee=true`
-/// (see `force_tee_true`); otherwise pass the client's query through unchanged.
-fn tee_only_catalog_query(
-    middleware: &Middleware,
-    headers: &HeaderMap,
-    query: Option<String>,
-) -> Option<String> {
-    match request_host_domain(headers) {
-        Some(host) if middleware.is_tee_only_domain(&host) => Some(force_tee_true(query)),
-        _ => query,
     }
 }
 
@@ -244,39 +243,6 @@ pub(super) async fn admin_put_upstreams(
     }
 }
 
-/// Revoke the current workload keyset (§4.7). Guarded by the admin token: the
-/// service signs the revocation payload with the identity key, persists the
-/// statement, and stops serving reports/inference under this keyset. On the
-/// next restart the launcher rolls to a fresh epoch so it can serve again,
-/// while the revoked digest stays listed at `GET /v1/aci/revocations`.
-pub(super) async fn admin_revoke_keyset(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Some(resp) = enforce_admin(&state, &headers) {
-        return resp;
-    }
-    match state.service.revoke_current_keyset() {
-        Ok(statement) => Json(json!({
-            "api_version": "aci/1",
-            "revoked": statement,
-        }))
-        .into_response(),
-        Err(e) => internal_error_response(e),
-    }
-}
-
-/// Public transparency surface: every keyset revocation statement this service
-/// has issued (§4.7), so a verifier can reject reports and receipts under a
-/// revoked digest. Unauthenticated, like the attested-session endpoints.
-pub(super) async fn aci_revocations(State(state): State<AppState>) -> Response {
-    Json(json!({
-        "api_version": "aci/1",
-        "revocations": state.service.revocations(),
-    }))
-    .into_response()
-}
-
 pub(super) async fn attestation_report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -346,6 +312,7 @@ pub(super) async fn attestation_report(
                 report,
                 q.signing_algo.as_deref(),
                 nvidia_payload,
+                &state.service.legacy_e2ee_keys(),
             ) {
                 Ok(value) => Json(value).into_response(),
                 Err(e) => internal_error_response(e),
@@ -401,7 +368,11 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
-        Err(ServiceError::KeysetRevoked) => keyset_revoked_response(),
+        Err(ServiceError::InvalidNonce(e)) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            e.to_string(),
+        ),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -413,11 +384,13 @@ pub(super) async fn aci_attestation_report(
 /// Place the legacy dstack-vllm-proxy compatibility fields on a gateway
 /// attestation report. `nvidia_payload` is supplied by the caller — the
 /// handler decides whether it carries real upstream GPU evidence or an empty
-/// placeholder — so this function only shapes/positions the fields.
+/// placeholder. `legacy_keys` are the legacy keys from the key provider
+/// (the ACI keyset no longer lists them).
 pub(super) fn report_with_legacy_attestation_fields(
     report: AttestationReport,
     signing_algo: Option<&str>,
     nvidia_payload: Value,
+    legacy_keys: &[KeyedPublicKey],
 ) -> Result<Value, ServiceError> {
     let mut value = serde_json::to_value(report)
         .map_err(|e| ServiceError::Key(KeyError::Crypto(format!("serialize report: {e}"))))?;
@@ -428,28 +401,20 @@ pub(super) fn report_with_legacy_attestation_fields(
     let signing_algo = signing_algo
         .unwrap_or(LEGACY_ALGO_ECDSA)
         .to_ascii_lowercase();
-    let legacy_e2ee = obj
-        .get("attestation")
-        .and_then(|v| v.get("workload_keyset"))
-        .and_then(|v| v.get("e2ee_public_keys"))
-        .and_then(Value::as_array)
-        .and_then(|keys| {
-            keys.iter().find_map(|key| {
-                let e2ee_key = key.as_object()?;
-                let algo = e2ee_key.get("algo").and_then(Value::as_str)?;
-                let public_key = e2ee_key.get("public_key").and_then(Value::as_str)?;
-                let matches = match signing_algo.as_str() {
-                    LEGACY_ALGO_ECDSA => {
-                        algo == E2EE_ALGO_LEGACY_ECDSA || algo == E2EE_ALGO_SECP256K1_AESGCM
-                    }
-                    LEGACY_ALGO_ED25519 => algo == E2EE_ALGO_LEGACY_ED25519,
-                    _ => false,
-                };
-                matches.then(|| public_key.to_string())
-            })
-        });
+    let legacy_algo = match signing_algo.as_str() {
+        LEGACY_ALGO_ECDSA => E2EE_ALGO_LEGACY_ECDSA,
+        LEGACY_ALGO_ED25519 => E2EE_ALGO_LEGACY_ED25519,
+        _ => return Err(ServiceError::Key(KeyError::UnsupportedAlgo(signing_algo))),
+    };
 
-    if let Some(public_key) = legacy_e2ee {
+    if let Some(key) = legacy_keys.iter().find(|key| key.algo == legacy_algo) {
+        // The pre-ACI report served the 65-byte `04`-prefixed SEC1 form;
+        // compatibility surfaces keep their wire shape (Appendix B).
+        let public_key = if signing_algo == LEGACY_ALGO_ECDSA && key.public_key_hex.len() == 128 {
+            format!("04{}", key.public_key_hex)
+        } else {
+            key.public_key_hex.clone()
+        };
         let signing_address = if signing_algo == LEGACY_ALGO_ED25519 {
             public_key.clone()
         } else {
@@ -461,36 +426,6 @@ pub(super) fn report_with_legacy_attestation_fields(
             "signing_address".to_string(),
             Value::String(signing_address),
         );
-    } else if !matches!(
-        signing_algo.as_str(),
-        LEGACY_ALGO_ECDSA | LEGACY_ALGO_ED25519
-    ) {
-        return Err(ServiceError::Key(KeyError::UnsupportedAlgo(signing_algo)));
-    } else {
-        let legacy_e2ee = obj
-            .get("attestation")
-            .and_then(|v| v.get("workload_keyset"))
-            .and_then(|v| v.get("e2ee_public_keys"))
-            .and_then(Value::as_array)
-            .and_then(|keys| keys.first())
-            .and_then(Value::as_object)
-            .and_then(|e2ee_key| {
-                let algo = e2ee_key.get("algo").and_then(Value::as_str)?;
-                let public_key = e2ee_key.get("public_key").and_then(Value::as_str)?;
-                (algo == E2EE_ALGO_SECP256K1_AESGCM).then(|| public_key.to_string())
-            });
-        if let Some(public_key) = legacy_e2ee {
-            let signing_address = ethereum_address_from_uncompressed_public_key(&public_key)?;
-            obj.insert("signing_public_key".to_string(), Value::String(public_key));
-            obj.insert(
-                "signing_algo".to_string(),
-                Value::String(LEGACY_ALGO_ECDSA.to_string()),
-            );
-            obj.insert(
-                "signing_address".to_string(),
-                Value::String(signing_address),
-            );
-        }
     }
 
     // Legacy dstack-vllm-proxy compatibility fields. Old clients read these from
@@ -586,7 +521,7 @@ fn aci_constraint(parsed: &Value) -> Result<AciConstraint, String> {
         return Err("invalid 'provider' routing block: expected an object".to_string());
     };
 
-    let explicitly_verified = match block.get("aci_verified") {
+    let explicitly_verified = match block.get(PROVIDER_ACI_VERIFIED) {
         None => None,
         Some(Value::Bool(value)) => Some(*value),
         Some(_) => return Err("invalid 'provider.aci_verified': expected a boolean".to_string()),
@@ -594,7 +529,7 @@ fn aci_constraint(parsed: &Value) -> Result<AciConstraint, String> {
 
     let mut session_ids = Vec::new();
     let mut seen_session_ids = HashSet::new();
-    if let Some(value) = block.get("aci_session_ids") {
+    if let Some(value) = block.get(PROVIDER_ACI_SESSION_IDS) {
         let Some(values) = value.as_array() else {
             return Err("invalid 'provider.aci_session_ids': expected an array".to_string());
         };
@@ -602,15 +537,38 @@ fn aci_constraint(parsed: &Value) -> Result<AciConstraint, String> {
             return Err("invalid 'provider.aci_session_ids': must not be empty".to_string());
         }
         for value in values {
-            let Some(id) = value.as_str().filter(|id| !id.trim().is_empty()) else {
+            // §5.3: ids are bare 64-hex (§8). A malformed id is a 400 —
+            // treating it as a membership miss would misreport a client bug
+            // as `session_not_accepted`.
+            let Some(id) = value.as_str().filter(|id| {
+                id.len() == 64
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }) else {
                 return Err(
-                    "invalid 'provider.aci_session_ids': expected non-empty strings".to_string(),
+                    "invalid 'provider.aci_session_ids': expected 64-hex session ids".to_string(),
                 );
             };
             if seen_session_ids.insert(id) {
                 session_ids.push(id.to_string());
             }
         }
+    }
+
+    // §5.3: an unknown `aci_`-prefixed member is rejected, never ignored —
+    // silently dropping one would let a client believe it constrained serving
+    // when it did not.
+    if let Some(unknown) = block.keys().find(|name| {
+        name.starts_with("aci_")
+            && !matches!(
+                name.as_str(),
+                PROVIDER_ACI_VERIFIED | PROVIDER_ACI_SESSION_IDS
+            )
+    }) {
+        return Err(format!(
+            "unknown ACI serving constraint: provider.{unknown}"
+        ));
     }
 
     if explicitly_verified == Some(false) && !session_ids.is_empty() {
@@ -632,8 +590,8 @@ fn strip_aci_constraint(mut parsed: Value) -> (Value, bool) {
     let Some(provider) = parsed.get_mut("provider").and_then(Value::as_object_mut) else {
         return (parsed, false);
     };
-    let changed =
-        provider.remove("aci_verified").is_some() | provider.remove("aci_session_ids").is_some();
+    let changed = provider.remove(PROVIDER_ACI_VERIFIED).is_some()
+        | provider.remove(PROVIDER_ACI_SESSION_IDS).is_some();
     if changed && provider.is_empty() {
         let _ = parsed
             .as_object_mut()
@@ -649,14 +607,15 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
-    // A revoked keyset backs the receipt-signing, E2EE, and TLS keys this
-    // request would use; stop serving inference under it (§4.7).
-    if state.service.is_keyset_revoked() {
-        return keyset_revoked_response();
-    }
-
     let has_e2ee = has_e2ee_headers(&headers);
-    if has_e2ee && state.service.supported_e2ee_versions().is_empty() {
+    // `supported_e2ee_versions` advertises ACI E2EE (§6). The inherited
+    // dstack-vllm-proxy path predates it and is identified by
+    // `x-signing-algo`, so a deployment that has not turned the ACI scheme on
+    // still serves its existing clients.
+    if has_e2ee
+        && headers.get("x-signing-algo").is_none()
+        && state.service.supported_e2ee_versions().is_empty()
+    {
         return unsupported_e2ee_response();
     }
 
@@ -714,10 +673,17 @@ pub(super) async fn openai_completion_endpoint(
         .map(ReceiptOwner::from_bearer);
     let context = GatewayRequestContext {
         request_id: generate_request_id(),
-        user_model: parsed
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        // The receipt `model` is the model the client requested: under E2EE
+        // the §6.2 envelope `model` (§7.3), otherwise the body's.
+        user_model: e2ee
+            .as_ref()
+            .map(|ctx| ctx.request_model().to_string())
+            .or_else(|| {
+                parsed
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
         target_route_id: None,
         // Populated from the x-user-tier header on the internal-forward path.
         user_tier: None,
@@ -746,9 +712,14 @@ pub(super) async fn openai_completion_endpoint(
         // to the control plane so a non-TEE model is a 404 before any forward,
         // while `aci_required` makes verification fail closed at serve time.
         // Client `provider.aci_verified:false` is ignored.
-        let tee_only = request_host_domain(&headers)
-            .as_deref()
-            .is_some_and(|host| middleware.is_tee_only_domain(host));
+        let tee_only = match request_host_domain(&headers).as_deref() {
+            Some(host) => middleware.is_tee_only_domain(host),
+            // §1.2 fail closed: with TEE-only hosts configured, a request
+            // whose host cannot be resolved is treated as TEE-only rather
+            // than unrestricted. The component in front must forward the
+            // original `Host` (see the deployment guide).
+            None => middleware.has_tee_only_domains(),
+        };
         let aci_required = aci.required || tee_only;
         let input = CompletionInput {
             endpoint,
@@ -810,10 +781,9 @@ pub(super) async fn completions(
     openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH, false).await
 }
 
-/// Canonical ACI receipt — the bare signed receipt (JCS canonical value), not
-/// the legacy dstack-vllm-proxy signature wrapper. `id` accepts the gateway
-/// `receipt_id` (preferred; on the `x-receipt-id` header) or the upstream
-/// `chat_id`.
+/// Canonical ACI receipt — the §7.2 receipt document. `id` accepts the
+/// gateway `receipt_id` (preferred; on the `x-receipt-id` header) or the
+/// upstream `chat_id`.
 pub(super) async fn aci_receipt(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -827,13 +797,19 @@ pub(super) async fn aci_receipt(
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Receipt id (receipt_id or chat_id) not found or expired",
+            "receipt id (receipt_id or chat_id) not found or expired",
         );
     };
     if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
         return resp;
     }
-    Json(receipt.to_canonical_value(true)).into_response()
+    // The §7.2 receipt document, served as its stored bytes (any encoding
+    // of the same document verifies; ours is the JCS form).
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        receipt.document.clone(),
+    )
+        .into_response()
 }
 
 /// List the attested TEE channels (one per upstream endpoint), optionally
@@ -849,13 +825,13 @@ pub(super) async fn aci_receipt(
 /// name, endpoint, the verified identity (e.g. signing address), channel bindings,
 /// claims, and an evidence digest. It holds no request or response content. The
 /// list response carries only the evidence **digest**, not the full evidence
-/// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{id}`) for the
+/// `data` bundle: fetch a single session by id (`/v1/aci/sessions/{session_id}`) for the
 /// bytes. This keeps any larger/raw evidence payload off the broad listing.
 pub(super) async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let mut sessions = match q.model.as_deref() {
+    let sessions = match q.model.as_deref() {
         // Resolve the model to the upstream(s) serving it, then list each
         // channel's sessions (honoring an upstream_name filter if both are given).
         Some(model) => {
@@ -879,11 +855,28 @@ pub(super) async fn aci_list_sessions(
             .service
             .list_attested_sessions(q.upstream_name.as_deref()),
     };
-    // Keep the digest as the integrity anchor; drop the data-URI bytes from the
-    // broad listing.
-    for s in &mut sessions {
-        s.evidence.data_uri = None;
-    }
+    // List entries add a `session_id` member for lookup and keep the digest as
+    // the integrity anchor while dropping the raw evidence `data` (§8.1). Only
+    // the full record's served bytes hash to the session id.
+    let sessions: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            // The sealed bytes parsed when the store adopted them, so this
+            // cannot fail; parse them rather than re-serializing the struct.
+            let mut value: Value =
+                serde_json::from_slice(s.bytes()).expect("sealed session bytes are valid JSON");
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "session_id".to_string(),
+                    Value::String(s.session_id().to_string()),
+                );
+                if let Some(evidence) = obj.get_mut("evidence").and_then(Value::as_object_mut) {
+                    evidence.remove("data");
+                }
+            }
+            value
+        })
+        .collect();
     Json(json!({
         "api_version": "aci/1",
         "sessions": sessions,
@@ -905,7 +898,7 @@ pub(super) async fn receipt_by_chat_id(
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Receipt id (chat_id or receipt_id) not found or expired",
+            "receipt id (chat_id or receipt_id) not found or expired",
         );
     };
     if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
@@ -921,7 +914,7 @@ pub(super) async fn receipt_by_chat_id(
             "signature": sig.signature,
             "signing_address": sig.signing_address,
             "signing_algo": sig.signing_algo,
-            "receipt": receipt.to_canonical_value(true),
+            "receipt": receipt.document_json().unwrap_or(serde_json::Value::Null),
         }))
         .into_response(),
         Err(ServiceError::Key(KeyError::UnsupportedAlgo(_))) => invalid_signing_algo_response(),
@@ -929,6 +922,10 @@ pub(super) async fn receipt_by_chat_id(
     }
 }
 
+/// Serve one attested session as its **exact sealed bytes** (§8): the client
+/// recomputes `sha256:` over the body and compares it to the id a receipt
+/// cited. `{session_id}` is the id exactly as receipts cite it
+/// (`bare 64-hex`), so the value from a receipt pastes straight in.
 pub(super) async fn attested_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -937,8 +934,12 @@ pub(super) async fn attested_session(
         return error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            "Attested session not found or expired",
+            "attested session not found or expired",
         );
     };
-    Json(session).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        session.bytes().to_vec(),
+    )
+        .into_response()
 }

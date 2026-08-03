@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -49,41 +52,38 @@ def assert_upstream_attested_session(
     index: int,
 ) -> dict[str, Any]:
     session_id = event.get("session_id")
-    if not isinstance(session_id, str) or not session_id.startswith("as_"):
+    if not isinstance(session_id, str) or len(session_id) != 64:
         raise RuntimeError(f"{provider.name} upstream event missing attested session_id")
 
-    status, _, body, parsed = request_json(
+    # The path takes the id exactly as the receipt cites it (spec §8.1).
+    status, _, body, session = request_json(
         "GET",
         f"{base_url}/v1/aci/sessions/{session_id}",
         timeout=120,
     )
     write_bytes(artifact_dir / f"attested-session-{index}.json", body)
-    if status != 200 or not isinstance(parsed, dict):
+    if status != 200 or not isinstance(session, dict):
         raise RuntimeError(
             f"{provider.name} attested session fetch failed for {session_id}: HTTP {status}"
         )
-    write_json(artifact_dir / f"attested-session-{index}.summary.json", parsed_summary(parsed))
+    write_json(artifact_dir / f"attested-session-{index}.summary.json", parsed_summary(session))
 
-    # The gateway serves a flat, immutable AttestedSession record (no wrapper):
-    # {api_version, session_id, provider, endpoint, verifier_id, established_at,
-    #  expires_at, identity?, channel_binding[], claims{...}, evidence{digest,data}}.
-    session = parsed
+    # §9.3 step 2: the JCS form of the document hashes to the cited id, so
+    # the record is provably the one the signed receipt referenced.
+    jcs = json.dumps(session, separators=(",", ":"), sort_keys=True).encode()
+    recomputed = hashlib.sha256(jcs).hexdigest()
+    expect_equal(provider, "session_id (recomputed)", recomputed, session_id)
+
+    # Flat immutable SessionDocument (spec §8.2): {api_version, upstream_name,
+    # endpoint, verifier_id, established_at, expires_at, identity?,
+    # channel_binding[], claims{}, evidence{digest,data}}. The id is not
+    # inside the document.
     if session.get("api_version") != "aci/1":
         raise RuntimeError(f"{provider.name} attested session has wrong api_version")
-    if session.get("session_id") != session_id:
-        raise RuntimeError(f"{provider.name} attested session id mismatch")
-
-    # `provider` is the operator's upstream config name (== event.upstream_name);
-    # `provider.provider` ("tinfoil") is the vendor and lives in event.provider.
-    expect_equal(provider, "session.provider", session.get("provider"), provider.name)
+    if "session_id" in session:
+        raise RuntimeError(f"{provider.name} attested session embeds its own id")
     expect_equal(
-        provider, "session.provider", session.get("provider"), event.get("upstream_name")
-    )
-    expect_equal(
-        provider,
-        "session.endpoint",
-        _norm_endpoint(session.get("endpoint")),
-        _norm_endpoint(event.get("url_origin")),
+        provider, "session.upstream_name", session.get("upstream_name"), provider.name
     )
     expect_equal(
         provider,
@@ -91,16 +91,12 @@ def assert_upstream_attested_session(
         _norm_endpoint(session.get("endpoint")),
         _norm_endpoint(provider.base_url),
     )
-    expect_equal(
-        provider,
-        "session.verifier_id",
-        session.get("verifier_id"),
-        event.get("verifier_id"),
-    )
+    if not session.get("verifier_id"):
+        raise RuntimeError(f"{provider.name} attested session missing verifier_id")
 
-    # Typed claim vocabulary (SessionClaims). The §1 tee_attested claim — a
-    # genuine CPU TEE with the workload identity bound — must be `asserted` for
-    # every verified upstream; that is what a "fully verified" session means.
+    # Typed claim vocabulary (spec §8.3). tee_attested — a genuine CPU TEE
+    # with the recorded identity bound — must be asserted for every verified
+    # upstream; that is what a verified session means.
     claims = require_object(session, "claims", provider.name)
     tee = require_object(claims, "tee_attested", provider.name)
     if tee.get("status") != "asserted":
@@ -109,43 +105,33 @@ def assert_upstream_attested_session(
             f"{tee.get('status')!r}"
         )
 
-    event_evidence = require_object(event, "evidence", provider.name)
-    session_evidence = require_object(session, "evidence", provider.name)
+    # The full record embeds the exact evidence bytes; digest must match.
+    evidence = require_object(session, "evidence", provider.name)
+    data = evidence.get("data")
+    if not isinstance(data, str) or not data.startswith("data:"):
+        raise RuntimeError(f"{provider.name} attested session evidence missing data URI")
+    evidence_bytes = base64.b64decode(data.split(",", 1)[1])
     expect_equal(
         provider,
         "evidence.digest",
-        session_evidence.get("digest"),
-        event_evidence.get("digest"),
+        "sha256:" + hashlib.sha256(evidence_bytes).hexdigest(),
+        evidence.get("digest"),
     )
-    data = session_evidence.get("data")
-    if not isinstance(data, str) or not data.startswith("data:"):
-        raise RuntimeError(f"{provider.name} attested session evidence missing data URI")
 
-    event_bindings = event.get("channel_bindings")
-    session_bindings = session.get("channel_binding")
-    if not isinstance(event_bindings, list) or not event_bindings:
-        raise RuntimeError(f"{provider.name} upstream event missing channel bindings")
-    if not isinstance(session_bindings, list) or not session_bindings:
+    bindings = session.get("channel_binding")
+    if not isinstance(bindings, list) or not bindings:
         raise RuntimeError(f"{provider.name} attested session missing channel_binding")
-    session_binding_types = {
-        binding.get("type") for binding in session_bindings if isinstance(binding, dict)
+    binding_types = {
+        binding.get("type") for binding in bindings if isinstance(binding, dict)
     }
-    event_binding_types = {
-        binding.get("type") for binding in event_bindings if isinstance(binding, dict)
-    }
-    if session_binding_types != event_binding_types:
-        raise RuntimeError(
-            f"{provider.name} attested session binding types {session_binding_types} "
-            f"!= receipt event binding types {event_binding_types}"
-        )
-    if provider.binding not in session_binding_types:
+    if provider.binding not in binding_types:
         raise RuntimeError(
             f"{provider.name} attested session missing binding {provider.binding}"
         )
 
     return {
         "session_id": session_id,
-        "provider": session.get("provider"),
+        "upstream_name": session.get("upstream_name"),
         "endpoint": session.get("endpoint"),
         "verifier_id": session.get("verifier_id"),
         "claims": {
@@ -153,9 +139,9 @@ def assert_upstream_attested_session(
             for name, claim in claims.items()
             if isinstance(claim, dict)
         },
-        "binding_count": len(session_bindings),
-        "binding_types": sorted(t for t in session_binding_types if t),
-        "evidence_digest": session_evidence.get("digest"),
+        "binding_count": len(bindings),
+        "binding_types": sorted(t for t in binding_types if t),
+        "evidence_digest": evidence.get("digest"),
         "evidence_has_data_uri": True,
     }
 
@@ -183,8 +169,7 @@ def parsed_summary(value: dict[str, Any]) -> dict[str, Any]:
     evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
     return {
         "api_version": value.get("api_version"),
-        "session_id": value.get("session_id"),
-        "provider": value.get("provider"),
+        "upstream_name": value.get("upstream_name"),
         "endpoint": value.get("endpoint"),
         "verifier_id": value.get("verifier_id"),
         "established_at": value.get("established_at"),

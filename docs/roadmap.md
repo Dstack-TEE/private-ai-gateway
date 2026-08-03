@@ -14,15 +14,19 @@ adapters that fail closed when binding material cannot be enforced.
 | Area | Status | Notes |
 | --- | --- | --- |
 | OpenAI-compatible chat/completions surface | Done | `/v1/chat/completions`, `/v1/completions`, streaming, E2EE addon, legacy aliases, and vLLM-compatible error behavior are covered by tests. |
-| OpenAI-compatible embeddings surface | Done | `/v1/embeddings` forwards through the same receipt/attestation pipeline as chat. Buffered-only (client-sent `stream:true` is forced back to buffered). ACI v2 + dstack-vllm-proxy legacy v1/v2 E2EE encrypt the `input` request field and each `data[].embedding` response field; AAD shape mirrors completions (`field=input` / `field=input.{N}` request, `data={index}|field=embedding` response). Provider adapters in this slice: openai-compatible only — Chutes embeddings (TEI native paths, not `/v1/embeddings`) and Tinfoil/NEAR-AI embedding routes still need adapter work. |
+| OpenAI-compatible embeddings surface | Done | `/v1/embeddings` forwards through the same receipt/attestation pipeline as chat. Buffered-only (client-sent `stream:true` is forced back to buffered). ACI E2EE v2 encrypts the `input` request field and each `data[].embedding` response field (field-level, same as the dstack-vllm-proxy legacy modes; the §6 whole-body scheme lands with the revamp). Provider adapters in this slice: openai-compatible only — Chutes embeddings (TEI native paths, not `/v1/embeddings`) and Tinfoil/NEAR-AI embedding routes still need adapter work. |
 | Model routing and runtime config | Done | One upstream config file, admin `GET`/`PUT`, model alias rewrite before verification/forwarding/receipt hashing in no-middleware mode. Production upstream policy should live in this config file, not in broad process-level allowlist env vars. |
-| ACI identity and self-attestation | In progress | dstack KMS-backed identity, keyset endorsement, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
-| Receipts and transparency events | In progress | Request/response/body hashes, streaming hashing, upstream verification events, middleware route events, rewrite events, and legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
+| ACI identity and self-attestation | In progress | dstack KMS-backed keys, the quote-bound keyset digest, TLS SPKI publication, and local dstack simulator support are implemented. Launcher provenance is tracked separately but still part of the release story. |
+| Receipts | In progress | Request/response body hashes, streaming hashing, upstream verification events, middleware route events, and the legacy `/v1/signature` alias are implemented. Persistent storage decision is still open. |
 | Attested sessions | In progress | Upstream verified TLS/SPKI or provider E2EE bindings now create session ids, audit records, and receipt references. Downstream session ids are pending TLS/domain binding work. |
 | Upstream verification lifecycle | In progress | Startup prewarm, background verification refresh, and Chutes session refresh exist. Provider soundness review is still strict-release work. |
 | Provider adapters | In progress | Tinfoil, NEAR AI, Chutes, SecretAI, and direct vLLM-proxy-backed GPU workers are the launch surface. OpenAI-compatible remains useful for deployment bring-up. ACI service upstreams stay minimal until first-party GPU workers move from vLLM-proxy to an ACI-compatible server. |
 | Frontend/middleware/backend framework | Shipped | Frontend/backend split with an optional middleware that consults the control plane to route, transform, cost-inject, and report usage; the middleware-disabled path stays behavior-compatible. |
 | Multi-domain downstream TLS binding | In progress | Domain-tagged TLS SPKIs can be configured, published in the keyset, and selected in report evidence from the HTTP `Host`. Downstream session ids are still pending. |
+| Client serving constraints | Implemented | Spec §5.3: `provider.aci_verified` and `provider.aci_session_ids` in any prompt-endpoint body; membership enforced by the measured code, refusal via `session_not_accepted`, member stripped before forwarding (recorded as the §7.4 rewrite). Enforced in the gateway: the member is consumed and stripped on the single body parse, membership is checked before forwarding, and the refusal is receipt-recorded. |
+| Authenticated E2EE responses | Specced | Spec §6.1: response keys mix `request_secret`, the request's client-ephemeral × service-static secret, so a valid AEAD tag proves the workload sealed the unit for that request. Implementation, TS client, and test vectors still derive from the unit secret alone. Lands with the E2EE revamp. |
+| JCS workload keyset | Implemented | Spec §3.1/§4.1: the keyset digest is over the JCS form and the report embeds the keyset as a plain `workload_keyset` object (base64 armor dropped). Implemented across the gateway, CLI, TS client, vectors, and docs. |
+| CLI verifier policy | Partial | User-configurable §1.3 policy for the `aci` CLI and `aci serve`. Landed: required claims (`--require-claim`, §9.2(3)) and attested-session pinning (`aci sessions`, `serve --session` / `--require-claim` with refresh-on-412). Remaining: custody checking (§9.1(5)) and provenance policy beyond `--accept-compose`. |
 | Local backend proxy mode | Planned | Let an end user run the verified-provider backend as a laptop-local OpenAI-compatible proxy without local TEE requirements. |
 | Live E2E fidelity suite | In progress | BFCL/OpenAI-compatible harness exists. Strict profiles and broader fidelity coverage remain P0 before external review. |
 | Production operations | Next | Durable stores, deployment docs, metrics review, multi-region behavior, and rate-limit/load tests follow the strict-release pass. |
@@ -59,8 +63,8 @@ An attested session is a verified secure channel, and we never create more than
 one session per channel. The channel boundary a provider attests is a first-class
 property, `UpstreamProvider::attestation_scope()` → `AttestationScope`: per E2EE
 instance (Chutes), per model TEE (Phala-direct), and per router gateway TD
-(NEAR AI) or model router (Tinfoil), where one channel fronts many models. The
-scope is the single source of truth: it drives channel-keyed verification (the
+(NEAR AI) or model router (Tinfoil), where one channel fronts many models.
+The scope is the single source of truth: it drives channel-keyed verification (the
 model is dropped from the verifier cache key for routers, so every model resolves
 to one verified channel and one attested session) and is enforced fail-closed at
 the verifier seam — a verifier must attest the scope its provider is declared to
@@ -162,8 +166,8 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   section in `docs/upstream-verification-lifecycle.md`): Chutes (DCAP +
   `report_data`↔`nonce‖e2e_pubkey`), NEAR AI (`report_data` binding now enforced),
   Tinfoil (official `tinfoil` SDK: AMD signature chain + Sigstore provenance + TLS
-  binding), and AciService (TLS keys covered by the keyset digest bound into `report_data`
-  and the keyset endorsement). Live tamper tests confirm rejection.
+  binding), and AciService (TLS keys covered by the keyset digest bound into
+  `report_data`). Live tamper tests confirm rejection.
 - Follow-up (defense-in-depth, not a forgeable hole): verify the NVIDIA NRAS GPU JWT
   signature against NRAS' JWKS. Today the GPU tokens are fetched online from NRAS over
   TLS and the request nonce is checked (Chutes via `eat_nonce`, NEAR AI via the
@@ -184,7 +188,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
 - Verification artifacts are *linked, not bundled* (the batch verification-bundle
   API was dropped). A receipt carries the typed claim verdicts inline (shallow
   audit) plus a content-addressed `session_id`; a verifier follows that reference
-  to `GET /v1/aci/sessions/{id}` for the full evidence and re-verifies locally
+  to `GET /v1/aci/sessions/{session_id}` for the full evidence and re-verifies locally
   (deep audit). Gateway identity is fetched once at preflight via
   `GET /v1/aci/attestation?nonce=`. Keep `/v1/signature/{id}` backward
   compatible with existing vLLM-proxy clients. If a high-volume auditor ever needs

@@ -58,10 +58,11 @@ def run_lifecycle_case(
     if not receipt_id:
         raise RuntimeError(f"{provider.name} lifecycle response missing x-receipt-id")
 
-    nonce = secrets.token_hex(16)
+    # A nonce is exactly 64 lowercase hex characters (spec §3.2).
+    nonce = secrets.token_hex(32)
     report_status, _, report_body, report_json = request_json(
         "GET",
-        f"{base_url}/v1/attestation/report?nonce={nonce}",
+        f"{base_url}/v1/aci/attestation?nonce={nonce}",
         timeout=120,
     )
     report_path = provider_dir / "report.json"
@@ -69,25 +70,41 @@ def run_lifecycle_case(
     if report_status != 200 or not isinstance(report_json, dict):
         raise RuntimeError(f"{provider.name} attestation report fetch failed: {report_status}")
 
-    receipt_status, _, receipt_body, receipt_json = request_json(
+    # The §7.2 receipt document from the canonical endpoint.
+    receipt_status, _, receipt_body, receipt = request_json(
         "GET",
-        f"{base_url}/v1/signature/{chat_id}",
+        f"{base_url}/v1/aci/receipts/{receipt_id}",
         headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
     write_bytes(receipt_path, receipt_body)
-    if receipt_status != 200 or not isinstance(receipt_json, dict):
+    if receipt_status != 200 or not isinstance(receipt, dict):
         raise RuntimeError(f"{provider.name} receipt fetch failed: {receipt_status}")
+
+    # Legacy compatibility spot-check: the inherited dstack-vllm-proxy
+    # signature wrapper still serves its contract fields.
+    legacy_status, _, _, legacy_json = request_json(
+        "GET",
+        f"{base_url}/v1/signature/{chat_id}",
+        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
+        timeout=120,
+    )
+    if legacy_status != 200 or not isinstance(legacy_json, dict):
+        raise RuntimeError(f"{provider.name} legacy signature fetch failed: {legacy_status}")
+    for field in ("text", "signature", "signing_address", "signing_algo"):
+        if not legacy_json.get(field):
+            raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
     verifier_summary = run_cmd_json(
         [
             "cargo",
             "run",
             "--quiet",
-            "--example",
-            "verify_aci_artifacts",
+            "--bin",
+            "aci",
             "--",
+            "audit",
             "--report",
             str(report_path),
             "--receipt",
@@ -98,11 +115,11 @@ def run_lifecycle_case(
             str(request_path),
             "--response-body",
             str(response_path),
+            "--json",
         ],
         timeout=240,
     )
     write_json(provider_dir / "user-verification-summary.json", verifier_summary)
-    receipt = receipt_json.get("receipt") or {}
     assert_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -115,10 +132,13 @@ def run_lifecycle_case(
         "chat_id": chat_id,
         "receipt_id": receipt_id,
         "status": status,
-        "verified": verifier_summary.get("verified") is True,
-        "upstream_events": verifier_summary.get("upstream_events"),
+        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
+        "checks": {
+            check.get("id"): check.get("status")
+            for check in verifier_summary.get("checks") or []
+            if isinstance(check, dict)
+        },
         "attested_sessions": attested_sessions,
-        "transparency_events": verifier_summary.get("transparency_events"),
     }
 
 
