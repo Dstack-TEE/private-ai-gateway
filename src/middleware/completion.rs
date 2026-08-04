@@ -372,13 +372,16 @@ pub async fn run(
 
     let candidates = consult.candidates.clone().unwrap_or_default();
     if candidates.is_empty() {
+        // Not found, not malformed — 404 is what the `model_not_found` body has
+        // always said, and what an OpenAI-compatible client expects for a model
+        // it cannot reach.
         let message = format!("no route available for model {}", model.unwrap_or("(none)"));
-        if should_log_failure(400) {
+        if should_log_failure(404) {
             log_generated_outcome(
                 &request_id,
                 model.unwrap_or(""),
                 "no_route",
-                400,
+                404,
                 0,
                 "",
                 0,
@@ -387,7 +390,7 @@ pub async fn run(
             );
         }
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
-        return finalize_generated(400, body, &[], e2ee, outcome_ctx);
+        return finalize_generated(404, body, &[], e2ee, outcome_ctx);
     }
 
     // Shape one body per candidate (typed per-route contract).
