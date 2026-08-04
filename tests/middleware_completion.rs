@@ -1166,7 +1166,7 @@ async fn empty_candidates_returns_model_not_found() {
 
     let (status, _, body) =
         response_parts(mw.handle_completion(&service, chat_input()).await).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 404);
     assert_eq!(body["error"]["type"], json!("model_not_found"));
     assert!(body["error"]["message"]
         .as_str()
