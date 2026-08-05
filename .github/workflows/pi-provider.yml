@@ -1,0 +1,41 @@
+name: pi-provider
+
+on:
+  pull_request:
+    paths:
+      - 'clients/pi-provider/**'
+      - '.github/workflows/pi-provider.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'clients/pi-provider/**'
+      - '.github/workflows/pi-provider.yml'
+
+defaults:
+  run:
+    working-directory: clients/pi-provider
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/pi-provider/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

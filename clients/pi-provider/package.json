@@ -1,0 +1,31 @@
+{
+  "name": "private-ai-gateway-pi-providers",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Vendor-neutral Pi provider for private-ai-gateway (ACI) + thin branded distributions (redpill, phala-cloud)",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "clean": "npm run clean --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "check": "tsc --noEmit",
+    "test": "npm run test -w @aci/pi-provider",
+    "lint": "npm run lint -w @aci/pi-provider",
+    "format": "npm run format -w @aci/pi-provider",
+    "format:check": "npm run format:check -w @aci/pi-provider",
+    "pre-commit": "npm run pre-commit -w @aci/pi-provider"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
+    "@j178/prek": "^0.4.4",
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^5.9.0"
+  }
+}
