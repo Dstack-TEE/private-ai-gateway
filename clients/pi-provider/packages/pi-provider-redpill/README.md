@@ -19,10 +19,10 @@ The default gateway is `https://api.redpill.ai/v1`; override with `REDPILL_BASE_
 and accept the same key.
 
 ```text
-/model redpill-ai/deepseek/deepseek-v4-flash
+/model redpill/deepseek/deepseek-v4-flash
 ```
 
-Config: `/redpill-ai-settings` · Attestation status: `/attestation`
+Config: `/redpill-settings` · Attestation status: `/attestation`
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same verified
 protocol core. If you operate your own private-ai-gateway, use the neutral

@@ -23,7 +23,7 @@ pi provider extension:
   per §5.3 — a fixed `--session` list, or a `--require-claim` policy that
   derives the accepted set and refreshes it when the service refuses a
   superseded pin).
-- [`pi-provider`](pi-provider) — a [pi](https://pi.0xlane.com/) provider
+- [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
   extension that turns the gateway (or any ACI service) into a first-class
   chat provider in pi's model picker, with attested TLS (SPKI) pinning and
   per-response receipt verification. The npm workspaces monorepo ships the

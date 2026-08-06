@@ -10,18 +10,18 @@
  * Usage:
  *   pi install npm:pi-provider-phala-cloud
  *   export PHALA_LLM_API_KEY=...
- *   # /model phala-cloud/<model-id>
+ *   # /model phala/<model-id>
  */
 import { createProvider } from "@aci/pi-provider";
 
 export default createProvider({
-  providerId: "phala-cloud",
+  providerId: "phala",
   label: "Phala Cloud",
   defaultBaseUrl: "https://inference.phala.com/v1",
   apiKeyEnv: "PHALA_LLM_API_KEY",
   envPrefix: "PHALA",
-  footerKey: "phala-cloud",
-  logPrefix: "[phala-cloud]",
+  footerKey: "phala",
+  logPrefix: "[phala]",
   baseUrlAliases: ["PHALA_CLOUD_API_PREFIX", "PHALA_BASE_URL", "PHALA_CLOUD_BASE_URL"],
   fallbackModels: [
     {

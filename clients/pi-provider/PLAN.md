@@ -29,7 +29,7 @@ verifiability as a first-class concern.
 TypeScript directly (no build step). The factory registers a provider via:
 
 ```ts
-pi.registerProvider("phala-cloud", {
+pi.registerProvider("phala", {
   baseUrl, apiKey: "$PHALA_LLM_API_KEY", api: "openai-completions",
   models: ProviderModelConfig[], headers?, authHeader?,
   streamSimple?, oauth?
@@ -43,7 +43,7 @@ via `ctx.ui.setStatus(key, text)`, and render a `SettingsList` config UI.
 
 ## Decisions (confirmed)
 
-1. **Package name**: `pi-provider-phala-cloud`. **Provider id**: `phala-cloud`.
+1. **Package name**: `pi-provider-phala-cloud`. **Provider id**: `phala`.
 2. **No custom `streamSimple`** for MVP — use the built-in `openai-completions`
    handler + event hooks. Thinking works because pi's built-in handler supports
    `compat.thinkingFormat: "qwen"` (sends `enable_thinking`) and parses
@@ -61,7 +61,7 @@ via `ctx.ui.setStatus(key, text)`, and render a `SettingsList` config UI.
      `request.received.body_hash` semantics (hash of decrypted body), handled
      there.
    - `src/config.ts` reserves an `e2ee` config block (default disabled).
-4. **`is_tee` filtering is configurable.** `phala-cloud-settings` toggles
+4. **`is_tee` filtering is configurable.** `phala-settings` toggles
    `models.isTeeOnly` (default `true`). Config supports home + project scope.
 5. **Footer shows verification result** after each response.
 6. **No OAuth** (server does not support it yet).
@@ -71,7 +71,7 @@ via `ctx.ui.setStatus(key, text)`, and render a `SettingsList` config UI.
 ```
 index.ts  PhalaCloud() factory
   |
-  +-- registerProvider("phala-cloud", { openai-completions, models, headers })
+  +-- registerProvider("phala", { openai-completions, models, headers })
   |     models <- src/models.ts  discoverPhalaModels() /v1/models
   |                                  -> is_tee filter, thinkingFormat inference,
   |                                     pricing/context/maxTokens mapping
@@ -82,7 +82,7 @@ index.ts  PhalaCloud() factory
   |                                     -> setStatus "attested" | "—"
   +-- on("message_end")        -> async fetch receipt -> classify
   |                                     -> setStatus "verified" | "routed" | "?"
-  +-- registerCommand("phala-cloud-settings") -> SettingsList (home/project)
+  +-- registerCommand("phala-settings") -> SettingsList (home/project)
 ```
 
 ## File layout
@@ -112,7 +112,7 @@ tests/
 |-------|-------|-----------|
 | P0 | Scaffold + provider passthrough + model discovery + thinking | `PHALA_LLM_API_KEY=... pi -e ./pi-provider-phala-cloud` chats on a phala model with thinking |
 | P1 | Footer verification | Each response updates footer to verified/routed/attested |
-| P2 | `phala-cloud-settings` command (isTeeOnly + thinkingFormat, home/project) | Toggle persists, `/reload` applies |
+| P2 | `phala-settings` command (isTeeOnly + thinkingFormat, home/project) | Toggle persists, `/reload` applies |
 | P3 | `/phala-verify` + `/phala-attestation` commands (receipt + session claims) | Commands print event_log key fields |
 | P4 | E2EE (future) | Switch to streamSimple, inject headers, decrypt fields |
 
