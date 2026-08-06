@@ -1,4 +1,4 @@
-// Settings UI helpers for the phala-cloud-settings command. Pure formatting
+// Settings UI helpers for the <provider-id>-settings command. Pure formatting
 // and theme adapters; the interactive SettingsList wiring lives in index.ts.
 
 import os from "node:os";

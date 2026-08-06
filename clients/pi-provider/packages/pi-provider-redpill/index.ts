@@ -10,18 +10,18 @@
  * Usage:
  *   pi install npm:pi-provider-redpill
  *   export REDPILL_LLM_API_KEY=...
- *   # /model redpill-ai/<model-id>
+ *   # /model redpill/<model-id>
  */
 import { createProvider } from "@aci/pi-provider";
 
 export default createProvider({
-  providerId: "redpill-ai",
+  providerId: "redpill",
   label: "Redpill AI",
   defaultBaseUrl: "https://api.redpill.ai/v1",
   apiKeyEnv: "REDPILL_LLM_API_KEY",
   envPrefix: "REDPILL",
-  footerKey: "redpill-ai",
-  logPrefix: "[redpill-ai]",
+  footerKey: "redpill",
+  logPrefix: "[redpill]",
   baseUrlAliases: ["REDPILL_CLOUD_API_PREFIX", "REDPILL_BASE_URL"],
   fallbackModels: [
     {
