@@ -256,6 +256,14 @@ pub async fn run(
         tee_only,
     } = input;
 
+    // What the client is told about who served the request. Built before
+    // `user_model` moves into the request context, and shared with the streaming
+    // transform, which needs it for every chunk.
+    let identity = Arc::new(response_transform::ResponseIdentity {
+        request_id: request_id.clone(),
+        user_model: user_model.clone(),
+    });
+
     let started = Instant::now();
     let (params, reasoning_requirements, exclude_reasoning) = if endpoint == Endpoint::ChatComplete
     {
@@ -419,28 +427,38 @@ pub async fn run(
     ) {
         Ok(shaped) => shaped,
         Err(err) => {
-            let message = format!("failed to shape provider request: {err}");
-            if should_log_failure(500) {
+            // A body we cannot shape for the chosen route is a 400, not a 500:
+            // reported as 500 it became `type: "upstream_error"` on the OpenAI
+            // surface, blaming the provider for a request the gateway itself
+            // declined to send.
+            let status = err.client_status();
+            let message = format!("cannot shape this request: {err}");
+            if should_log_failure(status) {
+                // The route id lives only here — see `TransformError::detail`.
+                let logged = match err.detail() {
+                    Some(detail) => format!("{message} ({detail})"),
+                    None => message.clone(),
+                };
                 log_generated_outcome(
                     &request_id,
                     model.unwrap_or(""),
                     "shape_error",
-                    500,
+                    status,
                     0,
                     "",
                     0,
                     started,
-                    &detail_snippet(message.as_bytes()),
+                    &detail_snippet(logged.as_bytes()),
                 );
             }
-            meter.gateway_failure(500, ErrorSource::Gateway, &message, stream);
+            meter.gateway_failure(status, ErrorSource::Gateway, &message, stream);
             let body = errors::envelope_bytes(
                 surface,
-                errors::error_type(surface, 500),
+                errors::error_type(surface, status),
                 &message,
                 Some(&request_id),
             );
-            return finalize_generated(500, body, &[], e2ee, outcome_ctx);
+            return finalize_generated(status, body, &[], e2ee, outcome_ctx);
         }
     };
     let forward_candidates: Vec<ForwardCandidate> = shaped
@@ -543,6 +561,7 @@ pub async fn run(
                 if exclude_reasoning {
                     response_transform::exclude_reasoning(&mut transformed);
                 }
+                response_transform::rewrite_identity(&mut transformed, &identity);
 
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
@@ -604,6 +623,11 @@ pub async fn run(
                         }
                     }
                 }
+                // Last, after identity rewrite and cost injection: reduce the body
+                // to the gateway's documented output schema, so the client sees one
+                // shape and no upstream-specific field — including any we have never
+                // seen — can leak.
+                response_transform::canonicalize(&mut transformed, endpoint);
                 (
                     upstream_status,
                     serde_json::to_vec(&transformed).unwrap_or_default(),
@@ -649,8 +673,7 @@ pub async fn run(
                 Ok(finalized) => {
                     let status =
                         StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
-                    let mut headers =
-                        response_headers(&forward.upstream_headers, "application/json");
+                    let mut headers = gateway_owned_headers("application/json");
                     insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
                     apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                     (status, headers, finalized.wire_body).into_response()
@@ -680,11 +703,19 @@ pub async fn run(
             }
         }
         Ok(MiddlewareForwardResult::Stream(forward)) => {
+            // Normalized, not relayed: providers spell the content type
+            // differently (`text/event-stream` vs `text/event-stream; charset=utf-8`),
+            // and that difference alone distinguishes backends. Emit only the base
+            // media type — everything before any `;` parameter — so the value is
+            // identical no matter which upstream served the stream, while a genuinely
+            // non-SSE type keeps its own base type rather than being mislabeled.
             let content_type = forward
                 .upstream_headers
                 .get("content-type")
-                .cloned()
-                .unwrap_or_else(|| "text/event-stream".to_string());
+                .map(|value| value.split(';').next().unwrap_or("").trim())
+                .filter(|base| !base.is_empty())
+                .unwrap_or("text/event-stream")
+                .to_string();
             let upstream_status = forward.upstream_status;
             let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
@@ -716,12 +747,12 @@ pub async fn run(
                 ms => Some(Duration::from_millis(ms)),
             };
             // Order: provider stream (drafts response.received) -> format
-            // transform (if cross-format) -> response visibility -> meter/cost ->
-            // keep-alive -> finalizer (hashes response.returned). Same-format
-            // streaming skips only the format transform. Metering sits inside the
+            // transform (if cross-format) -> response visibility -> sanitize
+            // -> meter/cost -> keep-alive -> finalizer (hashes response.returned).
+            // Same-format streaming skips only the format transform. Metering sits inside the
             // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
             // comments are injected downstream and never enter its line reassembly.
-            let response_header_map = response_headers(&forward.upstream_headers, &content_type);
+            let response_header_map = gateway_owned_headers(&content_type);
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -741,8 +772,15 @@ pub async fn run(
             } else {
                 transformed
             };
-            let metered: ServiceResponseStream = Box::pin(MeterStream::new(
+            // Unconditional, unlike the two above: same-format streaming skips
+            // every other transform, and that is exactly the path that used to
+            // hand the provider's bytes to the client verbatim.
+            let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
                 visible,
+                StreamTransform::SanitizeResponse(identity.clone(), endpoint),
+            ));
+            let metered: ServiceResponseStream = Box::pin(MeterStream::new(
+                sanitized,
                 report,
                 errors::sse_protocol(endpoint_path),
             ));
@@ -1225,59 +1263,24 @@ fn finalize_generated(
     }
 }
 
-// Build response headers from the upstream response, dropping gateway-owned and
-// hop-by-hop headers, and forcing the content type. Provider auth/server headers
-// are not forwarded.
-fn response_headers(
-    upstream_headers: &std::collections::HashMap<String, String>,
-    content_type: &str,
-) -> HeaderMap {
+// Client response headers, built from nothing. No upstream header reaches the
+// client: which provider served a request is ours to know, and a denylist cannot
+// keep that promise because a provider can name itself in a header we have never
+// seen — for example a header that names the serving provider, or a `set-cookie`
+// that would otherwise land on our own domain.
+//
+// The caller adds what it owns on top: `x-receipt-id`, `x-e2ee-*`, and for
+// streaming `x-accel-buffering`/`cache-control`. `x-aci-*` is stamped by an outer
+// layer (`http::app::aci_headers_middleware`).
+fn gateway_owned_headers(content_type: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (name, value) in upstream_headers {
-        // The body we emit is always identity-encoded (re-serialized JSON or a
-        // transformed/passthrough SSE stream), so a relayed `content-encoding`
-        // would mislabel it. `content-type` is set explicitly below.
-        if is_gateway_owned(name)
-            || is_hop_by_hop(name)
-            || name.eq_ignore_ascii_case("content-type")
-            || name.eq_ignore_ascii_case("content-encoding")
-        {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
-            headers.insert(name, value);
-        }
-    }
+    // Ours, not the upstream's: the body we emit is always identity-encoded
+    // (re-serialized JSON or a transformed SSE stream), so relaying the
+    // upstream's `content-type`/`content-encoding` could mislabel it.
     if let Ok(value) = HeaderValue::from_str(content_type) {
         headers.insert(CONTENT_TYPE, value);
     }
     headers
-}
-
-fn is_gateway_owned(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "x-receipt-id"
-        || lower.starts_with("x-e2ee-")
-        || lower.starts_with("x-aci-")
-        || lower.starts_with("x-private-ai-gateway-")
-}
-
-fn is_hop_by_hop(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-    )
 }
 
 fn apply_e2ee_headers(

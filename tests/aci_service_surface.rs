@@ -1537,7 +1537,6 @@ async fn streaming_chat_completion_upstream_error_is_returned_without_sse_or_rec
 
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     assert_eq!(header(&resp.headers, "content-type"), "application/json");
-    assert_eq!(header(&resp.headers, "x-upstream-error"), "true");
     assert!(resp.headers.get("x-receipt-id").is_none());
     assert!(resp.headers.get("x-e2ee-applied").is_none());
     assert!(resp.headers.get("x-accel-buffering").is_none());
@@ -1545,6 +1544,9 @@ async fn streaming_chat_completion_upstream_error_is_returned_without_sse_or_rec
     assert!(resp.headers.get("connection").is_none());
     assert!(resp.headers.get("transfer-encoding").is_none());
     assert_ne!(resp.headers.get("content-length").unwrap(), "999");
+    // No upstream header reaches the client. This arm used to relay them, which
+    // would let a header that names the serving provider reach the caller.
+    assert!(resp.headers.get("x-upstream-error").is_none());
 
     let response_data = json_body(&resp);
     assert_eq!(
@@ -2129,8 +2131,7 @@ async fn a_chat_stream_missing_done_is_completed_inside_the_receipt() {
 // An Anthropic stream that closes cleanly without `message_stop` has finished,
 // so it is completed and signed — but the gateway appends nothing: fabricating
 // a `message_stop` would assert an end the upstream never sent. The client gets
-// exactly what the upstream sent, then EOF, as litellm's Anthropic passthrough
-// also does.
+// exactly what the upstream sent, then EOF.
 #[tokio::test]
 async fn an_anthropic_stream_missing_message_stop_is_completed_without_a_tail() {
     let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
