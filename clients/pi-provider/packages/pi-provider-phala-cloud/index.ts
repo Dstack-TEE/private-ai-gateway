@@ -19,6 +19,10 @@ import { createProvider } from "@phala/pi-provider-aci";
 // the inference gateway.
 const DEFAULT_CLOUD_API_URL = "https://cloud-api.phala.com";
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
 export function getCloudApiBase(): string {
   const value = process.env.PHALA_CLOUD_API_BASE_URL || DEFAULT_CLOUD_API_URL;
   return value.trim().replace(/\/+$/, "") || DEFAULT_CLOUD_API_URL;
@@ -71,12 +75,12 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
 
   const deadline = Date.now() + code.expires_in * 1000;
   let token: DeviceTokenResponse | undefined;
+  // RFC 8628 §3.4: poll at the server-provided interval, and back off on
+  // slow_down. A loop without this would hammer the token endpoint.
+  let intervalMs = Math.max(Number(code.interval) || 5, 1) * 1000;
   while (Date.now() < deadline) {
     if (callbacks.signal?.aborted) throw new Error("Login cancelled");
     callbacks.onProgress?.("Waiting for authorization...");
-    // The server long-polls up to ~25s per request and answers 400 with
-    // { detail: { error } } on pending/expired/denied; rate-limit and
-    // key-cap failures surface as structured 4xx from the consume step.
     const tokenRes = await fetch(`${cloudApi}/api/v1/auth/device/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -95,7 +99,16 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
       | undefined;
     const detail = body?.detail;
     const errorCode = typeof detail === "object" && detail ? detail.error : undefined;
-    if (errorCode === "authorization_pending") continue;
+    if (errorCode === "authorization_pending") {
+      await sleep(Math.min(intervalMs, deadline - Date.now()));
+      continue;
+    }
+    if (errorCode === "slow_down") {
+      // RFC 8628 §3.5: increase the polling interval.
+      intervalMs = Math.min(Math.max(intervalMs * 2, 5000), 30000);
+      await sleep(intervalMs);
+      continue;
+    }
     const description =
       (typeof detail === "object" && detail ? detail.error_description : undefined) ??
       (typeof detail === "string" ? detail : undefined) ??

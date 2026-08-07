@@ -12,6 +12,7 @@ import {
   clearPins,
   installFetchPinning,
   isFetchPinningInstalled,
+  requirePinForHost,
   setPin,
   setPinningCaForTests,
 } from "../src/tls-pinning.ts";
@@ -125,6 +126,28 @@ test("changing the pin applies on the next request (key rotation)", async () => 
     // Rotate to the correct pin: recovers without reinstalling the wrapper.
     setPin("127.0.0.1", leafA.spki);
     assert.equal(await globalThis.fetch(srv.url).then((r) => r.text()), "rotated-ok");
+  } finally {
+    clearPins();
+    await srv.close();
+  }
+});
+
+test("fail closed: required host with no pin blocks inference until pinned", async () => {
+  const srv = await startServer(leafA, "gated");
+  try {
+    installFetchPinning();
+    clearPins();
+
+    // Mark the host as requiring a pin but do not pin it: inference traffic
+    // (any non-/v1/aci/ path) must be blocked, not downgraded.
+    requirePinForHost("127.0.0.1");
+    await assert.rejects(globalThis.fetch(srv.url), /requires an attested TLS pin/);
+
+    // The ACI bootstrap endpoint stays reachable so a fresh attestation can
+    // establish the pin.
+    setPin("127.0.0.1", leafA.spki);
+    requirePinForHost("127.0.0.1");
+    assert.equal(await globalThis.fetch(srv.url).then((r) => r.text()), "gated");
   } finally {
     clearPins();
     await srv.close();

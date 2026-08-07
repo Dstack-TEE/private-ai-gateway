@@ -16,6 +16,13 @@
 //     underlying fetch (pi's undici 8 fetch + its global dispatcher are left
 //     untouched for all other traffic).
 //
+// Fail-closed posture: when a host is marked REQUIRED (pinning enabled) but
+// no pin is established, inference traffic to that host is BLOCKED (the chat
+// request never leaves the process) rather than silently downgraded to plain
+// CA-TLS. The ACI bootstrap endpoints (/v1/aci/attestation, /v1/aci/receipts/*,
+// /v1/aci/sessions/*) are exempt so a fresh attestation can always be fetched
+// to install or refresh a pin.
+//
 // Pins are supplied per session from a fresh, validated attestation report
 // (see index.ts). `checkServerIdentity` reads the live pin map, so a key
 // rotation is applied on the next request without recreating the dispatcher.
@@ -24,8 +31,16 @@ import { EnvHttpProxyAgent } from "undici";
 import { LOG_PREFIX } from "./constants.ts";
 import crypto from "node:crypto";
 
-/** host(lowercase) -> attested SPKI SHA-256 hex (lowercase). */
+/** Hostname (lowercase) -> attested SPKI SHA-256 hex (lowercase). Pins are
+ *  scoped to a host; the per-connection peer check additionally compares the
+ *  port so a localhost gateway on one port cannot pin another local port's
+ *  unrelated TLS (the pin map is still host-keyed because pi builds requests
+ *  against the configured base host, whose port is constant). */
 const pins = new Map<string, string>();
+
+/** Hosts whose traffic must be attested-pinned once configured. Inference to a
+ *  required host with no established pin is blocked (fail closed). */
+const requiredHosts = new Set<string>();
 
 let fetchWrapped = false;
 let baseFetch: typeof globalThis.fetch | undefined;
@@ -45,7 +60,7 @@ function normalizeHost(host: string): string {
   return host.trim().toLowerCase();
 }
 
-/** Extract the target hostname from fetch's first argument, if possible. */
+/** Target hostname from fetch's first argument, if possible. */
 function hostOfInput(input: RequestInfo | URL): string | undefined {
   try {
     if (typeof input === "string") return normalizeHost(new URL(input).hostname);
@@ -62,7 +77,10 @@ function checkServerIdentity(
   hostname: string,
   cert: { raw: Uint8Array },
 ): Error | undefined {
-  const expected = pins.get(normalizeHost(hostname));
+  // undici reports "host:port" here when a custom port is in play; the pin is
+  // registered under the bare hostname from the configured base URL.
+  const bare = normalizeHost(hostname).split(":")[0];
+  const expected = pins.get(bare);
   if (!expected) return undefined; // no pin configured → default TLS validation
   let actual: string;
   try {
@@ -118,14 +136,31 @@ export function setPin(host: string, spkiSha256Hex: string): void {
   pins.set(normalizeHost(host), spkiSha256Hex.toLowerCase());
 }
 
+/** Mark a host as requiring an attested pin. Inference to it will be blocked
+ *  (fail closed) until a pin is installed. */
+export function requirePinForHost(host: string): void {
+  requiredHosts.add(normalizeHost(host));
+}
+
+/** Stop requiring a pin for a host (pinning disabled for it). */
+export function unrequirePinForHost(host: string): void {
+  requiredHosts.delete(normalizeHost(host));
+}
+
 /** Remove the pin for a host. */
 export function clearPin(host: string): void {
   pins.delete(normalizeHost(host));
 }
 
-/** Remove all registered pins. */
+/** Remove all registered pins (required-host status stays). */
 export function clearPins(): void {
   pins.clear();
+}
+
+/** Remove all pins AND all required-host marks. */
+export function clearAllPinning(): void {
+  pins.clear();
+  requiredHosts.clear();
 }
 
 /** Current pin for a host, or undefined. */
@@ -149,12 +184,50 @@ export function installFetchPinning(): void {
   if (fetchWrapped) return;
   fetchWrapped = true;
   baseFetch = globalThis.fetch;
-  globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const host = hostOfInput(input);
-    if (host && pins.has(host)) {
-      return baseFetch!(input, { ...init, dispatcher: getPinnedDispatcher() } as RequestInit);
-    }
-    return baseFetch!(input, init);
-  };
+  globalThis.fetch = wrappedFetch;
+}
+
+/** Remove the global wrapper when present. Test/teardown hook; a config change
+ *  that should drop pins should call clearPins() instead. */
+export function uninstallFetchPinning(): void {
+  if (!fetchWrapped) return;
+  if (globalThis.fetch === wrappedFetch) {
+    globalThis.fetch = baseFetch ?? globalThis.fetch;
+  }
+  fetchWrapped = false;
+  baseFetch = undefined;
+}
+
+function wrappedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const host = hostOfInput(input);
+  if (host && pins.has(host)) {
+    return baseFetch!(input, { ...init, dispatcher: getPinnedDispatcher() } as RequestInit);
+  }
+  // Fail closed: a host that must be attested-pinned but is not (yet) pinned
+  // BLOCKS inference traffic instead of silently downgrading to CA-TLS. The
+  // ACI bootstrap endpoints stay reachable so a fresh attestation can be
+  // fetched to establish the pin.
+  if (host && requiredHosts.has(host) && !pins.has(host) && isInferencePath(input)) {
+    return Promise.reject(
+      new Error(
+        `${LOG_PREFIX} host ${host} requires an attested TLS pin but none is established; ` +
+          `blocked to avoid a cleartext downgrade. Check the attestation/tail the logs, or ` +
+          `disable pinning in settings to run unpinned.`,
+      ),
+    );
+  }
+  return baseFetch!(input, init);
+}
+
+/** True when the request targets a model-inference path (not an ACI bootstrap
+ *  endpoint like /v1/aci/attestation). */
+function isInferencePath(input: RequestInfo | URL): boolean {
+  try {
+    const url = new URL(typeof input === "string" ? input : (input as Request).url ?? String(input));
+    const path = url.pathname;
+    return !path.startsWith("/v1/aci/");
+  } catch {
+    return true; // unparseable URL: treat as inference, stay strict
+  }
 }
 
