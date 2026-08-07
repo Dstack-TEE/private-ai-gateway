@@ -1,16 +1,18 @@
 use std::collections::HashSet;
 
+use serde::Serialize;
 use serde_json::Value;
 
+use crate::aci::digest;
 use crate::aci::receipt::{
-    ChannelBinding, ReceiptBuilder, ReceiptError, TransparencyEventKind, UpstreamVerifiedEvent,
+    ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
     VerificationResult,
 };
-use crate::aci::types::Receipt;
 use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
-    AttestedSession, EvidenceRef, SessionClaims, WorkloadIdentityRef,
+    AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
+    SESSION_API_VERSION,
 };
 
 use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
@@ -48,7 +50,6 @@ pub(super) struct SealedSession {
     /// `None` for a single-channel backend.
     instance_key: Option<String>,
     session_id: String,
-    claims: SessionClaims,
 }
 
 /// Pick which sealed session the receipt cites. For a backend that fronts
@@ -59,14 +60,14 @@ pub(super) struct SealedSession {
 pub(super) fn cite_served_session(
     sealed: &[SealedSession],
     served_instance_id: Option<&str>,
-) -> Option<(String, SessionClaims)> {
+) -> Option<String> {
     let chosen = match served_instance_id {
         Some(id) => sealed
             .iter()
             .find(|s| s.instance_key.as_deref() == Some(id)),
         None => sealed.first(),
     };
-    chosen.map(|s| (s.session_id.clone(), s.claims.clone()))
+    chosen.map(|s| s.session_id.clone())
 }
 
 /// Whether a route with this TEE classification may serve a request restricted
@@ -78,6 +79,31 @@ pub(super) fn cite_served_session(
 /// classification.
 pub(super) fn attested_route_eligible(is_tee: Option<bool>) -> bool {
     is_tee == Some(true)
+}
+
+/// Local key over a channel's verified material — the dedup handle the hot
+/// path uses to find "the current session for this channel" without sealing a
+/// new document per request. Never served; carries no protocol meaning.
+#[derive(Serialize)]
+struct ChannelMaterial<'a> {
+    upstream_name: &'a str,
+    endpoint: &'a Option<String>,
+    verifier_id: &'a str,
+    identity: &'a Option<WorkloadIdentityRef>,
+    channel_binding: &'a [ChannelBinding],
+    claims: &'a SessionClaims,
+    evidence_digest: &'a Option<String>,
+}
+
+impl ChannelMaterial<'_> {
+    fn fingerprint(&self) -> Result<String, serde_json::Error> {
+        // JCS form: `claims.extra` holds provider JSON whose member order
+        // follows the parse, so a plain serialization would fingerprint the
+        // same material differently across rounds.
+        let value = serde_json::to_value(self)?;
+        let bytes = digest::jcs_bytes(&value).map_err(serde::ser::Error::custom)?;
+        Ok(digest::sha256_hex(&bytes))
+    }
 }
 
 impl AciService {
@@ -104,12 +130,15 @@ impl AciService {
 
     /// Rich variant of [`Self::forward_chat_completion`] that also takes
     /// the receipt owner so the receipt store can authenticate later
-    /// lookups (ACI §9.1, §9.5).
+    /// lookups (ACI §7.6).
     pub async fn forward_chat_completion_request(
         &self,
         req: ChatCompletionRequest<'_>,
     ) -> Result<ForwardResult, ServiceError> {
-        let aci_required = req.requires_aci_verification();
+        // §5.3: a direct service satisfies `aci_verified` by construction — the
+        // workload the client verified (§9.1) is the one serving (§4.1); pinned
+        // session lists are still refused in `apply_aci_session_constraint`.
+        let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         self.metrics.record_request(
@@ -209,7 +238,7 @@ impl AciService {
             Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,
             None => client_body.clone(),
         };
-        let e2ee_response = e2ee.map(|ctx| E2eeResponseInfo {
+        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
@@ -225,8 +254,7 @@ impl AciService {
             receipt_id,
             chat_id,
             req.context.user_model.clone(),
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
+            self.keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -239,24 +267,20 @@ impl AciService {
             builder.add_route_selected(route_id)?;
         }
         builder.add_request_forwarded(&forwarded_body)?;
-        if received_body != forwarded_body.as_slice() {
-            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+        if !self.serves_directly() {
+            let sealed = self.record_attested_upstream_session(&recorded_event)?;
+            // When the backend fronts several instances (Chutes), cite the
+            // session of the instance that actually served this request.
+            let recorded =
+                cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
+            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
+            // The session is keyed on the requested (routed) model; record the
+            // exact upstream-served model in the receipt's event.
+            builder.set_upstream_verified_model_id(response_model.clone());
         }
-        let sealed = self.record_attested_upstream_session(&recorded_event)?;
-        // When the backend fronts several instances (Chutes), cite the session of
-        // the instance that actually served this request.
-        let recorded =
-            cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
-        // The session is keyed on the requested (routed) model; record the exact
-        // upstream-served model in the receipt's upstream.verified event.
-        builder.set_upstream_verified_model_id(response_model.clone());
-        // Modified when the returned bytes differ from what the upstream sent —
-        // whether from E2EE encryption or an image-input 400 remap.
-        if upstream_response.body != wire_response_body {
-            builder.add_transparency_event(TransparencyEventKind::ResponseModified)?;
-        }
-        builder.add_response_returned(&client_body, &wire_response_body)?;
+        // §7.4 wire bytes: whatever is actually served — after E2EE sealing
+        // or an image-input 400 remap, when either applies.
+        builder.add_response_returned(&wire_response_body)?;
 
         let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
         self.store_receipt(receipt.clone(), req.requester.clone());
@@ -280,19 +304,18 @@ impl AciService {
     /// The backend records trust-critical provider facts into the returned
     /// draft. The public frontend must append `response.returned`, sign, and
     /// store the receipt after middleware returns the final user-visible body.
-    /// Build the receipt event prefix shared by the buffered and
-    /// streaming commit paths: request.received → middleware.forwarded →
-    /// route.selected → request.forwarded (+transparency) →
-    /// upstream.verified. The caller appends response.received afterwards
-    /// (buffered now, streaming at end). Failover is not recorded in the
-    /// receipt — the receipt attests only the served (selected) route; the
-    /// attempt count is surfaced to ops via an attribution header.
+    ///
+    /// Failover is not recorded: the receipt attests only the served route,
+    /// and the attempt count reaches ops through an attribution header.
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_chat_completion_stream_request(
         &self,
         req: ChatCompletionRequest<'_>,
     ) -> Result<StreamingForwardResult, ServiceError> {
-        let aci_required = req.requires_aci_verification();
+        // §5.3: a direct service satisfies `aci_verified` by construction — the
+        // workload the client verified (§9.1) is the one serving (§4.1); pinned
+        // session lists are still refused in `apply_aci_session_constraint`.
+        let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
         self.metrics.record_request(
@@ -387,8 +410,7 @@ impl AciService {
             receipt_id.clone(),
             None,
             req.context.user_model.clone(),
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
+            self.keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -401,15 +423,14 @@ impl AciService {
             builder.add_route_selected(route_id)?;
         }
         builder.add_request_forwarded(&forwarded_body)?;
-        if received_body != forwarded_body.as_slice() {
-            builder.add_transparency_event(TransparencyEventKind::RequestModified)?;
+        if !self.serves_directly() {
+            let sealed = self.record_attested_upstream_session(&recorded_event)?;
+            // When the backend fronts several instances (Chutes), cite the
+            // session of the instance that actually served this request.
+            let recorded =
+                cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
+            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
         }
-        let sealed = self.record_attested_upstream_session(&recorded_event)?;
-        // When the backend fronts several instances (Chutes), cite the session of
-        // the instance that actually served this request.
-        let recorded =
-            cite_served_session(&sealed, upstream_response.served_instance_id.as_deref());
-        Self::append_upstream_verified(&mut builder, recorded_event, recorded)?;
 
         // This is the streaming entry point, so a response with no declared
         // media type is taken to be an event stream — the same assumption the
@@ -432,7 +453,6 @@ impl AciService {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let response_modified = req.e2ee.is_some();
         let e2ee_transformer = req
             .e2ee
             .clone()
@@ -445,7 +465,6 @@ impl AciService {
             req.requester,
             endpoint_path.to_string(),
             e2ee_transformer,
-            response_modified,
             Some(request_id),
             is_sse,
         );
@@ -477,9 +496,10 @@ impl AciService {
             },
         };
         if let Some(event) = upstream_verification_event.as_mut() {
-            // `required` is the client's effective mode for this request. The
-            // verifier may report the upstream result, but the service owns the
-            // client-facing downgrade decision recorded in the receipt.
+            // `required` is the effective policy for this request — a TEE-only
+            // serving endpoint or the client's §5.3 constraint. The verifier
+            // may report the upstream result, but the service owns the
+            // client-facing decision recorded in the receipt (§7.5).
             event.required = verification_required;
         }
 
@@ -510,6 +530,16 @@ impl AciService {
                     .unwrap_or_else(|| "upstream verification failed".to_string());
                 return Err(ServiceError::UpstreamVerification(
                     UpstreamVerificationError::VerifierFailed(reason),
+                ));
+            }
+            // §1.2: verification must obtain an *enforceable* channel binding.
+            // A verified result with none pins nothing, so no session could
+            // record what was enforced — refuse it like a failure.
+            if event.channel_bindings.is_empty() {
+                return Err(ServiceError::UpstreamVerification(
+                    UpstreamVerificationError::VerifierFailed(
+                        "no enforceable channel binding".to_string(),
+                    ),
                 ));
             }
         }
@@ -623,7 +653,7 @@ impl AciService {
             upstream_name: prepared.upstream_name.clone(),
             url_origin: prepared.url_origin.clone(),
             model_id: prepared.model_id.clone(),
-            forwarded_body_hash: crate::aci::canonical::sha256_hex(&prepared.request.body),
+            forwarded_body_hash: digest::sha256_hex(&prepared.request.body),
             required,
         }
     }
@@ -636,6 +666,12 @@ impl AciService {
         &self,
         event: &UpstreamVerifiedEvent,
     ) -> Result<Vec<SealedSession>, ServiceError> {
+        // §4.1: a direct service has no upstream hop and publishes no
+        // attested sessions — this also covers the middleware commit paths
+        // and the background prewarm sink.
+        if self.serves_directly() {
+            return Ok(Vec::new());
+        }
         if event.result != VerificationResult::Verified {
             return Ok(Vec::new());
         }
@@ -679,7 +715,7 @@ impl AciService {
                 event,
                 identity.clone(),
                 vec![binding.clone()],
-                claims.clone(),
+                claims,
                 evidence,
                 now,
                 expires_at,
@@ -687,10 +723,45 @@ impl AciService {
             sealed.push(SealedSession {
                 instance_key: instance.map(str::to_string),
                 session_id,
-                claims,
             });
         }
         Ok(sealed)
+    }
+
+    /// Finalize a fail-closed refusal into a receipt (§7.5): the exact request
+    /// bytes the workload received, a failed `upstream.verified` event naming
+    /// the requested model and the reason, and the exact error bytes served.
+    /// No prompt was forwarded, so there is no `request.forwarded` event.
+    pub fn issue_upstream_refusal_receipt(
+        &self,
+        endpoint_path: &str,
+        model: Option<String>,
+        received_body: &[u8],
+        reason: &str,
+        wire_error_body: &[u8],
+        requester: Option<ReceiptOwner>,
+    ) -> Result<SignedReceipt, ServiceError> {
+        let mut builder = ReceiptBuilder::new(
+            generate_receipt_id(),
+            None,
+            model.clone(),
+            self.keyset.digest().to_string(),
+            endpoint_path.to_string(),
+            "POST".to_string(),
+            self.clock.now_secs(),
+        );
+        builder.add_request_received(received_body)?;
+        // A refusal only happens when verification was required (§7.5).
+        builder.add_upstream_verified_failed(
+            model.as_deref().unwrap_or_default(),
+            reason,
+            true,
+            None,
+        )?;
+        builder.add_response_returned(wire_error_body)?;
+        let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
+        self.store_receipt(receipt.clone(), requester);
+        Ok(receipt)
     }
 
     /// Apply a client session allowlist to the current verified event before
@@ -706,6 +777,13 @@ impl AciService {
     ) -> Result<(), ServiceError> {
         if allowed_ids.is_empty() {
             return Ok(());
+        }
+        if self.serves_directly() {
+            // §4.1 direct serving: there is no upstream hop and no session for
+            // a pinned id to name.
+            return Err(ServiceError::UpstreamVerification(
+                UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
+            ));
         }
 
         let sealed = self.record_attested_upstream_session(event)?;
@@ -731,11 +809,11 @@ impl AciService {
         Ok(())
     }
 
-    /// Seal (or renew) one session for a verified channel binding and return its
-    /// content-addressed id. The id commits to the evidence *digest*, not its
-    /// bytes, so a digest-only seal derives the same id: if the session is
-    /// already recorded and live, renew its deadline rather than re-sealing and
-    /// re-appending its evidence each request.
+    /// Return the channel's current session id, sealing (serializing once) and
+    /// persisting a fresh document only when no session with identical
+    /// verified material has a live validity period. The store's channel
+    /// fingerprint provides the dedup — the document bytes themselves change
+    /// with every validity period, so the id cannot.
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -747,47 +825,43 @@ impl AciService {
         now: u64,
         expires_at: u64,
     ) -> Result<String, ServiceError> {
-        let session_id = AttestedSession::seal(
-            event.upstream_name.clone(),
-            event.url_origin.clone(),
-            event.verifier_id.clone(),
-            identity.clone(),
-            channel_bindings.clone(),
-            claims.clone(),
-            EvidenceRef {
-                digest: evidence.digest.clone(),
-                data_uri: None,
-            },
-            now,
-            expires_at,
-        )?
-        .session_id;
-        if self
-            .session_store
-            .renew_session(&session_id, expires_at, now)
+        let fingerprint = ChannelMaterial {
+            upstream_name: &event.upstream_name,
+            endpoint: &event.url_origin,
+            verifier_id: &event.verifier_id,
+            identity: &identity,
+            channel_binding: &channel_bindings,
+            claims: &claims,
+            evidence_digest: &evidence.digest,
+        }
+        .fingerprint()
+        .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
+
+        // Each citation obligates retention for another receipt TTL.
+        let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
+        if let Some(existing) =
+            self.session_store
+                .current_session(&fingerprint, retention_until, now)
         {
-            return Ok(session_id);
+            return Ok(existing.session_id().to_string());
         }
 
-        // First sighting (or the prior record lapsed): seal the full evidence
-        // and persist it once.
-        let session = AttestedSession::seal(
-            event.upstream_name.clone(),
-            event.url_origin.clone(),
-            event.verifier_id.clone(),
+        let session = AttestedSession::seal(SessionDocument {
+            api_version: SESSION_API_VERSION.to_string(),
+            upstream_name: event.upstream_name.clone(),
+            endpoint: event.url_origin.clone(),
+            verifier_id: event.verifier_id.clone(),
+            established_at: now,
+            expires_at,
             identity,
-            channel_bindings,
+            channel_binding: channel_bindings,
             claims,
             evidence,
-            now,
-            expires_at,
-        )?;
-        debug_assert_eq!(
-            session.session_id, session_id,
-            "digest-only probe must derive the same id as the full seal"
-        );
+        })
+        .map_err(|err| ServiceError::SessionStore(format!("seal attested session: {err}")))?;
+        let session_id = session.session_id().to_string();
         self.session_store
-            .put_session(session, now)
+            .put_session(&fingerprint, session, retention_until, now)
             .map_err(|err| {
                 ServiceError::SessionStore(format!(
                     "failed to persist attested session {session_id}: {err}"
@@ -814,20 +888,26 @@ impl AciService {
     /// the typed claim verdicts when a verified session was recorded.
     pub(super) fn append_upstream_verified(
         builder: &mut ReceiptBuilder,
-        event: UpstreamVerifiedEvent,
-        recorded: Option<(String, SessionClaims)>,
+        event: &UpstreamVerifiedEvent,
+        recorded: Option<String>,
     ) -> Result<(), ReceiptError> {
-        // A sealed session and its claims are inseparable: either both (verified)
-        // or neither (failed / no binding).
+        // §8.3: the receipt cites the session; the claims live on the session
+        // record, so a verified event carries an id and a failed one a reason.
         match recorded {
-            Some((session_id, claims)) => {
-                builder.add_upstream_verified_with_session(event, &session_id, &claims)
-            }
-            None => builder.add_upstream_verified(event),
+            Some(session_id) => builder.add_upstream_verified_with_session(event, &session_id),
+            None => builder.add_upstream_verified_failed(
+                &event.model_id,
+                event
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no enforceable verified binding"),
+                event.required,
+                Some(&event.upstream_name),
+            ),
         }
     }
 
-    pub(super) fn store_receipt(&self, receipt: Receipt, requester: Option<ReceiptOwner>) {
+    pub(super) fn store_receipt(&self, receipt: SignedReceipt, requester: Option<ReceiptOwner>) {
         let now = self.clock.now_secs();
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
         self.receipt_store.put(receipt, requester, now, expires_at);
@@ -837,13 +917,11 @@ impl AciService {
 #[cfg(test)]
 mod tests {
     use super::{cite_served_session, SealedSession};
-    use crate::aggregator::session::SessionClaims;
 
     fn sealed(instance_key: Option<&str>, session_id: &str) -> SealedSession {
         SealedSession {
             instance_key: instance_key.map(str::to_string),
             session_id: session_id.to_string(),
-            claims: SessionClaims::default(),
         }
     }
 
@@ -854,7 +932,7 @@ mod tests {
             sealed(Some("inst-b"), "as_b"),
         ];
         assert_eq!(
-            cite_served_session(&sessions, Some("inst-b")).map(|(id, _)| id),
+            cite_served_session(&sessions, Some("inst-b")),
             Some("as_b".to_string()),
         );
         // A served instance with no sealed session cites nothing, not the wrong one.
@@ -866,7 +944,7 @@ mod tests {
         let sessions = vec![sealed(None, "as_one")];
         // No served instance (single-channel backend) -> the one sealed session.
         assert_eq!(
-            cite_served_session(&sessions, None).map(|(id, _)| id),
+            cite_served_session(&sessions, None),
             Some("as_one".to_string()),
         );
         // Nothing sealed -> nothing cited.

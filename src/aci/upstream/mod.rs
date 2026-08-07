@@ -8,9 +8,9 @@
 //!
 //! * the per-request flow in the service layer never special-cases a
 //!   provider;
-//! * future provider adapters (ACI §1.2 "aggregator MUST verify
-//!   upstreams inside attested code") plug in by name without touching
-//!   the hot path.
+//! * future provider adapters plug in by name without touching the hot
+//!   path (§1.2: every TEE-attesting upstream is verified before it
+//!   serves, over the channel that verification bound).
 //!
 //! The first concrete backend is [`OpenAICompatibleBackend`]: it
 //! speaks the bare OpenAI `POST /v1/chat/completions` surface. That
@@ -37,6 +37,7 @@ pub use chutes::{
 };
 pub use openai::OpenAICompatibleBackend;
 pub use router::{ModelRoute, ModelRouterBackend};
+pub use tls::{observing_spki_client, SpkiObservations};
 
 use openai::request_model_id;
 
@@ -59,8 +60,9 @@ pub struct PreparedUpstreamRequest {
     pub model_id: String,
     pub route_id: Option<String>,
     /// Whether the selected route is an attested (TEE) provider. Only
-    /// `Some(true)` is eligible when a request sets `provider.aci_verified` or
-    /// pins an ACI session. Unconstrained requests may use any classification;
+    /// `Some(true)` is eligible when the effective policy requires verified
+    /// serving — a TEE-only endpoint (§1.2), `provider.aci_verified`, or a
+    /// pinned ACI session. Unconstrained requests may use any classification;
     /// their receipts still record the verification outcome.
     pub is_tee: Option<bool>,
 }

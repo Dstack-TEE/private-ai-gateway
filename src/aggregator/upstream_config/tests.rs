@@ -24,7 +24,7 @@ fn test_upstream_config(
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,
-        accepted_workload_ids: None,
+        accepted_subjects: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,
         pccs_url: None,
@@ -104,7 +104,7 @@ fn parse_secret_ai_allows_an_unpinned_workload() {
     .expect("SecretAI should measure an unpinned workload by default");
 
     assert_eq!(config[0].provider, UpstreamProvider::SecretAi);
-    assert_eq!(config[0].accepted_workload_ids, None);
+    assert_eq!(config[0].accepted_subjects, None);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstre
     ];
     let options = UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::AciService,
-        accepted_workload_ids: Vec::new(),
+        accepted_subjects: Vec::new(),
         accepted_image_digests: Vec::new(),
         accepted_dstack_kms_root_public_keys: Vec::new(),
         pccs_url: None,
@@ -296,7 +296,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
         ]),
         bearer_token: None,
         basic_auth: false,
-        accepted_workload_ids: None,
+        accepted_subjects: None,
         accepted_image_digests: None,
         accepted_dstack_kms_root_public_keys: None,
         pccs_url: None,
@@ -325,7 +325,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
         path: PathBuf::from("/tmp/upstreams.json"),
         options: UpstreamRuntimeOptions {
             verifier_mode: UpstreamVerifierMode::None,
-            accepted_workload_ids: Vec::new(),
+            accepted_subjects: Vec::new(),
             accepted_image_digests: Vec::new(),
             accepted_dstack_kms_root_public_keys: Vec::new(),
             pccs_url: None,

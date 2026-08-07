@@ -4,7 +4,13 @@ use serde_json::{json, Value};
 
 use super::streaming::E2eeSseTransformer;
 use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
-use crate::aci::canonical::canonicalize;
+use crate::aci::digest;
+
+/// JCS bytes for the AAD documents — same bytes main's `canonical` module
+/// produced for these integer-and-ASCII inputs.
+fn canonicalize(value: &Value) -> Result<Vec<u8>, digest::JcsError> {
+    digest::jcs_bytes(value)
+}
 use crate::aci::e2ee::{
     encrypt_aci_e2ee_for_public_key, encrypt_legacy_for_public_key,
     normalize_secp256k1_public_key_hex, E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,

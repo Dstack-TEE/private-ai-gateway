@@ -18,9 +18,9 @@ use axum::{
 };
 use private_ai_gateway::aci::keys::{verify_receipt_signature, KeyProvider};
 use private_ai_gateway::aci::receipt::{
-    canonical_bytes_for_signing, ChannelBinding, UpstreamVerifiedEvent,
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
 };
-use private_ai_gateway::aci::types::{Receipt, ServiceCapabilities, TlsSpki};
+use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
@@ -92,17 +92,27 @@ struct TestHarness {
 }
 
 fn make_harness() -> TestHarness {
-    make_harness_with_tls_public_keys(None)
+    make_harness_with(None)
+}
+
+/// A harness whose service policy does not require upstream verification —
+/// the forward-and-record-failed path (there is no per-request opt-out).
+fn make_optional_verification_harness() -> TestHarness {
+    make_harness_with(None)
 }
 
 fn make_harness_with_tls_public_keys(tls_public_keys: Option<Vec<TlsSpki>>) -> TestHarness {
+    make_harness_with(tls_public_keys)
+}
+
+fn make_harness_with(tls_public_keys: Option<Vec<TlsSpki>>) -> TestHarness {
     let keys = Arc::new(StaticKeyProvider::default());
     let receipt_keys = keys.receipt_keys();
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, received) = StubUpstream::new(RESPONSE_BODY);
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities::default();
     cfg.tls_public_keys = tls_public_keys;
     let svc = AciService::new(
@@ -123,6 +133,16 @@ fn make_harness_with_tls_public_keys(tls_public_keys: Option<Vec<TlsSpki>>) -> T
 
 async fn body_bytes(b: Body) -> Vec<u8> {
     to_bytes(b, usize::MAX).await.unwrap().to_vec()
+}
+
+fn payload_event(receipt: &SignedReceipt, event_type: &str) -> Value {
+    receipt.document_json().unwrap()["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == event_type)
+        .unwrap_or_else(|| panic!("receipt must carry {event_type}"))
+        .clone()
 }
 
 #[tokio::test]
@@ -163,10 +183,6 @@ async fn attestation_report_endpoint_shape() {
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body.get("api_version").unwrap(), "aci/1");
     assert_eq!(
-        body.get("workload_id").unwrap().as_str().unwrap(),
-        h.service.workload_id()
-    );
-    assert_eq!(
         body.get("workload_keyset_digest")
             .unwrap()
             .as_str()
@@ -182,15 +198,9 @@ async fn attestation_report_endpoint_shape() {
     assert!(body
         .get("attestation")
         .unwrap()
-        .get("keyset_endorsement")
+        .get("workload_keyset")
         .unwrap()
-        .get("value")
-        .unwrap()
-        .is_string());
-    assert_eq!(
-        body["attestation"]["evidence"]["app_compose"],
-        serde_json::json!(r#"{"stub":true}"#)
-    );
+        .is_object());
     // The capability advertisement is empty by default; no E2EE
     // version is wired.
     assert_eq!(
@@ -293,7 +303,7 @@ async fn attestation_report_v2_binds_sha256_of_address_and_tls_spki() {
         .unwrap();
     let mut preimage = hex::decode(signing_address).unwrap();
     preimage.extend(hex::decode(&spki).unwrap());
-    let expected = private_ai_gateway::aci::canonical::sha256_hex(&preimage);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&preimage);
     let expected = expected.trim_start_matches("sha256:");
     assert_eq!(&report_data[0..64], expected);
     assert_eq!(&report_data[64..128], nonce);
@@ -326,9 +336,8 @@ async fn attestation_report_selects_domain_tls_binding_from_host_header() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    let tls_keys = body["attestation"]["workload_keyset"]["tls_public_keys"]
-        .as_array()
-        .unwrap();
+    let keyset = body["attestation"]["workload_keyset"].clone();
+    let tls_keys = keyset["tls_public_keys"].as_array().unwrap();
     assert_eq!(tls_keys.len(), 2);
     assert_eq!(tls_keys[0]["domain"], "api.example.com");
     assert_eq!(tls_keys[0]["spki_sha256"], "aa".repeat(32));
@@ -385,9 +394,12 @@ async fn attestation_report_nonce_null_when_absent() {
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
 
     // Re-derive report_data with nonce=None and confirm match.
-    let stmt =
-        private_ai_gateway::aci::identity::attestation_statement(h.service.keyset(), None).unwrap();
-    let expected_hex = hex::encode(private_ai_gateway::aci::identity::report_data(&stmt).unwrap());
+    let stmt = private_ai_gateway::aci::identity::attestation_statement(
+        h.service.workload_keyset_digest(),
+        None,
+    )
+    .unwrap();
+    let expected_hex = hex::encode(private_ai_gateway::aci::identity::report_data(&stmt));
     assert_eq!(
         body.get("attestation")
             .unwrap()
@@ -396,6 +408,53 @@ async fn attestation_report_nonce_null_when_absent() {
             .as_str()
             .unwrap(),
         expected_hex
+    );
+}
+
+#[tokio::test]
+async fn chat_default_required_fails_closed_without_verifier() {
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"provider":{"aci_verified":true}}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The refusal is receipt-backed (§7.5): the error carries X-Receipt-Id.
+    let receipt_id = resp
+        .headers()
+        .get("x-receipt-id")
+        .expect("refusal must carry X-Receipt-Id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = body_bytes(resp.into_body()).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json.get("error")
+            .unwrap()
+            .get("type")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "upstream_verification_failed"
+    );
+    // Upstream MUST NOT have been called.
+    assert!(h.received.lock().unwrap().is_none());
+    // The refusal receipt hashes the exact error body served.
+    let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
+    assert_eq!(
+        payload_event(&receipt, "response.returned")["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(&body)
     );
 }
 
@@ -433,8 +492,9 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
         }
     }
 
-    let mut cfg = AciServiceConfig::for_test("private-ai-gateway");
+    let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities::default();
+    // Forward-and-record: verification is not required by policy here.
     let svc = Arc::new(
         AciService::new(
             Arc::new(StaticKeyProvider::default()),
@@ -492,8 +552,8 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
 }
 
 #[tokio::test]
-async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
-    let h = make_harness();
+async fn chat_optional_verification_forwards_and_signs_receipt_with_failed_event() {
+    let h = make_optional_verification_harness();
     let app = build_router(h.service.clone());
 
     let request_bytes = br#"{"model":"x","messages":[]}"#.to_vec();
@@ -519,54 +579,41 @@ async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
         .to_string();
     assert_eq!(
         resp.headers()
-            .get("x-aci-identity")
+            .get("x-aci-keyset-digest")
             .unwrap()
             .to_str()
             .unwrap(),
-        h.service.workload_id()
+        h.service.workload_keyset_digest()
     );
 
-    let receipt: Receipt = h
+    let receipt = h
         .service
         .get_receipt_by_receipt_id(&receipt_id)
         .expect("receipt should be retained");
 
-    // Aggregator receipt: upstream.verified must be present even for an
-    // unconstrained request, recorded as failed/no-verifier.
-    let uv = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .expect("upstream.verified must be emitted for unconstrained requests");
-    assert_eq!(uv.fields.get("result").unwrap().as_str().unwrap(), "failed");
-    assert!(!uv.fields.get("required").unwrap().as_bool().unwrap());
+    // Aggregator receipt: upstream.verified must be present even when
+    // verification is not required, recorded as failed/no-verifier.
+    let uv = payload_event(&receipt, "upstream.verified");
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], false);
 
-    // request.received body_hash matches the bytes the launcher
-    // received.
-    let received = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "request.received")
-        .unwrap();
-    let expected = private_ai_gateway::aci::canonical::sha256_hex(&request_bytes);
-    assert_eq!(
-        received.fields.get("body_hash").unwrap().as_str().unwrap(),
-        expected
-    );
+    // request.received body_hash matches the bytes the launcher received.
+    let received = payload_event(&receipt, "request.received");
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&request_bytes);
+    assert_eq!(received["body_hash"].as_str().unwrap(), expected);
 
-    // Signature verifies under the keyset receipt key.
-    let canonical_bytes = canonical_bytes_for_signing(&receipt).unwrap();
-    let sig = hex::decode(&receipt.signature.value_hex).unwrap();
+    // The signature covers JCS(document minus `signature`) (§7.2).
+    let sig = hex::decode(&receipt.signature_hex).unwrap();
     assert!(verify_receipt_signature(
         &h.receipt_keys[0],
-        &canonical_bytes,
+        &receipt_signing_input(&receipt.document_json().unwrap()).unwrap(),
         &sig
     ));
 }
 
 #[tokio::test]
 async fn chat_x_request_hash_is_ignored() {
-    let h = make_harness();
+    let h = make_optional_verification_harness();
     let app = build_router(h.service.clone());
 
     let request_bytes = br#"{"model":"x","messages":[]}"#.to_vec();
@@ -593,17 +640,14 @@ async fn chat_x_request_hash_is_ignored() {
         .to_string();
 
     let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
-    let received = receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "request.received")
-        .unwrap();
-    let actual = received.fields.get("body_hash").unwrap().as_str().unwrap();
+    let received = payload_event(&receipt, "request.received");
+    let actual = received["body_hash"].as_str().unwrap().to_string();
+    let actual = actual.as_str();
     assert_ne!(
         actual, attacker_hash,
         "the launcher MUST NOT use client-supplied X-Request-Hash"
     );
-    let expected = private_ai_gateway::aci::canonical::sha256_hex(&request_bytes);
+    let expected = private_ai_gateway::aci::digest::sha256_hex(&request_bytes);
     assert_eq!(actual, expected);
 }
 
@@ -628,13 +672,8 @@ async fn attested_session_lookup_returns_audit_record() {
         .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, Some(event))
         .await
         .unwrap();
-    let session_id = result
-        .receipt
-        .event_log
-        .iter()
-        .find(|e| e.event_type == "upstream.verified")
-        .and_then(|e| e.fields.get("session_id"))
-        .and_then(|v| v.as_str())
+    let session_id = payload_event(&result.receipt, "upstream.verified")["session_id"]
+        .as_str()
         .expect("receipt should reference session")
         .to_string();
 
@@ -649,16 +688,36 @@ async fn attested_session_lookup_returns_audit_record() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    let raw = body_bytes(resp.into_body()).await;
+    // The endpoint serves the exact sealed bytes (§8): their hash IS the id,
+    // and the id is not inside the document.
+    assert_eq!(
+        session_id,
+        hex::encode(private_ai_gateway::aci::digest::sha256_raw(&raw))
+    );
+    let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["session_id"], session_id);
+    assert!(body.get("session_id").is_none());
     assert_eq!(body["upstream_name"], "stub-upstream");
     assert_eq!(body["endpoint"], "https://stub-upstream");
     assert_eq!(body["verifier_id"], "stub-verifier-1");
     assert_eq!(body["channel_binding"][0]["type"], "tls_spki_sha256");
     // The by-id record serves the full evidence bundle, including the data-URI.
     assert!(body["evidence"]["data"].is_string());
+
+    // The path takes the 64-hex id exactly as receipts cite it (§8.1); a
+    // digest-style `sha256:`-prefixed string is not a session id.
+    let app = build_router(h.service.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/aci/sessions/sha256:{session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // Canonical receipt endpoint returns the bare signed receipt (no legacy
     // signature wrapper), addressable by the gateway receipt_id.
@@ -676,12 +735,12 @@ async fn attested_session_lookup_returns_audit_record() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert_eq!(body["receipt_id"], receipt_id);
-    assert_eq!(body["api_version"], "aci/1"); // signed ACI artifact keeps aci/1
-    assert!(body.get("event_log").is_some());
+    // The canonical receipt endpoint serves the §7.2 receipt document.
+    assert_eq!(body["api_version"], "aci/1");
+    assert!(body["event_log"].is_array());
     assert!(
         body.get("signature").is_some() && body.get("text").is_none(),
-        "canonical receipt is bare, not the legacy signature wrapper"
+        "canonical receipt is the document, not the legacy signature wrapper"
     );
 
     // Sessions list, filtered by upstream_name.
@@ -703,7 +762,7 @@ async fn attested_session_lookup_returns_audit_record() {
     // The broad list keeps the integrity digest but strips the evidence bytes;
     // fetch a single session by id for the full bundle (see above).
     assert!(body["sessions"][0]["evidence"]["digest"].is_string());
-    assert!(body["sessions"][0]["evidence"]["data"].is_null());
+    assert!(body["sessions"][0]["evidence"].get("data").is_none());
 
     // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
     let app = build_router(h.service.clone());
@@ -746,113 +805,11 @@ async fn chat_invalid_json_returns_400_before_forwarding() {
 }
 
 #[tokio::test]
-async fn retired_x_upstream_verification_header_is_rejected() {
-    let h = make_harness();
-    let app = build_router(h.service.clone());
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .header("x-upstream-verification", "required")
-                .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("provider.aci_verified"));
-    assert!(h.received.lock().unwrap().is_none());
-}
-
-#[tokio::test]
-async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
-    // This harness has no route classed as attested, so the prompt must not
-    // forward.
-    let h = make_harness();
-    let app = build_router(h.service.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    br#"{"model":"x","messages":[],"provider":{"aci_verified":true}}"#.to_vec(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(h.received.lock().unwrap().is_none());
-
-    // Malformed or contradictory constraints are 400s; none may silently
-    // downgrade to unrestricted routing.
-    for body in [
-        br#"{"model":"x","messages":[],"provider":{"aci_verified":"yes"}}"#.as_slice(),
-        br#"{"model":"x","messages":[],"provider":{"aci_session_ids":[]}}"#.as_slice(),
-        br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"aci_session_ids":["as_one"]}}"#.as_slice(),
-    ] {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-    assert!(h.received.lock().unwrap().is_none());
-
-    // These controls belong to the gateway, not the provider protocol. On a
-    // non-restricting request they are removed while unrelated provider fields
-    // are preserved for a direct upstream.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"custom":"keep"}}"#.to_vec(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let forwarded: Value = serde_json::from_slice(
-        h.received
-            .lock()
-            .unwrap()
-            .as_deref()
-            .expect("request should reach the direct upstream"),
-    )
-    .unwrap();
-    assert!(forwarded["provider"].get("aci_verified").is_none());
-    assert_eq!(forwarded["provider"]["custom"], "keep");
-}
-
-#[tokio::test]
 async fn receipt_lookup_by_chat_id() {
-    let h = make_harness();
+    let h = make_optional_verification_harness();
     let app = build_router(h.service.clone());
 
-    // Issue an unconstrained chat completion.
+    // Issue a chat completion (opt-out).
     app.clone()
         .oneshot(
             Request::builder()
@@ -877,17 +834,10 @@ async fn receipt_lookup_by_chat_id() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
-    assert_eq!(
-        body.get("receipt")
-            .unwrap()
-            .get("chat_id")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        "chat-xyz"
-    );
     assert_eq!(body.get("api_version").unwrap(), "aci/1");
     assert!(body.get("signature").unwrap().is_string());
+    // The embedded receipt is the §7.2 document; it names the chat id.
+    assert_eq!(body["receipt"]["chat_id"], "chat-xyz");
 }
 
 #[tokio::test]
@@ -923,7 +873,7 @@ async fn receipt_lookup_unknown_chat_id_returns_404() {
 fn upstream_runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
-        accepted_workload_ids: vec![],
+        accepted_subjects: vec![],
         accepted_image_digests: vec![],
         accepted_dstack_kms_root_public_keys: vec![],
         pccs_url: None,
@@ -953,7 +903,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
             manager.backend(),
             manager.verifier(),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1118,7 +1068,7 @@ async fn attestation_report_plumbs_nvidia_payload_through_aci_service_upstream()
     // aci-service builds a native verifier eagerly, so a policy is required here
     // (KMS root = secp256k1 generator point) though this path never uses it.
     let config = format!(
-        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_workload_ids":["wid-test"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
+        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
     let (_svc, app) = setup_with_config(&config);
 
@@ -1156,7 +1106,7 @@ async fn attestation_report_stops_aci_service_forwarding_at_depth_zero() {
     let (base, captured) =
         serve_phala_stub(Some("{\"evidence_list\":[\"unreached\"]}".to_string())).await;
     let config = format!(
-        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_workload_ids":["wid-test"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
+        r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
     let (_svc, app) = setup_with_config(&config);
 
@@ -1316,7 +1266,7 @@ fn legacy_ecdsa_signature_uses_the_e2ee_signing_address() {
     // returned signing_address field would still pass if the code signed with
     // the wrong key and merely relabeled the field.
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-    use private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM;
+    use private_ai_gateway::aci::e2ee::E2EE_ALGO_LEGACY_ECDSA;
     use private_ai_gateway::aci::keys::{
         ethereum_address_from_uncompressed_public_key, LEGACY_ALGO_ECDSA,
     };
@@ -1324,10 +1274,10 @@ fn legacy_ecdsa_signature_uses_the_e2ee_signing_address() {
 
     let keys = StaticKeyProvider::default();
     let e2ee = keys
-        .e2ee_keys()
+        .legacy_e2ee_keys()
         .into_iter()
-        .find(|k| k.algo == E2EE_ALGO_SECP256K1_AESGCM)
-        .expect("secp256k1 e2ee key");
+        .find(|k| k.algo == E2EE_ALGO_LEGACY_ECDSA)
+        .expect("legacy secp256k1 e2ee key");
     let expected = ethereum_address_from_uncompressed_public_key(&e2ee.public_key_hex).unwrap();
 
     let text = "hello";
@@ -1351,5 +1301,153 @@ fn legacy_ecdsa_signature_uses_the_e2ee_signing_address() {
         recovered_addr.to_lowercase(),
         expected.to_lowercase(),
         "legacy ecdsa signature must recover to the E2EE signing_address"
+    );
+}
+
+// --- restored from main (#102 retirement, §5.3 constraint validation) ---
+
+#[tokio::test]
+async fn retired_x_upstream_verification_header_is_rejected() {
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-upstream-verification", "required")
+                .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("provider.aci_verified"));
+    assert!(h.received.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn provider_aci_block_is_validated_fail_closed_and_not_forwarded() {
+    // This harness has no route classed as attested, so the prompt must not
+    // forward.
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"provider":{"aci_verified":true}}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(h.received.lock().unwrap().is_none());
+
+    // Malformed or contradictory constraints are 400s; none may silently
+    // downgrade to unrestricted routing.
+    for body in [
+        br#"{"model":"x","messages":[],"provider":{"aci_verified":"yes"}}"#.as_slice(),
+        br#"{"model":"x","messages":[],"provider":{"aci_session_ids":[]}}"#.as_slice(),
+        br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"aci_session_ids":["as_one"]}}"#.as_slice(),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    assert!(h.received.lock().unwrap().is_none());
+
+    // These controls belong to the gateway, not the provider protocol. On a
+    // non-restricting request they are removed while unrelated provider fields
+    // are preserved for a direct upstream.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    br#"{"model":"x","messages":[],"provider":{"aci_verified":false,"custom":"keep"}}"#.to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let forwarded: Value = serde_json::from_slice(
+        h.received
+            .lock()
+            .unwrap()
+            .as_deref()
+            .expect("request should reach the direct upstream"),
+    )
+    .unwrap();
+    assert!(forwarded["provider"].get("aci_verified").is_none());
+    assert_eq!(forwarded["provider"]["custom"], "keep");
+}
+
+#[tokio::test]
+async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+
+    let request_bytes = br#"{"model":"x","messages":[]}"#.to_vec();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(request_bytes.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let receipt_id = resp
+        .headers()
+        .get("x-receipt-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(&receipt_id)
+        .expect("receipt should be retained");
+
+    // An aggregator receipt always carries `upstream.verified`. For an
+    // unconstrained request it records the honest state — failed, and not
+    // required — rather than omitting the event.
+    let uv = payload_event(&receipt, "upstream.verified");
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], false);
+
+    assert_eq!(
+        payload_event(&receipt, "request.received")["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(&request_bytes)
     );
 }

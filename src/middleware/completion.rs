@@ -198,6 +198,10 @@ struct OutcomeCtx<'a> {
     request_id: &'a str,
     model: &'a str,
     started: Instant,
+    /// The exact bytes the workload received — a §7.5 refusal receipt
+    /// commits to them.
+    received_body: &'a [u8],
+    requester: &'a Option<ReceiptOwner>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -289,6 +293,8 @@ pub async fn run(
                         request_id: &request_id,
                         model,
                         started,
+                        received_body: &received_body,
+                        requester: &requester,
                     },
                 );
             }
@@ -304,6 +310,8 @@ pub async fn run(
         request_id: &request_id,
         model: model.unwrap_or(""),
         started,
+        received_body: &received_body,
+        requester: &requester,
     };
     // Forward the routing block verbatim; the control plane validates it. Parsing
     // it here would silently drop a caller's restrictions on a malformed field.
@@ -436,6 +444,8 @@ pub async fn run(
 
     let context = GatewayRequestContext {
         request_id: request_id.clone(),
+        // §7.3: the receipt `model` is the model the client asked for — under
+        // E2EE the envelope model, which `user_model` already carries.
         user_model,
         target_route_id: None,
         user_tier: consult.user_tier.clone(),
@@ -624,7 +634,7 @@ pub async fn run(
                 forward.receipt,
                 &final_body,
                 Some("application/json"),
-                requester,
+                requester.clone(),
                 e2ee,
             ) {
                 Ok(finalized) => {
@@ -737,7 +747,7 @@ pub async fn run(
                 kept,
                 endpoint_path,
                 Some(&content_type),
-                requester,
+                requester.clone(),
                 e2ee,
                 Some(request_id.clone()),
             ) {
@@ -1074,6 +1084,11 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
         ServiceError::E2ee(_) => 400,
+        // §5.3: nothing failed verification — none of the pinned sessions is
+        // current, so the client re-fetches the list and re-pins.
+        ServiceError::UpstreamVerification(
+            UpstreamVerificationError::NoEligibleAttestedSession(_),
+        ) => 412,
         ServiceError::UpstreamVerification(_) => 503,
         ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
         _ => 502,
@@ -1095,6 +1110,40 @@ fn service_error_response(
         ServiceError::E2ee(_) => None,
         _ => e2ee,
     };
+    // §7.5: a fail-closed refusal names its §10 type and is receipt-committed,
+    // exactly like the direct path (`http/app/backend.rs::refusal_response`).
+    if let ServiceError::UpstreamVerification(uv) = &err {
+        let error_type = match uv {
+            UpstreamVerificationError::NoEligibleAttestedSession(_) => "session_not_accepted",
+            _ => "upstream_verification_failed",
+        };
+        let reason = uv.to_string();
+        let body = errors::envelope_bytes(surface, error_type, &reason, Some(request_id));
+        return match outcome.service.issue_upstream_refusal_receipt(
+            outcome.endpoint_path,
+            (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
+            outcome.received_body,
+            &reason,
+            &body,
+            outcome.requester.clone(),
+        ) {
+            Ok(receipt) => {
+                let headers = [("x-receipt-id", receipt.receipt_id.clone())];
+                finalize_generated(status, body, &headers, e2ee, outcome)
+            }
+            // The receipt is part of the refusal contract (§5.2); a refusal
+            // that cannot be committed is a server error, not a bare 503.
+            Err(receipt_err) => {
+                let body = errors::envelope_bytes(
+                    surface,
+                    errors::error_type(surface, 500),
+                    &format!("refusal receipt could not be issued: {receipt_err}"),
+                    Some(request_id),
+                );
+                finalize_generated(500, body, &[], e2ee, outcome)
+            }
+        };
+    }
     let body = errors::envelope_bytes(
         surface,
         errors::error_type(surface, status),

@@ -1,8 +1,8 @@
 //! Reusable building blocks for upstream verifiers.
 //!
-//! ACI §1.2 requires an aggregator to "verify upstreams inside attested
-//! code before forwarding sensitive traffic" and record the result in
-//! the receipt. The trait [`crate::aggregator::service::UpstreamVerifier`]
+//! ACI §1.2: every upstream that offers TEE attestation is verified
+//! before it serves, the aggregator reaches it only over the channel
+//! that verification bound, and each receipt records the outcome (§7.5). The trait [`crate::aggregator::service::UpstreamVerifier`]
 //! is the seam; this module provides two small concrete
 //! implementations that are useful right now:
 //!
@@ -31,23 +31,34 @@ pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 
 mod aci_service;
+mod appraisal;
 mod dstack;
 mod external;
 mod providers;
+mod quote;
 mod report;
 mod simple;
 #[cfg(test)]
 mod tests;
 
 pub use aci_service::{
-    AciServiceUpstreamVerifier, AciServiceVerifierConfigError, AciServiceVerifierPolicy,
+    dcap_report_data, AciServiceUpstreamVerifier, AciServiceVerifierConfigError,
+    AciServiceVerifierPolicy,
 };
+pub use appraisal::{
+    appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckId, CheckResult,
+    CustodyEvidence, FailureCause, Outcome, QuoteSource,
+};
+pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
 pub use external::ProviderVerifierConfigError;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
 };
-pub use report::{validate_aci_report_binding, AciReportValidationError, ValidatedAciReport};
+pub use quote::QuoteStepError;
+pub use report::{
+    validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
+};
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {

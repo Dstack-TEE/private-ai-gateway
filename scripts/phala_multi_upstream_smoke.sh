@@ -283,7 +283,7 @@ fetch_upstream_policy() {
 
   wait_for_http_ok "$url/" "$WORK_DIR/upstream-${suffix}-root.json" "$HTTP_READY_ATTEMPTS"
   wait_for_http_ok "$url/v1/attestation/report?nonce=route-${suffix}" "$report" "$HTTP_READY_ATTEMPTS"
-  cargo run --quiet --example dstack_kms_root_from_report <"$report" >"$policy"
+  cargo run --quiet --example dstack_policy_from_report <"$report" >"$policy"
   log "upstream ${suffix} policy:"
   sed 's/^/[smoke]   /' "$policy" >&2
 }
@@ -339,7 +339,8 @@ assert_route_receipt() {
     .event_log | any(.type == "request.forwarded" and .body_hash == $h)
   ' "$receipt" >/dev/null
   jq -e '
-    .event_log | any(.type == "transparency.request_modified")
+    ([.event_log[] | select(.type == "request.received") | .body_hash] | first)
+    != ([.event_log[] | select(.type == "request.forwarded") | .body_hash] | first)
   ' "$receipt" >/dev/null
   jq -e --arg model "$upstream_model" '
     .event_log
@@ -388,8 +389,8 @@ printf '%s\n' "$upstream_b_url" >"$WORK_DIR/upstream-b.url"
 fetch_upstream_policy a "$upstream_a_url"
 fetch_upstream_policy b "$upstream_b_url"
 
-wid_a=$(awk -F= '/^workload_id=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
-wid_b=$(awk -F= '/^workload_id=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
+subject_a=$(awk -F= '/^subject=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
+subject_b=$(awk -F= '/^subject=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
 kms_a=$(awk -F= '/^kms_root_public_key=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
 kms_b=$(awk -F= '/^kms_root_public_key=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
 
@@ -397,8 +398,8 @@ routes_json=$(
   jq -cn \
     --arg url_a "$upstream_a_url" \
     --arg url_b "$upstream_b_url" \
-    --arg wid_a "$wid_a" \
-    --arg wid_b "$wid_b" \
+    --arg subject_a "$subject_a" \
+    --arg subject_b "$subject_b" \
     --arg kms_a "$kms_a" \
     --arg kms_b "$kms_b" \
     '[
@@ -407,7 +408,7 @@ routes_json=$(
         provider: "aci-service",
         base_url: $url_a,
         models: {"public-a": "routed-upstream-a-model"},
-        accepted_workload_ids: [$wid_a],
+        accepted_subjects: [$subject_a],
         accepted_dstack_kms_root_public_keys: [$kms_a]
       },
       {
@@ -415,7 +416,7 @@ routes_json=$(
         provider: "aci-service",
         base_url: $url_b,
         models: {"public-b": "routed-upstream-b-model"},
-        accepted_workload_ids: [$wid_b],
+        accepted_subjects: [$subject_b],
         accepted_dstack_kms_root_public_keys: [$kms_b]
       }
     ]'

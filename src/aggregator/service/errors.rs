@@ -1,4 +1,4 @@
-use crate::aci::canonical::CanonicalError;
+use crate::aci::identity::InvalidStatementInput;
 use crate::aci::keys::KeyError;
 use crate::aci::receipt::ReceiptError;
 use crate::aci::upstream::UpstreamError;
@@ -17,10 +17,12 @@ pub enum ServiceError {
     InvalidSourceProvenance,
     #[error("upstream verification failed: {0}")]
     UpstreamVerification(#[from] UpstreamVerificationError),
+    #[error("failed to seal workload keyset: {0}")]
+    Keyset(String),
+    #[error("invalid attestation nonce: {0}")]
+    InvalidNonce(#[from] InvalidStatementInput),
     #[error("E2EE request failed: {0}")]
     E2ee(#[from] E2eeError),
-    #[error("canonicalisation error: {0}")]
-    Canonical(#[from] CanonicalError),
     #[error("key provider error: {0}")]
     Key(#[from] KeyError),
     #[error("receipt builder error: {0}")]
@@ -29,10 +31,6 @@ pub enum ServiceError {
     Upstream(#[from] UpstreamError),
     #[error("attested session store error: {0}")]
     SessionStore(String),
-    #[error("revocation store error: {0}")]
-    RevocationStore(String),
-    #[error("the current workload keyset has been revoked (§4.7); refusing to serve it")]
-    KeysetRevoked,
     #[error("metrics error: {0}")]
     Metrics(String),
     #[error("missing receipt signing key in keyset")]

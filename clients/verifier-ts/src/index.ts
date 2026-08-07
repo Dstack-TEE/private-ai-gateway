@@ -1,84 +1,75 @@
 /**
- * @dstack/aci-verifier — a zero-dependency ACI Level 1 verifier.
+ * @phala/aci-verifier — a TypeScript ACI verifier for the browser and node.
  *
- * Level 1 (receipt verification, §10.2) is fully implemented against an
- * established keyset. {@link verifyReportBinding} adds the cryptographic-binding
- * checks of Level 2 (§10.1 checks 2–6); the hardware quote, key custody, and
- * provenance checks (§10.1 checks 1, 7–10) are verifier-profile territory and
- * out of scope here. All crypto is Web Crypto (Ed25519, SHA-256); `ecdsa-secp256k1`
- * is unsupported (not in the Web Crypto API) and raises a clear error.
+ * {@link verifyService} is the one call: fetch a service's attestation report
+ * with a fresh nonce and get a full §9.1 transcript, including the hardware
+ * quote (id-1, verified with @phala/dcap-qvl against the Phala PCCS) and the
+ * compose measurement (id-4). Also exposes the individual checks: report
+ * binding (§9.1 checks 2–3), receipts and body hashes (§9.3), sessions
+ * (§8, §9.3), and the v2 sealed-body E2EE channel (§6). Every check other than
+ * the quote is Web Crypto (Ed25519, X25519, HKDF, AES-GCM, SHA-256).
  */
 
-// Canonicalization (§3)
-export { canonicalize, jcsBytes } from './jcs.js';
-export type { JcsValue } from './jcs.js';
-
-// Crypto primitives (Web Crypto only)
+// Crypto primitives (Web Crypto)
 export {
   sha256,
   sha256Hex,
   sha256Prefixed,
   verifyEd25519,
-  verifySignature,
   toHex,
   fromHex,
+  toBase64,
+  fromBase64,
+  jcsBytes,
 } from './crypto.js';
 
-// Digest & canonical-signing-bytes constructions (§4, §8.5, §9.2)
-export {
-  computeWorkloadId,
-  computeKeysetDigest,
-  attestationStatement,
-  computeReportData,
-  keysetEndorsementPayload,
-  keysetRevocationPayload,
-  receiptSigningBytes,
-  sessionMaterial,
-  computeSessionId,
-} from './digest.js';
+// Digest constructions (Appendix A, §3.1, §3.2)
+export { computeKeysetDigest, attestationStatement, computeReportData } from './digest.js';
 
-// E2EE AAD builders (§7.3)
-export {
-  requestAad,
-  requestAadString,
-  responseAad,
-  responseAadString,
-} from './e2ee.js';
-export type { AadCommon } from './e2ee.js';
+// Attested sessions: content addressing and evidence (§8, §9.3)
+export { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 
-// E2EE channel to a verified workload — encrypt requests, decrypt replies (§7)
-export { openE2eeChannel } from './e2ee-channel.js';
-export type { E2eeChannel } from './e2ee-channel.js';
-
-// Level 1 receipt verification (§10.2)
+// Receipt verification (§9.3)
 export {
   verifyReceipt,
   findEvent,
   hashBody,
   checkRequestBodyHash,
-  checkResponseWireHash,
-  checkResponseCleartextHash,
+  checkResponseBodyHash,
 } from './receipt.js';
 
-// Level 2 report-binding checks (§10.1 checks 2–6, no hardware quote)
-export { verifyReportBinding } from './report.js';
+// Report binding (§9.1 checks 2–3), quote verification (check 1), compose
+// measurement (check 4)
+export { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './report.js';
 export type { ReportBindingOptions } from './report.js';
 
+// High-level transcript + one-call service verification
+export { verifyService, reportTranscript, receiptTranscript, computeVerdict } from './transcript.js';
+export type { UpstreamAuditInput } from './transcript.js';
+export type {
+  CheckStatus,
+  TranscriptLine,
+  Verdict,
+  ReportTranscript,
+  ReceiptTranscript,
+  TranscriptOptions,
+  VerifyServiceOptions,
+} from './transcript.js';
+
 // Errors
-export { AciError, AciFormatError, UnsupportedAlgorithmError } from './errors.js';
+export { AciError, AciFormatError } from './errors.js';
 
 // Wire & result types
 export type {
-  PublicKey,
-  WorkloadIdentity,
-  ReceiptSigningKey,
+  KeysetKey,
+  TlsKeyPin,
   WorkloadKeyset,
-  ReceiptSignature,
-  ReceiptEvent,
-  Receipt,
-  Endorsement,
+  SourceProvenance,
   Attestation,
   AttestationReport,
+  ReceiptEnvelope,
+  ReceiptEvent,
+  ReceiptPayload,
   SessionEvidence,
   SessionRecord,
   Check,

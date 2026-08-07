@@ -2,27 +2,27 @@
 //!
 //! `AciService` is thin:
 //!
-//! * `attestation_report(nonce)` builds a fresh report.
-//! * `forward_chat_completion(...)` runs the ACI §3 hot path for
+//! * `attestation_report(nonce)` builds a fresh report over the sealed keyset.
+//! * `forward_chat_completion(...)` runs the receipt-issuing hot path for
 //!   buffered responses.
 //! * `forward_chat_completion_stream_request(...)` runs the same path
 //!   for SSE responses and hashes bytes incrementally until the stream
 //!   ends.
 //! * `get_receipt(...)` returns a previously-issued receipt by id.
 //!
-//! Requests constrained by `provider.aci_verified` are fail-closed. If no
-//! verifier event is supplied for the chosen attested upstream, the service
-//! refuses to forward sensitive bytes and surfaces
-//! [`UpstreamVerificationError`].
+//! Requests constrained by `provider.aci_verified` (or served on a TEE-only
+//! endpoint) are fail-closed: when no verifier event is supplied for the
+//! chosen attested upstream, the service refuses to forward sensitive bytes
+//! and surfaces [`UpstreamVerificationError`], which the HTTP layer answers
+//! with `upstream_verification_failed` plus a refusal receipt (§7.5).
 
 use std::sync::{Arc, RwLock};
 
-use crate::aci::identity;
+use crate::aci::identity::SealedWorkloadKeyset;
 use crate::aci::keys::{KeyProvider, Quoter};
-use crate::aci::types::{WorkloadIdentity, WorkloadKeyset};
+use crate::aci::types::WorkloadKeyset;
 use crate::aci::upstream::UpstreamBackend;
 use crate::aggregator::metrics::{MetricsSnapshot, ServiceMetrics};
-use crate::aggregator::revocation_store::{RevocationStatement, RevocationStore};
 use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
@@ -47,7 +47,9 @@ mod streaming;
 mod wire;
 
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use config::{validate_source_provenance, AciServiceConfig, ReceiptOwner};
+pub use config::{
+    validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+};
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
 pub use wire::{
@@ -67,10 +69,7 @@ pub struct AciService {
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
     session_store: Arc<dyn SessionStore>,
-    revocation_store: Arc<RevocationStore>,
-    keyset: WorkloadKeyset,
-    workload_id: String,
-    workload_keyset_digest: String,
+    keyset: SealedWorkloadKeyset,
     default_receipt_key_id: String,
     config: AciServiceConfig,
     clock: Arc<dyn Clock>,
@@ -85,8 +84,6 @@ struct E2eeReplayKey {
     nonce: String,
 }
 
-/// Input supplied to the attested upstream verifier before any sensitive
-/// bytes are forwarded.
 impl AciService {
     pub fn new(
         keys: Arc<dyn KeyProvider>,
@@ -133,24 +130,22 @@ impl AciService {
         }
         validate_source_provenance(&config.source_provenance)?;
 
-        let identity = WorkloadIdentity {
-            public_key: keys.identity_public_key(),
-            subject: config.identity_subject.clone(),
-        };
         let tls_public_keys = config
             .tls_public_keys
             .clone()
             .unwrap_or_else(|| keys.tls_spkis());
-        let keyset = WorkloadKeyset {
-            workload_identity: identity,
-            keyset_epoch: config.keyset_epoch.clone(),
+        let unsealed = WorkloadKeyset {
+            subject: config.subject.clone(),
+            not_after: config.keyset_not_after,
             receipt_signing_keys: keys.receipt_keys(),
             e2ee_public_keys: keys.e2ee_keys(),
             tls_public_keys,
         };
-
-        let workload_id = identity::workload_id(&keyset.workload_identity)?;
-        let workload_keyset_digest = identity::workload_keyset_digest(&keyset)?;
+        validate_keyset(&unsealed, &config)?;
+        // Sealed once: these exact bytes (and their digest) are what every
+        // report serves for the lifetime of the process (Appendix A, §3.1).
+        let keyset = SealedWorkloadKeyset::seal(unsealed)
+            .map_err(|e| ServiceError::Keyset(e.to_string()))?;
 
         let default_receipt_key_id = keys
             .receipt_keys()
@@ -166,10 +161,7 @@ impl AciService {
             upstream_verifier,
             receipt_store,
             session_store: Arc::new(InMemorySessionStore::default()),
-            revocation_store: Arc::new(RevocationStore::in_memory()),
             keyset,
-            workload_id,
-            workload_keyset_digest,
             default_receipt_key_id,
             config,
             clock,
@@ -187,56 +179,23 @@ impl AciService {
         self
     }
 
-    /// Swap in a durable revocation store (file-backed in production). Defaults
-    /// to an in-memory store.
-    pub fn with_revocation_store(mut self, revocation_store: Arc<RevocationStore>) -> Self {
-        self.revocation_store = revocation_store;
-        self
-    }
-
-    /// Whether the current keyset digest has been revoked. A revoked service
-    /// stops serving reports and inference under that keyset (§4.7).
-    pub fn is_keyset_revoked(&self) -> bool {
-        self.revocation_store
-            .is_revoked(&self.workload_keyset_digest)
-    }
-
-    /// All revocation statements issued by this service (§4.7), served at
-    /// `GET /v1/aci/revocations`.
-    pub fn revocations(&self) -> Vec<RevocationStatement> {
-        self.revocation_store.list()
-    }
-
-    /// Sign a revocation for the current keyset digest with the identity key,
-    /// persist it, and return the statement (§4.7). Idempotent per digest.
-    /// After this the service stops serving the revoked keyset
-    /// ([`Self::is_keyset_revoked`]).
-    pub fn revoke_current_keyset(&self) -> Result<RevocationStatement, ServiceError> {
-        let payload = identity::keyset_revocation_payload(&self.workload_keyset_digest)?;
-        let signature = self.keys.sign_keyset_revocation(&payload)?;
-        let statement = RevocationStatement::new(
-            self.workload_id.clone(),
-            self.workload_keyset_digest.clone(),
-            self.keys.identity_public_key().algo,
-            hex::encode(signature),
-            self.clock.now_secs(),
-        );
-        self.revocation_store
-            .record(statement.clone())
-            .map_err(|e| ServiceError::RevocationStore(e.to_string()))?;
-        Ok(statement)
-    }
-
-    pub fn workload_id(&self) -> &str {
-        &self.workload_id
-    }
-
     pub fn workload_keyset_digest(&self) -> &str {
-        &self.workload_keyset_digest
+        self.keyset.digest()
     }
 
     pub fn keyset(&self) -> &WorkloadKeyset {
-        &self.keyset
+        self.keyset.keyset()
+    }
+
+    /// Inference runs inside this attested workload: no upstream hop, so no
+    /// `upstream.verified` event and no attested sessions (§7.5, §8).
+    pub fn serves_directly(&self) -> bool {
+        self.config.service_capabilities.serving == "direct"
+    }
+
+    /// The keyset object the report serves as `workload_keyset` (§4.1).
+    pub fn keyset_value(&self) -> serde_json::Value {
+        self.keyset.to_value()
     }
 
     pub fn upstream(&self) -> &dyn UpstreamBackend {
@@ -248,4 +207,82 @@ impl AciService {
             .render()
             .map_err(|e| ServiceError::Metrics(e.to_string()))
     }
+}
+
+/// §3.1 seal-time rules a library consumer could otherwise violate: a service
+/// that terminates E2EE must list a §6.1 key, and keys must be distinct per
+/// role. (The shipped launcher satisfies both by construction.)
+fn validate_keyset(
+    keyset: &WorkloadKeyset,
+    _config: &AciServiceConfig,
+) -> Result<(), ServiceError> {
+    use crate::aci::digest::sha256_raw;
+    use crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM;
+
+    // §3.1: the §6.1 E2EE key is unconditional — the keyset is the identity
+    // document even while E2EE termination is disabled (gaps item 3).
+    if !keyset
+        .e2ee_public_keys
+        .iter()
+        .any(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+    {
+        return Err(ServiceError::Keyset(format!(
+            "e2ee_public_keys has no {E2EE_ALGO_X25519_AESGCM} entry (§3.1)"
+        )));
+    }
+    for receipt_key in &keyset.receipt_signing_keys {
+        if keyset
+            .e2ee_public_keys
+            .iter()
+            .any(|e2ee_key| e2ee_key.public_key_hex == receipt_key.public_key_hex)
+        {
+            return Err(ServiceError::Keyset(format!(
+                "receipt signing key {:?} doubles as an E2EE key; keys must be distinct \
+                 per role (§3.1)",
+                receipt_key.key_id
+            )));
+        }
+    }
+    // §3.1: nor may a receipt or E2EE key double as a TLS key. The TLS role
+    // is published as SPKI digests, and the DER SPKI of an Ed25519/X25519
+    // raw key is deterministic, so the digest each keyset key WOULD have as
+    // a TLS entry is computable exactly.
+    for (role, key, der_prefix) in keyset
+        .receipt_signing_keys
+        .iter()
+        .map(|k| {
+            (
+                "receipt",
+                k,
+                &b"\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00"[..],
+            )
+        })
+        .chain(keyset.e2ee_public_keys.iter().map(|k| {
+            (
+                "E2EE",
+                k,
+                &b"\x30\x2a\x30\x05\x06\x03\x2b\x65\x6e\x03\x21\x00"[..],
+            )
+        }))
+    {
+        let Ok(raw) = hex::decode(&key.public_key_hex) else {
+            continue;
+        };
+        if raw.len() != 32 {
+            continue;
+        }
+        let spki = [der_prefix, &raw].concat();
+        let spki_digest = hex::encode(sha256_raw(&spki));
+        if keyset
+            .tls_public_keys
+            .iter()
+            .any(|tls| tls.spki_sha256_hex.eq_ignore_ascii_case(&spki_digest))
+        {
+            return Err(ServiceError::Keyset(format!(
+                "{role} key {:?} doubles as a TLS key; keys must be distinct per role (§3.1)",
+                key.key_id
+            )));
+        }
+    }
+    Ok(())
 }

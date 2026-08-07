@@ -1,7 +1,7 @@
 //! dstack-specific verification helpers: event-log/app-id checks, RTMR replay,
-//! KMS identity custody, and secp256k1 key recovery.
+//! KMS receipt-key custody, and secp256k1 key recovery.
 
-use dstack_sdk::dstack_client::EventLog as DstackEventLog;
+pub use dstack_sdk::dstack_client::EventLog as DstackEventLog;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
 use serde_json::Value;
@@ -10,45 +10,42 @@ use sha3::Keccak256;
 
 use super::aci_service::{dcap_rtmr3, AciServiceVerificationError, AciServiceVerifierPolicy};
 use super::decode_hex;
-use crate::aci::types::AttestationReport;
+use crate::aci::types::WorkloadKeyset;
 
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
 
-pub(super) fn verify_dstack_event_log_and_app_id(
+/// Replay the dstack event log to RTMR3 and require it to match the quote,
+/// returning the verified events. The `aci` CLI reuses this for its own
+/// §9.1(4) compose check, so failures are plain strings rather than this
+/// module's provider-verifier error type.
+pub fn verify_dstack_event_log(
     evidence: &Value,
     report: &dcap_qvl::quote::Report,
-) -> Result<Vec<u8>, AciServiceVerificationError> {
+) -> Result<Vec<DstackEventLog>, String> {
     let event_log = evidence
         .get("event_log")
         .and_then(Value::as_str)
-        .ok_or(AciServiceVerificationError::MissingEventLog)?;
+        .ok_or("missing dstack event_log evidence")?;
     let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
-        .map_err(|e| AciServiceVerificationError::InvalidEventLog(e.to_string()))?;
-    let rtmr3 = replay_dstack_rtmr(&events, 3)?;
-    let quote_rtmr3 = dcap_rtmr3(report).ok_or_else(|| {
-        AciServiceVerificationError::InvalidEventLog(
-            "dstack event log verification requires a TDX quote".to_string(),
-        )
-    })?;
+        .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
+    let rtmr3 = replay_dstack_rtmr(&events, 3).map_err(|e| e.to_string())?;
+    let quote_rtmr3 =
+        dcap_rtmr3(report).ok_or("dstack event log verification requires a TDX quote")?;
     if rtmr3.as_slice() != quote_rtmr3 {
-        return Err(AciServiceVerificationError::EventLogRtmrMismatch);
+        return Err("dstack event_log RTMR3 does not match verified quote".to_string());
     }
-    let app_id = runtime_event_before_system_ready(&events, "app-id")?
-        .ok_or(AciServiceVerificationError::MissingAppId)?;
-    let app_id =
-        decode_hex(&app_id.event_payload).map_err(AciServiceVerificationError::InvalidEventLog)?;
-    let compose_hash = runtime_event_before_system_ready(&events, "compose-hash")?
-        .ok_or(AciServiceVerificationError::MissingComposeHash)?;
-    let compose_hash = decode_hex(&compose_hash.event_payload)
-        .map_err(AciServiceVerificationError::InvalidEventLog)?;
-    let compose_hash: [u8; 32] = compose_hash.as_slice().try_into().map_err(|_| {
-        AciServiceVerificationError::InvalidEventLog(format!(
-            "compose-hash event must contain 32 bytes, got {}",
-            compose_hash.len()
-        ))
-    })?;
-    verify_dstack_app_compose(evidence, &compose_hash)?;
-    Ok(app_id)
+    Ok(events)
+}
+
+/// The single pre-`system-ready` dstack runtime event named `event_name`
+/// (`None` when the verified log carries none). A log carrying more than one
+/// is the tampering shape this lookup exists to catch, so it is an error,
+/// never a silent "absent".
+pub fn dstack_rtmr3_event<'a>(
+    events: &'a [DstackEventLog],
+    event_name: &str,
+) -> Result<Option<&'a DstackEventLog>, String> {
+    runtime_event_before_system_ready(events, event_name).map_err(|e| e.to_string())
 }
 
 fn runtime_event_before_system_ready<'a>(
@@ -76,8 +73,36 @@ fn runtime_event_before_system_ready<'a>(
     Ok(event)
 }
 
-/// Verify that `app_compose` is the preimage of the compose measurement bound
-/// into RTMR3 by the verified event log.
+/// The RTMR3-measured compose hash that `app_compose` reproduces (§9.1(4)).
+///
+/// Returns the measured hash as lowercase hex, so a caller can report or pin
+/// it. Shared so both verifiers compare the same preimage the same way.
+pub(super) fn verify_dstack_compose_measurement(
+    evidence: &Value,
+    events: &[DstackEventLog],
+) -> Result<String, String> {
+    let measured = dstack_rtmr3_event(events, "compose-hash")
+        .map_err(|e| format!("dstack event log rejected: {e}"))?
+        .ok_or_else(|| "verified event log carries no compose-hash event".to_string())?;
+    let measured_hash: [u8; 32] = decode_hex(&measured.event_payload)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| "compose-hash event must contain 32 bytes".to_string())?;
+    verify_dstack_app_compose(evidence, &measured_hash).map_err(|e| e.to_string())?;
+    Ok(hex::encode(measured_hash))
+}
+
+/// The RTMR3-measured app-id, which the custody chain and the policy anchor
+/// on (§9.1(5)).
+pub(super) fn dstack_app_id(events: &[DstackEventLog]) -> Result<Vec<u8>, String> {
+    let event = dstack_rtmr3_event(events, "app-id")
+        .map_err(|e| format!("dstack event log rejected: {e}"))?
+        .ok_or_else(|| "verified event log carries no app-id event".to_string())?;
+    decode_hex(&event.event_payload)
+}
+
+/// Verify that `app_compose` is the preimage of the compose measurement
+/// bound into RTMR3 by the verified event log.
 pub(super) fn verify_dstack_app_compose(
     evidence: &Value,
     measured_compose_hash: &[u8; 32],
@@ -127,14 +152,17 @@ fn dstack_event_digest(event: &DstackEventLog) -> Result<Vec<u8>, AciServiceVeri
     Ok(hasher.finalize().to_vec())
 }
 
-pub(super) fn verify_dstack_kms_identity_custody(
-    report: &AttestationReport,
+/// Residual gap (gaps item 17): the chain signs the evidence's self-asserted
+/// `kms_public_key`, and the link from that k256 scalar to the published
+/// Ed25519 receipt key rests on the measured workload code — which is why
+/// the policy anchor must itself be measured.
+pub(super) fn verify_dstack_kms_receipt_custody(
+    evidence: &Value,
+    keyset: &WorkloadKeyset,
     app_id: &[u8],
     policy: &AciServiceVerifierPolicy,
 ) -> Result<(), AciServiceVerificationError> {
-    let key_custody = report
-        .attestation
-        .evidence
+    let key_custody = evidence
         .get("key_custody")
         .ok_or(AciServiceVerificationError::MissingKeyCustody)?;
     let provider = key_custody
@@ -154,47 +182,59 @@ pub(super) fn verify_dstack_kms_identity_custody(
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody("missing keys".to_string())
         })?;
-    let identity = keys
+    let receipt = keys
         .iter()
-        .find(|key| key.get("role").and_then(Value::as_str) == Some("identity"))
-        .ok_or(AciServiceVerificationError::MissingIdentityKeyCustody)?;
-    let public_key = identity
+        .find(|key| key.get("role").and_then(Value::as_str) == Some("receipt"))
+        .ok_or(AciServiceVerificationError::MissingReceiptKeyCustody)?;
+    let public_key = receipt
         .get("public_key")
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody(
-                "identity key custody missing public_key".to_string(),
+                "receipt key custody missing public_key".to_string(),
             )
         })?;
-    if public_key
-        != report
-            .attestation
-            .workload_keyset
-            .workload_identity
-            .public_key
-            .public_key_hex
+    if !keyset
+        .receipt_signing_keys
+        .iter()
+        .any(|key| key.public_key_hex == public_key)
     {
-        return Err(AciServiceVerificationError::IdentityKeyCustodyMismatch);
+        return Err(AciServiceVerificationError::ReceiptKeyCustodyMismatch);
     }
-    let purpose = identity
+    let kms_public_key = receipt
+        .get("kms_public_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AciServiceVerificationError::InvalidKeyCustody(
+                "receipt key custody missing kms_public_key".to_string(),
+            )
+        })?;
+    let purpose = receipt
         .get("purpose")
         .and_then(Value::as_str)
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody(
-                "identity key custody missing purpose".to_string(),
+                "receipt key custody missing purpose".to_string(),
             )
         })?;
-    let signature_chain = identity
+    // The chain must be for the receipt key-derivation path, not any KMS key
+    // the app happens to hold.
+    if purpose != "aci.receipt.ed25519.v1" {
+        return Err(AciServiceVerificationError::InvalidKeyCustody(format!(
+            "receipt key custody purpose is {purpose:?}, expected \"aci.receipt.ed25519.v1\""
+        )));
+    }
+    let signature_chain = receipt
         .get("signature_chain")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody(
-                "identity key custody missing signature_chain".to_string(),
+                "receipt key custody missing signature_chain".to_string(),
             )
         })?;
     if signature_chain.len() != 2 {
         return Err(AciServiceVerificationError::InvalidKeyCustody(format!(
-            "identity key custody signature_chain must contain 2 signatures, got {}",
+            "receipt key custody signature_chain must contain 2 signatures, got {}",
             signature_chain.len()
         )));
     }
@@ -202,7 +242,7 @@ pub(super) fn verify_dstack_kms_identity_custody(
         .as_str()
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody(
-                "identity key custody signature_chain[0] is not a string".to_string(),
+                "receipt key custody signature_chain[0] is not a string".to_string(),
             )
         })
         .and_then(|s| decode_hex(s).map_err(AciServiceVerificationError::InvalidKeyCustody))?;
@@ -210,14 +250,14 @@ pub(super) fn verify_dstack_kms_identity_custody(
         .as_str()
         .ok_or_else(|| {
             AciServiceVerificationError::InvalidKeyCustody(
-                "identity key custody signature_chain[1] is not a string".to_string(),
+                "receipt key custody signature_chain[1] is not a string".to_string(),
             )
         })
         .and_then(|s| decode_hex(s).map_err(AciServiceVerificationError::InvalidKeyCustody))?;
 
-    let identity_public_key_compressed = compressed_k256_public_key_hex(public_key)
+    let kms_public_key_compressed = compressed_k256_public_key_hex(kms_public_key)
         .map_err(AciServiceVerificationError::KmsSignatureChain)?;
-    let purpose_message = format!("{purpose}:{identity_public_key_compressed}");
+    let purpose_message = format!("{purpose}:{kms_public_key_compressed}");
     let app_public_key = recover_k256_public_key(purpose_message.as_bytes(), &purpose_signature)
         .map_err(AciServiceVerificationError::KmsSignatureChain)?;
     let app_public_key_compressed = app_public_key.to_sec1_bytes();

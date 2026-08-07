@@ -48,7 +48,7 @@ fn service() -> Arc<AciService> {
             quoter,
             upstream,
             store,
-            AciServiceConfig::for_test("upstream-verifier-test"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_000)),
         )
         .unwrap(),
@@ -58,18 +58,19 @@ fn service() -> Arc<AciService> {
 #[tokio::test]
 async fn aci_report_binding_validation_accepts_self_consistent_report() {
     let report = service()
-        .attestation_report(Some("verifier nonce".to_string()))
+        .attestation_report(Some(
+            "ab0000000000000000000000000000000000000000000000000000000000cdef".to_string(),
+        ))
         .await
         .unwrap();
     let validated = validate_aci_report_binding(
         &report,
-        Some("verifier nonce"),
+        Some("ab0000000000000000000000000000000000000000000000000000000000cdef"),
         1_000,
         Some(br#"{"raw":"report"}"#),
     )
     .unwrap();
 
-    assert_eq!(validated.workload_id, report.workload_id);
     assert_eq!(
         validated.workload_keyset_digest,
         report.workload_keyset_digest
@@ -80,29 +81,46 @@ async fn aci_report_binding_validation_accepts_self_consistent_report() {
 #[tokio::test]
 async fn aci_report_binding_validation_rejects_wrong_nonce() {
     let report = service()
-        .attestation_report(Some("verifier nonce".to_string()))
+        .attestation_report(Some(
+            "ab0000000000000000000000000000000000000000000000000000000000cdef".to_string(),
+        ))
         .await
         .unwrap();
-    let err = validate_aci_report_binding(&report, Some("other nonce"), 1_000, None)
-        .unwrap_err()
-        .to_string();
+    let err = validate_aci_report_binding(
+        &report,
+        Some("ff0000000000000000000000000000000000000000000000000000000000ffff"),
+        1_000,
+        None,
+    )
+    .unwrap_err()
+    .to_string();
 
-    assert_eq!(err, "report_data mismatch");
+    assert!(err.starts_with("statement digest is "), "{err}");
 }
 
 #[tokio::test]
-async fn aci_report_binding_validation_rejects_bad_keyset_endorsement() {
+async fn aci_report_binding_validation_rejects_tampered_keyset_digest() {
     let mut report = service()
-        .attestation_report(Some("verifier nonce".to_string()))
+        .attestation_report(Some(
+            "ab0000000000000000000000000000000000000000000000000000000000cdef".to_string(),
+        ))
         .await
         .unwrap();
-    report.attestation.keyset_endorsement.value_hex = "00".to_string();
+    report.workload_keyset_digest = format!("sha256:{}", "00".repeat(32));
 
-    let err = validate_aci_report_binding(&report, Some("verifier nonce"), 1_000, None)
-        .unwrap_err()
-        .to_string();
+    let err = validate_aci_report_binding(
+        &report,
+        Some("ab0000000000000000000000000000000000000000000000000000000000cdef"),
+        1_000,
+        None,
+    )
+    .unwrap_err()
+    .to_string();
 
-    assert_eq!(err, "keyset_endorsement signature verification failed");
+    assert!(
+        err.contains("sha256 over the keyset JCS form is ") && err.contains(&"00".repeat(32)),
+        "{err}"
+    );
 }
 
 #[tokio::test]

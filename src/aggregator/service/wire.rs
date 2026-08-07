@@ -6,8 +6,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
-use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
-use crate::aci::types::Receipt;
+use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
 
 pub struct E2eeRequestParts<'a> {
@@ -35,18 +34,26 @@ pub struct E2eeRequestContext {
     pub(super) timestamp: Option<u64>,
 }
 
+impl E2eeRequestContext {
+    /// The request `model`: bound into the AAD and recorded as the
+    /// receipt `model` (§7.3).
+    pub fn request_model(&self) -> &str {
+        &self.request_model
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum E2eeAadMode {
-    /// The spec ACI v2 path: JCS AAD (§7.3).
+    /// The ACI v2 path: JCS AAD.
     AciV2,
-    /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): no AAD (§13).
+    /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): no AAD.
     LegacyV1,
 }
 
 impl E2eeAadMode {
-    /// The spec ACI v2 path (JCS AAD, §7.3), as opposed to the no-AAD legacy
+    /// The ACI v2 path (JCS AAD), as opposed to the no-AAD legacy
     /// X-Signing-Algo compatibility mode. Per-part multimodal field paths
-    /// (§7.2) exist only here.
+    /// exist only here.
     pub(super) fn is_aci(self) -> bool {
         matches!(self, Self::AciV2)
     }
@@ -56,9 +63,10 @@ pub(super) enum E2eeDecryptor<'a> {
     AciV2 { key_id: &'a str },
     Legacy { signing_algo: &'a str },
 }
+
 #[derive(Debug, Clone)]
 pub struct ForwardResult {
-    pub receipt: Receipt,
+    pub receipt: SignedReceipt,
     /// Client-facing status: the upstream's, or 400 when the service remapped a
     /// client image-URL fetch failure. The receipt attests the matching body.
     pub upstream_status: u16,
@@ -130,7 +138,6 @@ pub struct MiddlewareStreamingForwarded {
 pub struct MiddlewareReceiptDraft {
     pub(super) receipt_id: String,
     pub(super) builder: ReceiptBuilder,
-    pub(super) provider_response_hash: String,
     pub(super) endpoint_path: String,
     pub(super) request_mode: RequestMode,
     pub(super) response_model: Option<String>,
@@ -182,9 +189,15 @@ impl MiddlewareReceiptJournal {
 }
 
 pub struct MiddlewareReceiptFinalization {
-    pub receipt: Receipt,
+    pub receipt: SignedReceipt,
     pub wire_body: Vec<u8>,
     pub e2ee: Option<E2eeResponseInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct E2eeResponseInfo {
+    pub version: String,
+    pub algo: String,
 }
 
 pub type ServiceResponseStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServiceError>> + Send>>;
@@ -197,12 +210,6 @@ pub struct MiddlewareStreamFinalization {
 pub struct MiddlewareGeneratedFinalization {
     pub wire_body: Vec<u8>,
     pub e2ee: Option<E2eeResponseInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct E2eeResponseInfo {
-    pub version: String,
-    pub algo: String,
 }
 
 /// Returned by [`AciService::forward_chat_completion_stream_request`].
@@ -267,9 +274,10 @@ pub struct ChatCompletionRequest<'a> {
     /// `request.received.body_hash == request.forwarded.body_hash` receipt
     /// pair.
     pub forwarded_body: Option<Vec<u8>>,
-    /// Restrict this request to ACI-verified attested upstreams. Set by
-    /// `provider.aci_verified`, or implied by a non-empty
-    /// `provider.aci_session_ids` allowlist.
+    /// Restrict this request to ACI-verified attested upstreams: true when
+    /// the serving endpoint is TEE-only (§1.2), the request set
+    /// `provider.aci_verified`, or a non-empty `provider.aci_session_ids`
+    /// implies it. False means best-effort (§7.5 records the outcome).
     pub aci_required: bool,
     /// Optional hard allowlist of attested session ids. A route may forward
     /// only when its current verified channel binding derives one of these ids.

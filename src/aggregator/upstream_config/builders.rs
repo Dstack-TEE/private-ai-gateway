@@ -8,7 +8,7 @@ use super::{
     ConfiguredUpstreams, ProviderSessionRegistry, UpstreamConfig, UpstreamConfigError,
     UpstreamProvider, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use crate::aci::canonical;
+use crate::aci::digest;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, UpstreamBackend,
@@ -263,7 +263,7 @@ fn build_provider_verifier(
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .with_accepted_workload_ids(cfg.accepted_workload_ids.clone().unwrap_or_default());
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 Some(Arc::new(verifier))
             }
             UpstreamProvider::PhalaDirect => {
@@ -299,7 +299,7 @@ fn build_global_verifier_for_config(
         )))),
         UpstreamVerifierMode::AciService => {
             let has_explicit_aci_policy = cfg
-                .accepted_workload_ids
+                .accepted_subjects
                 .as_ref()
                 .is_some_and(|ids| !ids.is_empty())
                 || cfg
@@ -320,9 +320,9 @@ fn build_aci_service_verifier(
     options: &UpstreamRuntimeOptions,
 ) -> Result<Arc<dyn UpstreamVerifier>, UpstreamConfigError> {
     let policy = AciServiceVerifierPolicy::new(
-        cfg.accepted_workload_ids
+        cfg.accepted_subjects
             .clone()
-            .unwrap_or_else(|| options.accepted_workload_ids.clone()),
+            .unwrap_or_else(|| options.accepted_subjects.clone()),
         cfg.accepted_image_digests
             .clone()
             .unwrap_or_else(|| options.accepted_image_digests.clone()),
@@ -367,8 +367,9 @@ fn build_aci_service_verifier(
 }
 
 fn config_digest(config: &[UpstreamConfig]) -> Result<String, UpstreamConfigError> {
-    let value = serde_json::to_value(config).map_err(|e| {
+    // A local version stamp over the serialized config, not a protocol artifact.
+    let bytes = serde_json::to_vec(config).map_err(|e| {
         UpstreamConfigError::InvalidConfig(format!("failed to serialize upstream config: {e}"))
     })?;
-    canonical::jcs_sha256_hex(&value).map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))
+    Ok(digest::sha256_hex(&bytes))
 }

@@ -155,7 +155,7 @@ Raw SPKI digest inputs are not supported. The gateway reads mounted leaf
 certificates, computes `sha256(SPKI)`, and publishes those digests in the
 attested keyset. When `tls.domain_certificates` is configured, the request
 `Host` selects the matching downstream TLS binding for
-`/v1/attestation/report`. Unknown hosts return `404 not_found`.
+`/v1/aci/attestation`. Unknown hosts return `404 not_found`.
 
 ## Upstream Config
 
@@ -173,7 +173,7 @@ the admin API.
     "models": {
       "public-model": "provider-model"
     },
-    "accepted_workload_ids": ["<workload-id>"],
+    "accepted_subjects": ["app-id:0x<measured-app-id>"],
     "accepted_dstack_kms_root_public_keys": ["<kms-root-public-key>"]
   }
 ]
@@ -192,11 +192,14 @@ Supported `provider` values:
 | `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
 
 Provider verification policy belongs on the upstream entry. For ACI service
-routes, configure accepted workload ids, image digests, or dstack KMS root
-public keys on that entry.
+routes, configure accepted keyset subjects, image digests, or dstack KMS
+root public keys. For `aci-service` upstreams a subject anchors only in its
+measured form — `app-id:0x<hex>` of the RTMR3-verified app id. The upstream
+does not need to set a keyset `subject` of its own. For `secret-ai` the same
+field pins measured SecretVM workload ids on that entry.
 
 For `secret-ai`, `base_url` must be the root HTTPS inference origin. The optional
-`accepted_workload_ids` field pins measured SecretVM workloads in this form:
+`accepted_subjects` field pins measured SecretVM workloads in this form:
 
 ```text
 secretvm:<cpu-type>:<environment>:<template>:<artifacts-version>:sha256:<compose-sha256>
@@ -209,7 +212,7 @@ verification. TDX workloads must report DCAP status `UpToDate`. An SEV-SNP
 origin must meet the componentwise AMD TCB minimum embedded in the verifier.
 
 For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
-`/v1/attestation/report`. The router fetches the report through normal TLS,
+`/v1/aci/attestation`. The router fetches the report through normal TLS,
 derives the attested TLS SPKI binding from that report, then pins that SPKI for
 the actual upstream model request.
 

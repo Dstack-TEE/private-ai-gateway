@@ -286,8 +286,10 @@ assert_route_receipt() {
   jq -e --arg h "$(sha256_prefixed "$forwarded_body")" '
     .event_log | any(.type == "request.forwarded" and .body_hash == $h)
   ' "$receipt" >/dev/null
+  # The rewrite is the differing pair of hashes; there is no separate event.
   jq -e '
-    .event_log | any(.type == "transparency.request_modified")
+    ([.event_log[] | select(.type == "request.received") | .body_hash] | first)
+    != ([.event_log[] | select(.type == "request.forwarded") | .body_hash] | first)
   ' "$receipt" >/dev/null
   jq -e --arg model "$upstream_model" '
     .event_log
@@ -631,19 +633,19 @@ wait_for_https_ok "${UPSTREAM_B_TLS_URL}/v1/attestation/report?nonce=local-b" \
   "$WORK_DIR/certs/local-smoke-ca.crt" \
   "$WORK_DIR/upstream-b-report.json"
 
-cargo run --quiet --example dstack_kms_root_from_report \
+cargo run --quiet --example dstack_policy_from_report \
   <"$WORK_DIR/upstream-a-report.json" >"$WORK_DIR/upstream-a-policy.env"
-cargo run --quiet --example dstack_kms_root_from_report \
+cargo run --quiet --example dstack_policy_from_report \
   <"$WORK_DIR/upstream-b-report.json" >"$WORK_DIR/upstream-b-policy.env"
 
-wid_a=$(awk -F= '/^workload_id=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
-wid_b=$(awk -F= '/^workload_id=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
+subject_a=$(awk -F= '/^subject=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
+subject_b=$(awk -F= '/^subject=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
 kms_a=$(awk -F= '/^kms_root_public_key=/{print $2}' "$WORK_DIR/upstream-a-policy.env")
 kms_b=$(awk -F= '/^kms_root_public_key=/{print $2}' "$WORK_DIR/upstream-b-policy.env")
 
 jq -cn \
-  --arg wid_a "$wid_a" \
-  --arg wid_b "$wid_b" \
+  --arg subject_a "$subject_a" \
+  --arg subject_b "$subject_b" \
   --arg kms_a "$kms_a" \
   --arg kms_b "$kms_b" \
   '[
@@ -656,7 +658,7 @@ jq -cn \
         "public-embed": "routed-upstream-a-embed-model"
       },
       bearer_token: "router-secret-a",
-      accepted_workload_ids: [$wid_a],
+      accepted_subjects: [$subject_a],
       accepted_dstack_kms_root_public_keys: [$kms_a]
     },
     {
@@ -664,7 +666,7 @@ jq -cn \
       provider: "aci-service",
       base_url: "https://upstream-b-tls:8443",
       models: {"public-b": "routed-upstream-b-model"},
-      accepted_workload_ids: [$wid_b],
+      accepted_subjects: [$subject_b],
       accepted_dstack_kms_root_public_keys: [$kms_b]
     }
   ]' >"$WORK_DIR/router-upstreams.json"

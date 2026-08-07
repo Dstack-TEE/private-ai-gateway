@@ -41,6 +41,7 @@ rustls-pemfile = "2"
 x509-parser = "0.16"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+rcgen = "0.14"
 
 # HTTP server.
 axum = "0.7"
@@ -48,6 +49,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
+async-stream = "0.3"
 
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
 # validation normal without linking against system OpenSSL.
@@ -64,6 +66,9 @@ async-trait = "0.1"
 
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+
+# `aci` CLI argument parsing.
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

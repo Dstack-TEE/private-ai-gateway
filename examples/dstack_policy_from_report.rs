@@ -1,3 +1,13 @@
+//! Derive an `aci-service` verifier policy from an attestation report.
+//!
+//! Reads a report on stdin and prints the two values `accepted_subjects` and
+//! `accepted_dstack_kms_root_public_keys` need: the RTMR3-measured app-id in
+//! the `app-id:0x…` form the policy anchor compares against (§9.1(5)), and the
+//! KMS root recovered from the receipt key's custody chain.
+//!
+//! This recovers what the report attests so an operator can pin it; the
+//! gateway verifies the same chain on every request.
+
 use std::io::{self, Read};
 
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
@@ -14,8 +24,8 @@ fn main() -> Result<(), String> {
     let report: AttestationReport = serde_json::from_str(&input).map_err(|e| e.to_string())?;
     let app_id = app_id_from_report(&report)?;
     let root_public_key = kms_root_from_report(&report, &app_id)?;
-    println!("workload_id={}", report.workload_id);
-    println!("app_id={}", hex::encode(app_id));
+    println!("subject=app-id:0x{}", hex::encode(&app_id));
+    println!("app_id={}", hex::encode(&app_id));
     println!("kms_root_public_key={root_public_key}");
     Ok(())
 }
@@ -60,34 +70,30 @@ fn kms_root_from_report(report: &AttestationReport, app_id: &[u8]) -> Result<Str
         .get("keys")
         .and_then(Value::as_array)
         .ok_or_else(|| "missing key_custody keys".to_string())?;
-    let identity = keys
+    let receipt = keys
         .iter()
-        .find(|key| key.get("role").and_then(Value::as_str) == Some("identity"))
-        .ok_or_else(|| "missing identity key custody".to_string())?;
-    let public_key = identity
-        .get("public_key")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "identity key custody missing public_key".to_string())?;
-    let expected_public_key = &report
-        .attestation
-        .workload_keyset
-        .workload_identity
-        .public_key
-        .public_key_hex;
-    if public_key != expected_public_key {
-        return Err("identity key custody does not match report workload identity".to_string());
+        .find(|key| key.get("role").and_then(Value::as_str) == Some("receipt"))
+        .ok_or_else(|| "missing receipt key custody".to_string())?;
+    let public_key = field(receipt, "public_key")?;
+    let keyset: Value = report.attestation.workload_keyset.clone();
+    let listed = keyset
+        .get("receipt_signing_keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "keyset lists no receipt_signing_keys".to_string())?
+        .iter()
+        .any(|key| key.get("public_key").and_then(Value::as_str) == Some(public_key));
+    if !listed {
+        return Err("receipt key custody is not for a key the keyset lists".to_string());
     }
-    let purpose = identity
-        .get("purpose")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "identity key custody missing purpose".to_string())?;
-    let signature_chain = identity
+    let purpose = field(receipt, "purpose")?;
+    let kms_public_key = field(receipt, "kms_public_key")?;
+    let signature_chain = receipt
         .get("signature_chain")
         .and_then(Value::as_array)
-        .ok_or_else(|| "identity key custody missing signature_chain".to_string())?;
+        .ok_or_else(|| "receipt key custody missing signature_chain".to_string())?;
     if signature_chain.len() != 2 {
         return Err(format!(
-            "identity key custody signature_chain must contain 2 signatures, got {}",
+            "signature_chain must contain 2 signatures, got {}",
             signature_chain.len()
         ));
     }
@@ -102,7 +108,10 @@ fn kms_root_from_report(report: &AttestationReport, app_id: &[u8]) -> Result<Str
             .ok_or_else(|| "signature_chain[1] is not a string".to_string())?,
     )?;
 
-    let purpose_message = format!("{purpose}:{}", compressed_k256_public_key_hex(public_key)?);
+    let purpose_message = format!(
+        "{purpose}:{}",
+        compressed_k256_public_key_hex(kms_public_key)?
+    );
     let app_public_key = recover_k256_public_key(purpose_message.as_bytes(), &purpose_signature)?;
     let root_message = [
         b"dstack-kms-issued".as_slice(),
@@ -115,33 +124,40 @@ fn kms_root_from_report(report: &AttestationReport, app_id: &[u8]) -> Result<Str
     Ok(hex::encode(root_public_key.to_sec1_bytes()))
 }
 
-fn recover_k256_public_key(message: &[u8], signature: &[u8]) -> Result<K256VerifyingKey, String> {
-    if signature.len() != 65 {
-        return Err(format!(
-            "recoverable secp256k1 signature must be 65 bytes, got {}",
-            signature.len()
-        ));
-    }
-    let mut recovery_byte = signature[64];
-    if (27..=30).contains(&recovery_byte) {
-        recovery_byte -= 27;
-    }
-    let recid = RecoveryId::from_byte(recovery_byte)
-        .ok_or_else(|| format!("invalid recovery id: {}", signature[64]))?;
-    let sig = K256Signature::from_slice(&signature[..64])
-        .map_err(|e| format!("invalid secp256k1 signature: {e}"))?;
-    let digest = Keccak256::new_with_prefix(message);
-    K256VerifyingKey::recover_from_digest(digest, &sig, recid)
-        .map_err(|e| format!("secp256k1 public key recovery failed: {e}"))
+fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("receipt key custody missing {key}"))
 }
 
 fn compressed_k256_public_key_hex(public_key_hex: &str) -> Result<String, String> {
-    let public_key = decode_hex(public_key_hex)?;
-    let point = EncodedPoint::from_bytes(public_key)
-        .map_err(|e| format!("invalid secp256k1 public key: {e}"))?;
-    let key = K256VerifyingKey::from_encoded_point(&point)
-        .map_err(|e| format!("invalid secp256k1 public key: {e}"))?;
+    let bytes = decode_hex(public_key_hex)?;
+    let point = EncodedPoint::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    let key = K256VerifyingKey::from_encoded_point(&point).map_err(|e| e.to_string())?;
     Ok(hex::encode(key.to_sec1_bytes()))
+}
+
+fn recover_k256_public_key(message: &[u8], signature: &[u8]) -> Result<K256VerifyingKey, String> {
+    if signature.len() != 65 {
+        return Err(format!(
+            "recoverable signature must be 65 bytes, got {}",
+            signature.len()
+        ));
+    }
+    let sig = K256Signature::from_slice(&signature[..64]).map_err(|e| e.to_string())?;
+    let recovery_id = RecoveryId::from_byte(normalize_recovery_byte(signature[64]))
+        .ok_or_else(|| "invalid recovery id".to_string())?;
+    let digest = Keccak256::new_with_prefix(message);
+    K256VerifyingKey::recover_from_digest(digest, &sig, recovery_id).map_err(|e| e.to_string())
+}
+
+fn normalize_recovery_byte(byte: u8) -> u8 {
+    if byte >= 27 {
+        byte - 27
+    } else {
+        byte
+    }
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {

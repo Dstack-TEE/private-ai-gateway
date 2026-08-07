@@ -33,7 +33,7 @@ use ml_kem::{
     },
     MlKem768,
 };
-use private_ai_gateway::aci::canonical::sha256_hex;
+use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::receipt::{
     ChannelBinding, UpstreamVerifiedEvent, EVENT_REQUEST_FORWARDED, EVENT_UPSTREAM_VERIFIED,
 };
@@ -436,7 +436,7 @@ fn temp_config_path() -> std::path::PathBuf {
 fn runtime_options(mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: mode,
-        accepted_workload_ids: vec![],
+        accepted_subjects: vec![],
         accepted_image_digests: vec![],
         accepted_dstack_kms_root_public_keys: vec![],
         pccs_url: None,
@@ -481,23 +481,26 @@ fn service_for_manager(manager: Arc<UpstreamConfigManager>) -> Arc<AciService> {
             manager.backend(),
             manager.verifier(),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
     )
 }
 
-fn receipt_event<'a>(
-    receipt: &'a private_ai_gateway::aci::types::Receipt,
+fn receipt_event(
+    receipt: &private_ai_gateway::aci::receipt::SignedReceipt,
     event_type: &str,
-) -> &'a Value {
-    &receipt
-        .event_log
+) -> Value {
+    // §7.2: the receipt is one JSON document; events are read from it.
+    let document = receipt.document_json().expect("receipt document parses");
+    document["event_log"]
+        .as_array()
+        .expect("event_log array")
         .iter()
-        .find(|event| event.event_type == event_type)
-        .unwrap()
-        .fields
+        .find(|event| event["type"] == event_type)
+        .expect("event present")
+        .clone()
 }
 
 fn provider_evidence_fixture(name: &str) -> Value {
@@ -639,7 +642,7 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("scoped-credential".to_string()),
             basic_auth: true,
-            accepted_workload_ids: None,
+            accepted_subjects: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
             pccs_url: None,
@@ -687,7 +690,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
             basic_auth: false,
-            accepted_workload_ids: None,
+            accepted_subjects: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
             pccs_url: None,
@@ -739,18 +742,19 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(&call.body)
     );
+    // The `preverified` mode is an operator assertion made out of band: it pins
+    // no channel, so §1.2 leaves nothing enforceable and §7.5 has no session to
+    // cite. The receipt says exactly that rather than claiming a verified
+    // channel. The request is still served — this upstream is not TEE-only.
     let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
-    assert_eq!(
-        upstream_verified["upstream_name"],
-        "openai-compatible-provider"
-    );
     assert_eq!(upstream_verified["model_id"], "provider-model");
-    assert_eq!(upstream_verified["url_origin"], base_url);
+    assert_eq!(upstream_verified["result"], "failed");
+    assert_eq!(upstream_verified["required"], false);
     assert_eq!(
-        upstream_verified["verifier_id"],
-        "preverified/out-of-band/v1"
+        upstream_verified["reason"],
+        "no enforceable verified binding"
     );
-    assert_eq!(upstream_verified["result"], "verified");
+    assert!(upstream_verified.get("session_id").is_none());
 
     let _ = std::fs::remove_file(path);
 }
@@ -778,7 +782,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
             ]),
             bearer_token: Some("provider-secret".to_string()),
             basic_auth: false,
-            accepted_workload_ids: None,
+            accepted_subjects: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
             pccs_url: None,
@@ -823,7 +827,10 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     let receipt = service
         .get_receipt_by_receipt_id(receipt_id)
         .expect("provider embeddings response must persist a receipt");
-    assert_eq!(receipt.endpoint, "/v1/embeddings");
+    assert_eq!(
+        receipt.document_json().unwrap()["endpoint"],
+        "/v1/embeddings"
+    );
     assert!(
         receipt.chat_id.is_none(),
         "embeddings responses have no id field; receipt chat_id should be empty"
@@ -832,18 +839,19 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
         receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(&call.body)
     );
+    // The `preverified` mode is an operator assertion made out of band: it pins
+    // no channel, so §1.2 leaves nothing enforceable and §7.5 has no session to
+    // cite. The receipt says exactly that rather than claiming a verified
+    // channel. The request is still served — this upstream is not TEE-only.
     let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
-    assert_eq!(
-        upstream_verified["upstream_name"],
-        "openai-compatible-provider"
-    );
     assert_eq!(upstream_verified["model_id"], "provider-embed-model");
-    assert_eq!(upstream_verified["url_origin"], base_url);
+    assert_eq!(upstream_verified["result"], "failed");
+    assert_eq!(upstream_verified["required"], false);
     assert_eq!(
-        upstream_verified["verifier_id"],
-        "preverified/out-of-band/v1"
+        upstream_verified["reason"],
+        "no enforceable verified binding"
     );
-    assert_eq!(upstream_verified["result"], "verified");
+    assert!(upstream_verified.get("session_id").is_none());
 
     let _ = std::fs::remove_file(path);
 }
@@ -863,7 +871,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
             basic_auth: false,
-            accepted_workload_ids: None,
+            accepted_subjects: None,
             accepted_image_digests: None,
             accepted_dstack_kms_root_public_keys: None,
             pccs_url: None,
@@ -938,7 +946,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -980,7 +988,7 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1041,7 +1049,7 @@ async fn chutes_provider_requires_exact_catalog_match() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1049,8 +1057,11 @@ async fn chutes_provider_requires_exact_catalog_match() {
     let app = build_router(service);
 
     let (status, _, body) = call(app, "POST", "/v1/chat/completions", PROVIDER_CHAT_REQUEST).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // §10: an unroutable model is the inherited 404 `not_found_error`, the
+    // same as the middleware path.
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["type"], "not_found_error");
     assert!(error["error"]["message"]
         .as_str()
         .unwrap()
@@ -1091,7 +1102,7 @@ async fn chutes_provider_uses_configured_chute_id_pin() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1134,7 +1145,7 @@ async fn chutes_provider_pools_verified_single_use_nonces() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1215,7 +1226,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1274,7 +1285,7 @@ async fn chutes_provider_refreshes_verified_nonce_pool_without_forwarding() {
             Arc::new(backend),
             Arc::new(StaticUpstreamVerifier::new(event)),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1338,7 +1349,7 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1399,7 +1410,7 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1448,7 +1459,7 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
             Arc::new(backend),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("provider-e2e"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),

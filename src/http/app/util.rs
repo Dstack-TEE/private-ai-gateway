@@ -104,10 +104,12 @@ pub(super) fn enforce_owner(
     if ReceiptOwner::from_bearer(&token) == recorded_owner {
         None
     } else {
+        // A non-matching credential gets the same answer as a missing
+        // receipt: no existence oracle for other tenants' receipts.
         Some(error_response(
-            StatusCode::FORBIDDEN,
-            "redaction_required",
-            "the presented credential does not match the receipt owner",
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "receipt not found",
         ))
     }
 }

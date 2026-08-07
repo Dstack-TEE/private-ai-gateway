@@ -50,10 +50,11 @@ def run_embeddings_case(
     if not receipt_id:
         raise RuntimeError(f"{provider.name} embeddings response missing x-receipt-id")
 
-    nonce = secrets.token_hex(16)
+    # A nonce is exactly 64 lowercase hex characters (spec §3.2).
+    nonce = secrets.token_hex(32)
     report_status, _, report_body, report_json = request_json(
         "GET",
-        f"{base_url}/v1/attestation/report?nonce={nonce}",
+        f"{base_url}/v1/aci/attestation?nonce={nonce}",
         timeout=120,
     )
     report_path = provider_dir / "report.json"
@@ -61,18 +62,17 @@ def run_embeddings_case(
     if report_status != 200 or not isinstance(report_json, dict):
         raise RuntimeError(f"{provider.name} attestation report fetch failed: {report_status}")
 
-    # Embeddings responses carry no upstream `id`, so the receipt
-    # endpoint must be addressed by receipt_id. The gateway accepts
-    # either chat_id or receipt_id at /v1/signature/{id}.
-    receipt_status, _, receipt_body, receipt_json = request_json(
+    # Embeddings responses carry no upstream `id`, so the receipt is
+    # addressed by receipt_id (spec §7.1).
+    receipt_status, _, receipt_body, receipt = request_json(
         "GET",
-        f"{base_url}/v1/signature/{receipt_id}",
+        f"{base_url}/v1/aci/receipts/{receipt_id}",
         headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
     write_bytes(receipt_path, receipt_body)
-    if receipt_status != 200 or not isinstance(receipt_json, dict):
+    if receipt_status != 200 or not isinstance(receipt, dict):
         raise RuntimeError(
             f"{provider.name} embeddings receipt fetch failed: HTTP {receipt_status}"
         )
@@ -82,9 +82,10 @@ def run_embeddings_case(
             "cargo",
             "run",
             "--quiet",
-            "--example",
-            "verify_aci_artifacts",
+            "--bin",
+            "aci",
             "--",
+            "audit",
             "--report",
             str(report_path),
             "--receipt",
@@ -95,11 +96,11 @@ def run_embeddings_case(
             str(request_path),
             "--response-body",
             str(response_path),
+            "--json",
         ],
         timeout=240,
     )
     write_json(provider_dir / "user-verification-summary.json", verifier_summary)
-    receipt = receipt_json.get("receipt") or {}
     assert_embeddings_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,

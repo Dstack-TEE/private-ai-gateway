@@ -68,6 +68,22 @@ impl UpstreamBackend for MockUpstream {
             served_instance_id: None,
         })
     }
+    // Stands in for a backend that enforces the verifier's channel binding on
+    // its connection; the trait default fails closed.
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
 }
 
 // A mock upstream that classifies a route as attested by its `tee-` prefix and
@@ -131,6 +147,13 @@ impl UpstreamBackend for TeeAwareUpstream {
             .push(req.route_id.clone().unwrap_or_default());
         self.forward_stream(req.request).await
     }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -170,7 +193,7 @@ fn build_tee_aware_service_with_status(status: u16) -> (Arc<AciService>, Arc<Mut
             }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -224,7 +247,7 @@ fn build_service_failing_verify() -> Arc<AciService> {
             }),
             Arc::new(FailVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -239,7 +262,7 @@ fn build_service_with_upstream(status: u16, body: Vec<u8>) -> Arc<AciService> {
             Arc::new(MockUpstream { status, body }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -260,7 +283,7 @@ fn temp_config_path() -> std::path::PathBuf {
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
-        accepted_workload_ids: vec![],
+        accepted_subjects: vec![],
         accepted_image_digests: vec![],
         accepted_dstack_kms_root_public_keys: vec![],
         pccs_url: None,
@@ -281,7 +304,7 @@ fn build_service() -> Arc<AciService> {
             manager.backend(),
             manager.verifier(),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -850,7 +873,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         }),
         Arc::new(SessionVerifier),
         Arc::new(InMemoryReceiptStore::default()),
-        AciServiceConfig::for_test("private-ai-gateway"),
+        AciServiceConfig::for_test(),
         Arc::new(FixedClock(1_700_000_000)),
     )
     .unwrap();
@@ -1099,7 +1122,7 @@ async fn aci_constraint_fails_closed_when_attestation_fails() {
             }),
             Arc::new(FailVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
@@ -1107,8 +1130,28 @@ async fn aci_constraint_fails_closed_when_attestation_fails() {
     let mut input = chat_input();
     input.aci_required = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503, "a failed attestation must still fail closed");
+    // §7.5/§10 on the middleware path too: the named error type plus a
+    // fetchable refusal receipt.
+    assert_eq!(body["error"]["type"], json!("upstream_verification_failed"));
+    let receipt_id = headers
+        .get("x-receipt-id")
+        .expect("a refusal carries X-Receipt-Id")
+        .to_str()
+        .unwrap();
+    let receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("the refusal receipt must be retrievable");
+    let uv = receipt.document_json().unwrap()["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "upstream.verified")
+        .cloned()
+        .expect("refusal receipts record upstream.verified");
+    assert_eq!(uv["result"], "failed");
+    assert_eq!(uv["required"], true);
     assert!(
         forwarded.lock().unwrap().is_empty(),
         "an unattested TEE route must not receive the prompt"
@@ -1379,6 +1422,13 @@ impl UpstreamBackend for SequencedUpstream {
             served_instance_id: response.served_instance_id,
         })
     }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         unreachable!("sequenced upstream forwards via prepared paths only")
     }
@@ -1413,7 +1463,7 @@ fn build_sequenced_service(
             }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test("private-ai-gateway"),
+            AciServiceConfig::for_test(),
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),

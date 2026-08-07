@@ -273,7 +273,7 @@ impl SecretAiProviderVerifier {
         }
     }
 
-    pub fn with_accepted_workload_ids(
+    pub fn with_accepted_subjects(
         mut self,
         workload_ids: impl IntoIterator<Item = String>,
     ) -> Self {
