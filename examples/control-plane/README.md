@@ -13,7 +13,11 @@ endpoints below).
   `keys` is non-empty it requires the request's `apiKeyHash` to be in the list
   (empty list = anonymous allowed). Reasoning-aware routing is optional and this
   minimal example does not implement it. A candidate can return
-  `effectiveReasoning` to override the normalized request.
+  `effectiveReasoning` to override the normalized request. Candidates can set
+  `reasoningFormat` to `"reasoning_effort"` or `"reasoning"` to select the
+  upstream parameter dialect explicitly. When omitted, the gateway preserves
+  its legacy behavior: managed routes use nested `reasoning`, while SGLang and
+  vLLM routes use `reasoning_effort`.
 - `POST /consult/post` — accepts the usage report and drops it (no billing).
 
 No database; configuration only.

@@ -13,7 +13,9 @@
 use serde_json::{json, Value};
 
 use super::reasoning::validate_effective;
-use super::types::{Engine, ProviderFormat, ReasoningConfig, ReasoningEffort, RouteCandidate};
+use super::types::{
+    Engine, ProviderFormat, ReasoningConfig, ReasoningEffort, ReasoningFormat, RouteCandidate,
+};
 
 const PDF_MIME: &str = "application/pdf";
 const TXT_MIME: &str = "text/plain";
@@ -205,11 +207,18 @@ fn candidate_params(
             candidate.route_id
         ))
     })?;
-    match (candidate.format, candidate.engine) {
-        (ProviderFormat::Openai, None) => {
+    let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
+        if candidate.engine.is_some() {
+            ReasoningFormat::ReasoningEffort
+        } else {
+            ReasoningFormat::Reasoning
+        }
+    });
+    match (candidate.format, reasoning_format) {
+        (ProviderFormat::Openai, ReasoningFormat::Reasoning) => {
             object.insert("reasoning".to_string(), reasoning_object(effective));
         }
-        (ProviderFormat::Openai, Some(_)) => {
+        (ProviderFormat::Openai, ReasoningFormat::ReasoningEffort) => {
             if effective.max_tokens.is_some() {
                 return invalid_reasoning(candidate, "cannot represent max_tokens");
             }
@@ -1279,18 +1288,21 @@ mod tests {
                 route_id: "openai:a".into(),
                 format: ProviderFormat::Openai,
                 engine: None,
+                reasoning_format: Some(ReasoningFormat::Reasoning),
                 effective_reasoning: reasoning(ReasoningEffort::High),
             },
             RouteCandidate {
                 route_id: "openai:b".into(),
                 format: ProviderFormat::Openai,
                 engine: Some(Engine::Sglang),
+                reasoning_format: None,
                 effective_reasoning: reasoning(ReasoningEffort::Minimal),
             },
             RouteCandidate {
                 route_id: "openai:c".into(),
                 format: ProviderFormat::Openai,
                 engine: None,
+                reasoning_format: None,
                 effective_reasoning: None,
             },
         ];
@@ -1304,8 +1316,67 @@ mod tests {
         .unwrap();
         assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[0].1["reasoning"]["effort"], "high");
+        assert!(bodies[0].1.get("reasoning_effort").is_none());
         assert_eq!(bodies[1].1["reasoning_effort"], "low");
+        assert!(bodies[1].1.get("reasoning").is_none());
         assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
+        assert!(bodies[2].1.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn explicit_candidate_reasoning_format_uses_openai_parameter() {
+        let request = json!({
+            "model": "gpt-5",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "reasoning_effort": "high"
+        });
+        let (params, requested, _) =
+            crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+        let candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "openai:gpt-5",
+            "format": "openai",
+            "reasoningFormat": "reasoning_effort"
+        }))
+        .unwrap();
+
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[candidate],
+            requested.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(bodies[0].1["reasoning_effort"], "high");
+        assert!(bodies[0].1.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn managed_candidate_without_dialect_preserves_reasoning_budget() {
+        let request = json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "reasoning": { "max_tokens": 1000 }
+        });
+        let (params, requested, _) =
+            crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+        let candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "compatible:m",
+            "format": "openai"
+        }))
+        .unwrap();
+
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[candidate],
+            requested.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(bodies[0].1["reasoning"]["max_tokens"], 1000);
+        assert_eq!(bodies[0].1["reasoning"]["enabled"], true);
+        assert!(bodies[0].1.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -1327,12 +1398,14 @@ mod tests {
                 route_id: "openai:m".into(),
                 format: ProviderFormat::Openai,
                 engine: None,
+                reasoning_format: None,
                 effective_reasoning: None,
             },
             RouteCandidate {
                 route_id: "anthropic:m".into(),
                 format: ProviderFormat::Anthropic,
                 engine: None,
+                reasoning_format: None,
                 effective_reasoning: None,
             },
         ];

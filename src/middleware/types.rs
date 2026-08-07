@@ -28,6 +28,19 @@ pub enum Engine {
     Vllm,
 }
 
+/// Upstream parameter shape used for chat reasoning controls.
+///
+/// OpenAI Chat Completions uses `reasoning_effort`. Some OpenAI-compatible
+/// providers instead expose a richer nested `reasoning` object, so candidates
+/// can opt into that dialect explicitly.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ReasoningFormat {
+    #[serde(rename = "reasoning_effort")]
+    ReasoningEffort,
+    #[serde(rename = "reasoning")]
+    Reasoning,
+}
+
 /// Canonical public/control reasoning effort.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -88,6 +101,11 @@ pub struct RouteCandidate {
     /// server. Absent for managed APIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// Parameter dialect accepted by this route. When omitted, the gateway
+    /// preserves the legacy inference: managed routes use `reasoning`, while
+    /// self-hosted engines use `reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<ReasoningFormat>,
     /// Request-specific setting selected after capability filtering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_reasoning: Option<ReasoningConfig>,

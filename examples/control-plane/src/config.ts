@@ -17,6 +17,8 @@ export interface RouteCandidate {
   format: Format;
   /** Self-hosted serving engine (sglang/vllm); absent for managed APIs. */
   engine?: 'sglang' | 'vllm';
+  /** Explicit upstream reasoning parameter dialect. */
+  reasoningFormat?: 'reasoning_effort' | 'reasoning';
 }
 
 export interface ModelEntry {
