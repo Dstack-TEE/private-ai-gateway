@@ -52,6 +52,21 @@ test("applyProviderProfile updates the identity live-bindings", () => {
   assert.equal(LOG_PREFIX, "[brand-x]");
 });
 
+test("resolveProfile preserves an oauth block (login/refreshToken/getApiKey)", () => {
+  const full = { refresh: "", access: "tok", expires: 1 };
+  const login = async () => full;
+  const refreshToken = async (c: typeof full) => c;
+  const getApiKey = (c: typeof full) => c.access;
+  const p = resolveProfile({
+    providerId: "brand-oauth",
+    defaultBaseUrl: "https://brand.test/v1",
+    oauth: { name: "Brand", login, refreshToken, getApiKey },
+  });
+  assert.equal(p.providerId, "brand-oauth");
+  assert.equal(p.oauth?.name, "Brand");
+  assert.equal(p.oauth?.getApiKey(full), "tok");
+});
+
 test("getBaseUrl: profile default wins when no env is set", () => {
   delete process.env.ACI_BASE_URL;
   delete process.env.ACI_CLOUD_BASE_URL;

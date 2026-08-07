@@ -40,6 +40,22 @@ export interface ProviderProfile {
    *  backward-compat). */
   baseUrlAliases?: string[];
   apiKeyAliases?: string[];
+  /** Optional OAuth login block (device flow or otherwise). Branded shells
+   *  that support /login register this; the core passes it through to pi's
+   *  registerProvider `oauth` config and, when set, `resolveApiKey()` first
+   *  reads the stored credential (auth.json) before falling back to the env
+   *  var. The shell owns the flow implementation; the core only transports
+   *  the config. */
+  oauth?: AciOAuthConfig;
+}
+
+/** OAuth config the core forwards to pi's registerProvider `oauth` block. */
+export interface AciOAuthConfig {
+  /** Display name shown in `/login`. */
+  name: string;
+  login(callbacks: import("@earendil-works/pi-ai").OAuthLoginCallbacks): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
+  refreshToken(credentials: import("@earendil-works/pi-ai").OAuthCredentials): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
+  getApiKey(credentials: import("@earendil-works/pi-ai").OAuthCredentials): string;
 }
 
 export const DEFAULT_PROFILE: ProviderProfile = {

@@ -27,6 +27,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionFactory,
+  readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
 import os from "node:os";
@@ -100,6 +101,19 @@ function hostOfBaseUrl(baseUrl: string): string | undefined {
 }
 
 function resolveApiKey(): string {
+  // Prefer the credential stored by /login (auth.json) to match pi's own
+  // auth resolution; fall back to the env var.
+  try {
+    const stored = readStoredCredential(PROVIDER_ID);
+    if (stored?.type === "oauth" && typeof stored.access === "string" && stored.access) {
+      return stored.access;
+    }
+    if (stored?.type === "api_key" && typeof stored.key === "string" && stored.key) {
+      return stored.key;
+    }
+  } catch {
+    // auth.json unreadable; fall through to env.
+  }
   return process.env[API_KEY_ENV]?.trim() || "";
 }
 
@@ -171,12 +185,14 @@ async function installAttestedTlsPin(state: AciRuntimeState): Promise<void> {
 
 function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
   const config = state.config;
+  const oauth = profile().oauth;
   pi.registerProvider(PROVIDER_ID, {
     baseUrl: config.baseUrl,
     apiKey: `$${API_KEY_ENV}`,
     api: "openai-completions",
     authHeader: true,
     models: modelsFromState(state),
+    ...(oauth ? { oauth } : {}),
   });
 }
 
