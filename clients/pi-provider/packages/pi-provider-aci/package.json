@@ -1,5 +1,5 @@
 {
-  "name": "@aci/pi-provider",
+  "name": "@phala/pi-provider-aci",
   "version": "0.2.0",
   "description": "Vendor-neutral Pi provider for private-ai-gateway (ACI): attested TLS (SPKI) pinning + per-response receipt verification",
   "keywords": [

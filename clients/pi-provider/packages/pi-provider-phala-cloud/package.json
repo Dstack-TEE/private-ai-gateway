@@ -21,7 +21,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@aci/pi-provider": "^0.2.0"
+    "@phala/pi-provider-aci": "^0.2.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

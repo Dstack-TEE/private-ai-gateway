@@ -1,4 +1,4 @@
-# @aci/pi-provider
+# @phala/pi-provider-aci
 
 Vendor-neutral **Pi** provider for [private-ai-gateway] (the ACI protocol),
 with attested TLS (SPKI) pinning and per-response receipt verification.
@@ -15,7 +15,7 @@ they are interchangeable, and the underlying protocol code lives here once.
 ## Install (core)
 
 ```bash
-pi install npm:@aci/pi-provider
+pi install npm:@phala/pi-provider-aci
 export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
 export ACI_LLM_API_KEY=...
 ```
@@ -40,7 +40,7 @@ export ACI_LLM_API_KEY=...
 `createProvider(profile)` registers the provider with a brand identity:
 
 ```ts
-import { createProvider } from "@aci/pi-provider";
+import { createProvider } from "@phala/pi-provider-aci";
 export default createProvider({
   providerId: "my-brand",
   label: "My Brand",

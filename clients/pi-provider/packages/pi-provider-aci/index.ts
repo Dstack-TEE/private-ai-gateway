@@ -7,7 +7,7 @@
  * pi-provider-phala-cloud) call createProvider() with their own profile.
  *
  * Usage:
- *   pi install npm:@aci/pi-provider
+ *   pi install npm:@phala/pi-provider-aci
  *   # Set ACI_LLM_API_KEY (+ ACI_BASE_URL) then /model aci/<model-id>
  *
  * Source layout:

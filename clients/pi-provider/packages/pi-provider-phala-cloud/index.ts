@@ -2,7 +2,7 @@
  * pi-provider-phala-cloud — Phala Cloud branded distribution of the
  * vendor-neutral private-ai-gateway (ACI) Pi provider.
  *
- * This package is a thin skin: it imports the core `@aci/pi-provider` and
+ * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
  * registers it with the Phala Cloud identity (provider id, endpoint, env vars,
  * fallback catalog, OAuth login). All protocol logic — attestation, TLS SPKI
  * pinning, receipt verification, model discovery — lives in the core.
@@ -12,7 +12,7 @@
  *   # /login phala (or set PHALA_LLM_API_KEY), then /model phala/<model-id>
  */
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { createProvider } from "@aci/pi-provider";
+import { createProvider } from "@phala/pi-provider-aci";
 
 // Phala Cloud (teahouse) API base for account-level endpoints: the OAuth
 // device authorization flow and the LLM-key self lookup live here, not on
@@ -162,5 +162,5 @@ export default createProvider({
   },
 });
 
-export { createProvider } from "@aci/pi-provider";
-export { PROVIDER_VERSION } from "@aci/pi-provider";
+export { createProvider } from "@phala/pi-provider-aci";
+export { PROVIDER_VERSION } from "@phala/pi-provider-aci";
