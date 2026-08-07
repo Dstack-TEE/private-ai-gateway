@@ -21,6 +21,7 @@ def run_structured_outputs_case(
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
+    inference_token: str,
 ) -> dict[str, Any]:
     if not provider.has_capability("structured_outputs"):
         return {"provider": provider.name, "status": "skipped", "reason": "capability_absent"}
@@ -71,7 +72,7 @@ def run_structured_outputs_case(
         "POST",
         f"{base_url}/v1/chat/completions",
         headers={
-            "Authorization": "Bearer live-e2e-structured",
+            "Authorization": f"Bearer {inference_token}",
             "Content-Type": "application/json",
         },
         body=request_body,

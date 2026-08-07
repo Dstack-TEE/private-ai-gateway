@@ -97,7 +97,7 @@ fn custody_report(identity: &SigningKey, signature_chain: Vec<String>) -> Attest
 /// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "near-ai" | "tinfoil" | "secret-ai" | "privatemode" => Some("router"),
         _ => None,
     }
 }

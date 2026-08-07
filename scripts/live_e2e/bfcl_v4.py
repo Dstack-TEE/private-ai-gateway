@@ -403,62 +403,67 @@ def run_provider_bfcl(
         env=merged_env(),
         artifact_dir=artifact_dir,
     ) as aggregator:
-        (bfcl_project / ".env").write_text(
+        bfcl_env_path = bfcl_project / ".env"
+        bfcl_env_path.write_text(
             "\n".join(
                 [
                     f"OPENAI_BASE_URL={aggregator.base_url.rstrip('/')}/v1",
-                    "OPENAI_API_KEY=aci-local",
+                    f"OPENAI_API_KEY={aggregator.inference_token}",
                     "",
                 ]
             ),
             encoding="utf-8",
         )
+        bfcl_env_path.chmod(0o600)
         env = {
             **os.environ,
             "BFCL_PROJECT_ROOT": str(bfcl_project),
             "OPENAI_BASE_URL": f"{aggregator.base_url.rstrip('/')}/v1",
-            "OPENAI_API_KEY": "aci-local",
+            "OPENAI_API_KEY": aggregator.inference_token,
             "TOKENIZERS_PARALLELISM": "false",
         }
-        generate = run_bfcl(
-            bfcl_dir,
-            [
-                "generate",
-                "--model",
-                bfcl_public_model,
-                "--run-ids",
-                "--allow-overwrite",
-                "--num-threads",
-                str(num_threads),
-                "--result-dir",
-                "result",
-            ],
-            cwd=bfcl_dir,
-            env=env,
-            stdout_path=artifact_dir / "bfcl.generate.stdout",
-            stderr_path=artifact_dir / "bfcl.generate.stderr",
-            timeout_seconds=timeout_seconds,
-        )
-        evaluate = run_bfcl(
-            bfcl_dir,
-            [
-                "evaluate",
-                "--model",
-                bfcl_public_model,
-                "--test-category",
-                ",".join(sampled_categories),
-                "--partial-eval",
-                "--result-dir",
-                "result",
-                "--score-dir",
-                "score",
-            ],
-            cwd=bfcl_dir,
-            env=env,
-            stdout_path=artifact_dir / "bfcl.evaluate.stdout",
-            stderr_path=artifact_dir / "bfcl.evaluate.stderr",
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            generate = run_bfcl(
+                bfcl_dir,
+                [
+                    "generate",
+                    "--model",
+                    bfcl_public_model,
+                    "--run-ids",
+                    "--allow-overwrite",
+                    "--num-threads",
+                    str(num_threads),
+                    "--result-dir",
+                    "result",
+                ],
+                cwd=bfcl_dir,
+                env=env,
+                stdout_path=artifact_dir / "bfcl.generate.stdout",
+                stderr_path=artifact_dir / "bfcl.generate.stderr",
+                timeout_seconds=timeout_seconds,
+            )
+            evaluate = run_bfcl(
+                bfcl_dir,
+                [
+                    "evaluate",
+                    "--model",
+                    bfcl_public_model,
+                    "--test-category",
+                    ",".join(sampled_categories),
+                    "--partial-eval",
+                    "--result-dir",
+                    "result",
+                    "--score-dir",
+                    "score",
+                ],
+                cwd=bfcl_dir,
+                env=env,
+                stdout_path=artifact_dir / "bfcl.evaluate.stdout",
+                stderr_path=artifact_dir / "bfcl.evaluate.stderr",
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            bfcl_env_path.unlink(missing_ok=True)
 
     score = collect_scores(bfcl_project, bfcl_public_model)
     result = {
