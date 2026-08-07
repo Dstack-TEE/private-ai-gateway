@@ -11,10 +11,17 @@ verification** in the footer (`verified` / `routed` / `mismatch`).
 
 ```bash
 pi install npm:pi-provider-phala-cloud
+```
+
+Sign in with a Phala Cloud account (`/login phala`, RFC 8628 device flow —
+no API key to manage), or set one directly:
+
+```bash
 export PHALA_LLM_API_KEY=...
 ```
 
 ```text
+/login phala
 /model phala/openai/gpt-oss-20b
 ```
 
