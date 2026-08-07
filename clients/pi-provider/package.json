@@ -12,11 +12,11 @@
     "clean": "npm run clean --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "check": "tsc --noEmit",
-    "test": "npm run test -w @aci/pi-provider",
-    "lint": "npm run lint -w @aci/pi-provider",
-    "format": "npm run format -w @aci/pi-provider",
-    "format:check": "npm run format:check -w @aci/pi-provider",
-    "pre-commit": "npm run pre-commit -w @aci/pi-provider"
+    "test": "npm run test -w @phala/pi-provider-aci",
+    "lint": "npm run lint -w @phala/pi-provider-aci",
+    "format": "npm run format -w @phala/pi-provider-aci",
+    "format:check": "npm run format:check -w @phala/pi-provider-aci",
+    "pre-commit": "npm run pre-commit -w @phala/pi-provider-aci"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.83.0",

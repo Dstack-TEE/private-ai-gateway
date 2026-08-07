@@ -27,11 +27,10 @@ pi provider extension:
   extension that turns the gateway (or any ACI service) into a first-class
   chat provider in pi's model picker, with attested TLS (SPKI) pinning and
   per-response receipt verification. The npm workspaces monorepo ships the
-  vendor-neutral [`@aci/pi-provider`](pi-provider/packages/pi-provider-aci)
+  vendor-neutral [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci)
   core plus thin branded distributions,
   [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill) and
-  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
-  The core provides live model discovery from `/v1/models`, `is_tee`
+  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).  The core provides live model discovery from `/v1/models`, `is_tee`
   filtering, attested TLS pinning that fails closed on mismatch, and a
   footer that shows `verified` / `verified*` / `routed` / `attested` /
   `mismatch` after each reply. No build step — pi loads `.ts` directly.

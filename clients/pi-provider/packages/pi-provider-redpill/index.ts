@@ -2,7 +2,7 @@
  * pi-provider-redpill — Redpill AI branded distribution of the
  * vendor-neutral private-ai-gateway (ACI) Pi provider.
  *
- * This package is a thin skin: it imports the core `@aci/pi-provider` and
+ * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
  * registers it with the Redpill identity (provider id, endpoint, env vars,
  * fallback catalog). All protocol logic — attestation, TLS SPKI pinning,
  * receipt verification, model discovery — lives in the core.
@@ -12,7 +12,7 @@
  *   export REDPILL_LLM_API_KEY=...
  *   # /model redpill/<model-id>
  */
-import { createProvider } from "@aci/pi-provider";
+import { createProvider } from "@phala/pi-provider-aci";
 
 export default createProvider({
   providerId: "redpill",
@@ -45,5 +45,5 @@ export default createProvider({
   ],
 });
 
-export { createProvider } from "@aci/pi-provider";
-export { PROVIDER_VERSION } from "@aci/pi-provider";
+export { createProvider } from "@phala/pi-provider-aci";
+export { PROVIDER_VERSION } from "@phala/pi-provider-aci";

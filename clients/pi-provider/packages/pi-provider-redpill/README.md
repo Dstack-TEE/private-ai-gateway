@@ -3,7 +3,7 @@
 Attested AI for Pi, powered by [private-ai-gateway].
 
 A thin, Redpill-branded distribution of the vendor-neutral
-[`@aci/pi-provider`](https://www.npmjs.com/package/@aci/pi-provider): standard
+[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci): standard
 chat plus **attested TLS (SPKI) pinning** and **per-response receipt
 verification** in the footer (`verified` / `routed` / `mismatch`).
 
@@ -26,6 +26,6 @@ Config: `/redpill-settings` · Attestation status: `/attestation`
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same verified
 protocol core. If you operate your own private-ai-gateway, use the neutral
-[`@aci/pi-provider`](https://www.npmjs.com/package/@aci/pi-provider) instead.
+[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci) instead.
 
 [private-ai-gateway]: https://github.com/Dstack-TEE/private-ai-gateway
