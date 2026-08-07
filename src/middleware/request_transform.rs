@@ -52,7 +52,42 @@ pub enum TransformError {
     },
     /// A transform rejected the request body (e.g. unparseable tool-call
     /// arguments). Surfaced as a gateway-attributed failure (error_source "gateway").
-    InvalidRequest(String),
+    InvalidRequest {
+        /// Returned to the client. Must never name a route, provider or upstream:
+        /// this string reaches the caller verbatim, and `route <provider>:<model>`
+        /// used to be part of it.
+        message: String,
+        /// Operator-only context — which route could not be shaped. Logged, never
+        /// returned.
+        detail: Option<String>,
+    },
+}
+
+impl TransformError {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        TransformError::InvalidRequest {
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    /// Operator-only context, for the log line that accompanies the refusal.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            TransformError::InvalidRequest { detail, .. } => detail.as_deref(),
+            TransformError::Unsupported { .. } => None,
+        }
+    }
+
+    /// A body we cannot shape for the chosen route is the request's problem and
+    /// the caller can act on it; a route offered for an endpoint its format
+    /// cannot serve is ours.
+    pub fn client_status(&self) -> u16 {
+        match self {
+            TransformError::InvalidRequest { .. } => 400,
+            TransformError::Unsupported { .. } => 500,
+        }
+    }
 }
 
 impl std::fmt::Display for TransformError {
@@ -65,7 +100,7 @@ impl std::fmt::Display for TransformError {
                 };
                 write!(f, "{} is not supported by {format}", endpoint.label())
             }
-            TransformError::InvalidRequest(message) => write!(f, "{message}"),
+            TransformError::InvalidRequest { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -188,9 +223,9 @@ fn candidate_params(
     if endpoint != Endpoint::ChatComplete {
         return Ok(params);
     }
-    let object = params.as_object_mut().ok_or_else(|| {
-        TransformError::InvalidRequest("request body must be a JSON object".to_string())
-    })?;
+    let object = params
+        .as_object_mut()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
@@ -204,11 +239,9 @@ fn candidate_params(
     else {
         return Ok(params);
     };
-    validate_effective(effective).map_err(|err| {
-        TransformError::InvalidRequest(format!(
-            "route {} returned invalid effective reasoning: {err}",
-            candidate.route_id
-        ))
+    validate_effective(effective).map_err(|err| TransformError::InvalidRequest {
+        message: format!("invalid effective reasoning: {err}"),
+        detail: Some(format!("route {}", candidate.route_id)),
     })?;
     sync_chat_template_reasoning(object, effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
@@ -288,18 +321,19 @@ fn set_chat_template_reasoning(
         .entry("chat_template_kwargs")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| {
-            TransformError::InvalidRequest("chat_template_kwargs must be an object".to_string())
-        })?;
+        .ok_or_else(|| TransformError::invalid_request("chat_template_kwargs must be an object"))?;
     kwargs.insert(key.to_string(), Value::Bool(enabled));
     Ok(())
 }
 
+/// The route id names the provider (`<provider>:<model>`), so it goes
+/// to the log and not to the client — the caller only needs to know that the
+/// model they asked for cannot express the reasoning they requested.
 fn invalid_reasoning<T>(candidate: &RouteCandidate, message: &str) -> Result<T, TransformError> {
-    Err(TransformError::InvalidRequest(format!(
-        "route {} {message}",
-        candidate.route_id
-    )))
+    Err(TransformError::InvalidRequest {
+        message: format!("the requested model {message}"),
+        detail: Some(format!("route {}", candidate.route_id)),
+    })
 }
 
 fn reasoning_object(config: &ReasoningConfig) -> Value {
@@ -492,7 +526,7 @@ fn transform_assistant_message(msg: &Value) -> Result<Value, TransformError> {
             // request rather than forwarding a different input.
             let input = match arguments {
                 Some(s) if !s.is_empty() => serde_json::from_str(s).map_err(|e| {
-                    TransformError::InvalidRequest(format!("invalid tool call arguments: {e}"))
+                    TransformError::invalid_request(format!("invalid tool call arguments: {e}"))
                 })?,
                 _ => json!({}),
             };

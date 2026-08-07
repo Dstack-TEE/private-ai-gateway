@@ -22,6 +22,7 @@ use super::error_responses::{
     e2ee_error_response, error_response, insert_str_header, internal_error_response,
     refusal_error_body,
 };
+use crate::middleware::errors::{normalize_upstream_error, surface_for_path};
 
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
@@ -63,7 +64,6 @@ pub(super) async fn forward_to_backend(
             Ok(StreamingForwardResult::Stream(forward)) => {
                 let mut resp_headers = chat_response_headers(
                     &forward.receipt_id,
-                    &forward.upstream_headers,
                     "text/event-stream",
                     forward.e2ee.as_ref(),
                 );
@@ -101,22 +101,19 @@ pub(super) async fn forward_to_backend(
             }
             Ok(StreamingForwardResult::UpstreamError(forward)) => {
                 // The streaming error body is cleartext (E2EE applies to the stream,
-                // not this pre-stream error), so classify and remap it here directly.
-                match image_input_error_response(
-                    input.endpoint_path,
-                    &input.received_body,
+                // not this pre-stream error), so it is classified and remapped here
+                // directly. This used to relay the upstream's status, headers and
+                // error body verbatim, which handed the client the provider's own
+                // error vocabulary; `normalize_upstream_error` is the same treatment
+                // the buffered branch already gave, and it subsumes the image-URL
+                // remap this arm used to do on its own.
+                normalize_upstream_error(
+                    surface_for_path(input.endpoint_path),
                     forward.upstream_status,
                     &forward.upstream_body,
-                ) {
-                    Some(resp) => resp,
-                    None => {
-                        let status =
-                            StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-                        let resp_headers =
-                            upstream_direct_response_headers(&forward.upstream_headers);
-                        (status, resp_headers, forward.upstream_body).into_response()
-                    }
-                }
+                    &input.received_body,
+                    None,
+                )
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
             Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -155,7 +152,6 @@ pub(super) async fn forward_to_backend(
             // buffered response is returned uniformly here.
             let resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
-                &forward.upstream_headers,
                 "application/json",
                 forward.e2ee.as_ref(),
             );
@@ -258,8 +254,7 @@ pub(super) fn generate_request_id() -> String {
 
 pub(super) fn chat_response_headers(
     receipt_id: &str,
-    upstream_headers: &std::collections::HashMap<String, String>,
-    default_content_type: &'static str,
+    content_type: &'static str,
     e2ee: Option<&E2eeResponseInfo>,
 ) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
@@ -281,39 +276,22 @@ pub(super) fn chat_response_headers(
         }
     }
 
-    let content_type = upstream_headers
-        .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| default_content_type.to_string());
-    if let Ok(value) = HeaderValue::from_str(&content_type) {
-        resp_headers.insert(axum::http::header::CONTENT_TYPE, value);
-    }
+    // Ours, not the upstream's. Relaying the upstream `content-type` leaked a
+    // small fingerprint of its own (whether it appends `; charset=utf-8`), and
+    // the caller already knows which content type this path emits.
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
     resp_headers
 }
 
-pub(super) fn upstream_direct_response_headers(
-    upstream_headers: &std::collections::HashMap<String, String>,
-) -> HeaderMap {
-    let mut resp_headers = HeaderMap::new();
-    for (name, value) in upstream_headers {
-        let lower = name.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            // `x-receipt-id`: an upstream aci-service refusal carries its own
-            // receipt id, which does not resolve on this host (§7.1).
-            "connection" | "transfer-encoding" | "content-length" | "x-receipt-id"
-        ) {
-            continue;
-        }
-        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(header_value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        resp_headers.insert(header_name, header_value);
-    }
-    resp_headers
+/// Response headers for the direct-to-upstream catalog relay. Nothing from the
+/// upstream is forwarded — see `middleware::completion::gateway_owned_headers`
+/// for why this is an allowlist rather than a denylist. The caller supplies the
+/// content type.
+pub(super) fn upstream_direct_response_headers() -> HeaderMap {
+    HeaderMap::new()
 }
 
 /// Remaining aci-service chaining hops, passed between aggregators so a config
@@ -444,7 +422,7 @@ pub(super) fn upstream_direct_response(
     upstream: crate::aci::upstream::UpstreamResponse,
     default_content_type: &'static str,
 ) -> Response {
-    let mut headers = upstream_direct_response_headers(&upstream.headers);
+    let mut headers = upstream_direct_response_headers();
     if !headers.contains_key(axum::http::header::CONTENT_TYPE) {
         headers.insert(
             axum::http::header::CONTENT_TYPE,
@@ -453,25 +431,6 @@ pub(super) fn upstream_direct_response(
     }
     let status = StatusCode::from_u16(upstream.status_code).unwrap_or(StatusCode::BAD_GATEWAY);
     (status, headers, upstream.body).into_response()
-}
-
-/// The surface-appropriate 400 when the upstream error is a client image-URL
-/// fetch failure; `None` for any other error (caller keeps verbatim passthrough).
-fn image_input_error_response(
-    endpoint_path: &str,
-    received_body: &[u8],
-    upstream_status: u16,
-    upstream_body: &[u8],
-) -> Option<Response> {
-    use crate::middleware::errors::{image_input_error_parts, parts_response, surface_for_path};
-    let (status, body) = image_input_error_parts(
-        surface_for_path(endpoint_path),
-        received_body,
-        upstream_status,
-        upstream_body,
-        None,
-    )?;
-    Some(parts_response(status, body))
 }
 
 pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {

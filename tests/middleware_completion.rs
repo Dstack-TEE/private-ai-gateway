@@ -40,6 +40,9 @@ use common::{event_from_request, StaticKeyProvider, StubQuoter};
 struct MockUpstream {
     status: u16,
     body: Vec<u8>,
+    /// Headers an upstream may add on top of `content-type` — the kind the
+    /// allowlist must drop so none of them can reach a client.
+    extra_headers: Vec<(&'static str, &'static str)>,
 }
 
 #[async_trait]
@@ -53,6 +56,9 @@ impl UpstreamBackend for MockUpstream {
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
+        for (name, value) in &self.extra_headers {
+            headers.insert(name.to_string(), value.to_string());
+        }
         Ok(UpstreamResponse {
             status_code: self.status,
             body: self.body.clone(),
@@ -255,11 +261,23 @@ fn build_service_failing_verify() -> Arc<AciService> {
 }
 
 fn build_service_with_upstream(status: u16, body: Vec<u8>) -> Arc<AciService> {
+    build_service_with_upstream_headers(status, body, Vec::new())
+}
+
+fn build_service_with_upstream_headers(
+    status: u16,
+    body: Vec<u8>,
+    extra_headers: Vec<(&'static str, &'static str)>,
+) -> Arc<AciService> {
     Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(MockUpstream { status, body }),
+            Arc::new(MockUpstream {
+                status,
+                body,
+                extra_headers,
+            }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
             AciServiceConfig::for_test(),
@@ -420,6 +438,102 @@ async fn response_parts(response: axum::response::Response) -> (u16, axum::http:
     (status, headers, body)
 }
 
+/// The shape of headers an upstream sends that identify it: one names the
+/// serving provider outright, one names its edge, one is a set-cookie that would
+/// otherwise land on our own domain. Synthetic values — the test proves the
+/// allowlist drops arbitrary upstream headers, not any specific provider.
+const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
+    ("x-acme-serving", "acme"),
+    ("server", "acme-edge/1.0"),
+    ("inference-id", "29abc41a-c5c0-56d7-818a-c56c8c0fb272"),
+    ("x-request-id", "fa57b5a8-4967-4e5c-9ab8-103a9feeeb14"),
+    ("alt-svc", r#"h3=":8443"; ma=86400"#),
+    ("x-vendor-call-gateway", "true"),
+    ("set-cookie", "edge_sess=0893731c1786104409;path=/"),
+];
+
+fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
+    for (name, _) in LEAKY_UPSTREAM_HEADERS {
+        assert!(
+            headers.get(*name).is_none(),
+            "{name} reached the client; response headers must be an allowlist"
+        );
+    }
+}
+
+async fn raw_body(response: axum::response::Response) -> (axum::http::HeaderMap, String) {
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (headers, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn buffered_success_hides_which_upstream_served_it() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],
+            "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    // An engine-served body: `matched_stop` is the engine's own field, the id
+    // is its own format, and `model` is the upstream's internal name.
+    let service = build_service_with_upstream_headers(
+        200,
+        br#"{"id":"7bdaaade50304502b0fe7e66e9a4bec2","object":"chat.completion","model":"vendor-model-int","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop","matched_stop":424242}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
+
+    let (status, headers, body) =
+        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 200);
+    assert_no_upstream_headers(&headers);
+    assert_eq!(body["id"], json!("req-1"));
+    assert_eq!(body["model"], json!("gpt-test"));
+    assert!(body["choices"][0].get("matched_stop").is_none());
+    // The parts that are the client's answer are untouched.
+    assert_eq!(body["choices"][0]["message"]["content"], json!("hi"));
+    assert_eq!(body["choices"][0]["finish_reason"], json!("stop"));
+    assert_eq!(body["usage"]["completion_tokens"], json!(1));
+}
+
+#[tokio::test]
+async fn streamed_success_hides_which_upstream_served_it() {
+    // Same-format streaming is the path that relayed provider bytes verbatim,
+    // so it gets its own end-to-end check rather than only a unit test.
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],
+            "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream_headers(
+        200,
+        b"data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"matched_stop\":424242}]}\n\ndata: [DONE]\n\n".to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
+    let mut input = chat_input();
+    input.stream = true;
+
+    let (headers, body) = raw_body(mw.handle_completion(&service, input).await).await;
+    assert_no_upstream_headers(&headers);
+    assert!(!body.contains("matched_stop"), "{body}");
+    assert!(!body.contains("vendor-model-int"), "{body}");
+    assert!(!body.contains("b4fa5a1dc59c4b41"), "{body}");
+    assert!(body.contains("req-1"), "{body}");
+    assert!(body.contains("gpt-test"), "{body}");
+    // Framing and content survive intact.
+    assert!(body.contains(r#""content":"hi""#), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
+}
+
 #[tokio::test]
 async fn denial_returns_forbidden_envelope() {
     let control_url = spawn_control(200, json!({ "allow": false })).await;
@@ -504,7 +618,10 @@ async fn allow_forwards_and_finalizes_receipt() {
         headers.get("x-receipt-id").is_some(),
         "buffered success must carry a receipt id"
     );
-    assert_eq!(body["id"], json!("chat-1"));
+    // Our request id, not the upstream's `chat-1`: the shape of a provider's id
+    // identifies its backend (`chatcmpl-<uuid>`, bare 32-hex, timestamp-prefixed
+    // each belong to a different one), so it is replaced rather than relayed.
+    assert_eq!(body["id"], json!("req-1"));
 }
 
 #[tokio::test]
