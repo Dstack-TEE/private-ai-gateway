@@ -28,7 +28,7 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
-use super::request_transform::{build_candidates, Endpoint};
+use super::request_transform::{build_candidates_with_user_tier, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
 use super::types::{ErrorSource, PostReport, ProviderFormat, SpendMode};
@@ -402,11 +402,12 @@ pub async fn run(
     }
 
     // Shape one body per candidate (typed per-route contract).
-    let shaped = match build_candidates(
+    let shaped = match build_candidates_with_user_tier(
         &params,
         endpoint,
         &candidates,
         reasoning_requirements.as_ref(),
+        consult.user_tier.as_deref(),
     ) {
         Ok(shaped) => shaped,
         Err(err) => {
