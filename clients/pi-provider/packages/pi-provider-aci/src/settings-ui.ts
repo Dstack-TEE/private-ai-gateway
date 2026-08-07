@@ -69,5 +69,6 @@ export function modelRegistrationSummary(config: AciCloudConfig): string {
 
 export function verifySummary(config: AciCloudConfig): string {
   return `Verify: auto-receipt ${formatBoolean(config.verify.autoFetchReceipt)}, ` +
-    `require-attestation ${formatBoolean(config.verify.requireAttestationMatch)}`;
+    `require-attestation ${formatBoolean(config.verify.requireAttestationMatch)}, ` +
+    `fail-open-unpinned ${formatBoolean(config.verify.failOpenOnUnpinned)}`;
 }

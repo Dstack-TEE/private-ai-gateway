@@ -1,3 +1,15 @@
+# Note (post-implementation)
+#
+# This plan predates the vendor-neutral restructure (0d69f9d) and the switch to
+# attested TLS pinning + the reference verifier. The current code:
+#   - no longer ships src/headers.ts, src/e2ee.ts, or per-field E2EE;
+#   - performs verification through @phala/aci-verifier (clients/verifier-ts),
+#     not a private reimplementation;
+#   - pins TLS fail-closed by default (verify.failOpenOnUnpinned opt-out);
+#   - reads the body-hash contract as request.received.body_hash /
+#     response.returned.body_hash (spec §7.4), not wire_hash.
+# Treat the body of this file as historical context, not the current design.
+
 # pi-provider-phala-cloud — Implementation Plan
 
 A pi extension that wires Phala Cloud Confidential AI into pi, with per-response

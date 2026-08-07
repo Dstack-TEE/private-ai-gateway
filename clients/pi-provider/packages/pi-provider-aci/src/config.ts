@@ -11,7 +11,7 @@
 // UI can show provenance. Validation runs after merge so a malformed layer
 // never produces a partially-applied config.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { DEFAULT_BASE_URL, LOG_PREFIX, PROVIDER_ID, getBaseUrl } from "./constants.ts";
@@ -35,6 +35,10 @@ export interface AciVerifyConfig {
   autoFetchReceipt: boolean;
   /** Require a cached attestation whose workload matches the receipt. */
   requireAttestationMatch: boolean;
+  /** When true, an unpinnable session runs unpinned with a footer warning
+   *  (fail-open). When false (default) an unpinned session blocks inference
+   *  with a clear error rather than silently downgrading to CA-TLS. */
+  failOpenOnUnpinned: boolean;
 }
 
 export interface AciTlsPinningConfig {
@@ -62,6 +66,7 @@ export type AciCloudConfigPatch = {
   verify?: Partial<{
     autoFetchReceipt: unknown;
     requireAttestationMatch: unknown;
+    failOpenOnUnpinned: unknown;
   }>;
   pinning?: Partial<{ enabled: unknown }>;
   defaultModel?: unknown;
@@ -77,6 +82,7 @@ export interface AciCloudConfigSources {
   verify: {
     autoFetchReceipt: AciConfigSource;
     requireAttestationMatch: AciConfigSource;
+    failOpenOnUnpinned: AciConfigSource;
   };
   pinning: { enabled: AciConfigSource };
   defaultModel: AciConfigSource;
@@ -112,6 +118,7 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
   verify: {
     autoFetchReceipt: true,
     requireAttestationMatch: false,
+    failOpenOnUnpinned: false,
   },
   pinning: {
     enabled: true,
@@ -339,6 +346,11 @@ function validateVerifyConfig(
       configPath,
       `${pointer}/requireAttestationMatch`,
     ),
+    failOpenOnUnpinned: requireBoolean(
+      verify.failOpenOnUnpinned,
+      configPath,
+      `${pointer}/failOpenOnUnpinned`,
+    ),
   };
 }
 
@@ -399,6 +411,7 @@ function buildSources(
     verify: {
       autoFetchReceipt: sourceForPath(layers, ["verify", "autoFetchReceipt"]),
       requireAttestationMatch: sourceForPath(layers, ["verify", "requireAttestationMatch"]),
+      failOpenOnUnpinned: sourceForPath(layers, ["verify", "failOpenOnUnpinned"]),
     },
     pinning: { enabled: sourceForPath(layers, ["pinning", "enabled"]) },
     defaultModel: sourceForPath(layers, ["defaultModel"]),
@@ -475,5 +488,22 @@ export function saveHomeAciCloudConfig(home: string, config: AciCloudConfig): vo
 
 function saveAciCloudConfigFile(path: string, config: AciCloudConfig): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(validateAciCloudConfig(config, path), null, 2)}\n`, "utf8");
+  // Atomic write: temp file + rename in the same directory, so a crash or
+  // ENOSPC mid-write cannot leave a torn JSON that silently resets settings
+  // to defaults on the next read (previously plain writeFileSync).
+  const tempPath = `${path}.tmp`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify(validateAciCloudConfig(config, path), null, 2)}\n`, "utf8");
+    renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Cleanup is best-effort; the original file (if any) is left untouched.
+    }
+    throw new ConfigError(
+      `failed to write config: ${error instanceof Error ? error.message : String(error)}`,
+      path,
+    );
+  }
 }

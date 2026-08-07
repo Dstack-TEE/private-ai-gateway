@@ -20,7 +20,17 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
   assert.equal(validated.verify.autoFetchReceipt, true);
+  assert.equal(validated.verify.requireAttestationMatch, false);
+  assert.equal(validated.verify.failOpenOnUnpinned, false); // fail-closed default
   assert.equal(validated.pinning.enabled, true);
+});
+
+test("validateAciCloudConfig: failOpenOnUnpinned can be enabled", () => {
+  const validated = validateAciCloudConfig({
+    ...BASE,
+    verify: { ...BASE.verify, failOpenOnUnpinned: true },
+  });
+  assert.equal(validated.verify.failOpenOnUnpinned, true);
 });
 
 test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {

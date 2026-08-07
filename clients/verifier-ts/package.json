@@ -25,7 +25,8 @@
     "build": "tsc -p tsconfig.json",
     "build:bundle": "esbuild src/index.ts --bundle --format=esm --minify --platform=browser --target=es2022 --inject:./browser-shim.js --outfile=dist/aci-verifier.min.js",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "clean": "rm -rf dist dist-test"
+    "clean": "rm -rf dist dist-test",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
