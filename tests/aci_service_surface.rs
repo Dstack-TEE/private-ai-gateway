@@ -47,7 +47,7 @@ use common::{event_from_request, StaticKeyProvider, StubQuoter};
 const CHAT_REQUEST: &[u8] =
     br#"{"model":"aci-model","messages":[{"role":"user","content":"hello"}]}"#;
 const CHAT_RESPONSE: &[u8] = br#"{"id":"chat-aci-1","object":"chat.completion","choices":[]}"#;
-const E2EE_CHAT_RESPONSE: &[u8] = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain-answer"},"finish_reason":"stop"}]}"#;
+const E2EE_CHAT_RESPONSE: &[u8] = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","reasoning":"private-thought","content":"plain-answer"},"finish_reason":"stop"}]}"#;
 
 #[derive(Clone)]
 struct HttpResult {
@@ -1053,6 +1053,14 @@ async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire
         decrypt_with_secret_key(&client_secret, encrypted_content, &response_aad).unwrap();
     assert_eq!(decrypted_response, b"plain-answer");
 
+    let encrypted_reasoning = encrypted_response["choices"][0]["message"]["reasoning"]
+        .as_str()
+        .unwrap();
+    let reasoning_aad = e2ee_response_aad(&h, nonce, "chat-aci-1", "choices.0.message.reasoning");
+    let decrypted_reasoning =
+        decrypt_with_secret_key(&client_secret, encrypted_reasoning, &reasoning_aad).unwrap();
+    assert_eq!(decrypted_reasoning, b"private-thought");
+
     let receipt_id = header(&resp.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     assert_eq!(
@@ -1297,6 +1305,12 @@ async fn legacy_ecdsa_e2ee_v1_matches_vllm_proxy_no_aad_shape() {
     let decrypted_response =
         decrypt_legacy_ecdsa_with_secret_key(&client_secret, encrypted_content, None).unwrap();
     assert_eq!(decrypted_response, b"plain-answer");
+    let encrypted_reasoning = encrypted_response["choices"][0]["message"]["reasoning"]
+        .as_str()
+        .unwrap();
+    let decrypted_reasoning =
+        decrypt_legacy_ecdsa_with_secret_key(&client_secret, encrypted_reasoning, None).unwrap();
+    assert_eq!(decrypted_reasoning, b"private-thought");
 }
 
 #[tokio::test]
@@ -2473,6 +2487,50 @@ async fn e2ee_streaming_rejects_a_non_sse_upstream_without_a_receipt() {
         resp.headers.get("x-receipt-id").is_none(),
         "a rejected E2EE response is not bound to a receipt"
     );
+}
+
+#[tokio::test]
+async fn e2ee_v2_encrypts_streamed_reasoning_field() {
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-reasoning-stream-1",
+            "object": "chat.completion.chunk",
+            "model": "aci-model",
+            "choices": [{
+                "index": 7,
+                "delta": {"reasoning": "private streamed thought"},
+            }],
+        })
+    )
+    .into_bytes();
+    let stream_chunks = vec![Bytes::from(frame), Bytes::from_static(b"data: [DONE]\n\n")];
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(stream_chunks));
+    let client_secret = k256::SecretKey::from_slice(&[0x67; 32]).unwrap();
+    let nonce = hex_nonce("nonce-reasoning-stream");
+    let nonce = nonce.as_str();
+    let (encrypted_body, headers) = e2ee_stream_request(&h, &client_secret, nonce);
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &encrypted_body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let events = sse_json_events(&resp.body);
+    assert_eq!(events.len(), 1);
+    let encrypted_reasoning = events[0]["choices"][0]["delta"]["reasoning"]
+        .as_str()
+        .unwrap();
+    let response_aad = e2ee_response_aad(
+        &h,
+        nonce,
+        "chat-reasoning-stream-1",
+        "choices.7.delta.reasoning",
+    );
+    let decrypted_reasoning =
+        decrypt_with_secret_key(&client_secret, encrypted_reasoning, &response_aad).unwrap();
+    assert_eq!(decrypted_reasoning, b"private streamed thought");
 }
 
 #[tokio::test]
