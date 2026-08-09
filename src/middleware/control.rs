@@ -46,29 +46,6 @@ pub struct CatalogResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PreConsultBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key_hash: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'a str>,
-    // Forwarded verbatim so the control plane validates it (a malformed block
-    // must not silently drop the caller's routing restrictions).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<&'a Value>,
-    // Canonical route-relevant controls only. Response visibility stays local.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<&'a ReasoningConfig>,
-    // Content-blind response-shape signal. The schema remains local.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    structured_output: bool,
-    // TEE-only host: the control plane 404s a non-TEE model. Only sent when set
-    // so the metadata-minimal payload is unchanged off these hosts.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    tee: bool,
-}
-
 #[derive(Clone)]
 pub struct ControlClient {
     client: reqwest::Client,
@@ -153,7 +130,7 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider?, reasoningRequested?, structuredOutput? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub async fn consult_pre(
@@ -165,11 +142,33 @@ impl ControlClient {
         structured_output: bool,
         tee_only: bool,
     ) -> PreConsult {
-        let body = PreConsultBody {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            api_key_hash: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: Option<&'a str>,
+            // Forwarded verbatim so the control plane validates it (a malformed
+            // block must not silently drop the caller's routing restrictions).
+            #[serde(skip_serializing_if = "Option::is_none")]
+            provider: Option<&'a Value>,
+            // Content-blind request-shape signals; their values remain local.
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            reasoning_requested: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            structured_output: bool,
+            // TEE-only host: the control plane 404s a non-TEE model. Only sent
+            // when set so the metadata-minimal payload is unchanged off these hosts.
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            tee: bool,
+        }
+
+        let body = Body {
             api_key_hash,
             model,
             provider,
-            reasoning,
+            reasoning_requested: reasoning.is_some(),
             structured_output,
             tee: tee_only,
         };
@@ -302,29 +301,6 @@ mod tests {
             client.url("/consult/pre"),
             "http://control.example/consult/pre"
         );
-    }
-
-    #[test]
-    fn pre_consult_body_sends_only_the_structured_output_signal() {
-        let reasoning = ReasoningConfig {
-            effort: Some(crate::middleware::types::ReasoningEffort::High),
-            enabled: Some(true),
-            ..Default::default()
-        };
-        let body = serde_json::to_value(PreConsultBody {
-            api_key_hash: None,
-            model: Some("m"),
-            provider: None,
-            reasoning: Some(&reasoning),
-            structured_output: true,
-            tee: false,
-        })
-        .unwrap();
-
-        assert_eq!(body["structuredOutput"], true);
-        assert_eq!(body["reasoning"]["effort"], "high");
-        assert!(body.get("responseFormat").is_none());
-        assert!(body.get("tee").is_none());
     }
 
     #[tokio::test]

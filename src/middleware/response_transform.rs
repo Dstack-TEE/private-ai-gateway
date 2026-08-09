@@ -40,15 +40,21 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, mut body: 
 /// alias only when the canonical value is absent or null; a populated canonical
 /// value remains authoritative. Preserve the alias and sibling detail fields.
 pub(super) fn normalize_reasoning_usage(body: &mut Value) {
-    let Some(usage) = body.get_mut("usage").and_then(Value::as_object_mut) else {
-        return;
+    if let Some(usage) = body.get_mut("usage") {
+        normalize_reasoning_usage_value(usage);
+    }
+}
+
+pub(super) fn normalize_reasoning_usage_value(usage: &mut Value) -> bool {
+    let Some(usage) = usage.as_object_mut() else {
+        return false;
     };
     let Some(reasoning_tokens) = usage
         .get("reasoning_tokens")
         .filter(|value| !value.is_null())
         .cloned()
     else {
-        return;
+        return false;
     };
     let details = usage
         .entry("completion_tokens_details")
@@ -57,11 +63,13 @@ pub(super) fn normalize_reasoning_usage(body: &mut Value) {
         *details = Value::Object(serde_json::Map::new());
     }
     let Some(details) = details.as_object_mut() else {
-        return;
+        return false;
     };
     if details.get("reasoning_tokens").is_none_or(Value::is_null) {
         details.insert("reasoning_tokens".into(), reasoning_tokens);
+        return true;
     }
+    false
 }
 
 /// Remove reasoning traces from an OpenAI Chat Completions response while

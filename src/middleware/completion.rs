@@ -711,12 +711,12 @@ pub async fn run(
                 0 => None,
                 ms => Some(Duration::from_millis(ms)),
             };
-            // Order: provider stream (drafts response.received) -> format/
-            // compatibility normalization -> response visibility -> meter/cost
-            // -> keep-alive -> finalizer (hashes response.returned). Metering sits
-            // inside the keep-alive so it only ever buffers real upstream SSE
-            // bytes; heartbeat comments are injected downstream and never enter
-            // its line reassembly.
+            // Order: provider stream (drafts response.received) -> format
+            // transform (if cross-format) -> response visibility -> meter/cost ->
+            // keep-alive -> finalizer (hashes response.returned). Same-format
+            // streaming skips only the format transform. Metering sits inside the
+            // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
+            // comments are injected downstream and never enter its line reassembly.
             let response_header_map = response_headers(&forward.upstream_headers, &content_type);
             let selected_format = candidates
                 .iter()

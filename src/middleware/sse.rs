@@ -34,6 +34,7 @@ use super::completion::{
 };
 use super::control::ControlClient;
 use super::pricing;
+use super::response_transform;
 use super::types::{ErrorSource, PostReport, SpendMode};
 
 /// Cap on the partial-line reassembly buffer. An upstream that streams bytes
@@ -471,34 +472,38 @@ impl MeterStream {
                     };
                     self.detect_outcome(&parsed);
 
-                    let top_usage = parsed.get("usage").filter(|u| !u.is_null());
-                    let nested = parsed
+                    let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
+                    let nested_usage = parsed
                         .get("response")
                         .and_then(|r| r.get("usage"))
-                        .filter(|u| !u.is_null());
-                    let Some(usage_obj) = top_usage.or(nested) else {
-                        return line.to_string();
-                    };
-                    self.last_usage = Some(usage_obj.clone());
-                    if !self.inject {
+                        .is_some_and(|u| !u.is_null());
+                    if !top_usage && !nested_usage {
                         return line.to_string();
                     }
-                    let pricing = self
-                        .report
-                        .pricing
-                        .as_ref()
-                        .expect("inject implies pricing");
-                    let cost = pricing::compute_cost(usage_obj, pricing);
-                    changed = true;
 
-                    let mut updated = parsed.clone();
-                    let target = if top_usage.is_some() {
+                    let mut updated = parsed;
+                    let usage_obj = if top_usage {
                         updated.get_mut("usage")
                     } else {
                         updated.get_mut("response").and_then(|r| r.get_mut("usage"))
-                    };
-                    if let Some(usage_map) = target.and_then(Value::as_object_mut) {
-                        usage_map.insert("cost".to_string(), pricing::cost_to_json(cost));
+                    }
+                    .expect("usage presence checked above");
+                    let normalized = response_transform::normalize_reasoning_usage_value(usage_obj);
+                    self.last_usage = Some(usage_obj.clone());
+                    if !self.inject && !normalized {
+                        return line.to_string();
+                    }
+                    changed = true;
+                    if self.inject {
+                        let pricing = self
+                            .report
+                            .pricing
+                            .as_ref()
+                            .expect("inject implies pricing");
+                        let cost = pricing::compute_cost(usage_obj, pricing);
+                        if let Some(usage_map) = usage_obj.as_object_mut() {
+                            usage_map.insert("cost".to_string(), pricing::cost_to_json(cost));
+                        }
                     }
                     format!(
                         "data: {}",
@@ -1001,6 +1006,29 @@ mod tests {
 
         // Byte fidelity: the buffered chunk is emitted intact, nothing dropped.
         assert_eq!(out.as_ref(), [a.as_ref(), b.as_ref()].concat().as_slice());
+    }
+
+    #[test]
+    fn legacy_reasoning_usage_is_normalized_without_rejecting_non_json_data() {
+        let mut meter = test_meter();
+        let chunk = Bytes::from(concat!(
+            "data: {\"choices\":[],\"usage\":{\"reasoning_tokens\":5,\"completion_tokens_details\":null}}\n",
+            "data: ping\n",
+        ));
+        let Fed::Emit(out) = meter.process(&chunk) else {
+            panic!("complete lines emit bytes");
+        };
+        let text = String::from_utf8(out.to_vec()).unwrap();
+
+        assert!(
+            text.contains("\"completion_tokens_details\":{\"reasoning_tokens\":5}"),
+            "{text}"
+        );
+        assert!(text.contains("data: ping\n"), "{text}");
+        assert_eq!(
+            meter.last_usage.as_ref().unwrap()["completion_tokens_details"]["reasoning_tokens"],
+            5
+        );
     }
 
     // `data:{...}` without the optional space is valid SSE; missing it would drop
