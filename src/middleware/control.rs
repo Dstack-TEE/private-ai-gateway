@@ -130,7 +130,7 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider?, reasoningRequested?, structuredOutput? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub async fn consult_pre(
@@ -153,9 +153,10 @@ impl ControlClient {
             // block must not silently drop the caller's routing restrictions).
             #[serde(skip_serializing_if = "Option::is_none")]
             provider: Option<&'a Value>,
-            // Content-blind request-shape signals; their values remain local.
-            #[serde(skip_serializing_if = "std::ops::Not::not")]
-            reasoning_requested: bool,
+            // Canonical route-relevant controls only. Response visibility stays local.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reasoning: Option<&'a ReasoningConfig>,
+            // Content-blind response-shape signal. The schema remains local.
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             structured_output: bool,
             // TEE-only host: the control plane 404s a non-TEE model. Only sent
@@ -168,7 +169,7 @@ impl ControlClient {
             api_key_hash,
             model,
             provider,
-            reasoning_requested: reasoning.is_some(),
+            reasoning,
             structured_output,
             tee: tee_only,
         };

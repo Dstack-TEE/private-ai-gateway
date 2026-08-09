@@ -1391,6 +1391,21 @@ mod tests {
         assert_eq!(bodies[0].1["reasoning"]["max_tokens"], 1000);
         assert_eq!(bodies[0].1["reasoning"]["enabled"], true);
         assert!(bodies[0].1.get("reasoning_effort").is_none());
+
+        let effort_candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "self-hosted:m",
+            "format": "openai",
+            "engine": "sglang"
+        }))
+        .unwrap();
+        let error = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[effort_candidate],
+            requested.as_ref(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot represent max_tokens"));
     }
 
     #[test]
