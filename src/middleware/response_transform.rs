@@ -15,9 +15,12 @@ use super::types::ProviderFormat;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
-/// Transform a 2xx upstream body for `format`/`endpoint` into the client surface.
-/// Returns the body unchanged when no transform applies (native passthrough).
-pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Value) -> Value {
+/// Transform a 2xx upstream body for `format`/`endpoint` into the client surface,
+/// applying OpenAI compatibility normalization before any format conversion.
+pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, mut body: Value) -> Value {
+    if format == ProviderFormat::Openai {
+        normalize_reasoning_usage(&mut body);
+    }
     use Endpoint::*;
     use ProviderFormat::*;
     match (format, endpoint) {
@@ -28,6 +31,38 @@ pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, body: Valu
         // responses (createModelResponse).
         _ => body,
     }
+}
+
+/// Normalize the legacy reasoning-token usage alias into the OpenAI field.
+///
+/// Some OpenAI-compatible providers emit `usage.reasoning_tokens`, while clients
+/// read `usage.completion_tokens_details.reasoning_tokens`. Promote the legacy
+/// alias only when the canonical value is absent or null; a populated canonical
+/// value remains authoritative. Preserve the alias and sibling detail fields.
+pub(super) fn normalize_reasoning_usage(body: &mut Value) {
+    if let Some(usage) = body.get_mut("usage") {
+        let _ = normalize_reasoning_usage_value(usage);
+    }
+}
+
+pub(super) fn normalize_reasoning_usage_value(usage: &mut Value) -> Option<bool> {
+    let usage = usage.as_object_mut()?;
+    let reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .filter(|value| !value.is_null())
+        .cloned()?;
+    let details = usage
+        .entry("completion_tokens_details")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if details.is_null() {
+        *details = Value::Object(serde_json::Map::new());
+    }
+    let details = details.as_object_mut()?;
+    if details.get("reasoning_tokens").is_none_or(Value::is_null) {
+        details.insert("reasoning_tokens".into(), reasoning_tokens);
+        return Some(true);
+    }
+    Some(false)
 }
 
 /// Remove reasoning traces from an OpenAI Chat Completions response while
@@ -300,6 +335,46 @@ mod tests {
         assert_eq!(
             body["usage"]["completion_tokens_details"]["reasoning_tokens"],
             3
+        );
+    }
+
+    #[test]
+    fn legacy_reasoning_usage_is_normalized_without_losing_canonical_data() {
+        let body = json!({
+            "choices": [],
+            "usage": {
+                "completion_tokens": 128,
+                "reasoning_tokens": 128,
+                "completion_tokens_details": null
+            }
+        });
+        let out = transform_response(ProviderFormat::Openai, Endpoint::ChatComplete, body);
+        assert_eq!(
+            out["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            128
+        );
+        assert_eq!(out["usage"]["reasoning_tokens"], 128);
+
+        let canonical = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::ChatComplete,
+            json!({
+                "usage": {
+                    "reasoning_tokens": 128,
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 4,
+                        "reasoning_tokens": 7
+                    }
+                }
+            }),
+        );
+        assert_eq!(
+            canonical["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            7
+        );
+        assert_eq!(
+            canonical["usage"]["completion_tokens_details"]["accepted_prediction_tokens"],
+            4
         );
     }
 }

@@ -130,7 +130,7 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider?, reasoning? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub async fn consult_pre(
@@ -139,6 +139,7 @@ impl ControlClient {
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
         reasoning: Option<&ReasoningConfig>,
+        structured_output: bool,
         tee_only: bool,
     ) -> PreConsult {
         #[derive(Serialize)]
@@ -152,10 +153,12 @@ impl ControlClient {
             // block must not silently drop the caller's routing restrictions).
             #[serde(skip_serializing_if = "Option::is_none")]
             provider: Option<&'a Value>,
-            // Canonical route-relevant controls only. Response visibility stays
-            // local to the gateway.
+            // Canonical route-relevant controls only. Response visibility stays local.
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning: Option<&'a ReasoningConfig>,
+            // Content-blind response-shape signal. The schema remains local.
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            structured_output: bool,
             // TEE-only host: the control plane 404s a non-TEE model. Only sent
             // when set so the metadata-minimal payload is unchanged off these hosts.
             #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -167,6 +170,7 @@ impl ControlClient {
             model,
             provider,
             reasoning,
+            structured_output,
             tee: tee_only,
         };
         let build = || {
@@ -305,7 +309,9 @@ mod tests {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client.consult_pre(Some("m"), None, None, None, false).await;
+        let consult = client
+            .consult_pre(Some("m"), None, None, None, false, false)
+            .await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(

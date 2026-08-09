@@ -194,6 +194,9 @@ fn candidate_params(
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
+    // The control plane's route-specific resolution is authoritative. Fall back
+    // to caller intent only when control did not resolve it. Absence remains
+    // absence: provider and engine labels do not imply reasoning capability.
     let Some(effective) = candidate
         .effective_reasoning
         .as_ref()
@@ -222,12 +225,11 @@ fn candidate_params(
             if effective.max_tokens.is_some() {
                 return invalid_reasoning(candidate, "cannot represent max_tokens");
             }
-            let effort = effective
-                .effort
-                .or((effective.enabled == Some(false)).then_some(ReasoningEffort::None));
-            let Some(effort) = effort else {
-                return invalid_reasoning(candidate, "cannot represent enabled without effort");
-            };
+            let effort = effective.effort.unwrap_or_else(|| match effective.enabled {
+                Some(true) => ReasoningEffort::Medium,
+                Some(false) => ReasoningEffort::None,
+                None => unreachable!("validated reasoning has an effort, budget, or enabled flag"),
+            });
             object.insert(
                 "reasoning_effort".to_string(),
                 Value::String(effort.as_str().to_string()),
@@ -1238,6 +1240,17 @@ mod tests {
         );
         // Managed OpenAI chatComplete has no top_k param, so it is dropped.
         assert!(managed.get("top_k").is_none());
+
+        let structured = chat(
+            ProviderFormat::Openai,
+            json!({
+                "model": "m",
+                "messages": [],
+                "response_format": { "type": "json_object" }
+            }),
+            Some(Engine::Sglang),
+        );
+        assert!(structured.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -1324,11 +1337,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_candidate_reasoning_format_uses_openai_parameter() {
+    fn explicit_candidate_reasoning_format_maps_enabled_to_openai_parameter() {
         let request = json!({
             "model": "gpt-5",
             "messages": [{ "role": "user", "content": "hi" }],
-            "reasoning_effort": "high"
+            "reasoning": { "enabled": true }
         });
         let (params, requested, _) =
             crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
@@ -1347,7 +1360,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bodies[0].1["reasoning_effort"], "high");
+        assert_eq!(bodies[0].1["reasoning_effort"], "medium");
         assert!(bodies[0].1.get("reasoning").is_none());
     }
 
@@ -1377,6 +1390,21 @@ mod tests {
         assert_eq!(bodies[0].1["reasoning"]["max_tokens"], 1000);
         assert_eq!(bodies[0].1["reasoning"]["enabled"], true);
         assert!(bodies[0].1.get("reasoning_effort").is_none());
+
+        let effort_candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "self-hosted:m",
+            "format": "openai",
+            "engine": "sglang"
+        }))
+        .unwrap();
+        let error = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[effort_candidate],
+            requested.as_ref(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot represent max_tokens"));
     }
 
     #[test]
