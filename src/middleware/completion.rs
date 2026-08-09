@@ -25,7 +25,7 @@ use crate::aggregator::service::{
     ServiceError, ServiceResponseStream, UpstreamVerificationError,
 };
 
-use super::control::ControlClient;
+use super::control::{ControlClient, GenerationConstraints};
 use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_transform::{build_candidates, Endpoint};
@@ -320,6 +320,7 @@ pub async fn run(
         && params
             .get("response_format")
             .is_some_and(|value| !value.is_null());
+    let output_token_limit = output_token_limit(endpoint, &params);
 
     let consult = control
         .consult_pre(
@@ -327,7 +328,10 @@ pub async fn run(
             api_key_hash.as_deref(),
             provider,
             reasoning_requirements.as_ref(),
-            structured_output,
+            GenerationConstraints {
+                structured_output,
+                output_token_limit,
+            },
             tee_only,
         )
         .await;
@@ -1309,6 +1313,18 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
     }
 }
 
+fn output_token_limit(endpoint: Endpoint, params: &Value) -> Option<u64> {
+    match endpoint {
+        Endpoint::ChatComplete => params
+            .get("max_completion_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| params.get("max_tokens").and_then(Value::as_u64)),
+        Endpoint::Complete | Endpoint::Messages => params.get("max_tokens").and_then(Value::as_u64),
+        Endpoint::CreateModelResponse => params.get("max_output_tokens").and_then(Value::as_u64),
+        Endpoint::Embed => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1362,39 @@ mod tests {
         // class — must trip the anomaly.
         assert!(finish_reasons_anomalous(["upstream_error"]));
         assert!(finish_reasons_anomalous(["stop", "weird_provider_reason"]));
+    }
+
+    #[test]
+    fn normalizes_output_token_limit_across_api_surfaces() {
+        let cases = [
+            (Endpoint::ChatComplete, r#"{"max_tokens":128}"#, Some(128)),
+            (
+                Endpoint::ChatComplete,
+                r#"{"max_tokens":128,"max_completion_tokens":64}"#,
+                Some(64),
+            ),
+            (
+                Endpoint::ChatComplete,
+                r#"{"max_tokens":64,"max_completion_tokens":null}"#,
+                Some(64),
+            ),
+            (
+                Endpoint::ChatComplete,
+                r#"{"max_tokens":64,"max_completion_tokens":"invalid"}"#,
+                Some(64),
+            ),
+            (Endpoint::Complete, r#"{"max_tokens":48}"#, Some(48)),
+            (Endpoint::Messages, r#"{"max_tokens":32}"#, Some(32)),
+            (
+                Endpoint::CreateModelResponse,
+                r#"{"max_output_tokens":16}"#,
+                Some(16),
+            ),
+            (Endpoint::Embed, r#"{"max_tokens":8}"#, None),
+        ];
+        for (endpoint, params, expected) in cases {
+            let params = serde_json::from_str(params).unwrap();
+            assert_eq!(output_token_limit(endpoint, &params), expected);
+        }
     }
 }
