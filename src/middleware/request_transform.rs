@@ -150,6 +150,7 @@ pub fn transform_to_provider_request(
 ) -> Result<Value, TransformError> {
     let mut params = params.clone();
     inject_stream_options(&mut params);
+    inject_sglang_structured_output_reasoning_default(&mut params, endpoint, engine);
     let config = select_config(format, endpoint, engine)?;
     transform_using_provider_config(&config, &params)
 }
@@ -194,6 +195,9 @@ fn candidate_params(
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
+    // The control plane's route-specific resolution is authoritative. Fall back
+    // to caller intent only when control did not resolve it; if both are absent,
+    // engine-specific shaping may install a safe default below.
     let Some(effective) = candidate
         .effective_reasoning
         .as_ref()
@@ -257,6 +261,28 @@ fn reasoning_object(config: &ReasoningConfig) -> Value {
         object.insert("enabled".into(), enabled.into());
     }
     Value::Object(object)
+}
+
+fn inject_sglang_structured_output_reasoning_default(
+    params: &mut Value,
+    endpoint: Endpoint,
+    engine: Option<Engine>,
+) {
+    if endpoint != Endpoint::ChatComplete || engine != Some(Engine::Sglang) {
+        return;
+    }
+    let Some(object) = params.as_object_mut() else {
+        return;
+    };
+    let has_structured_output = object
+        .get("response_format")
+        .is_some_and(|value| !value.is_null());
+    if has_structured_output
+        && !object.contains_key("reasoning")
+        && !object.contains_key("reasoning_effort")
+    {
+        object.insert("reasoning_effort".into(), json!("none"));
+    }
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
@@ -1238,6 +1264,90 @@ mod tests {
         );
         // Managed OpenAI chatComplete has no top_k param, so it is dropped.
         assert!(managed.get("top_k").is_none());
+    }
+
+    #[test]
+    fn sglang_structured_output_defaults_reasoning_off() {
+        let params = json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "response_format": { "type": "json_object" }
+        });
+        let sglang = chat(ProviderFormat::Openai, params.clone(), Some(Engine::Sglang));
+        assert_eq!(sglang["reasoning_effort"], "none");
+
+        let explicit = chat(
+            ProviderFormat::Openai,
+            json!({
+                "model": "m",
+                "messages": [],
+                "response_format": { "type": "json_object" },
+                "reasoning_effort": "high"
+            }),
+            Some(Engine::Sglang),
+        );
+        assert_eq!(explicit["reasoning_effort"], "high");
+
+        let vllm = chat(ProviderFormat::Openai, params, Some(Engine::Vllm));
+        assert!(vllm.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn sglang_structured_output_reasoning_precedence_is_control_then_caller_then_default() {
+        let request = json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "response_format": { "type": "json_schema", "json_schema": {} }
+        });
+        let candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "sglang:m",
+            "format": "openai",
+            "engine": "sglang",
+            "effectiveReasoning": { "effort": "high", "enabled": true }
+        }))
+        .unwrap();
+
+        let controlled = build_candidates(
+            &request,
+            Endpoint::ChatComplete,
+            std::slice::from_ref(&candidate),
+            None,
+        )
+        .unwrap();
+        assert_eq!(controlled[0].1["reasoning_effort"], "high");
+
+        let explicit_reasoning = ReasoningConfig {
+            effort: Some(ReasoningEffort::Medium),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let explicit = build_candidates(
+            &request,
+            Endpoint::ChatComplete,
+            &[candidate],
+            Some(&explicit_reasoning),
+        )
+        .unwrap();
+        assert_eq!(explicit[0].1["reasoning_effort"], "high");
+
+        let uncontrolled: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "sglang:m",
+            "format": "openai",
+            "engine": "sglang"
+        }))
+        .unwrap();
+        let caller_controlled = build_candidates(
+            &request,
+            Endpoint::ChatComplete,
+            std::slice::from_ref(&uncontrolled),
+            Some(&explicit_reasoning),
+        )
+        .unwrap();
+        assert_eq!(caller_controlled[0].1["reasoning_effort"], "medium");
+
+        let defaulted =
+            build_candidates(&request, Endpoint::ChatComplete, &[uncontrolled], None).unwrap();
+        assert_eq!(defaulted[0].1["reasoning_effort"], "none");
     }
 
     #[test]

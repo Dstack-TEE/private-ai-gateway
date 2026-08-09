@@ -2,9 +2,10 @@
 //! events into the downstream client surface, event by event, threading mutable
 //! state across events (a per-stream transform state).
 //!
-//! Three provider conversions are supported. Same-format streaming reaches this
-//! module only when response reasoning must be excluded. Cost injection, TTFT,
-//! and outcome are a separate metering pass downstream (`sse`).
+//! Three provider conversions are supported. Same-format streaming also reaches
+//! this module for reasoning-usage normalization or when response reasoning must
+//! be excluded. Cost injection, TTFT, and outcome are a separate metering pass
+//! downstream (`sse`).
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -33,14 +34,16 @@ pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
     AnthropicCompleteToOpenai,
+    NormalizeReasoningUsage,
     ExcludeReasoning,
 }
 
 impl StreamTransform {
     fn provider(self) -> &'static str {
         match self {
-            StreamTransform::OpenaiToAnthropicMessages => "openai",
-            StreamTransform::ExcludeReasoning => "openai",
+            StreamTransform::OpenaiToAnthropicMessages
+            | StreamTransform::NormalizeReasoningUsage
+            | StreamTransform::ExcludeReasoning => "openai",
             _ => "anthropic",
         }
     }
@@ -58,8 +61,12 @@ impl StreamTransform {
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Option<String>, ()> {
-        if matches!(self, StreamTransform::ExcludeReasoning) {
-            return exclude_reasoning_event(event).map(Some);
+        match self {
+            StreamTransform::NormalizeReasoningUsage => {
+                return normalize_reasoning_usage_event(event).map(Some)
+            }
+            StreamTransform::ExcludeReasoning => return exclude_reasoning_event(event).map(Some),
+            _ => {}
         }
         let event = parse_event(event);
         match self {
@@ -70,7 +77,9 @@ impl StreamTransform {
                 openai_to_anthropic_messages_stream(&event, fallback_id, state)
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
-            StreamTransform::ExcludeReasoning => unreachable!(),
+            StreamTransform::NormalizeReasoningUsage | StreamTransform::ExcludeReasoning => {
+                unreachable!()
+            }
         }
     }
 }
@@ -87,6 +96,7 @@ pub fn select_stream_transform(
         (Anthropic, ChatComplete) => Some(StreamTransform::AnthropicToOpenaiChat),
         (Anthropic, Complete) => Some(StreamTransform::AnthropicCompleteToOpenai),
         (Openai, Messages) => Some(StreamTransform::OpenaiToAnthropicMessages),
+        (Openai, ChatComplete) => Some(StreamTransform::NormalizeReasoningUsage),
         _ => None,
     }
 }
@@ -771,7 +781,7 @@ fn replace_data_fields(event: &str, replacement: &str) -> String {
     output
 }
 
-fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
+fn transform_json_event(event: &str, transform: fn(&mut Value)) -> Result<String, ()> {
     let parsed = parse_event(event);
     let Some(payload) = parsed.data.as_deref() else {
         return Ok(framed_event(event));
@@ -782,12 +792,20 @@ fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
     }
     let mut body: Value = serde_json::from_str(payload).map_err(|_| ())?;
     let original = body.clone();
-    response_transform::exclude_reasoning(&mut body);
+    transform(&mut body);
     if body == original {
         Ok(framed_event(event))
     } else {
         Ok(replace_data_fields(event, &json_str(&body)))
     }
+}
+
+fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
+    transform_json_event(event, response_transform::exclude_reasoning)
+}
+
+fn normalize_reasoning_usage_event(event: &str) -> Result<String, ()> {
+    transform_json_event(event, response_transform::normalize_reasoning_usage)
 }
 
 /// Splits the provider byte stream into SSE events and applies a stateful
@@ -1383,6 +1401,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_stream_usage_is_normalized_and_preserves_sse_fields() {
+        let output = normalize_reasoning_usage_event(
+            "event: chunk\nid: 7\nretry: 100\n: keep\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":0,\"reasoning_tokens\":0,\"completion_tokens_details\":null}}",
+        )
+        .unwrap();
+        assert!(output.contains("event: chunk\n"), "{output}");
+        assert!(output.contains("id: 7\n"), "{output}");
+        assert!(output.contains("retry: 100\n"), "{output}");
+        assert!(output.contains(": keep\n"), "{output}");
+        let parsed = parse_event(&output);
+        let body: Value = serde_json::from_str(parsed.data.as_deref().unwrap()).unwrap();
+        assert_eq!(body["usage"]["reasoning_tokens"], 0);
+        assert_eq!(
+            body["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            0
+        );
+    }
+
+    #[test]
     fn selection_matrix() {
         assert!(matches!(
             select_stream_transform(ProviderFormat::Anthropic, Endpoint::ChatComplete),
@@ -1392,6 +1429,9 @@ mod tests {
             select_stream_transform(ProviderFormat::Openai, Endpoint::Messages),
             Some(StreamTransform::OpenaiToAnthropicMessages)
         ));
-        assert!(select_stream_transform(ProviderFormat::Openai, Endpoint::ChatComplete).is_none());
+        assert!(matches!(
+            select_stream_transform(ProviderFormat::Openai, Endpoint::ChatComplete),
+            Some(StreamTransform::NormalizeReasoningUsage)
+        ));
     }
 }
