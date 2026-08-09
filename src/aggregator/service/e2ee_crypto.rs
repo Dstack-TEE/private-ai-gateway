@@ -452,6 +452,13 @@ pub(super) fn encrypt_e2ee_response_body(
             )?;
             encrypt_response_field(
                 message,
+                "reasoning",
+                &format!("choices.{choice_index}.message.reasoning"),
+                ctx,
+                &response_id,
+            )?;
+            encrypt_response_field(
+                message,
                 "reasoning_content",
                 &format!("choices.{choice_index}.message.reasoning_content"),
                 ctx,
@@ -594,6 +601,13 @@ pub(super) fn encrypt_e2ee_stream_payload(
             )?;
             encrypt_response_field(
                 delta,
+                "reasoning",
+                &format!("choices.{choice_index}.delta.reasoning"),
+                ctx,
+                &response_id,
+            )?;
+            encrypt_response_field(
+                delta,
                 "reasoning_content",
                 &format!("choices.{choice_index}.delta.reasoning_content"),
                 ctx,
@@ -612,12 +626,23 @@ pub(super) fn encrypt_response_field(
     ctx: &E2eeRequestContext,
     response_id: &str,
 ) -> Result<(), E2eeError> {
-    let Some(Value::String(plaintext)) = container.get_mut(field_name) else {
+    let Some(value) = container.get_mut(field_name) else {
+        return Ok(());
+    };
+    let Some(plaintext) = optional_response_string(value)? else {
         return Ok(());
     };
     let aad = response_aad_for_context(ctx, response_id, aci_field)?;
     *plaintext = encrypt_response_plaintext(ctx, plaintext.as_bytes(), aad.as_deref())?;
     Ok(())
+}
+
+fn optional_response_string(value: &mut Value) -> Result<Option<&mut String>, E2eeError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value)),
+        _ => Err(E2eeError::EncryptionFailed),
+    }
 }
 
 /// Encrypt `message.audio.data` in place under the `choices.{i}.message.audio.data`
@@ -698,7 +723,8 @@ pub(super) fn encrypt_response_plaintext(
 
 #[cfg(test)]
 mod tests {
-    use super::{aci_request_aad, aci_response_aad};
+    use super::{aci_request_aad, aci_response_aad, optional_response_string};
+    use serde_json::json;
 
     // Byte-exact expected AAD from spec/test-vectors.md §7 (X25519 suite).
     const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -730,6 +756,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(aad, RESPONSE_AAD.as_bytes());
+    }
+
+    #[test]
+    fn response_fields_reject_non_string_values() {
+        assert!(optional_response_string(&mut json!({"text": "secret"})).is_err());
     }
 
     #[test]
