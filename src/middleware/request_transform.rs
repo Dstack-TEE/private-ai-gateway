@@ -150,7 +150,6 @@ pub fn transform_to_provider_request(
 ) -> Result<Value, TransformError> {
     let mut params = params.clone();
     inject_stream_options(&mut params);
-    inject_sglang_structured_output_reasoning_default(&mut params, endpoint, engine);
     let config = select_config(format, endpoint, engine)?;
     transform_using_provider_config(&config, &params)
 }
@@ -196,8 +195,8 @@ fn candidate_params(
         object.remove(key);
     }
     // The control plane's route-specific resolution is authoritative. Fall back
-    // to caller intent only when control did not resolve it; if both are absent,
-    // engine-specific shaping may install a safe default below.
+    // to caller intent only when control did not resolve it. Absence remains
+    // absence: provider and engine labels do not imply reasoning capability.
     let Some(effective) = candidate
         .effective_reasoning
         .as_ref()
@@ -261,28 +260,6 @@ fn reasoning_object(config: &ReasoningConfig) -> Value {
         object.insert("enabled".into(), enabled.into());
     }
     Value::Object(object)
-}
-
-fn inject_sglang_structured_output_reasoning_default(
-    params: &mut Value,
-    endpoint: Endpoint,
-    engine: Option<Engine>,
-) {
-    if endpoint != Endpoint::ChatComplete || engine != Some(Engine::Sglang) {
-        return;
-    }
-    let Some(object) = params.as_object_mut() else {
-        return;
-    };
-    let has_structured_output = object
-        .get("response_format")
-        .is_some_and(|value| !value.is_null());
-    if has_structured_output
-        && !object.contains_key("reasoning")
-        && !object.contains_key("reasoning_effort")
-    {
-        object.insert("reasoning_effort".into(), json!("none"));
-    }
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
@@ -1267,14 +1244,14 @@ mod tests {
     }
 
     #[test]
-    fn sglang_structured_output_defaults_reasoning_off() {
+    fn engine_does_not_infer_a_structured_output_reasoning_default() {
         let params = json!({
             "model": "m",
             "messages": [{ "role": "user", "content": "hi" }],
             "response_format": { "type": "json_object" }
         });
         let sglang = chat(ProviderFormat::Openai, params.clone(), Some(Engine::Sglang));
-        assert_eq!(sglang["reasoning_effort"], "none");
+        assert!(sglang.get("reasoning_effort").is_none());
 
         let explicit = chat(
             ProviderFormat::Openai,
@@ -1293,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn sglang_structured_output_reasoning_precedence_is_control_then_caller_then_default() {
+    fn structured_output_reasoning_precedence_is_control_then_caller_then_absence() {
         let request = json!({
             "model": "m",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -1347,7 +1324,8 @@ mod tests {
 
         let defaulted =
             build_candidates(&request, Endpoint::ChatComplete, &[uncontrolled], None).unwrap();
-        assert_eq!(defaulted[0].1["reasoning_effort"], "none");
+        assert!(defaulted[0].1.get("reasoning_effort").is_none());
+        assert!(defaulted[0].1.get("reasoning").is_none());
     }
 
     #[test]

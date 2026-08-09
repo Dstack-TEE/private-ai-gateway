@@ -316,6 +316,10 @@ pub async fn run(
     // Forward the routing block verbatim; the control plane validates it. Parsing
     // it here would silently drop a caller's restrictions on a malformed field.
     let provider = params.get("provider");
+    let structured_output = endpoint == Endpoint::ChatComplete
+        && params
+            .get("response_format")
+            .is_some_and(|value| !value.is_null());
 
     let consult = control
         .consult_pre(
@@ -323,6 +327,7 @@ pub async fn run(
             api_key_hash.as_deref(),
             provider,
             reasoning_requirements.as_ref(),
+            structured_output,
             tee_only,
         )
         .await;

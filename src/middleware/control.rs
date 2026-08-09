@@ -46,6 +46,29 @@ pub struct CatalogResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreConsultBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    // Forwarded verbatim so the control plane validates it (a malformed block
+    // must not silently drop the caller's routing restrictions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a Value>,
+    // Canonical route-relevant controls only. Response visibility stays local.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a ReasoningConfig>,
+    // Content-blind response-shape signal. The schema remains local.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    structured_output: bool,
+    // TEE-only host: the control plane 404s a non-TEE model. Only sent when set
+    // so the metadata-minimal payload is unchanged off these hosts.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tee: bool,
+}
+
 #[derive(Clone)]
 pub struct ControlClient {
     client: reqwest::Client,
@@ -130,7 +153,7 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider?, reasoning? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub async fn consult_pre(
@@ -139,34 +162,15 @@ impl ControlClient {
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
         reasoning: Option<&ReasoningConfig>,
+        structured_output: bool,
         tee_only: bool,
     ) -> PreConsult {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Body<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            api_key_hash: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            model: Option<&'a str>,
-            // Forwarded verbatim so the control plane validates it (a malformed
-            // block must not silently drop the caller's routing restrictions).
-            #[serde(skip_serializing_if = "Option::is_none")]
-            provider: Option<&'a Value>,
-            // Canonical route-relevant controls only. Response visibility stays
-            // local to the gateway.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            reasoning: Option<&'a ReasoningConfig>,
-            // TEE-only host: the control plane 404s a non-TEE model. Only sent
-            // when set so the metadata-minimal payload is unchanged off these hosts.
-            #[serde(skip_serializing_if = "std::ops::Not::not")]
-            tee: bool,
-        }
-
-        let body = Body {
+        let body = PreConsultBody {
             api_key_hash,
             model,
             provider,
             reasoning,
+            structured_output,
             tee: tee_only,
         };
         let build = || {
@@ -300,12 +304,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pre_consult_body_sends_only_the_structured_output_signal() {
+        let reasoning = ReasoningConfig {
+            effort: Some(crate::middleware::types::ReasoningEffort::High),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(PreConsultBody {
+            api_key_hash: None,
+            model: Some("m"),
+            provider: None,
+            reasoning: Some(&reasoning),
+            structured_output: true,
+            tee: false,
+        })
+        .unwrap();
+
+        assert_eq!(body["structuredOutput"], true);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(body.get("responseFormat").is_none());
+        assert!(body.get("tee").is_none());
+    }
+
     #[tokio::test]
     async fn consult_pre_fails_closed_on_transport_error() {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client.consult_pre(Some("m"), None, None, None, false).await;
+        let consult = client
+            .consult_pre(Some("m"), None, None, None, false, false)
+            .await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(
