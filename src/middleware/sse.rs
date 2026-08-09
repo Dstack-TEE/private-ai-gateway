@@ -488,7 +488,8 @@ impl MeterStream {
                         updated.get_mut("response").and_then(|r| r.get_mut("usage"))
                     }
                     .expect("usage presence checked above");
-                    let normalized = response_transform::normalize_reasoning_usage_value(usage_obj);
+                    let normalized = response_transform::normalize_reasoning_usage_value(usage_obj)
+                        .unwrap_or(false);
                     self.last_usage = Some(usage_obj.clone());
                     if !self.inject && !normalized {
                         return line.to_string();
