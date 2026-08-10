@@ -1,6 +1,6 @@
 //! ACI and dstack-vllm-proxy E2EE helpers.
 //!
-//! ACI v1 (§7.1) defines two cipher suites — X25519 (RECOMMENDED,
+//! ACI E2EE v2 (§6.1) defines two cipher suites — X25519 (RECOMMENDED,
 //! browser-native) and secp256k1 (EVM/dstack-native). Both do ECDH to a
 //! fresh ephemeral key, HKDF-SHA256, and AES-256-GCM; they differ only in
 //! the curve, the ephemeral key encoding, and the HKDF `info` string. The
@@ -12,7 +12,7 @@
 //!
 //! encoded as lowercase hex, where the ephemeral key is 32 raw bytes for
 //! X25519 and the 65-byte uncompressed SEC1 point for secp256k1. The AAD
-//! strings are built by the caller from ACI §7.3.
+//! strings are built by the caller from ACI §6.3.
 //!
 //! The inherited dstack-vllm-proxy profile uses the legacy `ecdsa`
 //! and `ed25519` labels, different HKDF context strings, and v1
@@ -80,13 +80,13 @@ pub fn ed25519_public_key_hex(secret: &Ed25519SigningKey) -> String {
     hex::encode(secret.verifying_key().as_bytes())
 }
 
-/// True for the two ACI v1 §7.1 E2EE cipher suites. Other keyset `algo`
+/// True for the two ACI v2 §6.1 E2EE cipher suites. Other keyset `algo`
 /// values (legacy labels, unknown suites) are ignored for E2EE selection.
 pub fn is_aci_e2ee_suite(algo: &str) -> bool {
     matches!(algo, E2EE_ALGO_X25519_AESGCM | E2EE_ALGO_SECP256K1_AESGCM)
 }
 
-/// Normalize a §7.1 public key to canonical lowercase hex for the suite's
+/// Normalize a §6.1 public key to canonical lowercase hex for the suite's
 /// `algo`: 32-byte raw for X25519, 65-byte uncompressed SEC1 for secp256k1.
 pub fn normalize_aci_e2ee_public_key_hex(algo: &str, value: &str) -> Result<String, KeyError> {
     match algo {
@@ -96,7 +96,7 @@ pub fn normalize_aci_e2ee_public_key_hex(algo: &str, value: &str) -> Result<Stri
     }
 }
 
-/// Encrypt one ACI v2 field to a recipient public key under the given §7.1
+/// Encrypt one ACI v2 field to a recipient public key under the given §6.1
 /// suite. Used for response fields, keyed by the selected service E2EE key's
 /// `algo`.
 pub fn encrypt_aci_e2ee_for_public_key(

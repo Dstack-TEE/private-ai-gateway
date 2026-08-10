@@ -293,8 +293,8 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         );
     }
 
-    // receipt-3 — request.received.body_hash covers the bytes the client sent (for
-    // E2EE requests, the original bytes the client sealed, §7.4).
+    // receipt-3 — request.received.body_hash covers the plaintext wire bytes,
+    // or the compact post-decryption JSON body for E2EE v2 (§7.4).
     match cx.request_body {
         None => transcript.skip(
             RECEIPT_3,
@@ -320,8 +320,8 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         }
     }
 
-    // receipt-4 — response.returned covers the exact bytes read off the wire (raw
-    // SSE bytes for a stream, the sealed envelope bytes for E2EE, §7.4).
+    // receipt-4 — response.returned covers the exact bytes read off the wire
+    // (raw SSE bytes for a stream, including encrypted E2EE fields, §7.4).
     match cx.response_wire {
         None => transcript.skip(
             RECEIPT_4,

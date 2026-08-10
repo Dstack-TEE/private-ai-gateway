@@ -326,7 +326,7 @@ fn harness_with(
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: if enable_e2ee {
-            vec!["3".to_string()]
+            vec!["2".to_string()]
         } else {
             vec![]
         },
@@ -458,7 +458,7 @@ fn legacy_model_public_key(h: &Harness, signing_algo: &str) -> String {
         .clone()
 }
 
-/// A valid ACI v2 nonce (64 lowercase hex chars, §7.5) derived from a label, so
+/// A valid ACI v2 nonce (64 hex chars, §6.5) derived from a label, so
 /// each test uses a distinct, readable value without hardcoding 64-char hex.
 fn hex_nonce(label: &str) -> String {
     let mut out = String::with_capacity(64);
@@ -519,8 +519,8 @@ fn e2ee_chat_request(
 }
 
 /// Build an X25519-suite E2EE chat request: the client encrypts whole message
-/// content to the keyset's X25519 service key (§7.1 RECOMMENDED suite). Suite
-/// selection is by the `algo` of the matched `X-Model-Pub-Key` entry (§7.4).
+/// content to the keyset's X25519 service key (§6.1 RECOMMENDED suite). Suite
+/// selection is by the `algo` of the matched `X-Model-Pub-Key` entry (§6.4).
 fn e2ee_x25519_chat_request(
     h: &Harness,
     client_secret: &X25519SecretKey,
@@ -604,7 +604,7 @@ fn e2ee_completion_request_with_stream(
 }
 
 /// ACI v2 response AAD bound to the request model `aci-model`, for the given
-/// response id and full field path (spec §7.2, §7.3).
+/// response id and full field path (spec §6.2, §6.3).
 fn e2ee_response_aad(h: &Harness, nonce: &str, response_id: &str, field: &str) -> Vec<u8> {
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     aci_response_aad(
@@ -1019,6 +1019,21 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 }
 
 #[tokio::test]
+async fn e2ee_v2_is_rejected_on_prompt_endpoints_without_a_v2_field_contract() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+
+    for path in ["/v1/messages", "/v1/responses"] {
+        let resp = h
+            .requester
+            .post(path, CHAT_REQUEST, &[("x-e2ee-version", "2")])
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(error_type(&resp), "e2ee_unsupported_endpoint", "{path}");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn e2ee_v2_success_sets_e2ee_headers_and_receipt_hashes_cleartext_and_wire_separately() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x55; 32]).unwrap();
@@ -1093,7 +1108,7 @@ async fn e2ee_v2_x25519_suite_selected_by_model_key_round_trips() {
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
-    // The response header follows the suite selected by X-Model-Pub-Key (§7.4).
+    // The response header follows the suite selected by X-Model-Pub-Key (§6.4).
     assert_eq!(
         header(&resp.headers, "x-e2ee-algo"),
         E2EE_ALGO_X25519_AESGCM
@@ -1187,7 +1202,7 @@ async fn e2ee_v2_response_aad_uses_request_model_not_upstream_response_model() {
 #[tokio::test]
 async fn e2ee_v2_decrypts_multimodal_image_and_audio_parts() {
     // Per-part decryption of `image_url.url` and `input_audio.data`
-    // alongside a text part (spec §7.2).
+    // alongside a text part (spec §6.2).
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x64; 32]).unwrap();
     let nonce = hex_nonce("nonce-multimodal");
@@ -1253,7 +1268,7 @@ async fn e2ee_v2_decrypts_multimodal_image_and_audio_parts() {
 
 #[tokio::test]
 async fn e2ee_v2_response_encrypts_message_audio_data() {
-    // Buffered chat responses encrypt `choices.{i}.message.audio.data` (§7.2).
+    // Buffered chat responses encrypt `choices.{i}.message.audio.data` (§6.2).
     let audio_response = br#"{"id":"chat-aci-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","audio":{"id":"audio-1","data":"QUJDMTIzYXVkaW8="}},"finish_reason":"stop"}]}"#;
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(audio_response));
     let client_secret = k256::SecretKey::from_slice(&[0x65; 32]).unwrap();
@@ -1408,12 +1423,35 @@ async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
 }
 
 #[tokio::test]
+async fn e2ee_v2_replay_detection_normalizes_nonce_hex_case() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x5d; 32]).unwrap();
+    let nonce = hex_nonce("nonce-case");
+    let (lower_body, lower_headers) = e2ee_request(&h, &client_secret, &nonce);
+    let upper_nonce = nonce.to_ascii_uppercase();
+    let (upper_body, upper_headers) = e2ee_request(&h, &client_secret, &upper_nonce);
+
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &lower_body, &lower_headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    let second = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &upper_body, &upper_headers)
+        .await;
+    assert_eq!(second.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
 async fn e2ee_v2_invalid_payload_model_is_rejected_before_upstream() {
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x59; 32]).unwrap();
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     // JCS AAD needs no escaping, so `model` is rejected only when it is absent
-    // or not a string (spec §7.3), never for its contents.
+    // or not a string (spec §6.3), never for its contents.
     let invalid = br#"{"model":123,"messages":[]}"#;
     let client_pub = public_key_from_secret(&client_secret);
     let nonce = hex_nonce("payload-model");
@@ -1438,7 +1476,7 @@ async fn e2ee_v2_invalid_payload_model_is_rejected_before_upstream() {
 
 #[tokio::test]
 async fn e2ee_v2_malformed_nonce_is_rejected_before_upstream() {
-    // §7.5: the nonce must be exactly 64 lowercase hex characters.
+    // §6.5: the nonce must be exactly 64 hexadecimal characters.
     let h = harness_with_e2ee(RecordingUpstream::default());
     let client_secret = k256::SecretKey::from_slice(&[0x60; 32]).unwrap();
     let (_body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("valid-nonce"));

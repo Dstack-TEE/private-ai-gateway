@@ -324,7 +324,7 @@ function channelLine(
         ID_TITLES,
         'id-6',
         'fail',
-        'keyset publishes no TLS role: pin nothing, or seal through E2EE instead (§1.1, §9.1(6))',
+        'keyset publishes no TLS role: pin nothing, or encrypt through E2EE instead (§1.1, §9.1(6))',
       );
     }
     return candidates.some((k) => k.spki_sha256.toLowerCase() === observed)

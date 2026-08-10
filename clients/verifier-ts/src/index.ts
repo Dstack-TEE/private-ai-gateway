@@ -5,9 +5,10 @@
  * with a fresh nonce and get a full §9.1 transcript, including the hardware
  * quote (id-1, verified with @phala/dcap-qvl against the Phala PCCS) and the
  * compose measurement (id-4). Also exposes the individual checks: report
- * binding (§9.1 checks 2–3), receipts and body hashes (§9.3), sessions
- * (§8, §9.3), and the v2 sealed-body E2EE channel (§6). Every check other than
- * the quote is Web Crypto (Ed25519, X25519, HKDF, AES-GCM, SHA-256).
+ * binding (§9.1 checks 2–3), receipts and body hashes (§9.3), and sessions
+ * (§8, §9.3). Every check other than the quote uses Web Crypto (Ed25519 and
+ * SHA-256). E2EE v2 field encryption is specified by §6 but is not constructed
+ * by this verifier package.
  */
 
 // Crypto primitives (Web Crypto)

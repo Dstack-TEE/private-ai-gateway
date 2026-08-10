@@ -42,10 +42,10 @@ evidence) exactly as observed.
   evidence, and is one you pinned with `provider.aci_session_ids`). Pass
   `{ session, pinnedSessions, requiresVerified }`; anything absent is a skip
   with its reason, never a pass.
-- **No E2EE this round.** This client ships no request/response sealing —
-  the §6 whole-body scheme lands with the E2EE revamp. A bound channel
-  needs the caller-observed TLS SPKI (the `channel` option) or the `aci`
-  CLI / `aci serve` proxy.
+- **E2EE key verification, not an E2EE request builder.** Report verification
+  establishes the quote-bound `e2ee_public_keys`, including the v2 suites in
+  §6. This package does not yet encrypt or decrypt content fields. Callers can
+  implement the field-level wire contract in §6 or use a separate v2 client.
 
 ## What it does not do
 
@@ -107,9 +107,11 @@ if (!(await checkResponseBodyHash(result.payload!, responseBytes))) {
 
 ### E2EE
 
-This client ships no E2EE this round — the §6 whole-body scheme lands with
-the E2EE revamp. Until then, a bound channel needs the caller-observed TLS
-SPKI (the `channel` option) or the `aci` CLI / `aci serve` proxy.
+ACI E2EE v2 is the supported field-level scheme in spec §6. This verifier
+establishes the attested E2EE keys but does not construct encrypted requests or
+decrypt responses. Use a v2-capable client for those operations. Without one,
+a bound channel needs the caller-observed TLS SPKI (`channel`) or the `aci` CLI
+/ `aci serve` proxy.
 
 ## Development
 

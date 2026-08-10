@@ -217,17 +217,19 @@ fn validate_keyset(
     _config: &AciServiceConfig,
 ) -> Result<(), ServiceError> {
     use crate::aci::digest::sha256_raw;
-    use crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM;
+    use crate::aci::e2ee::is_aci_e2ee_suite;
 
-    // §3.1: the §6.1 E2EE key is unconditional — the keyset is the identity
-    // document even while E2EE termination is disabled (gaps item 3).
+    // §3.1: at least one recognized §6.1 E2EE suite is unconditional — the
+    // keyset is the identity document even while E2EE termination is disabled.
+    // X25519 is recommended, not required; existing v2 clients may select the
+    // secp256k1 suite on its own.
     if !keyset
         .e2ee_public_keys
         .iter()
-        .any(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+        .any(|key| is_aci_e2ee_suite(&key.algo))
     {
         return Err(ServiceError::Keyset(format!(
-            "e2ee_public_keys has no {E2EE_ALGO_X25519_AESGCM} entry (§3.1)"
+            "e2ee_public_keys has no recognized ACI E2EE v2 suite (§3.1, §6.1)"
         )));
     }
     for receipt_key in &keyset.receipt_signing_keys {

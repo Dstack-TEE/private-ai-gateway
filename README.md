@@ -131,17 +131,16 @@ additional ACI artifacts are:
 - `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
 - `GET /v1/aci/sessions/{session_id}`: fetches an attested-session audit
   record referenced by a receipt.
-- Optional ACI E2EE headers: seal the whole request and response bodies to an
-  attested key when the client wants application-level encryption in addition
-  to TLS.
+- Optional ACI E2EE v2 headers: encrypt content-bearing request and response
+  fields to an attested key when the client wants application-level encryption
+  in addition to TLS. V2 is enabled by default.
 
 Useful terms:
 
 - **TEE**: trusted execution environment. In this project, the gateway relies on
   dstack/TDX evidence to prove where the workload is running.
-- **E2EE**: end-to-end encryption of whole request and response bodies between
-  a client and the verified gateway workload, used when TLS alone is not
-  enough for the client.
+- **E2EE**: field-level end-to-end encryption between a client and the verified
+  gateway workload, used when TLS alone is not enough for the client.
 - **Workload keyset**: the attested document listing the gateway's
   receipt-signing, E2EE, and TLS keys. The TEE quote binds its digest, making
   the keyset the unit of workload identity.

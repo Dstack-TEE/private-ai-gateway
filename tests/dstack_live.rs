@@ -168,19 +168,24 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
         .await
         .unwrap();
 
-    // One attested receipt key (Ed25519) and one attested E2EE suite key.
+    // One attested receipt key and both long-lived ACI E2EE v2 suites.
     let receipt_keys = provider.receipt_keys();
     assert_eq!(receipt_keys.len(), 1);
     assert_eq!(receipt_keys[0].algo, ALGO_ED25519);
     assert_eq!(receipt_keys[0].public_key_hex.len(), 64);
 
     let e2ee_keys = provider.e2ee_keys();
-    assert_eq!(e2ee_keys.len(), 1);
+    assert_eq!(e2ee_keys.len(), 2);
     assert_eq!(
         e2ee_keys[0].algo,
+        private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM
+    );
+    assert_eq!(e2ee_keys[0].public_key_hex.len(), 130);
+    assert_eq!(
+        e2ee_keys[1].algo,
         private_ai_gateway::aci::e2ee::E2EE_ALGO_X25519_AESGCM
     );
-    assert_eq!(e2ee_keys[0].public_key_hex.len(), 64);
+    assert_eq!(e2ee_keys[1].public_key_hex.len(), 64);
 
     // legacy keys stay outside the keyset.
     let legacy_keys = provider.legacy_e2ee_keys();
@@ -192,7 +197,14 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
 
     let evidence = provider.key_custody_evidence();
     assert_eq!(evidence["provider"], "dstack-kms");
-    assert_eq!(evidence["keys"].as_array().unwrap().len(), 4);
+    let custody_keys = evidence["keys"].as_array().unwrap();
+    assert_eq!(custody_keys.len(), 3);
+    let secp256k1_custody = custody_keys
+        .iter()
+        .find(|key| key["role"] == "e2ee-secp256k1")
+        .expect("secp256k1 E2EE key must carry custody evidence");
+    assert_eq!(secp256k1_custody["algo"], e2ee_keys[0].algo);
+    assert_eq!(secp256k1_custody["public_key"], e2ee_keys[0].public_key_hex);
     assert!(evidence["keys"][0]["signature_chain"]
         .as_array()
         .is_some_and(|chain| !chain.is_empty()));

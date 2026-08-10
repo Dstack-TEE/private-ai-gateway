@@ -103,10 +103,10 @@ Then verify the response (spec §9.3):
 1. The receipt signature (Ed25519 over the JCS form of the document
    bytes) verifies under the keyset entry `key_id` names.
 2. The payload's `workload_keyset_digest` matches the established digest.
-3. `request.received.body_hash` matches the request bytes you sent (for E2EE,
-   the original bytes you sealed).
+3. `request.received.body_hash` matches the request bytes the gateway processed.
+   For E2EE v2, reconstruct the compact JSON body with decrypted field values.
 4. `response.returned.body_hash` matches the response bytes you received (the
-   raw SSE stream for streaming, the sealed envelope bytes for E2EE).
+   raw SSE stream for streaming, including encrypted E2EE fields).
 
 For aggregator deployments, verify the cited session (spec §9.2): the
 `upstream.verified` event is `verified` and cites a `session_id`; the fetched
@@ -158,45 +158,46 @@ before forwarding, and the refusal carries its own receipt. The whole
 
 ## E2EE Mode
 
-> **Draft:** this section describes the spec §6 whole-body scheme, the
-> revamp target and still under active revision. The implementation still
-> ships the earlier field-level scheme instead, disabled by default
-> (`enable_e2ee`). That flag gates the ACI scheme only; the legacy
-> dstack-vllm-proxy path stays available.
+E2EE v2 encrypts content-bearing request and response fields between the
+client and the attested gateway. It is enabled by default and remains a
+supported compatibility contract. TLS still protects the HTTP connection;
+E2EE binds field plaintext to a key from the quote-bound workload keyset.
 
-E2EE seals the whole request and response bodies between the client and the
-attested gateway, on top of TLS, so the decryption capability itself is
-attested even when TLS terminates outside the workload.
-
-Use ACI E2EE v2 (spec §6). Required headers:
+Use ACI E2EE v2 (spec §6) with these headers:
 
 | Header | Value |
 | --- | --- |
 | `X-E2EE-Version` | `2` |
-| `X-Client-Pub-Key` | Client X25519 public key, hex encoded. |
-| `X-Model-Pub-Key` | Gateway X25519 E2EE public key from the attested keyset. |
+| `X-Client-Pub-Key` | Client public key, hex encoded with the selected suite's curve. |
+| `X-Model-Pub-Key` | Gateway E2EE public key from the attested keyset. |
+| `X-E2EE-Nonce` | A fresh 32-byte random value encoded as 64 hex characters. |
+| `X-E2EE-Timestamp` | Current Unix time in seconds. |
 
 Do not send `X-Signing-Algo` for ACI E2EE v2. That header selects the legacy
 compatibility path.
 
-The request body is the envelope `{ "model": "<id>", "sealed_b64": "<base64>" }`,
-where the sealed unit is
+The client selects either `x25519-aes-256-gcm-hkdf-sha256` or
+`secp256k1-aes-256-gcm-hkdf-sha256` by matching the `algo` on an
+`e2ee_public_keys` entry. Each encrypted field is lowercase hex of:
 
 ```text
-ephemeral_x25519_public_key (32) || aes_gcm_nonce (12) || ciphertext || tag (16)
+ephemeral_public_key || aes_gcm_nonce (12) || ciphertext || tag (16)
 ```
 
-sealing your entire original request-body bytes to the attested key
-(X25519 + HKDF-SHA256 + AES-256-GCM). The AAD binds the direction context and
-the envelope `model`, so a sealed body cannot be replayed under a different
-model. Responses come back as `{ "sealed_b64": ... }` — the whole body when
-buffered, each SSE event's data payload when streaming.
+The JSON structure stays OpenAI-compatible. Encrypt request content in place,
+for example `messages.0.content`, and decrypt the corresponding response fields
+such as `choices.0.message.content`. The RFC 8785 JCS AAD binds each field to
+the direction, selected algorithm, request model, full field path, request
+nonce, timestamp, and response id. See spec §6.2 and §6.3 for every supported
+field and the byte-exact AAD object.
 
-The gateway unseals your exact original bytes and processes those, so the
-receipt's `request.received.body_hash` is reproducible from the bytes you
-sealed. For E2EE responses, `response.returned.body_hash` covers the sealed
-envelope bytes you received; the AEAD already authenticates the plaintext
-inside them.
+The quote binds the workload keyset digest directly. V2 does not require, and
+does not reintroduce, a separate workload identity key or keyset endorsement.
+The attested `e2ee_public_keys` entry is the key-provenance anchor.
+
+`enable_e2ee` defaults to `true`. Setting it to `false` is an explicit
+operator opt-out: the attestation advertises no supported E2EE versions and
+the gateway rejects v2 requests before decryption.
 
 ## Legacy Compatibility
 

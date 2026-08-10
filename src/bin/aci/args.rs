@@ -277,7 +277,7 @@ pub struct ServeArgs {
         value_name = "SESSION_ID",
         value_parser = session_id,
         conflicts_with_all = ["require_claims", "allow_unverified"],
-        help = "Session id (spec 5.3) to pin into every unsealed POST that does not pin \
+        help = "Session id (spec 5.3) to pin into every POST that does not pin \
                 its own; repeatable. Implies verified serving."
     )]
     pub sessions: Vec<String>,

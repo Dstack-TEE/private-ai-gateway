@@ -140,12 +140,12 @@ What the proxy does:
   the connection-scoped ones a proxy re-derives, so your API key and any
   E2EE headers reach the service unchanged. The proxy stores nothing and
   never logs bodies.
-- Every plaintext inference demands verified serving: the proxy sets
+- Every inference demands verified serving: the proxy sets
   `provider.aci_verified` in the body ([aci.md](../spec/aci.md) §5.3), so an
   aggregator refuses rather than serve you through an unverified upstream.
-  `--allow-unverified` drops the demand. A sealed request passes through
-  untouched — only the client can write inside its own sealed body, so an
-  E2EE client states the constraint itself before sealing.
+  `--allow-unverified` drops the demand. Under E2EE v2, only content-bearing
+  fields are encrypted, so the proxy can add or tighten the ordinary
+  `provider` block without changing ciphertext.
 - Every upstream connection enforces the attested TLS SPKI pin for the
   hostname and fails closed on a mismatch.
 - Responses stream through byte-exact while the proxy digests the raw wire

@@ -30,16 +30,13 @@ item.
 
 ## Service conformance
 
-3. **ACI E2EE is off by default, and the shipped scheme predates §6.**
-   `enable_e2ee` defaults to false, so the gateway advertises no
-   `supported_e2ee_versions` and rejects ACI E2EE requests. It gates the ACI
-   scheme only: the inherited dstack-vllm-proxy path (`x-signing-algo`) stays
-   available, so existing clients are unaffected. §1.4(5) requires
-   E2EE on chat completions, so the default deployment is knowingly
-   non-conformant until the §6 revamp (item 8) lands. Setting `enable_e2ee`
-   restores the earlier field-level v2 scheme carried over unchanged from
-   before this protocol revision — not the §6 whole-body sealing. The
-   launcher warns at startup.
+3. **ACI E2EE can be explicitly disabled.** `enable_e2ee` defaults to true
+   and advertises `supported_e2ee_versions: ["2"]`. An operator may still set
+   it to false for a TLS-only deployment; that deployment advertises no ACI
+   E2EE versions and rejects v2 requests. §1.4(5) requires E2EE on chat
+   completions, so explicit opt-out is non-conformant and produces a startup
+   warning. The flag gates only ACI v2. The inherited dstack-vllm-proxy path
+   selected by `x-signing-algo` remains available.
 
 4. **Receipts are in-memory only.** Receipt retention is bounded by
    `receipt_ttl_seconds` and lost on restart. The spec permits a bounded,
@@ -76,13 +73,12 @@ item.
    non-listed instance can serve when a sibling instance was listed. The
    receipt's cited id exposes this to the client's §9.3(6) check.
 
-8. **§6 is specified but not implemented.** The spec defines whole-body
-   sealing with the §6.1 key schedule (including the
-   `request_secret || unit_secret` response derivation and in-band response
-   authenticity). The implementation ships the earlier field-level scheme
-   (item 3); the TS client ships no E2EE at all; and `spec/test-vectors.md`
-   carries no §6 vectors yet. Response authenticity today is only post-hoc
-   via the receipt (§9.3). All of it lands with the E2EE revamp.
+8. **The E2EE replay cache is per process.** The spec requires rejection of a
+   repeated `(client_public_key, service_public_key, nonce)` tuple inside the
+   acceptance window (§6.5). `claim_e2ee_replay` keeps that state in one
+   process. Replicas that share the same workload keyset can each accept the
+   same captured request once unless the deployment provides affinity or a
+   shared replay store.
 
 9. **Session validity is advertised far longer than a session can actually
     serve.** `expires_at` is set to `now + receipt_ttl_seconds` (default
@@ -142,9 +138,10 @@ item.
 
 15. **The dstack custody policy checks only the receipt key.**
     `verify_dstack_kms_receipt_custody` matches the `receipt` role against
-    `receipt_signing_keys`; the `e2ee-x25519` custody entry is never matched
-    against `e2ee_public_keys`, and TLS is not covered. §3.3 requires a
-    policy to specify custody for the receipt, E2EE and TLS keys.
+    `receipt_signing_keys`; the `e2ee-secp256k1` and `e2ee-x25519` custody
+    entries are never matched against `e2ee_public_keys`, and TLS is not
+    covered. §3.3 requires a policy to specify custody for the receipt, E2EE
+    and TLS keys.
 
 16. **No plausibility bound on `not_after`.** §3.1 says a verifier SHOULD
     reject an implausibly distant expiry; no verifier here does, and the
@@ -203,9 +200,9 @@ item.
 21. **Legacy dstack-vllm-proxy compatibility** (the Appendix B non-ACI-surfaces rule).
     `/v1/attestation/report` (separate report-data layout, injected
     `signing_address` / `intel_quote` / `nvidia_payload`), `/v1/signature/{id}`,
-    and the `X-Signing-Algo` E2EE mode serve pre-ACI clients. The k256 code
-    and the legacy keys' KMS custody evidence are confined to that surface —
-    the `/v1/aci/attestation` report's `key_custody` carries keyset roles
-    only. The spec's rule that compatibility
+    and the `X-Signing-Algo` E2EE mode serve pre-ACI clients. The shared k256
+    key also serves the ACI v2 secp256k1 suite, so its KMS custody evidence is
+    a keyset role in `/v1/aci/attestation`; the legacy Ed25519 key stays
+    outside ACI artifacts. The spec's rule that compatibility
     surfaces must not alter ACI artifacts holds: report, receipt, and session
     bytes are identical with or without compatibility parameters.

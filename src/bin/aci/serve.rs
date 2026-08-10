@@ -92,8 +92,8 @@ pub struct RecordedExchange {
     pub path: String,
     pub status: u16,
     pub streamed: bool,
-    /// Digest of the request bytes this proxy forwarded; `None` for a sealed
-    /// request, whose §7.4 preimage only the client holds.
+    /// Digest of the request bytes this proxy forwarded; `None` for E2EE,
+    /// because §7.4 commits to the post-decryption body only the workload sees.
     pub request: Option<BodyDigest>,
     /// Digest of the response wire bytes as forwarded — the full body, or
     /// everything before the truncation recorded alongside.
@@ -129,8 +129,8 @@ pub struct ProxyState {
     /// Serializes the re-verify so a burst of blocked requests reverifies once.
     reverify: tokio::sync::Mutex<()>,
     recorded: Mutex<VecDeque<RecordedExchange>>,
-    /// `--session`: a fixed §5.3 pin set injected into every unsealed POST
-    /// that does not pin its own. Never refreshed — it is the user's own
+    /// `--session`: a fixed §5.3 pin set injected into every POST that does
+    /// not pin its own. Never refreshed — it is the user's own
     /// statement, so a 412 refusal surfaces as-is.
     fixed_pins: Vec<String>,
     /// `--require-claim`: the §9.2(3) policy that derives the pin set from
@@ -323,8 +323,8 @@ pub async fn run(args: ServeArgs) -> Result<i32, String> {
         if args.allow_unverified {
             "verified serving NOT demanded (--allow-unverified)."
         } else {
-            "every plaintext inference demands verified serving \
-             (provider.aci_verified, spec 5.3); a sealed request states its own."
+            "every inference demands verified serving \
+             (provider.aci_verified, spec 5.3)."
         }
     );
     println!();
@@ -435,26 +435,16 @@ async fn proxy_inference(
 
     let trusted = state.snapshot();
     let url = join_url(&state.base_url, &uri);
-    // §5.3: under E2EE the constraint rides inside the sealed body, which
-    // only the client can write. Injecting into the envelope would corrupt
-    // the request, so a sealed request passes through untouched and the
-    // client states its own constraint before sealing.
-    let sealed = headers.contains_key("x-e2ee-version");
-    let active_pins = if sealed {
-        Vec::new()
-    } else {
-        state.active_pins()
-    };
+    // §5.3: E2EE v2 encrypts content fields in place; `provider` remains
+    // ordinary JSON. The proxy can therefore tighten serving constraints
+    // without touching any ciphertext or its field-bound AAD.
+    let e2ee = headers.contains_key("x-e2ee-version");
+    let active_pins = state.active_pins();
     // Policy pins are injected only when the client stated none of its own.
-    let injected_policy_pins = !sealed
-        && !state.required_claims.is_empty()
+    let injected_policy_pins = !state.required_claims.is_empty()
         && !active_pins.is_empty()
         && pinned_session_ids(&body).is_empty();
-    let mut request_body = if !sealed {
-        apply_constraints(body.to_vec(), state.enforce_verified, &active_pins)
-    } else {
-        body.to_vec()
-    };
+    let mut request_body = apply_constraints(body.to_vec(), state.enforce_verified, &active_pins);
     let send = |body: Vec<u8>| {
         forward_headers(state.client.request(Method::POST, &url), &headers)
             .body(body)
@@ -507,16 +497,12 @@ async fn proxy_inference(
     // verification via the control endpoint. Nothing is fetched per request.
     let hook_state = state.clone();
     let hook_path = path.clone();
-    // §7.4 hashes the unsealed client bytes; for a sealed request the proxy
-    // only ever saw the envelope, so receipt-3 gets no preimage (skip, not fail).
-    let request_digest = (!sealed).then(|| BodyDigest::of(&request_body));
+    // §7.4 hashes the post-decryption body. The proxy cannot reproduce that
+    // body for E2EE, so receipt-3 gets no preimage (skip, not fail).
+    let request_digest = (!e2ee).then(|| BodyDigest::of(&request_body));
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
-    let pinned_sessions = if sealed {
-        Vec::new()
-    } else {
-        pinned_session_ids(&request_body)
-    };
+    let pinned_sessions = pinned_session_ids(&request_body);
     let hook: CompletionHook = Box::new(move |end| {
         let (response, truncation) = match end {
             StreamEnd::Complete(digest) => (digest, None),
@@ -863,10 +849,11 @@ fn pinned_session_ids(body: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Tighten a plaintext inference body (§5.3): demand verified serving and,
+/// Tighten an inference body (§5.3): demand verified serving and,
 /// when the proxy holds a pin set and the client stated none, pin those
-/// session ids. A client's own members always win; anything that is not a
-/// JSON object is forwarded untouched for the service to reject.
+/// session ids. E2EE v2 content fields are preserved verbatim. A client's own
+/// members always win; anything that is not a JSON object is forwarded
+/// untouched for the service to reject.
 fn apply_constraints(body: Vec<u8>, enforce_verified: bool, pins: &[String]) -> Vec<u8> {
     if !enforce_verified && pins.is_empty() {
         return body;
@@ -1067,6 +1054,18 @@ mod tests {
         );
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_session_ids"], json!(["b"]));
+
+        // Field-level E2EE content remains byte-for-byte unchanged while the
+        // ordinary provider block is tightened.
+        let ciphertext = "04deadbeef";
+        let out = apply_constraints(
+            format!(r#"{{"model":"m","messages":[{{"content":"{ciphertext}"}}]}}"#).into_bytes(),
+            true,
+            &[],
+        );
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["messages"][0]["content"], ciphertext);
+        assert_eq!(v["provider"]["aci_verified"], true);
 
         // Non-JSON bodies pass through untouched.
         assert_eq!(
