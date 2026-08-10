@@ -1,0 +1,41 @@
+{
+  "name": "opencode-provider-phala-cloud",
+  "version": "0.1.0",
+  "description": "Phala Cloud branded opencode provider for private-ai-gateway (ACI): attested TLS pinning + per-response receipt verification",
+  "keywords": [
+    "ai-provider",
+    "attestation",
+    "confidential-ai",
+    "llm",
+    "llm-provider",
+    "opencode",
+    "opencode-plugin",
+    "opencode-provider",
+    "phala",
+    "phala-cloud",
+    "tee",
+    "verifiable"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.ts",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "dependencies": {
+    "@phala/opencode-provider-aci": "file:../opencode-provider-aci"
+  }
+}

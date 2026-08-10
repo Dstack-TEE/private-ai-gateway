@@ -1,0 +1,49 @@
+name: opencode-provider
+
+on:
+  pull_request:
+    paths:
+      - 'clients/opencode-provider/**'
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/opencode-provider.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'clients/opencode-provider/**'
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/opencode-provider.yml'
+
+defaults:
+  run:
+    working-directory: clients/opencode-provider
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/opencode-provider/package-lock.json
+
+      - name: Build the reference verifier (file: dependency)
+        run: |
+          cd clients/verifier-ts
+          npm ci
+          npm run build
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

@@ -1,0 +1,30 @@
+{
+  "name": "private-ai-gateway-opencode-providers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vendor-neutral opencode provider for private-ai-gateway (ACI) + thin branded distributions (phala-cloud)",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "clean": "npm run clean --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "check": "tsc --noEmit",
+    "test": "npm run test -w @phala/opencode-provider-aci",
+    "lint": "npm run lint -w @phala/opencode-provider-aci",
+    "format": "npm run format -w @phala/opencode-provider-aci",
+    "format:check": "npm run format:check -w @phala/opencode-provider-aci",
+    "pre-commit": "npm run pre-commit -w @phala/opencode-provider-aci"
+  },
+  "devDependencies": {
+    "@j178/prek": "^0.4.4",
+    "@opencode-ai/plugin": "^1.18.15",
+    "@opencode-ai/sdk": "^1.18.15",
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^5.9.0"
+  }
+}
