@@ -508,6 +508,50 @@ async fn allow_forwards_and_finalizes_receipt() {
 }
 
 #[tokio::test]
+async fn control_override_reconciles_openrouter_reasoning_before_forwarding() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "phala:z-ai/glm-5.2",
+                "format": "openai",
+                "engine": "sglang",
+                "reasoningFormat": "reasoning_effort",
+                "effectiveReasoning": { "effort": "none" }
+            }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, _, forwarded) = build_sequenced_service(vec![200]);
+    let mut input = chat_input();
+    input.params = json!({
+        "model": "phala/glm-5.2",
+        "messages": [{ "role": "user", "content": "Return JSON" }],
+        "reasoning_effort": "high",
+        "response_format": { "type": "json_object" },
+        "max_tokens": 256,
+        "chat_template_kwargs": {
+            "thinking": true,
+            "enable_thinking": true,
+            "tokenize": false
+        }
+    });
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_slice(&forwarded.lock().unwrap()[0]).unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+    assert_eq!(
+        body["chat_template_kwargs"],
+        json!({ "thinking": false, "enable_thinking": false, "tokenize": false })
+    );
+    assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+    assert_eq!(body["max_tokens"], 256);
+}
+
+#[tokio::test]
 async fn buffered_success_transforms_injects_cost_and_meters() {
     // Anthropic upstream over /v1/chat/completions: response is transformed to the
     // OpenAI shape, cost is injected into the client body, and the metering report
