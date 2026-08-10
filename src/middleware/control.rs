@@ -46,6 +46,15 @@ pub struct CatalogResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GenerationConstraints {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) structured_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) output_token_limit: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct ControlClient {
     client: reqwest::Client,
@@ -130,16 +139,17 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider?, reasoning?, structuredOutput?, outputTokenLimit? }`
+    /// -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
-    pub async fn consult_pre(
+    pub(super) async fn consult_pre(
         &self,
         model: Option<&str>,
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
         reasoning: Option<&ReasoningConfig>,
-        structured_output: bool,
+        constraints: GenerationConstraints,
         tee_only: bool,
     ) -> PreConsult {
         #[derive(Serialize)]
@@ -156,9 +166,8 @@ impl ControlClient {
             // Canonical route-relevant controls only. Response visibility stays local.
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning: Option<&'a ReasoningConfig>,
-            // Content-blind response-shape signal. The schema remains local.
-            #[serde(skip_serializing_if = "std::ops::Not::not")]
-            structured_output: bool,
+            #[serde(flatten)]
+            constraints: GenerationConstraints,
             // TEE-only host: the control plane 404s a non-TEE model. Only sent
             // when set so the metadata-minimal payload is unchanged off these hosts.
             #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -170,7 +179,7 @@ impl ControlClient {
             model,
             provider,
             reasoning,
-            structured_output,
+            constraints,
             tee: tee_only,
         };
         let build = || {
@@ -304,13 +313,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_constraints_pin_the_wire_names() {
+        assert_eq!(
+            serde_json::to_value(GenerationConstraints::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let constraints = GenerationConstraints {
+            structured_output: true,
+            output_token_limit: Some(128),
+        };
+        assert_eq!(
+            serde_json::to_value(constraints).unwrap(),
+            serde_json::json!({ "structuredOutput": true, "outputTokenLimit": 128 })
+        );
+    }
+
     #[tokio::test]
     async fn consult_pre_fails_closed_on_transport_error() {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
         let consult = client
-            .consult_pre(Some("m"), None, None, None, false, false)
+            .consult_pre(
+                Some("m"),
+                None,
+                None,
+                None,
+                GenerationConstraints::default(),
+                false,
+            )
             .await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
