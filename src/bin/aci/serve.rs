@@ -2,11 +2,12 @@
 //! service.
 //!
 //! Startup verifies `<base-url>` (spec 9.1) and refuses to listen unless
-//! the verdict is VERIFIED. Every method and path then forwards unchanged
-//! over the SPKI-pinned channel. Each POST response streams through
-//! byte-exact while its receipt id and body digests are recorded — bodies
-//! are never stored — and a local control endpoint fetches and verifies
-//! any recorded receipt on demand (spec 9.3, 9.2). No bodies are logged.
+//! the verdict is VERIFIED. The proxy exposes a plaintext local API, rejects
+//! E2EE request headers, and forwards accepted traffic over the SPKI-pinned
+//! channel. Each POST response streams through byte-exact while its receipt id
+//! and body digests are recorded — bodies are never stored — and a local control
+//! endpoint fetches and verifies any recorded receipt on demand (spec 9.3, 9.2).
+//! No bodies are logged.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,10 +35,9 @@ use crate::transcript::{Status, Transcript};
 use crate::verify::{verify_service, ServiceVerification};
 
 /// Connection-scoped headers a proxy re-derives per hop and never relays
-/// (RFC 9110 §7.6.1). Everything else passes through in both directions:
-/// stripping a header the client sent — the §5.1 E2EE headers, say — would
-/// silently downgrade it, and dropping one the service sent would hide
-/// protocol members this proxy does not know about (Appendix B).
+/// (RFC 9110 §7.6.1). Everything else passes through in both directions after
+/// E2EE input is rejected. Dropping a service header would hide protocol
+/// members this proxy does not know about (Appendix B).
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -51,8 +51,26 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "content-length",
 ];
 
+/// Headers that select either E2EE v2 or the legacy encrypted transport.
+/// `aci serve` exposes a plaintext local API, so even a partial encrypted
+/// request is rejected instead of being forwarded or silently downgraded.
+const E2EE_REQUEST_HEADERS: &[&str] = &[
+    "x-signing-algo",
+    "x-client-pub-key",
+    "x-model-pub-key",
+    "x-e2ee-version",
+    "x-e2ee-nonce",
+    "x-e2ee-timestamp",
+];
+
 fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+}
+
+fn has_e2ee_request_headers(headers: &HeaderMap) -> bool {
+    E2EE_REQUEST_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
 }
 
 /// What happened to one forwarded request; the reporter turns it into a line.
@@ -92,9 +110,8 @@ pub struct RecordedExchange {
     pub path: String,
     pub status: u16,
     pub streamed: bool,
-    /// Digest of the request bytes this proxy forwarded; `None` for E2EE,
-    /// because §7.4 commits to the post-decryption body only the workload sees.
-    pub request: Option<BodyDigest>,
+    /// Digest of the plaintext request bytes this proxy forwarded.
+    pub request: BodyDigest,
     /// Digest of the response wire bytes as forwarded — the full body, or
     /// everything before the truncation recorded alongside.
     pub response: BodyDigest,
@@ -420,6 +437,14 @@ async fn proxy_inference(
 ) -> Response {
     let path = uri.path().to_string();
 
+    if has_e2ee_request_headers(&headers) {
+        eprintln!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "aci serve accepts plaintext requests only; remove E2EE request headers\n",
+        );
+    }
+
     // §3.4: a long-running proxy must not keep forwarding on an expired
     // keyset — expiry blocks exactly like a rotation.
     if crate::checks::now_secs() >= state.snapshot().not_after {
@@ -435,10 +460,6 @@ async fn proxy_inference(
 
     let trusted = state.snapshot();
     let url = join_url(&state.base_url, &uri);
-    // §5.3: E2EE v2 encrypts content fields in place; `provider` remains
-    // ordinary JSON. The proxy can therefore tighten serving constraints
-    // without touching any ciphertext or its field-bound AAD.
-    let e2ee = headers.contains_key("x-e2ee-version");
     let active_pins = state.active_pins();
     // Policy pins are injected only when the client stated none of its own.
     let injected_policy_pins = !state.required_claims.is_empty()
@@ -497,17 +518,15 @@ async fn proxy_inference(
     // verification via the control endpoint. Nothing is fetched per request.
     let hook_state = state.clone();
     let hook_path = path.clone();
-    // §7.4 hashes the post-decryption body. The proxy cannot reproduce that
-    // body for E2EE, so receipt-3 gets no preimage (skip, not fail).
-    let request_digest = (!e2ee).then(|| BodyDigest::of(&request_body));
+    let request_digest = BodyDigest::of(&request_body);
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
     let pinned_sessions = pinned_session_ids(&request_body);
     let hook: CompletionHook = Box::new(move |end| {
         let (response, truncation) = match end {
             StreamEnd::Complete(digest) => (digest, None),
-            // E2EE v2 §7: truncation is exactly what the wire-hash check exists to
-            // catch — it must reach the report, not vanish.
+            // ACI §9.3(4) uses the wire hash to catch truncation, so it must
+            // reach the report rather than vanish.
             StreamEnd::Errored { partial, error } => (partial, Some(error)),
         };
         let outcome = |verified: Option<bool>, detail: String| RequestOutcome {
@@ -674,7 +693,7 @@ async fn verify_exchange(
         &mut transcript,
         &receipt,
         &trusted.identity,
-        exchange.request.as_ref(),
+        Some(&exchange.request),
         Some(&exchange.response),
         UpstreamContext {
             session_bytes: session_bytes.as_deref(),
@@ -851,9 +870,8 @@ fn pinned_session_ids(body: &[u8]) -> Vec<String> {
 
 /// Tighten an inference body (§5.3): demand verified serving and,
 /// when the proxy holds a pin set and the client stated none, pin those
-/// session ids. E2EE v2 content fields are preserved verbatim. A client's own
-/// members always win; anything that is not a JSON object is forwarded
-/// untouched for the service to reject.
+/// session ids. A client's own members always win; anything that is not a JSON
+/// object is forwarded untouched for the service to reject.
 fn apply_constraints(body: Vec<u8>, enforce_verified: bool, pins: &[String]) -> Vec<u8> {
     if !enforce_verified && pins.is_empty() {
         return body;
@@ -965,6 +983,7 @@ mod tests {
     };
     use axum::routing::{get, post};
     use axum::Json;
+    use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
     /// The one-line summary over the self-consistent fixtures, without any
@@ -1022,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_constraints_tightens_and_preserves() {
+    fn apply_constraints_tightens_plaintext_body() {
         // Plain body: the member is added.
         let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[]);
         let v: Value = serde_json::from_slice(&out).unwrap();
@@ -1055,23 +1074,53 @@ mod tests {
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_session_ids"], json!(["b"]));
 
-        // Field-level E2EE content remains byte-for-byte unchanged while the
-        // ordinary provider block is tightened.
-        let ciphertext = "04deadbeef";
-        let out = apply_constraints(
-            format!(r#"{{"model":"m","messages":[{{"content":"{ciphertext}"}}]}}"#).into_bytes(),
-            true,
-            &[],
-        );
-        let v: Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(v["messages"][0]["content"], ciphertext);
-        assert_eq!(v["provider"]["aci_verified"], true);
-
         // Non-JSON bodies pass through untouched.
         assert_eq!(
             apply_constraints(b"not json".to_vec(), true, &[]),
             b"not json"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_e2ee_request_headers_without_contacting_upstream() {
+        let upstream_calls = Arc::new(AtomicUsize::new(0));
+        let counted_calls = upstream_calls.clone();
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counted_calls = counted_calls.clone();
+                async move {
+                    counted_calls.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let base = spawn_server(upstream).await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let proxy = spawn_server(build_proxy_router(state_over(base, tx))).await;
+        let http = reqwest::Client::new();
+
+        for header in E2EE_REQUEST_HEADERS {
+            let resp = http
+                .post(format!("{proxy}/v1/chat/completions"))
+                .header(*header, "2")
+                .header("content-type", "application/json")
+                .body(REQUEST_BODY.to_vec())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status().as_u16(), 400, "header {header}");
+            assert!(
+                resp.text()
+                    .await
+                    .unwrap()
+                    .contains("accepts plaintext requests only"),
+                "header {header}"
+            );
+        }
+
+        assert_eq!(upstream_calls.load(Ordering::SeqCst), 0);
     }
 
     /// Policy-pinned proxy against rotated sessions: the stale pin is

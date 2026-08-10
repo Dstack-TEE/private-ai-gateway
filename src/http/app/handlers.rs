@@ -477,9 +477,9 @@ pub(super) async fn messages(
 ) -> Response {
     // Native Anthropic-format downstream surface. The frontend treats the body
     // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
-    // middleware, which handles Anthropic<->provider conversion. The pre-PR v2
-    // field contract does not define Anthropic response content blocks, so fail
-    // closed rather than mark an unencrypted response as E2EE-applied.
+    // middleware, which handles Anthropic<->provider conversion. The E2EE v2
+    // compatibility protocol does not define Anthropic response content blocks,
+    // so fail closed rather than mark an unencrypted response as E2EE-applied.
     if has_e2ee_headers(&headers) {
         return error_response(
             StatusCode::BAD_REQUEST,

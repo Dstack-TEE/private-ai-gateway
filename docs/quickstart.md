@@ -119,7 +119,9 @@ cargo run --bin aci -- serve "$ACI_URL"
 `aci serve` verifies the service first, prints the transcript, and refuses
 to start unless the verdict is `VERIFIED`. It then listens on plain HTTP at
 `127.0.0.1:4180` — like a local Ollama — so any OpenAI-compatible client
-works unchanged:
+can use an unencrypted local API. Send plaintext request bodies without E2EE
+headers. The proxy rejects E2EE v2 and legacy E2EE request headers with HTTP
+400 instead of forwarding them:
 
 ```bash
 export API_KEY=<your api key>
@@ -138,15 +140,13 @@ What the proxy does:
   API surface works unchanged: OpenAI chat completions, completions and
   embeddings, Anthropic `/v1/messages`, OpenAI `/v1/responses`, model
   listings, and `GET /v1/aci/*`. Headers travel in both directions except
-  the connection-scoped ones a proxy re-derives, so your API key and any
-  E2EE headers reach the service unchanged. The proxy stores nothing and
-  never logs bodies.
+  the connection-scoped ones a proxy re-derives. E2EE request headers are
+  rejected at the local boundary. The proxy stores nothing and never logs
+  bodies.
 - Every inference demands verified serving: the proxy sets
   `provider.aci_verified` in the body ([aci.md](../spec/aci.md) §5.3), so an
   aggregator refuses rather than serve you through an unverified upstream.
-  `--allow-unverified` drops the demand. Under E2EE v2, only content-bearing
-  fields are encrypted, so the proxy can add or tighten the ordinary
-  `provider` block without changing ciphertext.
+  `--allow-unverified` drops the demand.
 - Every upstream connection enforces the attested TLS SPKI pin for the
   hostname and fails closed on a mismatch.
 - Responses stream through byte-exact while the proxy digests the raw wire

@@ -10,6 +10,10 @@ and an attested inference workload, on top of TLS. It is a client-facing
 transport extension to [Attested Confidential Inference (ACI)](aci.md), not
 part of the core `aci/1` protocol.
 
+> **Warning:** E2EE v2 will be replaced by E2EE v3. The reference gateway
+> supports v2 through at least February 10, 2027. V2 clients should plan to
+> migrate once v3 is specified.
+
 ## 1. Support and replacement policy
 
 | Item | Policy |

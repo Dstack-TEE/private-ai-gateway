@@ -16,7 +16,7 @@ pub enum StreamEnd {
     /// Clean end-of-stream: digest over the full wire bytes.
     Complete(BodyDigest),
     /// The upstream errored mid-stream: digest over the bytes forwarded so
-    /// far plus the error. E2EE v2 §7 / ACI §9.3(4) make truncation exactly the case a
+    /// far plus the error. ACI §9.3(4) makes truncation exactly the case a
     /// wire-hash verifier must surface, so it must not end unreported.
     Errored { partial: BodyDigest, error: String },
 }

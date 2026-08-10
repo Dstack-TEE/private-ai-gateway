@@ -42,8 +42,8 @@ pub enum Command {
     #[command(
         about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
                  Verifies the service on startup and refuses to start unless VERIFIED, \
-                 forwards every method and path over the pinned attested TLS channel, and \
-                 verifies each POST response's receipt after the fact."
+                 accepts plaintext API requests only, forwards them over the pinned attested \
+                 TLS channel, and verifies each POST response's receipt after the fact."
     )]
     Serve(ServeArgs),
 }

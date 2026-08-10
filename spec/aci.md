@@ -485,15 +485,18 @@ constraints:
 
 ## 6. E2EE Transport Extensions
 
+> **Warning:** E2EE v2 is a temporary compatibility extension and will be
+> replaced by E2EE v3. The reference gateway supports v2 through at least
+> February 10, 2027. V2 clients should plan to migrate once v3 is specified.
+
 ACI binds E2EE public keys into the workload keyset and advertises extension
 versions, but the core `aci/1` specification does not define an E2EE wire
 protocol or require one for conformance. Each version is specified separately.
 
 The currently implemented compatibility extension is
-[E2EE v2](e2ee-v2.md). V2 is supported through at least February 10, 2027,
-while E2EE v3 is developed as its replacement. Its headers, algorithms,
-encrypted fields, replay rules, errors, receipt integration, and migration
-policy are defined only in the E2EE v2 document.
+[E2EE v2](e2ee-v2.md). Its headers, algorithms, encrypted fields, replay
+rules, errors, receipt integration, and migration policy are defined only in
+the E2EE v2 document.
 
 ## 7. Inference Receipts
 

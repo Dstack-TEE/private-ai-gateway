@@ -30,9 +30,9 @@ use crate::aci::types::{KeyedPublicKey, TlsSpki};
 
 const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
-/// The k256 key keeps its pre-PR path and doubles as the E2EE v2 secp256k1 key,
-/// legacy `signing_address`, and legacy `ecdsa` E2EE key. The ed25519 key is
-/// used only by the legacy `ed25519` mode.
+/// The k256 E2EE key doubles as the E2EE v2 secp256k1 key, legacy
+/// `signing_address`, and legacy `ecdsa` E2EE key. The ed25519 key is used only
+/// by the legacy `ed25519` mode.
 const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
 
