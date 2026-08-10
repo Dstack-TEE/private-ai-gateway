@@ -10,7 +10,7 @@
 //! Strongly typed endpoint structs may replace `serde_json::Value` later; for now
 //! the dynamic shape keeps behavior aligned with the source.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::reasoning::validate_effective;
 use super::types::{
@@ -210,6 +210,7 @@ fn candidate_params(
             candidate.route_id
         ))
     })?;
+    sync_chat_template_reasoning(object, effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
         if candidate.engine.is_some() {
             ReasoningFormat::ReasoningEffort
@@ -238,6 +239,23 @@ fn candidate_params(
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
+}
+
+fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
+    let Some(Value::Object(kwargs)) = object.get_mut("chat_template_kwargs") else {
+        return;
+    };
+    let enabled = reasoning.enabled.unwrap_or_else(|| {
+        reasoning.max_tokens.is_some()
+            || reasoning
+                .effort
+                .is_some_and(|effort| effort != ReasoningEffort::None)
+    });
+    for key in ["thinking", "enable_thinking"] {
+        if let Some(value) = kwargs.get_mut(key) {
+            *value = Value::Bool(enabled);
+        }
+    }
 }
 
 fn invalid_reasoning<T>(candidate: &RouteCandidate, message: &str) -> Result<T, TransformError> {
@@ -1334,6 +1352,60 @@ mod tests {
         assert!(bodies[1].1.get("reasoning").is_none());
         assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
         assert!(bodies[2].1.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn selected_reasoning_reconciles_chat_template_aliases() {
+        for (engine, requested, controlled, original, expected) in [
+            (Engine::Vllm, ReasoningEffort::None, None, true, false),
+            (
+                Engine::Sglang,
+                ReasoningEffort::High,
+                Some(ReasoningEffort::None),
+                true,
+                false,
+            ),
+            (
+                Engine::Vllm,
+                ReasoningEffort::None,
+                Some(ReasoningEffort::High),
+                false,
+                true,
+            ),
+        ] {
+            let reasoning = |effort| ReasoningConfig {
+                effort: Some(effort),
+                ..Default::default()
+            };
+            let params = json!({
+                "model": "m",
+                "messages": [],
+                "chat_template_kwargs": {
+                    "thinking": original,
+                    "enable_thinking": original,
+                    "tokenize": false
+                }
+            });
+            let candidate = RouteCandidate {
+                route_id: "self-hosted:m".into(),
+                format: ProviderFormat::Openai,
+                engine: Some(engine),
+                reasoning_format: None,
+                effective_reasoning: controlled.map(reasoning),
+            };
+
+            let bodies = build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                &[candidate],
+                Some(&reasoning(requested)),
+            )
+            .unwrap();
+            let kwargs = &bodies[0].1["chat_template_kwargs"];
+            assert_eq!(kwargs["thinking"], expected);
+            assert_eq!(kwargs["enable_thinking"], expected);
+            assert_eq!(kwargs["tokenize"], false);
+        }
     }
 
     #[test]
