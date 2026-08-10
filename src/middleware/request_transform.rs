@@ -210,9 +210,7 @@ fn candidate_params(
             candidate.route_id
         ))
     })?;
-    if candidate.engine.is_some() {
-        sync_chat_template_reasoning(object, effective);
-    }
+    sync_chat_template_reasoning(object, effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
         if candidate.engine.is_some() {
             ReasoningFormat::ReasoningEffort
@@ -1358,15 +1356,17 @@ mod tests {
 
     #[test]
     fn selected_reasoning_reconciles_chat_template_aliases() {
-        for (requested, controlled, original, expected) in [
-            (ReasoningEffort::None, None, true, false),
+        for (engine, requested, controlled, original, expected) in [
+            (Engine::Vllm, ReasoningEffort::None, None, true, false),
             (
+                Engine::Sglang,
                 ReasoningEffort::High,
                 Some(ReasoningEffort::None),
                 true,
                 false,
             ),
             (
+                Engine::Vllm,
                 ReasoningEffort::None,
                 Some(ReasoningEffort::High),
                 false,
@@ -1389,7 +1389,7 @@ mod tests {
             let candidate = RouteCandidate {
                 route_id: "self-hosted:m".into(),
                 format: ProviderFormat::Openai,
-                engine: Some(Engine::Sglang),
+                engine: Some(engine),
                 reasoning_format: None,
                 effective_reasoning: controlled.map(reasoning),
             };
