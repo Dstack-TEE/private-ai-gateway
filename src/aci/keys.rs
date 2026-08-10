@@ -93,7 +93,7 @@ pub trait KeyProvider: Send + Sync {
     /// Attested E2EE keys (§3.1) — spec-shaped suite entries only.
     fn e2ee_keys(&self) -> Vec<KeyedPublicKey>;
 
-    /// Decrypt an ACI E2EE v2 field using a key listed in
+    /// Decrypt an E2EE v2 field using a key listed in
     /// [`KeyProvider::e2ee_keys`].
     fn decrypt_e2ee(
         &self,

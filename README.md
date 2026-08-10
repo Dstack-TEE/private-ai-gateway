@@ -90,7 +90,8 @@ flowchart LR
 
 1. The user verifies `GET /v1/aci/attestation?nonce=<fresh nonce>` and accepts
    the gateway workload keyset.
-2. The user sends an OpenAI-compatible request over ordinary TLS or ACI E2EE.
+2. The user sends an OpenAI-compatible request over ordinary TLS or the E2EE
+   v2 compatibility extension.
 3. The frontend records the user-facing request and downstream E2EE state.
 4. Optional middleware may handle auth, billing, routing, cache-aware logic, or
    rewrites. Middleware does not create verification facts.
@@ -108,7 +109,7 @@ Use this checklist before treating a deployment as private inference.
 | --- | --- |
 | Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote and the attested keyset digest bound into it. For dstack, verify `evidence.app_compose` against the RTMR3-bound `compose-hash`; pin the hashes you accept with `aci verify --accept-compose`. Image and source-code acceptance remain verifier-policy TODOs. |
 | Keys are bound to the workload | The keyset in the report lists receipt-signing, E2EE, and optional TLS SPKI keys. The quote binds the digest of the keyset itself; there is no separate identity key or endorsement. |
-| Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For ACI E2EE, verify the E2EE public key from the keyset. |
+| Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For an E2EE extension, verify its service key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
 | Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
 | Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/aci/sessions/{session_id}`. The id is the SHA-256 of the exact served session document bytes, so the fetched record is provably the one the receipt cited. |
@@ -131,17 +132,18 @@ additional ACI artifacts are:
 - `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
 - `GET /v1/aci/sessions/{session_id}`: fetches an attested-session audit
   record referenced by a receipt.
-- Optional ACI E2EE headers: seal the whole request and response bodies to an
-  attested key when the client wants application-level encryption in addition
-  to TLS.
+- Optional [E2EE v2 compatibility headers](spec/e2ee-v2.md): encrypt
+  content-bearing request and response fields to an attested key when the
+  client wants application-level encryption in addition to TLS. V2 is enabled
+  by default, is supported through at least February 10, 2027, and is planned
+  to be replaced by E2EE v3.
 
 Useful terms:
 
 - **TEE**: trusted execution environment. In this project, the gateway relies on
   dstack/TDX evidence to prove where the workload is running.
-- **E2EE**: end-to-end encryption of whole request and response bodies between
-  a client and the verified gateway workload, used when TLS alone is not
-  enough for the client.
+- **E2EE**: field-level end-to-end encryption between a client and the verified
+  gateway workload, used when TLS alone is not enough for the client.
 - **Workload keyset**: the attested document listing the gateway's
   receipt-signing, E2EE, and TLS keys. The TEE quote binds its digest, making
   the keyset the unit of workload identity.
@@ -186,7 +188,7 @@ container.
 | Workload keyset, quote-bound keyset digest, attestation report | Implemented |
 | Signed receipts | Implemented |
 | Chat/completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
-| Downstream ACI E2EE and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
+| Downstream E2EE v2 compatibility extension and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
 | Runtime upstream config file and admin API | Implemented |
 | Gateway-owned Prometheus metrics | Implemented |
 | Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, SecretAI, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |

@@ -30,8 +30,9 @@ use crate::aci::types::{KeyedPublicKey, TlsSpki};
 
 const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
-/// legacy keys: the k256 key doubles as the legacy `signing_address` and
-/// legacy `ecdsa` E2EE key; the ed25519 key serves the legacy `ed25519` mode.
+/// The k256 E2EE key doubles as the E2EE v2 secp256k1 key, legacy
+/// `signing_address`, and legacy `ecdsa` E2EE key. The ed25519 key is used only
+/// by the legacy `ed25519` mode.
 const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
 
@@ -86,6 +87,7 @@ pub struct DstackAciProvider {
     legacy_e2ee: k256::SecretKey,
     legacy_ed25519: Ed25519SigningKey,
     receipt_evidence: KmsKeyEvidence,
+    secp256k1_e2ee_evidence: KmsKeyEvidence,
     x25519_e2ee_evidence: KmsKeyEvidence,
     receipt_key_id: String,
     x25519_e2ee_key_id: String,
@@ -138,7 +140,7 @@ impl DstackAciProvider {
             signature_chain: x25519_chain,
         };
 
-        let (legacy_e2ee_bytes, _) = load_kms_raw32_key(
+        let (legacy_e2ee_bytes, legacy_e2ee_chain) = load_kms_raw32_key(
             &client,
             "legacy-e2ee",
             &config.legacy_e2ee_path,
@@ -146,6 +148,18 @@ impl DstackAciProvider {
         )
         .await?;
         let legacy_e2ee = secret_key_from_bytes(&legacy_e2ee_bytes)?;
+        let secp256k1_e2ee_evidence = KmsKeyEvidence {
+            role: "e2ee-secp256k1",
+            path: config.legacy_e2ee_path.clone(),
+            purpose: LEGACY_E2EE_PURPOSE,
+            algo: E2EE_ALGO_SECP256K1_AESGCM,
+            public_key_hex: public_key_from_secret(&legacy_e2ee),
+            kms_public_key_hex: kms_counterpart_public_key_hex(
+                "e2ee-secp256k1",
+                &legacy_e2ee_bytes,
+            )?,
+            signature_chain: legacy_e2ee_chain,
+        };
 
         let (legacy_ed25519_bytes, _) = load_kms_raw32_key(
             &client,
@@ -163,6 +177,7 @@ impl DstackAciProvider {
             legacy_e2ee,
             legacy_ed25519,
             receipt_evidence,
+            secp256k1_e2ee_evidence,
             x25519_e2ee_evidence,
             receipt_key_id: config.receipt_key_id,
             x25519_e2ee_key_id: config.x25519_e2ee_key_id,
@@ -402,14 +417,14 @@ impl KeyProvider for DstackAciProvider {
     }
 
     fn key_custody_evidence(&self) -> serde_json::Value {
-        // Keyset roles only (§3.3): the legacy keys live on the pre-ACI
-        // compatibility surface, and Appendix B forbids that surface from
-        // adding content to ACI artifacts. An unbound key with an
-        // authoritative-looking KMS chain is exactly what §3.2 warns against.
+        // Keyset roles only (§3.3). The secp256k1 key also serves the legacy
+        // compatibility surface, but it is listed here because E2EE v2
+        // publishes and accepts that same key as a keyset role.
         json!({
             "provider": "dstack-kms",
             "keys": [
                 key_evidence_json(&self.receipt_evidence),
+                key_evidence_json(&self.secp256k1_e2ee_evidence),
                 key_evidence_json(&self.x25519_e2ee_evidence),
             ],
         })

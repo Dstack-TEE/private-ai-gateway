@@ -560,7 +560,7 @@ impl private_ai_gateway::aci::keys::KeyProvider for MisshapenKeyProvider {
 }
 
 #[test]
-fn service_init_requires_an_e2ee_key_when_e2ee_is_advertised() {
+fn service_init_requires_a_recognized_e2ee_key_in_the_keyset() {
     let keys = Arc::new(MisshapenKeyProvider {
         inner: StaticKeyProvider::default(),
         e2ee_keys: Vec::new(),
@@ -569,16 +569,44 @@ fn service_init_requires_an_e2ee_key_when_e2ee_is_advertised() {
     let (upstream, _) = StubUpstream::new(b"{}");
     let upstream = Arc::new(upstream);
     let store = Arc::new(InMemoryReceiptStore::default());
-    let mut cfg = AciServiceConfig::for_test();
-    cfg.service_capabilities = ServiceCapabilities {
-        supported_e2ee_versions: vec!["3".to_string()],
-        serving: "aggregator".to_string(),
-    };
+    let cfg = AciServiceConfig::for_test();
     let err = AciService::new(keys, quoter, upstream, store, cfg, Arc::new(FixedClock(0)))
         .err()
         .expect("must fail");
     assert!(matches!(err, ServiceError::Keyset(_)), "{err:?}");
     assert!(err.to_string().contains("e2ee_public_keys"), "{err}");
+}
+
+#[test]
+fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
+    use private_ai_gateway::aci::e2ee::E2EE_ALGO_SECP256K1_AESGCM;
+    use private_ai_gateway::aci::keys::KeyProvider as _;
+
+    let inner = StaticKeyProvider::default();
+    let e2ee_keys = inner
+        .e2ee_keys()
+        .into_iter()
+        .filter(|key| key.algo == E2EE_ALGO_SECP256K1_AESGCM)
+        .collect();
+    let keys = Arc::new(MisshapenKeyProvider { inner, e2ee_keys });
+    let quoter = Arc::new(StubQuoter::default());
+    let (upstream, _) = StubUpstream::new(b"{}");
+    let store = Arc::new(InMemoryReceiptStore::default());
+    let mut cfg = AciServiceConfig::for_test();
+    cfg.service_capabilities = ServiceCapabilities {
+        supported_e2ee_versions: vec!["2".to_string()],
+        serving: "aggregator".to_string(),
+    };
+
+    AciService::new(
+        keys,
+        quoter,
+        Arc::new(upstream),
+        store,
+        cfg,
+        Arc::new(FixedClock(0)),
+    )
+    .expect("secp256k1 is a supported E2EE v2 suite");
 }
 
 #[test]

@@ -61,7 +61,7 @@ fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GatewayConfigFile {
     bind: Option<String>,
@@ -79,12 +79,30 @@ struct GatewayConfigFile {
     /// no third party. Reported as `serving: "direct"`, and receipts then
     /// carry no `upstream.verified` event (§7.5).
     direct_serving: bool,
-    /// Advertise and terminate client-facing ACI E2EE (§6). Off until the
-    /// scheme's response-authentication revamp lands; a deployment with it
-    /// off is not spec-conformant for chat completions (§1.4(5)).
+    /// Advertise and terminate the E2EE v2 compatibility extension. Enabled by
+    /// default to preserve the deployed v2 contract. Operators may disable it
+    /// explicitly for a plaintext/TLS-only deployment.
     enable_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
+}
+
+impl Default for GatewayConfigFile {
+    fn default() -> Self {
+        Self {
+            bind: None,
+            state_dir: None,
+            upstream_config_seed_path: None,
+            admin_token: None,
+            keyset_not_after_seconds: None,
+            subject: None,
+            tls: GatewayTlsConfig::default(),
+            direct_serving: false,
+            enable_e2ee: true,
+            dstack_endpoint: None,
+            middleware: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -471,13 +489,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if service.supported_e2ee_versions().is_empty() {
-        // §1.4(5) requires E2EE on chat completions, so this deployment is
-        // knowingly non-conformant until the scheme stabilizes. Set
-        // `enable_e2ee` to advertise and terminate it.
+        // This warning is reachable only when an operator explicitly opts out
+        // of the default E2EE v2 compatibility path.
         tracing::warn!(
-            "ACI E2EE is off (enable_e2ee is false): ACI E2EE requests are rejected \
-             and this deployment is not ACI spec-conformant for chat completions. \
-             The legacy dstack-vllm-proxy path is unaffected"
+            "E2EE v2 is off (enable_e2ee is false): v2 requests are rejected. \
+             Core ACI remains available over a keyset-bound TLS channel; \
+             the legacy dstack-vllm-proxy path is unaffected"
         );
         if service.keyset().tls_public_keys.is_empty() {
             // §1.1/§3.1: with no TLS pin and no E2EE termination, no client
@@ -862,6 +879,28 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         assert_eq!(config.keyset_not_after_seconds, Some(1_209_600));
         assert_eq!(config.subject.as_deref(), Some("app-id:0x1234"));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_enables_e2ee_v2_by_default() {
+        let config_path = temp_path("gateway-config-default-e2ee");
+        std::fs::write(&config_path, "{}").unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+
+        assert!(config.enable_e2ee);
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_allows_explicit_e2ee_opt_out() {
+        let config_path = temp_path("gateway-config-disable-e2ee");
+        std::fs::write(&config_path, r#"{ "enable_e2ee": false }"#).unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+
+        assert!(!config.enable_e2ee);
         let _ = std::fs::remove_file(config_path);
     }
 

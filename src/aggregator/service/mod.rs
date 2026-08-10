@@ -209,26 +209,28 @@ impl AciService {
     }
 }
 
-/// §3.1 seal-time rules a library consumer could otherwise violate: a service
-/// that terminates E2EE must list a §6.1 key, and keys must be distinct per
-/// role. (The shipped launcher satisfies both by construction.)
+/// Keyset seal-time rules a library consumer could otherwise violate: this
+/// v2-capable gateway must list an E2EE v2 §4 key, and keys must be distinct
+/// per role. (The shipped launcher satisfies both by construction.)
 fn validate_keyset(
     keyset: &WorkloadKeyset,
     _config: &AciServiceConfig,
 ) -> Result<(), ServiceError> {
     use crate::aci::digest::sha256_raw;
-    use crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM;
+    use crate::aci::e2ee::is_aci_e2ee_suite;
 
-    // §3.1: the §6.1 E2EE key is unconditional — the keyset is the identity
-    // document even while E2EE termination is disabled (gaps item 3).
+    // The reference gateway always provisions at least one recognized E2EE v2
+    // §4 suite, even while extension termination is explicitly disabled.
+    // X25519 is recommended, not required; existing v2 clients may select the
+    // secp256k1 suite on its own.
     if !keyset
         .e2ee_public_keys
         .iter()
-        .any(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+        .any(|key| is_aci_e2ee_suite(&key.algo))
     {
-        return Err(ServiceError::Keyset(format!(
-            "e2ee_public_keys has no {E2EE_ALGO_X25519_AESGCM} entry (§3.1)"
-        )));
+        return Err(ServiceError::Keyset(
+            "e2ee_public_keys has no recognized E2EE v2 suite (E2EE v2 spec §4)".to_string(),
+        ));
     }
     for receipt_key in &keyset.receipt_signing_keys {
         if keyset

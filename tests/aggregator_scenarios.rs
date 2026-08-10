@@ -356,7 +356,7 @@ fn assert_valid_receipt_signature(receipt: &SignedReceipt, receipt_key: &KeyedPu
 }
 
 #[tokio::test]
-async fn report_establishes_identity_keyset_endorsement_and_nonce_binding() {
+async fn legacy_report_binds_signing_address_and_nonce() {
     let (verifier, _verifier_calls) = ScriptedVerifier::verified();
     let h = make_harness(verifier);
 

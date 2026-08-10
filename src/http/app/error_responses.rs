@@ -14,7 +14,7 @@ pub(super) fn unsupported_e2ee_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
         "e2ee_invalid_version",
-        "ACI E2EE is not supported by this service",
+        "E2EE v2 is not supported by this service",
     )
 }
 

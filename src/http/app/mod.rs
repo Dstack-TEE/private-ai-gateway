@@ -8,7 +8,7 @@
 //!   receipt so later lookups can authenticate the original requester.
 //! * `POST /v1/completions` - compatibility surface. The aggregator
 //!   forwards legacy prompt completions through the same ACI receipt
-//!   path as chat completions. ACI E2EE is an optional add-on here;
+//!   path as chat completions. The E2EE v2 extension is an optional add-on here;
 //!   plaintext OpenAI-compatible requests remain unchanged.
 //! * `POST /v1/embeddings` - OpenAI-shaped embeddings forwarding.
 //!   Buffered-only; any client-sent `stream:true` is forced back to

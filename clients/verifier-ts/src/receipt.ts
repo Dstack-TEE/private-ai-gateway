@@ -111,9 +111,9 @@ export async function hashBody(body: Uint8Array | string): Promise<string> {
 }
 
 /**
- * §9.3 check 3: `request.received.body_hash` matches the request bytes this
- * client sent — the wire body for plaintext, the original body it sealed for
- * E2EE (§7.4). Returns false when the event or its hash is absent.
+ * §9.3 check 3: `request.received.body_hash` matches the plaintext wire body,
+ * or the compact post-decryption JSON body for E2EE (§7.4). Returns false when
+ * the event or its hash is absent.
  */
 export async function checkRequestBodyHash(
   payload: ReceiptPayload,
@@ -124,9 +124,9 @@ export async function checkRequestBodyHash(
 
 /**
  * §9.3 check 4: `response.returned.body_hash` matches the response bytes this
- * client received off the wire — the in-order raw SSE bytes for a stream, the
- * sealed envelope bytes for E2EE (§7.4). Returns false when the event or its
- * hash is absent.
+ * client received off the wire — the in-order raw SSE bytes for a stream,
+ * including encrypted E2EE field values (§7.4). Returns false when the event
+ * or its hash is absent.
  */
 export async function checkResponseBodyHash(
   payload: ReceiptPayload,

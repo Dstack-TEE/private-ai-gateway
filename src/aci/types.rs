@@ -108,7 +108,7 @@ impl SourceProvenance {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceCapabilities {
-    /// Client-facing ACI E2EE scheme versions the service terminates (§4.1).
+    /// Client-facing E2EE extension versions the service terminates (ACI §4.1).
     /// Only services that actually wired E2EE termination should populate this.
     pub supported_e2ee_versions: Vec<String>,
     /// `"direct"` when inference runs inside this attested workload, so there

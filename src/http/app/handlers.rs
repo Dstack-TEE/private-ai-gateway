@@ -477,7 +477,16 @@ pub(super) async fn messages(
 ) -> Response {
     // Native Anthropic-format downstream surface. The frontend treats the body
     // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
-    // middleware, which handles Anthropic<->provider conversion.
+    // middleware, which handles Anthropic<->provider conversion. The E2EE v2
+    // compatibility protocol does not define Anthropic response content blocks,
+    // so fail closed rather than mark an unencrypted response as E2EE-applied.
+    if has_e2ee_headers(&headers) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE v2 is not supported on /v1/messages",
+        );
+    }
     openai_completion_endpoint(state, headers, body, MESSAGES_PATH, false).await
 }
 
@@ -488,14 +497,14 @@ pub(super) async fn responses(
 ) -> Response {
     // Native OpenAI Responses API passthrough (create only). The frontend treats
     // the body as opaque plaintext (extracts `model`/`stream`); the path flows
-    // through to the upstream as `base_url + /v1/responses`. ACI E2EE is not
+    // through to the upstream as `base_url + /v1/responses`. E2EE v2 is not
     // supported on this endpoint yet — its body uses `input`, not `messages` —
     // so reject E2EE requests cleanly instead of failing later in field decryption.
     if has_e2ee_headers(&headers) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "e2ee_unsupported_endpoint",
-            "ACI E2EE is not supported on /v1/responses",
+            "E2EE v2 is not supported on /v1/responses",
         );
     }
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
@@ -608,13 +617,21 @@ pub(super) async fn openai_completion_endpoint(
     force_buffered: bool,
 ) -> Response {
     let has_e2ee = has_e2ee_headers(&headers);
-    // `supported_e2ee_versions` advertises ACI E2EE (§6). The inherited
+    // `supported_e2ee_versions` advertises client-facing E2EE extensions (ACI
+    // §6). The inherited
     // dstack-vllm-proxy path predates it and is identified by
-    // `x-signing-algo`, so a deployment that has not turned the ACI scheme on
-    // still serves its existing clients.
+    // `x-signing-algo`, so an explicit ACI opt-out does not disable that path.
+    // A missing version is left to the v2 parser so it returns the precise
+    // `e2ee_header_missing` error.
     if has_e2ee
         && headers.get("x-signing-algo").is_none()
-        && state.service.supported_e2ee_versions().is_empty()
+        && header_str(&headers, "x-e2ee-version").is_some_and(|requested| {
+            !state
+                .service
+                .supported_e2ee_versions()
+                .iter()
+                .any(|advertised| advertised == requested)
+        })
     {
         return unsupported_e2ee_response();
     }
@@ -674,7 +691,7 @@ pub(super) async fn openai_completion_endpoint(
     let context = GatewayRequestContext {
         request_id: generate_request_id(),
         // The receipt `model` is the model the client requested: under E2EE
-        // the §6.2 envelope `model` (§7.3), otherwise the body's.
+        // the clear top-level `model` bound into E2EE v2 §6 AAD, otherwise the body's.
         user_model: e2ee
             .as_ref()
             .map(|ctx| ctx.request_model().to_string())

@@ -185,7 +185,7 @@ pub fn receipt_signing_input(document: &Value) -> Result<Vec<u8>, digest::JcsErr
 pub struct ReceiptBuilder {
     receipt_id: String,
     chat_id: Option<String>,
-    /// The model the client requested (for E2EE, the envelope `model`);
+    /// The model the client requested (for E2EE v2, the clear top-level `model`);
     /// `None` when the request carried none (§7.3).
     model: Option<String>,
     workload_keyset_digest: String,
@@ -334,7 +334,7 @@ impl ReceiptBuilder {
     }
 
     /// The exact response body bytes emitted on the wire (§7.4): raw SSE
-    /// stream bytes for streaming, the sealed envelope bytes for E2EE.
+    /// stream bytes for streaming, including encrypted field values for E2EE.
     pub fn add_response_returned(&mut self, wire: &[u8]) -> Result<String, ReceiptError> {
         self.append_body_hash(EVENT_RESPONSE_RETURNED, wire)
     }

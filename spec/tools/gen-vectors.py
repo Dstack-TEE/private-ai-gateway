@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the deterministic values in spec/test-vectors.md.
+"""Regenerate the deterministic values in the ACI and E2EE v2 vector docs.
 
 Every value in the test-vectors doc is reproduced here from first principles —
 an implementation independent of the Rust reference — so the doc, the
@@ -7,7 +7,7 @@ reference implementation (`tests/spec_vectors.rs`), and this script can be
 cross-checked against each other. Run with no arguments to verify every
 published constant and print the full set of values with intermediates.
 
-Requires: python3 stdlib + `cryptography` (Ed25519, X25519, HKDF, AES-GCM).
+Requires: python3 stdlib + `cryptography` (Ed25519 and X25519).
 
 The artifact bytes below are the exact bytes the reference implementation
 serves for this fixture content. Consumers hash and verify these bytes as-is
@@ -23,11 +23,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
-    X25519PublicKey,
 )
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.hashes import SHA256
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 import base64
 
@@ -74,10 +70,6 @@ def x25519_from_seed(seed: bytes):
 # ---- Fixed keys ------------------------------------------------------------
 RECEIPT_KEY, RECEIPT_PUB = ed25519_from_seed(bytes([0x02]) * 32)
 E2EE_KEY, E2EE_PUB = x25519_from_seed(bytes([0x03]) * 32)
-CLIENT_KEY, CLIENT_PUB = x25519_from_seed(bytes([0x04]) * 32)
-EPH_REQUEST_KEY, EPH_REQUEST_PUB = x25519_from_seed(bytes([0x05]) * 32)
-EPH_RESPONSE_KEY, EPH_RESPONSE_PUB = x25519_from_seed(bytes([0x06]) * 32)
-EPH_SSE_KEY, EPH_SSE_PUB = x25519_from_seed(bytes([0x07]) * 32)
 
 TLS_SPKI = "c0" * 32
 CHANNEL_SPKI = "d1" * 32
@@ -189,14 +181,31 @@ SIGNING_INPUT_SHA256 = sha256_hex(SIGNING_INPUT)
 RECEIPT_SIG = RECEIPT_KEY.sign(SIGNING_INPUT).hex()
 DOCUMENT_BYTES = jcs({**UNSIGNED_DOCUMENT, "signature": RECEIPT_SIG})
 
-# ---- Published constants (must match spec/test-vectors.md) -------------------
+# ---- E2EE v2 AAD (E2EE v2 spec §6) ----------------------------------------
+REQUEST_AAD = jcs({
+    "purpose": "aci.e2ee.request.v2",
+    "algo": E2EE_ALGO,
+    "model": "demo-model",
+    "field": "messages.0.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+RESPONSE_AAD = jcs({
+    "purpose": "aci.e2ee.response.v2",
+    "algo": E2EE_ALGO,
+    "model": "demo-model",
+    "id": "chatcmpl-123",
+    "field": "choices.0.message.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+
+# ---- Published constants (must match both spec vector documents) ------------
 PINNED = {
     "receipt-1 public key": (RECEIPT_PUB,
         "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
     "e2ee-1 public key": (E2EE_PUB,
         "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22"),
-    "client public key": (CLIENT_PUB,
-        "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b"),
     "§1 workload_keyset_digest": (KEYSET_DIGEST,
         "sha256:53a5cd44b30dcc51999754c719f2628a041f174ecbf9662a6f8e898a10cd9371"),
     "§2 report_data (test nonce)": (REPORT_DATA_NONCE,
@@ -210,6 +219,14 @@ PINNED = {
     "§4 signature": (RECEIPT_SIG,
         "d5b005e093bde3b577faf270b7184b09e169cacb0ecb206b103bd2581f997db0"
         "3da616175454b063323a23ac1dc68f1ce506c2a6eba8aa0561d5e724f0b80c03"),
+    "§5 request AAD": (REQUEST_AAD.decode(),
+        '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content",'
+        '"model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
+        '"purpose":"aci.e2ee.request.v2","ts":1750000000}'),
+    "§5 response AAD": (RESPONSE_AAD.decode(),
+        '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content",'
+        '"id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
+        '"purpose":"aci.e2ee.response.v2","ts":1750000000}'),
 }
 
 
@@ -225,10 +242,6 @@ def main():
     print("== Fixed keys ==")
     print("receipt-1 (ed25519, seed 02*32) pub =", RECEIPT_PUB)
     print("e2ee-1 (x25519, seed 03*32) pub =", E2EE_PUB)
-    print("client (x25519, seed 04*32) pub =", CLIENT_PUB)
-    print("request ephemeral (seed 05*32) pub =", EPH_REQUEST_PUB)
-    print("response ephemeral (seed 06*32) pub =", EPH_RESPONSE_PUB)
-    print("sse ephemeral (seed 07*32) pub =", EPH_SSE_PUB)
     print()
     print("== §1 workload keyset ==")
     print("keyset JCS bytes =", KEYSET_BYTES.decode())
@@ -255,6 +268,10 @@ def main():
     print("sha256(signing input) =", SIGNING_INPUT_SHA256)
     print("signature =", RECEIPT_SIG)
     print("document bytes =", DOCUMENT_BYTES.decode())
+    print()
+    print("== E2EE v2 §6 AAD ==")
+    print("request AAD =", REQUEST_AAD.decode())
+    print("response AAD =", RESPONSE_AAD.decode())
     return 0 if ok else 1
 
 

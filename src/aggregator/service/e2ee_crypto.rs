@@ -17,7 +17,7 @@ use crate::aci::e2ee::{
 };
 use crate::aci::keys::KeyProvider;
 
-/// ACI v2 nonce (§7.5): a per-request replay token — exactly 32 bytes of CSPRNG
+/// E2EE v2 nonce (§7): a per-request replay token — exactly 32 bytes of CSPRNG
 /// output, hex-encoded (64 hex characters, either case). The fixed width is the
 /// only rule; the service cannot verify entropy.
 pub(super) fn validate_aci_e2ee_nonce(nonce: &str) -> Result<(), E2eeError> {
@@ -74,7 +74,7 @@ pub(super) fn normalize_ed25519_public_key_hex(value: &str) -> Result<String, E2
     Ok(hex::encode(bytes))
 }
 
-/// ACI v2 model (§7.3): present and a string. No ambiguity check — the JCS
+/// E2EE v2 model (§6): present and a string. No ambiguity check — the JCS
 /// AAD needs no escaping.
 pub(super) fn validate_aci_payload_model(payload: &Value) -> Result<String, E2eeError> {
     payload
@@ -84,8 +84,8 @@ pub(super) fn validate_aci_payload_model(payload: &Value) -> Result<String, E2ee
         .ok_or(E2eeError::InvalidPayloadModel)
 }
 
-/// ACI v2 request AAD (§7.3): the JCS canonicalization of the purpose-tagged
-/// object. `field` is the encrypted location's field path (§7.2).
+/// E2EE v2 request AAD (§6): the JCS canonicalization of the purpose-tagged
+/// object. `field` is the encrypted location's field path (§5).
 fn aci_request_aad(
     algo: &str,
     model: &str,
@@ -104,7 +104,7 @@ fn aci_request_aad(
     .map_err(|_| E2eeError::DecryptionFailed)
 }
 
-/// ACI v2 response AAD (§7.3): like the request AAD but tagged
+/// E2EE v2 response AAD (§6): like the request AAD but tagged
 /// `aci.e2ee.response.v2` and additionally binding the response `id`.
 fn aci_response_aad(
     algo: &str,
@@ -293,7 +293,7 @@ pub(super) fn decrypt_content_value(
 
 /// Decrypt one structured content part in place. `text` parts are decrypted in
 /// every mode; the per-part `image_url.url` and `input_audio.data` locations
-/// (§7.2) are ACI-only — the legacy compatibility modes never defined field
+/// (E2EE v2 §5) are extension-only — the legacy compatibility modes never defined field
 /// paths for them, so there they pass through unchanged.
 fn decrypt_content_part(
     crypto: &E2eeFieldCrypto<'_>,
@@ -356,8 +356,8 @@ fn decrypt_content_part_nested(
     Ok(1)
 }
 
-/// AAD for a request field (§7.3): the JCS canonicalization bound to the field
-/// path (§7.2) on the ACI path, and none on the legacy (no-AAD) path.
+/// AAD for an E2EE v2 request field (§6): the JCS canonicalization bound to the
+/// field path (§5), and none on the legacy (no-AAD) path.
 fn request_field_aad(
     crypto: &E2eeFieldCrypto<'_>,
     field: &str,
@@ -464,7 +464,7 @@ pub(super) fn encrypt_e2ee_response_body(
                 ctx,
                 &response_id,
             )?;
-            // Response audio (`message.audio.data`, §7.2) is ACI-only.
+            // Response audio (`message.audio.data`, E2EE v2 §5) is extension-only.
             if ctx.aad_mode.is_aci() {
                 encrypt_message_audio_data(message, ctx, &response_id, choice_index)?;
             }
@@ -726,7 +726,7 @@ mod tests {
     use super::{aci_request_aad, aci_response_aad, optional_response_string};
     use serde_json::json;
 
-    // Byte-exact expected AAD from spec/test-vectors.md §7 (X25519 suite).
+    // Byte-exact expected AAD from spec/test-vectors.md §5 (X25519 suite).
     const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const REQUEST_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2","ts":1750000000}"#;
     const RESPONSE_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2","ts":1750000000}"#;
@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn nonce_validation_requires_64_hex() {
         assert!(super::validate_aci_e2ee_nonce(NONCE).is_ok());
-        // Either case is accepted (§7.5).
+        // Either case is accepted (E2EE v2 §7).
         assert!(super::validate_aci_e2ee_nonce(&"A".repeat(64)).is_ok());
         assert!(super::validate_aci_e2ee_nonce("").is_err());
         assert!(super::validate_aci_e2ee_nonce("nonce-1").is_err());

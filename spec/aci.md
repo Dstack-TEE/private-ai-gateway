@@ -10,9 +10,9 @@
 
 Attested Confidential Inference (ACI) lets an AI inference service prove
 **what workload is serving its API**, with hardware-rooted TEE
-attestation. Every later artifact binds back to that
-proven workload: TLS sessions, sealed request and response bodies,
-per-request receipts, and upstream verification records.
+attestation. Every later artifact binds back to that proven workload: TLS
+sessions, optional E2EE extension channels, per-request receipts, and upstream
+verification records.
 
 ACI covers OpenAI-compatible inference endpoints and adds three verification
 artifacts:
@@ -123,31 +123,28 @@ An ACI-conformant service MUST:
    code or build artifacts (§4.1).
 4. Keep every listed private key in TEE custody (§3.3), and bind any
    plaintext-HTTPS endpoint's TLS key into the keyset (§3.1).
-5. Support E2EE on its prompt endpoints, at minimum
-   `POST /v1/chat/completions` (§6).
-6. Compute receipt hashes inside the TEE from observed bytes, sign
+5. Compute receipt hashes inside the TEE from observed bytes, sign
    receipts with an attested key, and serve them at
    `GET /v1/aci/receipts/{id}` (§7).
 
 An aggregator MUST additionally:
 
-7. Verify upstreams and enforce channel bindings as §1.2 requires,
+6. Verify upstreams and enforce channel bindings as §1.2 requires,
    failing closed when required verification fails or the client's
    serving constraints cannot be met (§5.3).
-8. Cite the attested session in each receipt served through a verified
+7. Cite the attested session in each receipt served through a verified
    upstream, and serve those sessions with their evidence (§7.5, §8).
 
 An ACI client (a verifier SDK, agent runtime, or verifying proxy acting for
 the end user) MUST:
 
-9. Verify the service's attested code, environment, and keyset (§9.1),
+8. Verify the service's attested code, environment, and keyset (§9.1),
    on its own or through a Verifier it trusts, before releasing sensitive
    data.
-10. Send sensitive data only over channels bound to the attested keyset: a
-    pinned TLS SPKI or an attested E2EE key (§1.1).
-11. Use fresh randomness where the protocol binds it: the attestation
-    `nonce`, and a fresh ephemeral key and GCM nonce for every body it
-    seals (§6.1).
+9. Send sensitive data only over channels bound to the attested keyset: a
+   pinned TLS SPKI or an attested E2EE key used according to a separately
+   specified extension (§1.1, §6).
+10. Use a fresh attestation `nonce` wherever freshness is required (§3.2).
 
 An ACI verifier MUST implement at least the §9.1 checks for the policy it
 applies and fail closed on missing required evidence (§1.3).
@@ -192,16 +189,15 @@ attestation statement   (keyset digest + client nonce)
 workload keyset         (receipt · E2EE · TLS public keys)
       │  verifies
       ▼
-receipts · sealed bodies · TLS sessions
+receipts · E2EE fields · TLS sessions
 ```
 
 Two SHA-256 links join the chain: `report_data` in the quote is the hash
 of the statement (§3.2), and the statement names the hash of the keyset
 (§3.1).
 
-A verifier checks the quote once. After that, every receipt, sealed body,
-and TLS connection can be checked offline against keys in the attested
-keyset.
+A verifier checks the quote once. After that, every receipt, E2EE field,
+and TLS connection can be checked against keys in the attested keyset.
 
 Keysets change. To recognize the same service over time, rely on what a
 workload cannot shed:
@@ -221,7 +217,7 @@ workload cannot shed:
     { "key_id": "<stable-id>", "algo": "ed25519", "public_key": "<hex>" }
   ],
   "e2ee_public_keys": [
-    { "key_id": "<stable-id>", "algo": "x25519-aes-256-gcm-hkdf-sha256", "public_key": "<hex>" }
+    { "key_id": "<stable-id>", "algo": "<extension-defined-algorithm>", "public_key": "<extension-defined-encoding>" }
   ],
   "tls_public_keys": [
     { "spki_sha256": "<hex>", "domain": "<optional-hostname>" }
@@ -249,8 +245,9 @@ Rules:
   SHOULD reject an implausibly distant `not_after`.
 - `receipt_signing_keys` hold the keys that sign receipts (§7.2) —
   `ed25519` baseline (Appendix B).
-- `e2ee_public_keys` MUST contain at least one key with the §6.1
-  algorithm.
+- `e2ee_public_keys` contains keys for separately specified E2EE extensions
+  (§6). It MAY be empty when the service advertises no E2EE versions. An
+  advertised extension defines its accepted algorithms and required keys.
 - `tls_public_keys` is required for services accepting sensitive plaintext
   over HTTPS. The digest is over the certificate SPKI, not the whole
   certificate, so renewals that keep the TLS key do not rotate the keyset.
@@ -393,9 +390,9 @@ per-field bindings below (Appendix A). Field rules:
     provenance-checked launcher fetched and ran a pinned commit.
   - A verifier MUST reject a report without acceptable provenance (the
     field may be absent on development deployments).
-- `service_capabilities.supported_e2ee_versions` lists the client-facing ACI
-  E2EE scheme versions the service terminates (this document defines `"2"`,
-  §6). A service MUST NOT advertise upstream-only encryption schemes here.
+- `service_capabilities.supported_e2ee_versions` lists separately specified,
+  client-facing E2EE extension versions the service terminates (§6). A service
+  MUST NOT advertise upstream-only encryption schemes here.
 - `service_capabilities.serving` is `"direct"` when inference runs inside
   this attested workload and `"aggregator"` when the service forwards to
   upstreams (§1.2). A direct service has no upstream hop, so it publishes no
@@ -421,9 +418,9 @@ one for the hostname it actually uses.
 ## 5. Inference Endpoints
 
 ACI v1 covers prompt endpoints: OpenAI-compatible completions and similar
-formats such as Anthropic messages. Plaintext requests and responses
-follow the underlying API unchanged, and ACI adds headers and artifacts.
-E2EE requests and responses carry sealed envelopes as bodies (§6.2, §6.3).
+formats such as Anthropic messages. Requests and responses follow the
+underlying API unless a separately specified transport extension says
+otherwise. ACI adds headers and artifacts.
 
 | Endpoint | Status |
 | --- | --- |
@@ -441,9 +438,6 @@ MUST NOT infer trust from `/v1/models` entries.
 | Header | When | Meaning |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | inherited | Service authentication. Also binds the receipt to this credential (§7.6). |
-| `X-E2EE-Version: 2` | E2EE | E2EE scheme version. This document defines `2`. |
-| `X-Client-Pub-Key` | E2EE | Client X25519 public key (hex) that the response is sealed to. |
-| `X-Model-Pub-Key` | E2EE | The service E2EE public key the client selected from the attested keyset. |
 
 ### 5.2 Response headers
 
@@ -452,7 +446,6 @@ MUST NOT infer trust from `/v1/models` entries.
 | `X-ACI-Version: aci/1` | every response | Protocol version, including error responses. |
 | `X-ACI-Keyset-Digest` | every response | The serving `workload_keyset_digest`. |
 | `X-Receipt-Id` | inference responses and refusal errors (§7.5) | Lookup id for the signed receipt. |
-| `X-E2EE-Applied: true \| false` | inference responses | Whether the response body is sealed. |
 
 Headers are unauthenticated hints. Only the attested keyset and the
 signed receipt bind anything. On a changed `X-ACI-Keyset-Digest`, the
@@ -487,140 +480,23 @@ constraints:
   name its own sessions. Removing them appears as the §7.4 rewrite.
   Unknown `aci_`-prefixed fields are rejected (`invalid_request_error`),
   never ignored. The rest of `provider` is outside this specification.
-- Under E2EE the constraint rides inside the sealed body (§6.2): nothing
-  outside the workload can strip it, and the `request.received` hash puts
-  it in the signed receipt.
+- A transport extension defines how its protected request carries serving
+  constraints and which restored bytes the `request.received` hash commits to.
 
-## 6. End-to-End Encryption (E2EE)
+## 6. E2EE Transport Extensions
 
-> **Draft:** this section is under active revision and may change
-> frequently. The reference implementation still ships the earlier
-> field-level scheme, disabled by default; this section is the revamp
-> target, and its test vectors land with it.
+> **Warning:** E2EE v2 is a temporary compatibility extension and will be
+> replaced by E2EE v3. The reference gateway supports v2 through at least
+> February 10, 2027. V2 clients should plan to migrate once v3 is specified.
 
-E2EE seals whole request and response bodies between the client and the
-attested workload, on top of TLS. Plaintext then reaches only a key proven
-to live inside the TEE, even when TLS terminates elsewhere (load balancers,
-CDNs; §1.1).
+ACI binds E2EE public keys into the workload keyset and advertises extension
+versions, but the core `aci/1` specification does not define an E2EE wire
+protocol or require one for conformance. Each version is specified separately.
 
-A service MUST support E2EE on `POST /v1/chat/completions` for both
-non-streaming and streaming responses, and SHOULD support it on the other
-prompt endpoints it serves. `X-E2EE-Version` selects the scheme, and
-this document defines version `2`. Version `1` is the pre-ACI legacy mode
-(Appendix B), not part of ACI.
-
-### 6.1 Sealing
-
-One construction seals everything, parameterized by a context string, a
-recipient X25519 public key, and (for response units) the request's
-secret:
-
-```text
-context           = "aci.e2ee.v2.request" | "aci.e2ee.v2.response"
-unit_secret       = X25519(ephemeral_private_key, recipient_public_key)
-ikm               = unit_secret                    (request)
-                  = request_secret || unit_secret  (response)
-key               = HKDF-SHA256(salt = <absent>, ikm = ikm,
-                                info = UTF-8(context), length = 32)
-request_aad       = UTF-8(context) || 0x00 || UTF-8(model) || 0x00 || UTF-8(client_key_hex)
-response_aad      = UTF-8(context) || 0x00 || UTF-8(model)
-ciphertext || tag = AES-256-GCM(key, gcm_nonce, plaintext, aad)
-
-sealed      = ephemeral_public_key (32) || gcm_nonce (12) || ciphertext || tag (16)
-sealed_b64  = base64(sealed)
-```
-
-- `model` is the request envelope `model` (§6.2). `client_key_hex` is
-  the request's `X-Client-Pub-Key` (§5.1), present only in the request
-  AAD.
-- A **sealed unit** is one request body, one buffered response body, or one
-  SSE event payload. Every sealed unit MUST use a fresh ephemeral key and a
-  fresh random `gcm_nonce`.
-- `request_secret` is the request's `unit_secret` — the secret only the
-  client and the attested workload share, because computing it needs the
-  client's ephemeral private key or the service's static private key.
-  Both sides keep it for the exchange and mix it into every response
-  unit's key (§6.5).
-- Public keys are 32-byte X25519 keys, hex-encoded, no `0x` prefix.
-
-### 6.2 Requests
-
-The client sends the three E2EE headers (§5.1) and this body:
-
-```json
-{ "model": "<id>", "sealed_b64": "<base64>" }
-```
-
-- `model` MUST be a string. It and `X-Client-Pub-Key` are bound into the
-  request AAD (§6.1), so a captured request cannot be replayed under another
-  envelope model or resealed to a different response recipient.
-- The plaintext sealed is the client's **entire original request-body
-  bytes** — the exact JSON the client would have sent without E2EE, any
-  modality included. The recipient key is the `X-Model-Pub-Key` service
-  key, and the context is `aci.e2ee.v2.request`.
-- The service unseals to the client's exact original bytes and processes
-  those as the request body. No re-serialization exists, so the receipt's
-  `request.received` hash (§7.4) is reproducible by the client from the
-  bytes it sealed.
-
-### 6.3 Responses
-
-Responses are sealed to `X-Client-Pub-Key` with the same envelope format,
-context `aci.e2ee.v2.response`, and the same request `model` string in the
-AAD. Fresh ephemeral key per sealed unit, and each unit's key mixes the
-`request_secret` (§6.1).
-
-- **Buffered:** the response body is
-  `{ "sealed_b64": "<base64>" }`, sealing the entire original response-body
-  bytes.
-- **Streaming:** the SSE framing stays plaintext. Each event's data
-  payload is replaced by `{ "sealed_b64": "<base64>" }`, sealing that
-  event's original JSON bytes. The `[DONE]` sentinel stays plaintext.
-
-### 6.4 Key selection and validation
-
-- `X-Model-Pub-Key` MUST equal the `public_key` of an attested
-  `e2ee_public_keys` entry carrying the §6.1 algorithm. Otherwise the
-  request is rejected with `e2ee_model_key_mismatch`. This forces the
-  client to prove it is encrypting to a key it could have verified.
-- A public-key header that does not parse as 32 hex-encoded bytes is
-  rejected with `e2ee_invalid_public_key`.
-- An `X-E2EE-Version` other than `2` is rejected with
-  `e2ee_invalid_version`. A request presenting some but not all of the
-  three E2EE headers is rejected with `e2ee_header_missing`.
-- A body that does not parse as the §6.2 envelope, a `sealed_b64` that does
-  not decode to a well-formed sealed unit, or an AEAD authentication
-  failure is rejected with `e2ee_decryption_failed`.
-- E2EE headers sent to an endpoint that does not support E2EE are rejected
-  with `e2ee_unsupported_endpoint`.
-
-### 6.5 Replay and response authenticity
-
-E2EE v2 has no replay cache or timestamp window, deliberately: a replay
-needs the bearer credential, and the response stays sealed to the
-original client's key (bound into the request AAD, §6.1), so a replay
-exposes nothing — it only spends the credential owner's quota.
-
-Responses authenticate through their key derivation. Only the client and
-the workload holding the attested static key can compute
-`request_secret` (§6.1), so a valid tag proves the workload sealed the
-unit for this exact request. A unit lifted from another exchange fails
-to open, because the client's ephemeral key is fresh per request. The
-envelope needs no service signature.
-
-One unit's tag says nothing about the stream around it. Event order and
-truncation are checked against the signed receipt over the wire bytes
-(§7.4, §9.3), and the AEAD binds each unit's plaintext to the sealed
-bytes the receipt commits to.
-
-### 6.6 Upstream encryption
-
-Client E2EE terminates at the aggregator: upstreams are third parties
-that need not speak ACI, so the measured aggregator code is the bridge.
-An aggregator may encrypt to its upstreams however it likes. That is not
-client-facing ACI E2EE (§4.1 forbids advertising it in
-`supported_e2ee_versions`). Clients see it only as channel-binding
-material inside attested sessions.
+The currently implemented compatibility extension is
+[E2EE v2](e2ee-v2.md). Its headers, algorithms, encrypted fields, replay
+rules, errors, receipt integration, and migration policy are defined only in
+the E2EE v2 document.
 
 ## 7. Inference Receipts
 
@@ -680,10 +556,11 @@ one self-contained file a client can archive and re-verify offline.
 ```
 
 Receipts do not embed fresh attestation. They bind back to an
-established keyset through `workload_keyset_digest` and the signing key. `model` is
-the model id the client asked for (under E2EE, the envelope `model`).
-Events are flat objects — `type` plus type-specific fields — and event
-order is the array order. The first event MUST be `request.received`.
+established keyset through `workload_keyset_digest` and the signing key. `model`
+is the model id the client asked for. A transport extension defines how the
+service extracts it from a protected request. Events are flat objects — `type`
+plus type-specific fields — and event order is the array order. The first event
+MUST be `request.received`.
 
 ### 7.4 Event vocabulary
 
@@ -693,10 +570,10 @@ receipt hashes.
 
 | Event | Required | Fields | Meaning |
 | --- | --- | --- | --- |
-| `request.received` | yes, first | `body_hash` | The request body the workload received. Under E2EE, the hash of the **unsealed original client bytes** — reproducible by the client by construction (§6.2). Plaintext requests hash the wire body. |
+| `request.received` | yes, first | `body_hash` | The request body the workload processed. Plaintext requests hash the wire body. A transport extension defines the restored request bytes hashed after its protection is removed. |
 | `request.forwarded` | if forwarded | `body_hash` | The exact bytes used for inference after any service-side rewrite (for an aggregator, the bytes forwarded upstream). A rewrite is this hash differing from `request.received`. Absent when the prompt was not forwarded (a §7.5 refusal). |
 | `upstream.verified` | aggregator | §7.5 | The upstream verification outcome for this request (§7.5). |
-| `response.returned` | yes | `body_hash` | The exact response body bytes emitted on the wire — for a §7.5 refusal, the error body served in place of an inference response. For SSE, the raw in-order stream including framing (`data:` lines, delimiters, terminating sentinel). For E2EE, the sealed envelope bytes — the plaintext binding comes from the AEAD (§6.5). |
+| `response.returned` | yes | `body_hash` | The exact response body bytes emitted on the wire — for a §7.5 refusal, the error body served in place of an inference response. For SSE, the raw in-order stream including framing (`data:` lines, delimiters, terminating sentinel). |
 
 Services MAY add events with implementation-specific types (the reference
 implementation records routing decisions, for example), but MUST NOT reuse
@@ -917,9 +794,10 @@ anything sensitive:
 - Read the code, or rely on a reviewer you trust. The §1 privacy and
   integrity claims are enforced by the measured code, and the provenance
   (check 4) names it.
-- From now on, talk to the service only through the keyset: TLS pinned to
-  a listed SPKI, or bodies sealed to a listed E2EE key (§6), on every
-  connection. Re-establish identity when `not_after` passes, when the
+- From now on, talk to the service only through the keyset: TLS pinned to a
+  listed SPKI, or content encrypted to a listed E2EE key under a separately
+  specified extension (§6), on every connection. Re-establish identity when
+  `not_after` passes, when the
   served `X-ACI-Keyset-Digest` changes (§5.2), or when your policy
   deny-lists the workload (§3.4).
 - Behind an aggregator, the session list (§8.1) shows which upstreams
@@ -965,13 +843,13 @@ Given an established keyset, plus a response and its receipt:
    entry's algorithm (§7.2).
 2. **Document.** The document's `api_version` is `aci/1` (Appendix B) and
    its `workload_keyset_digest` equals the established digest.
-3. **Request.** `request.received.body_hash` matches the client's request
-   bytes — the wire body for plaintext requests, the original body the
-   client sealed for E2EE requests (§7.4).
-4. **Response.** `response.returned.body_hash` matches the response bytes
-   the client received off the wire — the in-order raw SSE bytes for a
-   stream, the sealed envelope bytes for E2EE (whose plaintext the client
-   already authenticated through the AEAD, §6.5).
+3. **Request.** `request.received.body_hash` matches the wire body for a
+   plaintext request. For a protected request, follow the advertised transport
+   extension's receipt-integration rules (§6, §7.4).
+4. **Response.** `response.returned.body_hash` matches the response bytes the
+   client received off the wire, including the in-order raw SSE framing for a
+   stream. When a transport extension protects the response, the client also
+   performs that extension's authentication checks (§6).
 
 Behind an aggregator, additionally:
 
@@ -997,9 +875,9 @@ Errors use the OpenAI-compatible shape:
 { "error": { "message": "...", "type": "<type>", "code": null, "param": null } }
 ```
 
-Malformed requests use the OpenAI-inherited types unchanged (a bad nonce
-or invalid §5.3 constraint is a 400 `invalid_request_error`). ACI defines
-these types, with the HTTP status a service SHOULD use:
+Malformed non-ACI request members use the OpenAI-inherited types unchanged
+(for example, an invalid §5.3 constraint is a 400 `invalid_request_error`).
+ACI defines these types, with the HTTP status a service SHOULD use:
 
 | Type | Status | Meaning |
 | --- | --- | --- |
@@ -1007,12 +885,6 @@ these types, with the HTTP status a service SHOULD use:
 | `unauthorized` | 401 | The receipt is credential-bound and no credential was presented. |
 | `upstream_verification_failed` | 503 | Upstream verification was required and did not produce an enforceable verified binding. The prompt was not forwarded. |
 | `session_not_accepted` | 412 | The request pinned sessions (§5.3) and none of them could serve it. The prompt was not forwarded. |
-| `e2ee_header_missing` | 400 | Some but not all required E2EE headers are present. |
-| `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, or the service does not terminate E2EE. |
-| `e2ee_invalid_public_key` | 400 | A supplied public key does not parse as 32 hex-encoded bytes. |
-| `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
-| `e2ee_decryption_failed` | 400 | The envelope does not parse, the sealed unit is malformed, or AEAD authentication fails (§6.4). |
-| `e2ee_unsupported_endpoint` | 400 | E2EE headers sent to an endpoint that does not support E2EE. |
 
 A service MAY use a different status where an HTTP intermediary requires it
 (for example 429 for rate limiting), but SHOULD preserve the `type` so
@@ -1027,8 +899,6 @@ Limits that remain after every §9 check passes:
   identifies that code (§9.1(4)) but cannot vouch for it.
 - No non-repudiation: `served_at` is self-asserted, and nothing orders or
   timestamps receipts. Durable proof needs an external transparency log.
-- Under E2EE, a credential holder can replay a sealed request, but the
-  response stays sealed to the original client's key (§6.5).
 - `gpu_attested` proves a genuine CC GPU, not its binding to the serving
   CPU TEE (§8.3).
 - The service sees client IPs, credentials, and timing. An OHTTP relay
@@ -1039,8 +909,6 @@ Limits that remain after every §9 check passes:
 Normative for the wire formats in this document:
 
 - RFC 8032 — Ed25519 signatures.
-- RFC 7748 — X25519 key agreement.
-- RFC 5869 — HKDF.
 - RFC 4648 — base64 encoding.
 - RFC 8785 — JSON Canonicalization Scheme (JCS): the form the keyset,
   receipts, and sessions are hashed and signed in (Appendix A).
@@ -1076,9 +944,9 @@ Two rules cover every hash and signature in ACI:
    free: a service may pretty-print, and a verifier canonicalizes
    whatever it parsed, never checking how the server encoded it. Foreign
    bytes (HTTP bodies, `evidence.data`) are hashed exactly as observed.
-2. **A verifier builds only two payloads itself:** the attestation
-   statement (§3.2) and the E2EE AAD (§6.1). Both are fixed templates
-   filled by plain string concatenation.
+2. **A verifier builds the attestation statement itself** (§3.2). The
+   statement is a fixed template. Separately specified extensions define any
+   additional verifier-constructed payloads (§6).
 
 Under ACI's constraints (ASCII field names, integer numbers), JCS is just
 compact JSON with lexicographically sorted field names.
@@ -1095,11 +963,10 @@ Encodings:
 
 Conventions:
 
-- Domain separation: each verifier-constructed payload embeds its purpose —
-  the `aci.report_data.v1` tag in the attestation statement, and the
-  `aci.e2ee.v2.request` / `aci.e2ee.v2.response` context in the E2EE HKDF
-  info and AAD. Receipt signing needs no purpose string because receipt
-  keys sign nothing else (§3.1 role separation).
+- Domain separation: the attestation statement embeds the
+  `aci.report_data.v1` purpose. Receipt signing needs no purpose string because
+  receipt keys sign nothing else (§3.1 role separation). Extension documents
+  define their own domain-separation values (§6).
 - Some artifacts restate a field that is derivable elsewhere, so they are
   self-describing: the report carries the keyset digest beside the
   keyset, and a receipt names the digest that resolves its signing key. A
@@ -1117,10 +984,8 @@ these sets requires a published extension document.
 | Set | Values | Unknown value handling |
 | --- | --- | --- |
 | API version | `aci/1` (`api_version` fields, `X-ACI-Version` header) | Reject artifacts with other versions |
-| Purpose / context strings | `aci.report_data.v1`, `aci.e2ee.v2.request`, `aci.e2ee.v2.response` | — (fixed payload tags) |
+| Purpose / context strings | `aci.report_data.v1` | — (fixed statement tag) |
 | Signature algorithms | `ed25519` baseline. Keysets may carry more (below) | Ignore a keyset entry whose `algo` is unknown. Reject an artifact signed with one |
-| E2EE algorithms | `x25519-aes-256-gcm-hkdf-sha256` baseline. Keysets may carry more (below) | Ignore a keyset entry whose `algo` is unknown. Reject a request that selects one |
-| E2EE versions | `2` (`1` is the pre-ACI legacy mode) | Reject (`e2ee_invalid_version`) |
 | Receipt event types | `request.received`, `request.forwarded`, `response.returned`, `upstream.verified` | Ignore (§7.4) |
 | Channel binding types | `tls_spki_sha256`, `e2ee_public_key_sha256` | Treat as not enforceable |
 | Claim names | `tee_attested`, `gpu_attested`, `tcb_up_to_date`, `os_known_good`, `serving_software_known_good`, `model_weights_provenance` | Extra facts live in `claims.extra`. Unknown entries are informational |
@@ -1128,7 +993,7 @@ these sets requires a published extension document.
 | TEE types | `tdx`, `sev_snp` | Requires a published verifier extension (§4.2) |
 | Error types | §10 table | Treat as opaque. Act on HTTP status |
 | Serving modes | `direct`, `aggregator` (`service_capabilities.serving`, §4.1) | Treat an unknown value as `aggregator` |
-| Headers | §5.1, §5.2 tables | Ignore unrecognized `X-ACI-*` / `X-E2EE-*` headers |
+| Headers | §5.1, §5.2 tables | Ignore unrecognized `X-ACI-*` headers |
 | Serving constraints | `provider.aci_verified`, `provider.aci_session_ids` (§5.3) | Reject unknown `aci_`-prefixed fields (`invalid_request_error`) |
 
 Extension points:
@@ -1146,10 +1011,9 @@ Extension points:
   and ignore compatibility fields.
 - **Reports** — `attestation.evidence` is policy-defined, and consumers
   MUST ignore unrecognized `service_capabilities` fields.
-- **The keyset** shape is fixed. New key roles need a new protocol
-  version.
-  Every verifier implements the baseline: `ed25519` for signatures and
-  `x25519-aes-256-gcm-hkdf-sha256` for E2EE. A keyset may add other
-  algorithms (for example secp256k1 or P-256). The attested entry picks
-  the algorithm. A verifier skips entries it can't implement (§3.1) and
-  rejects an unknown algorithm instead of guessing. No negotiation, no downgrade.
+- **The keyset** shape is fixed. New key roles need a new protocol version.
+  Every verifier implements the `ed25519` baseline for receipt signatures.
+  E2EE extensions define the algorithms they recognize in
+  `e2ee_public_keys`. The attested entry picks the algorithm. A verifier skips
+  entries it cannot implement (§3.1) and rejects an unknown algorithm instead
+  of guessing. No negotiation, no downgrade.

@@ -64,10 +64,10 @@ Two cautionary counterexamples. Atoma Network (since pivoted away from its
 decentralized offering) shipped request encryption whose key authenticity
 rested entirely on an unverified coordinator — its SDKs checked neither
 attestation nor response signatures, so the encryption reduced to trusting
-the routing proxy. ACI's rule that the client's chosen service key MUST
-appear in the attested keyset (spec §6.4), and that the keyset itself is
-quote-bound, exists precisely to make that failure mode impossible for a
-conformant client. Super Protocol illustrates a second anti-pattern:
+the routing proxy. ACI's quote-bound keyset rule, combined with the
+[E2EE v2 key-selection rule](e2ee-v2.md#7-key-selection-validation-and-replay-protection),
+exists precisely to make that failure mode impossible for a conformant client.
+Super Protocol illustrates a second anti-pattern:
 attestation consumed by a vendor-operated X.509 authority (with shared root
 keys across swarm nodes and partially closed PKI code), leaving clients a
 certificate chain to trust rather than evidence to appraise. ACI's
