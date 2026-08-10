@@ -95,9 +95,10 @@ The provenance names the exact source to review:
 }
 ```
 
-The commit changes when the deployment updates. The ACI E2EE suite is
+The commit changes when the deployment updates. The E2EE v2 extension suite is
 `x25519-aes-256-gcm-hkdf-sha256`; keyset entries with any other `algo` are
-ignored ([aci.md](../spec/aci.md) §3.1, §6.1).
+ignored ([ACI §3.1](../spec/aci.md#31-workload-keyset),
+[E2EE v2 §4](../spec/e2ee-v2.md#4-algorithms)).
 
 To recompute any digest by hand, add `--explain` to `aci verify`: each check
 prints the exact material it computed — the decoded keyset bytes, the §3.2

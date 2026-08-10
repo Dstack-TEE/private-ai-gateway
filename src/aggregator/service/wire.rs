@@ -44,14 +44,14 @@ impl E2eeRequestContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum E2eeAadMode {
-    /// The ACI v2 path: JCS AAD.
+    /// The E2EE v2 path: JCS AAD.
     AciV2,
     /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): no AAD.
     LegacyV1,
 }
 
 impl E2eeAadMode {
-    /// The ACI v2 path (JCS AAD), as opposed to the no-AAD legacy
+    /// The E2EE v2 path (JCS AAD), as opposed to the no-AAD legacy
     /// X-Signing-Algo compatibility mode. Per-part multimodal field paths
     /// exist only here.
     pub(super) fn is_aci(self) -> bool {

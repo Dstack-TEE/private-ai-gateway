@@ -43,9 +43,10 @@ evidence) exactly as observed.
   `{ session, pinnedSessions, requiresVerified }`; anything absent is a skip
   with its reason, never a pass.
 - **E2EE key verification, not an E2EE request builder.** Report verification
-  establishes the quote-bound `e2ee_public_keys`, including the v2 suites in
-  §6. This package does not yet encrypt or decrypt content fields. Callers can
-  implement the field-level wire contract in §6 or use a separate v2 client.
+  establishes the quote-bound `e2ee_public_keys`, including the suites in the
+  [E2EE v2 compatibility protocol](../../spec/e2ee-v2.md). This package does
+  not yet encrypt or decrypt content fields. Callers can implement that
+  field-level wire contract or use a separate v2 client.
 
 ## What it does not do
 
@@ -107,17 +108,19 @@ if (!(await checkResponseBodyHash(result.payload!, responseBytes))) {
 
 ### E2EE
 
-ACI E2EE v2 is the supported field-level scheme in spec §6. This verifier
-establishes the attested E2EE keys but does not construct encrypted requests or
-decrypt responses. Use a v2-capable client for those operations. Without one,
-a bound channel needs the caller-observed TLS SPKI (`channel`) or the `aci` CLI
-/ `aci serve` proxy.
+E2EE v2 is a supported field-level compatibility extension, specified
+separately from core ACI in [the v2 protocol](../../spec/e2ee-v2.md). It is
+supported through at least February 10, 2027 and is planned to be replaced by
+E2EE v3. This verifier establishes the attested E2EE keys but does not construct
+encrypted requests or decrypt responses. Use a v2-capable client for those
+operations. Without one, a bound channel needs the caller-observed TLS SPKI
+(`channel`) or the `aci` CLI / `aci serve` proxy.
 
 ## Development
 
 ```sh
 npm install
 npm test      # tsc + node:test; test/vectors.test.ts pins every
-              # construction byte-for-byte against ../../spec/test-vectors.md
+              # construction against the ACI and E2EE v2 vector documents
 npm run build # emit dist/ (ESM + .d.ts)
 ```

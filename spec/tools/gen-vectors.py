@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the deterministic values in spec/test-vectors.md.
+"""Regenerate the deterministic values in the ACI and E2EE v2 vector docs.
 
 Every value in the test-vectors doc is reproduced here from first principles —
 an implementation independent of the Rust reference — so the doc, the
@@ -181,7 +181,7 @@ SIGNING_INPUT_SHA256 = sha256_hex(SIGNING_INPUT)
 RECEIPT_SIG = RECEIPT_KEY.sign(SIGNING_INPUT).hex()
 DOCUMENT_BYTES = jcs({**UNSIGNED_DOCUMENT, "signature": RECEIPT_SIG})
 
-# ---- §5 E2EE v2 AAD (spec §6.3) -------------------------------------------
+# ---- E2EE v2 AAD (E2EE v2 spec §6) ----------------------------------------
 REQUEST_AAD = jcs({
     "purpose": "aci.e2ee.request.v2",
     "algo": E2EE_ALGO,
@@ -200,7 +200,7 @@ RESPONSE_AAD = jcs({
     "ts": 1750000000,
 })
 
-# ---- Published constants (must match spec/test-vectors.md) -------------------
+# ---- Published constants (must match both spec vector documents) ------------
 PINNED = {
     "receipt-1 public key": (RECEIPT_PUB,
         "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
@@ -269,7 +269,7 @@ def main():
     print("signature =", RECEIPT_SIG)
     print("document bytes =", DOCUMENT_BYTES.decode())
     print()
-    print("== §5 E2EE v2 AAD ==")
+    print("== E2EE v2 §6 AAD ==")
     print("request AAD =", REQUEST_AAD.decode())
     print("response AAD =", RESPONSE_AAD.decode())
     return 0 if ok else 1

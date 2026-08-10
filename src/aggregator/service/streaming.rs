@@ -343,7 +343,7 @@ fn poll_finalizing_stream<F: FinalizingStream>(
             f.shared().finished = true;
             // A broken stream is signed too: §7.4's `response.returned` covers
             // the exact bytes emitted on the wire — including the synthesized
-            // error tail — and §6.5's truncation check needs precisely this
+            // error tail — and E2EE v2 §7's truncation check needs precisely this
             // signature. A receipt attests bytes, not completeness.
             return match f.finalize_receipt() {
                 Ok(()) => Poll::Ready(None),

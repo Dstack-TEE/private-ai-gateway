@@ -168,7 +168,7 @@ async fn dstack_live_provider_loads_kms_keys_and_quote() {
         .await
         .unwrap();
 
-    // One attested receipt key and both long-lived ACI E2EE v2 suites.
+    // One attested receipt key and both long-lived E2EE v2 suites.
     let receipt_keys = provider.receipt_keys();
     assert_eq!(receipt_keys.len(), 1);
     assert_eq!(receipt_keys[0].algo, ALGO_ED25519);

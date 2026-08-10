@@ -606,7 +606,7 @@ fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
         cfg,
         Arc::new(FixedClock(0)),
     )
-    .expect("secp256k1 is a supported ACI E2EE v2 suite");
+    .expect("secp256k1 is a supported E2EE v2 suite");
 }
 
 #[test]

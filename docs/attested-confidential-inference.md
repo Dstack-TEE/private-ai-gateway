@@ -156,14 +156,18 @@ session can serve, the gateway refuses with `session_not_accepted` (412)
 before forwarding, and the refusal carries its own receipt. The whole
 `provider` member is consumed by the gateway and never reaches an upstream.
 
-## E2EE Mode
+## E2EE v2 Compatibility Extension
 
 E2EE v2 encrypts content-bearing request and response fields between the
-client and the attested gateway. It is enabled by default and remains a
-supported compatibility contract. TLS still protects the HTTP connection;
-E2EE binds field plaintext to a key from the quote-bound workload keyset.
+client and the attested gateway. It is a separate transport extension, not
+part of the core ACI specification. It is enabled by default and remains
+supported through at least February 10, 2027. E2EE v3 is the planned
+replacement. V2 is frozen except for security, correctness, and
+interoperability fixes.
 
-Use ACI E2EE v2 (spec §6) with these headers:
+The normative contract is the
+[E2EE v2 compatibility protocol](../spec/e2ee-v2.md). It defines these five
+request headers:
 
 | Header | Value |
 | --- | --- |
@@ -173,7 +177,7 @@ Use ACI E2EE v2 (spec §6) with these headers:
 | `X-E2EE-Nonce` | A fresh 32-byte random value encoded as 64 hex characters. |
 | `X-E2EE-Timestamp` | Current Unix time in seconds. |
 
-Do not send `X-Signing-Algo` for ACI E2EE v2. That header selects the legacy
+Do not send `X-Signing-Algo` for E2EE v2. That header selects the legacy
 compatibility path.
 
 The client selects either `x25519-aes-256-gcm-hkdf-sha256` or
@@ -188,8 +192,9 @@ The JSON structure stays OpenAI-compatible. Encrypt request content in place,
 for example `messages.0.content`, and decrypt the corresponding response fields
 such as `choices.0.message.content`. The RFC 8785 JCS AAD binds each field to
 the direction, selected algorithm, request model, full field path, request
-nonce, timestamp, and response id. See spec §6.2 and §6.3 for every supported
-field and the byte-exact AAD object.
+nonce, timestamp, and response id. See
+[E2EE v2 §5](../spec/e2ee-v2.md#5-encrypted-fields) and
+[§6](../spec/e2ee-v2.md#6-associated-data) for the complete contract.
 
 The quote binds the workload keyset digest directly. V2 does not require, and
 does not reintroduce, a separate workload identity key or keyset endorsement.
@@ -214,7 +219,7 @@ of receipt-signing and E2EE keys.
 ## Trust Boundary
 
 Plain TLS requests are visible to the attested gateway after TLS termination.
-ACI E2EE requests are decrypted inside the attested gateway. If middleware is
+E2EE v2 requests are decrypted inside the attested gateway. If middleware is
 enabled, middleware is part of the same deployment trust boundary and can see
 plaintext after gateway decryption.
 

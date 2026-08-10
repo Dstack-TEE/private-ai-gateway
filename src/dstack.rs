@@ -30,7 +30,7 @@ use crate::aci::types::{KeyedPublicKey, TlsSpki};
 
 const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
-/// The k256 key keeps its pre-PR path and doubles as the ACI v2 secp256k1 key,
+/// The k256 key keeps its pre-PR path and doubles as the E2EE v2 secp256k1 key,
 /// legacy `signing_address`, and legacy `ecdsa` E2EE key. The ed25519 key is
 /// used only by the legacy `ed25519` mode.
 const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
@@ -418,7 +418,7 @@ impl KeyProvider for DstackAciProvider {
 
     fn key_custody_evidence(&self) -> serde_json::Value {
         // Keyset roles only (§3.3). The secp256k1 key also serves the legacy
-        // compatibility surface, but it is listed here because ACI E2EE v2
+        // compatibility surface, but it is listed here because E2EE v2
         // publishes and accepts that same key as a keyset role.
         json!({
             "provider": "dstack-kms",

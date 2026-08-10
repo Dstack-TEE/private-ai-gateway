@@ -266,8 +266,8 @@ impl AciService {
             return Err(E2eeError::InvalidTimestamp);
         }
 
-        // The client selects a §6.1 suite by the `algo` of the keyset entry it
-        // encrypts to (§6.4). Match `X-Model-Pub-Key` against each suite entry
+        // The client selects an E2EE v2 §4 suite by the `algo` of the keyset
+        // entry it encrypts to (§7). Match `X-Model-Pub-Key` against each suite entry
         // under that suite's own normalization; the first match fixes the suite.
         let selected_key = self
             .keyset
@@ -364,7 +364,7 @@ impl AciService {
         // that ask for it — via `X-E2EE-Version: 2` or the nonce/timestamp it
         // required — so they fail loudly rather than silently decrypting with no
         // AAD. Reaching the ACI path means dropping `X-Signing-Algo` entirely
-        // (it routes here whenever present) and encrypting to a §6.1 suite via
+        // (it routes here whenever present) and encrypting to a v2 §4 suite via
         // `X-Model-Pub-Key` + `X-E2EE-Version: 2`.
         let version_header = parts.version.unwrap_or("").trim();
         if (!version_header.is_empty() && version_header != E2EE_VERSION_V1)

@@ -43,7 +43,7 @@ This is the smallest practical container config.
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `enable_e2ee` | `true` | Advertise and terminate client-facing ACI E2EE v2. Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
+| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
 | `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
 
 ## Middleware

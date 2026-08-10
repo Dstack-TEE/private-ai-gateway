@@ -209,9 +209,9 @@ impl AciService {
     }
 }
 
-/// §3.1 seal-time rules a library consumer could otherwise violate: a service
-/// that terminates E2EE must list a §6.1 key, and keys must be distinct per
-/// role. (The shipped launcher satisfies both by construction.)
+/// Keyset seal-time rules a library consumer could otherwise violate: this
+/// v2-capable gateway must list an E2EE v2 §4 key, and keys must be distinct
+/// per role. (The shipped launcher satisfies both by construction.)
 fn validate_keyset(
     keyset: &WorkloadKeyset,
     _config: &AciServiceConfig,
@@ -219,8 +219,8 @@ fn validate_keyset(
     use crate::aci::digest::sha256_raw;
     use crate::aci::e2ee::is_aci_e2ee_suite;
 
-    // §3.1: at least one recognized §6.1 E2EE suite is unconditional — the
-    // keyset is the identity document even while E2EE termination is disabled.
+    // The reference gateway always provisions at least one recognized E2EE v2
+    // §4 suite, even while extension termination is explicitly disabled.
     // X25519 is recommended, not required; existing v2 clients may select the
     // secp256k1 suite on its own.
     if !keyset
@@ -228,9 +228,9 @@ fn validate_keyset(
         .iter()
         .any(|key| is_aci_e2ee_suite(&key.algo))
     {
-        return Err(ServiceError::Keyset(format!(
-            "e2ee_public_keys has no recognized ACI E2EE v2 suite (§3.1, §6.1)"
-        )));
+        return Err(ServiceError::Keyset(
+            "e2ee_public_keys has no recognized E2EE v2 suite (E2EE v2 spec §4)".to_string(),
+        ));
     }
     for receipt_key in &keyset.receipt_signing_keys {
         if keyset

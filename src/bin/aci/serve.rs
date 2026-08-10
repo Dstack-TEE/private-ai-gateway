@@ -506,7 +506,7 @@ async fn proxy_inference(
     let hook: CompletionHook = Box::new(move |end| {
         let (response, truncation) = match end {
             StreamEnd::Complete(digest) => (digest, None),
-            // §6.5: truncation is exactly what the wire-hash check exists to
+            // E2EE v2 §7: truncation is exactly what the wire-hash check exists to
             // catch — it must reach the report, not vanish.
             StreamEnd::Errored { partial, error } => (partial, Some(error)),
         };

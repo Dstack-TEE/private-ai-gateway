@@ -79,7 +79,7 @@ struct GatewayConfigFile {
     /// no third party. Reported as `serving: "direct"`, and receipts then
     /// carry no `upstream.verified` event (§7.5).
     direct_serving: bool,
-    /// Advertise and terminate client-facing ACI E2EE v2 (§6). Enabled by
+    /// Advertise and terminate the E2EE v2 compatibility extension. Enabled by
     /// default to preserve the deployed v2 contract. Operators may disable it
     /// explicitly for a plaintext/TLS-only deployment.
     enable_e2ee: bool,
@@ -489,12 +489,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if service.supported_e2ee_versions().is_empty() {
-        // §1.4(5) requires E2EE on chat completions. This warning is reachable
-        // only when an operator explicitly opts out of the default v2 path.
+        // This warning is reachable only when an operator explicitly opts out
+        // of the default E2EE v2 compatibility path.
         tracing::warn!(
-            "ACI E2EE is off (enable_e2ee is false): ACI E2EE requests are rejected \
-             and this deployment is not ACI spec-conformant for chat completions. \
-             The legacy dstack-vllm-proxy path is unaffected"
+            "E2EE v2 is off (enable_e2ee is false): v2 requests are rejected. \
+             Core ACI remains available over a keyset-bound TLS channel; \
+             the legacy dstack-vllm-proxy path is unaffected"
         );
         if service.keyset().tls_public_keys.is_empty() {
             // §1.1/§3.1: with no TLS pin and no E2EE termination, no client

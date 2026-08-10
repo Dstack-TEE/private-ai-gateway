@@ -1,8 +1,7 @@
 /**
- * Byte-exact pins against spec/test-vectors.md — the cross-implementation
- * check. Every digest, signature, and AAD published there is recomputed here
- * from the vector inputs. The constants are copied verbatim from the spec
- * document.
+ * Byte-exact pins against spec/test-vectors.md and
+ * spec/e2ee-v2-test-vectors.md. Every published digest, signature, and AAD is
+ * recomputed here from the vector inputs.
  */
 
 import { test } from 'node:test';
@@ -31,7 +30,7 @@ import * as fx from './fixtures.js';
 
 const dec = new TextDecoder();
 
-// --- Constants from spec/test-vectors.md, verbatim -------------------------------
+// --- Constants from the ACI and E2EE v2 vector documents, verbatim ----------------
 
 const KEYSET_JCS = "{\"e2ee_public_keys\":[{\"algo\":\"x25519-aes-256-gcm-hkdf-sha256\",\"key_id\":\"e2ee-1\",\"public_key\":\"5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22\"}],\"not_after\":1800000000,\"receipt_signing_keys\":[{\"algo\":\"ed25519\",\"key_id\":\"receipt-1\",\"public_key\":\"8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\"}],\"subject\":\"dstack-app://example-app\",\"tls_public_keys\":[{\"domain\":\"api.example.com\",\"spki_sha256\":\"c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0\"}]}";
 const KEYSET_DIGEST = "sha256:53a5cd44b30dcc51999754c719f2628a041f174ecbf9662a6f8e898a10cd9371";
@@ -136,7 +135,7 @@ test('vectors §4: body hashes, signing input, Ed25519 signature, document verif
   assert.equal(await checkResponseBodyHash(result.payload, RESPONSE_BODY), true);
 });
 
-test('vectors §5: E2EE v2 request and response AAD use byte-exact JCS', () => {
+test('E2EE v2 vectors §6: request and response AAD use byte-exact JCS', () => {
   const request = {
     purpose: 'aci.e2ee.request.v2',
     algo: 'x25519-aes-256-gcm-hkdf-sha256',
