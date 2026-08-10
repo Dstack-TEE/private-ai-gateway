@@ -1,7 +1,7 @@
 # ACI clients
 
-Three client surfaces: a verifier library, a command-line verifier, and a
-pi provider extension:
+Four client surfaces: a verifier library, a command-line verifier, and two
+agent provider plugins (pi and opencode):
 
 - [`verifier-ts`](verifier-ts) — `@phala/aci-verifier`, a TypeScript verifier
   for the browser and Node. One call, `verifyService(url)`, fetches the
@@ -37,6 +37,19 @@ pi provider extension:
   `@phala/aci-verifier` under `vendor/`. Submodule checkouts:
   [`release/`](release/). Pack: `make -C pi-provider pack`.
   See [`pi-provider/README.md`](pi-provider/README.md).
+- [`opencode-provider`](opencode-provider) — an [opencode](https://opencode.ai)
+  provider plugin that wires the gateway into opencode via a custom `fetch`
+  injected into `@ai-sdk/openai-compatible` provider options: attested TLS
+  (SPKI) pinning per connection (Bun `tls.checkServerIdentity`, fail closed),
+  plus full receipt verification — the injected fetch sees the exact
+  request/response bytes, so body hashes are checked honestly (`verified`,
+  not pi's inspection-only `/aci-receipt`). The npm workspaces monorepo ships
+  the vendor-neutral
+  [`@phala/opencode-provider-aci`](opencode-provider/packages/opencode-provider-aci)
+  core plus the branded
+  [`opencode-provider-phala-cloud`](opencode-provider/packages/opencode-provider-phala-cloud)
+  distribution. See [`opencode-provider/README.md`](opencode-provider/README.md)
+  for install and use.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. For pi, install a brand artifact or load
