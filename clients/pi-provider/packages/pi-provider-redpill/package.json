@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-redpill",
   "version": "0.2.0",
-  "description": "Redpill AI for Pi — attested TLS (SPKI) pinning + per-response receipt verification on private-ai-gateway",
+  "description": "Redpill AI for Pi \u2014 attested TLS (SPKI) pinning on private-ai-gateway (prevention)",
   "keywords": [
     "ai-provider",
     "attestation",

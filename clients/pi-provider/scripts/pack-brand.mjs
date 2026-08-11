@@ -380,9 +380,10 @@ It is generated from the single source of truth (SoT):
 
 **https://github.com/Dstack-TEE/private-ai-gateway**
 
-Security control is **attested TLS (SPKI) pinning** (prevention). Per-response
-receipt verification is intentionally not wired into this plugin — use SoT
-\`clients/verifier-ts\` (\`@phala/aci-verifier\`) if you need receipt audit.
+Security control is **attested TLS (SPKI) pinning** (prevention). There is
+no field-level E2EE and no automatic per-response receipt verification.
+On-demand \`/aci-receipt\` / \`/aci-session\` only fetch/summarize; crypto
+audit belongs in SoT \`clients/verifier-ts\`.
 
 Do not treat this repo as the place to change protocol/kernel/verifier logic.
 See [Maintenance](#maintenance) below.
