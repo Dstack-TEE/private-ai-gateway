@@ -635,7 +635,9 @@ async fn control_override_reconciles_reasoning_before_forwarding() {
                 "format": "openai",
                 "engine": "sglang",
                 "reasoningFormat": "reasoning_effort",
-                "effectiveReasoning": { "effort": "none" }
+                "reasoningPolicy": {
+                    "override": { "effort": "none" }
+                }
             }]
         }),
     )
