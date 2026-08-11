@@ -26,6 +26,8 @@ import {
   DEFAULT_ATTESTATION_FETCH_TIMEOUT_MS,
   LOG_PREFIX,
   buildAttestationUrl,
+  buildReceiptUrl,
+  buildSessionUrl,
 } from "./constants.ts";
 
 // ----------------------------------------------------------------------------
@@ -77,6 +79,96 @@ export async function fetchAttestation(
     "attestation",
   );
   return json as AttestationReport | null;
+}
+
+// ----------------------------------------------------------------------------
+// On-request audit fetches (raw documents — no verification). These power the
+// /aci-receipt and /aci-session commands. They are NOT wired into the chat
+// path: prevention is pinning, and receipts/sessions are only shown when the
+// user asks.
+// ----------------------------------------------------------------------------
+
+/** Fetch a receipt document by id (raw; no signature verification). */
+export async function fetchReceipt(
+  apiKey: string,
+  receiptId: string,
+  options: { timeoutMs?: number; baseUrl?: string } = {},
+): Promise<Record<string, unknown> | null> {
+  return (await fetchJson(
+    buildReceiptUrl(receiptId, options.baseUrl),
+    apiKey,
+    options.timeoutMs ?? DEFAULT_ATTESTATION_FETCH_TIMEOUT_MS,
+    `receipt ${receiptId}`,
+  )) as Record<string, unknown> | null;
+}
+
+/** Fetch an attested session document by id (raw). */
+export async function fetchSession(
+  apiKey: string,
+  sessionId: string,
+  options: { timeoutMs?: number; baseUrl?: string } = {},
+): Promise<Record<string, unknown> | null> {
+  return (await fetchJson(
+    buildSessionUrl(sessionId, options.baseUrl),
+    apiKey,
+    options.timeoutMs ?? DEFAULT_ATTESTATION_FETCH_TIMEOUT_MS,
+    `session ${sessionId}`,
+  )) as Record<string, unknown> | null;
+}
+
+/** Compact summary of a raw receipt's key fields for the on-request audit
+ *  display. Always present: receipt_id, key_id, api_version, served_at, model,
+ *  and a one-line rendering of each event_log entry (type + selected fields). */
+export function summarizeReceipt(receipt: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  const push = (label: string, value: unknown): void => {
+    lines.push(`${label}: ${value === undefined || value === null ? "(none)" : String(value)}`);
+  };
+  push("Receipt", receipt.receipt_id);
+  push("API version", receipt.api_version);
+  push("Signing key", receipt.key_id);
+  push("Model", receipt.model);
+  push("Endpoint", receipt.endpoint);
+  push("Served at", receipt.served_at ? new Date(Number(receipt.served_at) * 1000).toISOString() : receipt.served_at);
+  push("Keyset digest", receipt.workload_keyset_digest);
+  const events = Array.isArray(receipt.event_log) ? (receipt.event_log as unknown[]) : [];
+  lines.push(`events: ${events.length}`);
+  const interesting = ["upstream.verified", "request.received", "request.forwarded", "response.received", "response.returned"];
+  for (const ev of events) {
+    const e = ev as Record<string, unknown>;
+    const type = String(e.type ?? "?");
+    if (!interesting.includes(type)) continue;
+    const summary = summarizeEvent(e, type);
+    if (summary) lines.push(`  ${type} ${summary}`);
+  }
+  return lines;
+}
+
+function summarizeEvent(e: Record<string, unknown>, type: string): string {
+  if (type === "upstream.verified") {
+    const bits: string[] = [];
+    if (e.result !== undefined) bits.push(`result=${String(e.result)}`);
+    if (e.required !== undefined) bits.push(`required=${String(e.required)}`);
+    if (e.provider !== undefined) bits.push(`provider=${String(e.provider)}`);
+    if (e.model_id !== undefined) bits.push(`model=${String(e.model_id)}`);
+    if (e.session_id !== undefined) bits.push(`session=${String(e.session_id)}`);
+    return bits.length ? bits.join(" ") : "";
+  }
+  if (e.body_hash !== undefined) return `body_hash=${String(e.body_hash)}`;
+  return "";
+}
+
+/** Compact summary of a raw attested session's key fields. */
+export function summarizeSession(session: Record<string, unknown>): string[] {
+  return [
+    `Session: ${String(session.session_id ?? session.id ?? "?")}`,
+    `API version: ${String(session.api_version ?? "?")}`,
+    `Upstream: ${String(session.upstream_name ?? "?")}`,
+    `Endpoint: ${String(session.endpoint ?? "(none)")}`,
+    `Verifier: ${String(session.verifier_id ?? "?")}`,
+    `Established: ${session.established_at ? new Date(Number(session.established_at) * 1000).toISOString() : "?"}`,
+    `Expires: ${session.expires_at ? new Date(Number(session.expires_at) * 1000).toISOString() : "?"}`,
+  ];
 }
 
 // ----------------------------------------------------------------------------

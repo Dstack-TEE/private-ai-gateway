@@ -73,3 +73,44 @@ test("attestedSpkiSha256ForHost on a full report-shaped keyset is not required; 
   const keyset = report.attestation.workload_keyset as WorkloadKeyset;
   assert.ok(attestedSpkiSha256ForHost(keyset, "inference.phala.com"));
 });
+
+test("summarizeReceipt renders key fields + interesting events (audit display)", async () => {
+  const { summarizeReceipt } = await import("../src/verify.ts");
+  const lines = summarizeReceipt({
+    receipt_id: "rcpt-1",
+    api_version: "aci/1",
+    key_id: "receipt-ed25519",
+    model: "phala/qwen3.5-27b",
+    endpoint: "/v1/chat/completions",
+    served_at: 1700000000,
+    workload_keyset_digest: "sha256:digest",
+    event_log: [
+      { type: "upstream.verified", result: "verified", required: true, provider: "phala", model_id: "phala/qwen3.5-27b", session_id: "as_123" },
+      { type: "response.returned", body_hash: "sha256:xxxx" },
+      { type: "some.other", ignored: true },
+    ],
+  });
+  const text = lines.join("\n");
+  assert.match(text, /Receipt: rcpt-1/);
+  assert.match(text, /Signing key: receipt-ed25519/);
+  assert.match(text, /result=verified required=true provider=phala.*session=as_123/);
+  assert.match(text, /response.returned body_hash/);
+  assert.ok(!text.includes("some.other"), "non-interesting events omitted");
+});
+
+test("summarizeSession renders an attested session's key fields", async () => {
+  const { summarizeSession } = await import("../src/verify.ts");
+  const lines = summarizeSession({
+    session_id: "as_123",
+    api_version: "aci/1",
+    upstream_name: "phala",
+    endpoint: "https://inference.phala.com/v1",
+    verifier_id: "v1",
+    established_at: 1700000000,
+    expires_at: 1700600000,
+  });
+  const text = lines.join("\n");
+  assert.match(text, /Session: as_123/);
+  assert.match(text, /Upstream: phala/);
+  assert.match(text, /Expires:/);
+});

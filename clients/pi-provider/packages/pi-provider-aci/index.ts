@@ -44,6 +44,7 @@ import {
 import {
   API_KEY_ENV,
   FOOTER_STATUS_KEY,
+  HEADER_RECEIPT_ID,
   LOG_PREFIX,
   PROVIDER_ID,
   PROVIDER_VERSION,
@@ -58,7 +59,13 @@ import {
 } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import { AciAttestationStore } from "./src/attestation-store.ts";
-import { attestedSpkiSha256ForHost } from "./src/verify.ts";
+import {
+  attestedSpkiSha256ForHost,
+  fetchReceipt,
+  fetchSession,
+  summarizeReceipt,
+  summarizeSession,
+} from "./src/verify.ts";
 import type { WorkloadKeyset } from "./src/verify.ts";
 import {
   clearPin,
@@ -420,6 +427,55 @@ async function openSettingsMenu(
   if (dirty) await ctx.reload();
 }
 
+/** On-request audit: fetch and show the latest (or a given) receipt. Raw
+ *  document display — no signature verification (prevention is pinning). */
+async function runReceiptCommand(
+  ctx: ExtensionCommandContext,
+  state: AciRuntimeState,
+  args: string,
+): Promise<void> {
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    ctx.ui.notify(`${API_KEY_ENV} not set`, "error");
+    return;
+  }
+  const receiptId = args.trim() || state.store.receiptId;
+  if (!receiptId) {
+    ctx.ui.notify("No receipt id given and no x-receipt-id seen yet; send a message first or pass an id", "error");
+    return;
+  }
+  const receipt = await fetchReceipt(apiKey, receiptId, { baseUrl: state.config.baseUrl });
+  if (!receipt) {
+    ctx.ui.notify(`Receipt ${receiptId} not found or fetch failed`, "error");
+    return;
+  }
+  ctx.ui.notify(summarizeReceipt(receipt).join("\n"), "info");
+}
+
+/** On-request audit: fetch and show an attested session document (raw). */
+async function runSessionCommand(
+  ctx: ExtensionCommandContext,
+  state: AciRuntimeState,
+  args: string,
+): Promise<void> {
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    ctx.ui.notify(`${API_KEY_ENV} not set`, "error");
+    return;
+  }
+  const sessionId = args.trim();
+  if (!sessionId) {
+    ctx.ui.notify("Usage: /aci-session <session-id>", "error");
+    return;
+  }
+  const session = await fetchSession(apiKey, sessionId, { baseUrl: state.config.baseUrl });
+  if (!session) {
+    ctx.ui.notify(`Session ${sessionId} not found or fetch failed`, "error");
+    return;
+  }
+  ctx.ui.notify(summarizeSession(session).join("\n"), "info");
+}
+
 async function runAttestationCommand(
   ctx: ExtensionCommandContext,
   state: AciRuntimeState,
@@ -502,6 +558,19 @@ export function createProvider(
       updateFooter(ctx, state);
     });
 
+    // Cheap header capture ONLY: remember the latest x-receipt-id so the
+    // on-request /aci-receipt audit command knows what to fetch. No receipt is
+    // downloaded or verified here (prevention is pinning; audit is opt-in).
+    pi.on("after_provider_response", (event, ctx) => {
+      if (ctx.model?.provider !== PROVIDER_ID) return;
+      const lower = Object.fromEntries(
+        Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+      );
+      state.store.recordReceiptId(
+        lower[HEADER_RECEIPT_ID] ?? lower["x-receipt-id"],
+      );
+    });
+
     const settingsCommand = `${PROVIDER_ID}-settings`;
     pi.registerCommand(settingsCommand, {
       description: `Configure ${getLabel()} (models, thinking, TLS pinning, verification)`,
@@ -518,6 +587,20 @@ export function createProvider(
       description: "Show the cached/current attestation report status",
       handler: async (_args, ctx) => {
         await runAttestationCommand(ctx, state);
+      },
+    });
+
+    pi.registerCommand("aci-receipt", {
+      description: "Show the latest (or a given) receipt as an audit trail (no verification)",
+      handler: async (args, ctx) => {
+        await runReceiptCommand(ctx, state, args ?? "");
+      },
+    });
+
+    pi.registerCommand("aci-session", {
+      description: "Show an attested session document (audit trail)",
+      handler: async (args, ctx) => {
+        await runSessionCommand(ctx, state, args ?? "");
       },
     });
   };
