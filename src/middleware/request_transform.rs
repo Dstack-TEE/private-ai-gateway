@@ -251,7 +251,9 @@ fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &Rea
     let Some(Value::Object(kwargs)) = object.get_mut("chat_template_kwargs") else {
         return;
     };
-    let enabled = reasoning_enabled(reasoning);
+    let Some(enabled) = reasoning_enabled(reasoning) else {
+        return;
+    };
     for key in ["thinking", "enable_thinking"] {
         if let Some(value) = kwargs.get_mut(key) {
             *value = Value::Bool(enabled);
@@ -259,13 +261,15 @@ fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &Rea
     }
 }
 
-fn reasoning_enabled(reasoning: &ReasoningConfig) -> bool {
-    reasoning.enabled.unwrap_or_else(|| {
-        reasoning.max_tokens.is_some()
-            || reasoning
+fn reasoning_enabled(reasoning: &ReasoningConfig) -> Option<bool> {
+    reasoning
+        .enabled
+        .or_else(|| {
+            reasoning
                 .effort
-                .is_some_and(|effort| effort != ReasoningEffort::None)
-    })
+                .map(|effort| effort != ReasoningEffort::None)
+        })
+        .or(reasoning.max_tokens.map(|_| true))
 }
 
 fn set_chat_template_reasoning(
@@ -277,6 +281,9 @@ fn set_chat_template_reasoning(
     if reasoning.max_tokens.is_some() {
         return invalid_reasoning(candidate, "cannot represent max_tokens");
     }
+    let Some(enabled) = reasoning_enabled(reasoning) else {
+        return invalid_reasoning(candidate, "reasoning configuration is empty");
+    };
     let kwargs = object
         .entry("chat_template_kwargs")
         .or_insert_with(|| Value::Object(Map::new()))
@@ -284,7 +291,7 @@ fn set_chat_template_reasoning(
         .ok_or_else(|| {
             TransformError::InvalidRequest("chat_template_kwargs must be an object".to_string())
         })?;
-    kwargs.insert(key.to_string(), Value::Bool(reasoning_enabled(reasoning)));
+    kwargs.insert(key.to_string(), Value::Bool(enabled));
     Ok(())
 }
 
