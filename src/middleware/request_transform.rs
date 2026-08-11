@@ -223,27 +223,22 @@ fn candidate_params(
     if endpoint != Endpoint::ChatComplete {
         return Ok(params);
     }
+    // Read request context before the mutable borrow below.
+    let effective = resolve_effective_reasoning(candidate, &params, requested_reasoning);
     let object = params
         .as_object_mut()
         .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
-    // The control plane's route-specific resolution is authoritative. Fall back
-    // to caller intent only when control did not resolve it. Absence remains
-    // absence: provider and engine labels do not imply reasoning capability.
-    let Some(effective) = candidate
-        .effective_reasoning
-        .as_ref()
-        .or(requested_reasoning)
-    else {
+    let Some(effective) = effective else {
         return Ok(params);
     };
-    validate_effective(effective).map_err(|err| TransformError::InvalidRequest {
+    validate_effective(&effective).map_err(|err| TransformError::InvalidRequest {
         message: format!("invalid effective reasoning: {err}"),
         detail: Some(format!("route {}", candidate.route_id)),
     })?;
-    sync_chat_template_reasoning(object, effective);
+    sync_chat_template_reasoning(object, &effective);
     let reasoning_format = candidate.reasoning_format.unwrap_or_else(|| {
         if candidate.engine.is_some() {
             ReasoningFormat::ReasoningEffort
@@ -253,7 +248,7 @@ fn candidate_params(
     });
     match (candidate.format, reasoning_format) {
         (ProviderFormat::Openai, ReasoningFormat::Reasoning) => {
-            object.insert("reasoning".to_string(), reasoning_object(effective));
+            object.insert("reasoning".to_string(), reasoning_object(&effective));
         }
         (ProviderFormat::Openai, ReasoningFormat::ReasoningEffort) => {
             if effective.max_tokens.is_some() {
@@ -270,14 +265,68 @@ fn candidate_params(
             );
         }
         (ProviderFormat::Openai, ReasoningFormat::ChatTemplateThinking) => {
-            set_chat_template_reasoning(object, effective, candidate, "thinking")?;
+            set_chat_template_reasoning(object, &effective, candidate, "thinking")?;
         }
         (ProviderFormat::Openai, ReasoningFormat::ChatTemplateEnableThinking) => {
-            set_chat_template_reasoning(object, effective, candidate, "enable_thinking")?;
+            set_chat_template_reasoning(object, &effective, candidate, "enable_thinking")?;
         }
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
+}
+
+/// Compute the effective reasoning config from the deployment's policy and the
+/// request context. Three cases:
+///
+/// 1. `response_format` present, no `tools`: structured output. Apply override
+///    or default (always from policy — the caller's reasoning is ignored
+///    because OR injects a default that cannot be distinguished from intent).
+///
+/// 2. `tools` present (with or without `response_format`): tool calls. Apply
+///    threshold only — disable reasoning when max_tokens is small enough that
+///    reasoning might eat the budget. Above the threshold, keep the caller's
+///    reasoning. Tool call JSON is small, but complex prompts can produce
+///    hundreds of reasoning tokens, so the threshold protects small budgets.
+///
+/// 3. Neither: normal chat. Keep the caller's reasoning.
+fn resolve_effective_reasoning(
+    candidate: &RouteCandidate,
+    params: &Value,
+    requested: Option<&ReasoningConfig>,
+) -> Option<ReasoningConfig> {
+    let policy = candidate.reasoning_policy.as_ref();
+    let has_rf = params.get("response_format").is_some_and(|v| !v.is_null());
+    let has_tools = params.get("tools").is_some_and(|v| !v.is_null());
+    let max_tokens = params
+        .get("max_completion_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| params.get("max_tokens").and_then(Value::as_u64));
+
+    if has_rf && !has_tools {
+        // Structured output: override or default (always from policy when
+        // configured — the caller's reasoning is ignored because OR injects a
+        // default that cannot be distinguished from intent). Fall back to
+        // caller when no policy is configured.
+        policy
+            .and_then(|p| p.override_policy.clone().or(p.default_policy.clone()))
+            .or(requested.cloned())
+    } else if has_tools {
+        // Tools: threshold only. Disable below threshold, keep caller above.
+        if let Some(p) = policy {
+            if let (Some(threshold), Some(mt)) = (p.threshold, max_tokens) {
+                if mt <= threshold {
+                    return Some(ReasoningConfig {
+                        effort: Some(ReasoningEffort::None),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        requested.cloned()
+    } else {
+        // Normal chat: caller's reasoning.
+        requested.cloned()
+    }
 }
 
 fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
@@ -1306,7 +1355,7 @@ fn anthropic_messages_config() -> ProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::types::{Engine, ProviderFormat, RouteCandidate};
+    use crate::middleware::types::{Engine, ProviderFormat, ReasoningPolicy, RouteCandidate};
 
     fn chat(format: ProviderFormat, params: Value, engine: Option<Engine>) -> Value {
         transform_to_provider_request(format, &params, Endpoint::ChatComplete, engine).unwrap()
@@ -1378,7 +1427,7 @@ mod tests {
 
     #[test]
     fn build_candidates_uses_effective_or_requested_reasoning() {
-        let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 8 });
+        let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 8, "response_format": { "type": "json_object" } });
         let reasoning = |effort| {
             Some(ReasoningConfig {
                 effort: Some(effort),
@@ -1391,21 +1440,27 @@ mod tests {
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: Some(ReasoningFormat::Reasoning),
-                effective_reasoning: reasoning(ReasoningEffort::High),
+                reasoning_policy: Some(ReasoningPolicy {
+                    override_policy: reasoning(ReasoningEffort::High),
+                    ..Default::default()
+                }),
             },
             RouteCandidate {
                 route_id: "openai:b".into(),
                 format: ProviderFormat::Openai,
                 engine: Some(Engine::Sglang),
                 reasoning_format: None,
-                effective_reasoning: reasoning(ReasoningEffort::Minimal),
+                reasoning_policy: Some(ReasoningPolicy {
+                    override_policy: reasoning(ReasoningEffort::Minimal),
+                    ..Default::default()
+                }),
             },
             RouteCandidate {
                 route_id: "openai:c".into(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
-                effective_reasoning: None,
+                reasoning_policy: None,
             },
         ];
         let requested = reasoning(ReasoningEffort::Medium).unwrap();
@@ -1421,6 +1476,7 @@ mod tests {
         assert!(bodies[0].1.get("reasoning_effort").is_none());
         assert_eq!(bodies[1].1["reasoning_effort"], "low");
         assert!(bodies[1].1.get("reasoning").is_none());
+        // Candidate c has no policy — falls back to caller's requested reasoning.
         assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
         assert!(bodies[2].1.get("reasoning_effort").is_none());
     }
@@ -1451,6 +1507,7 @@ mod tests {
             let params = json!({
                 "model": "m",
                 "messages": [],
+                "response_format": { "type": "json_object" },
                 "chat_template_kwargs": {
                     "thinking": original,
                     "enable_thinking": original,
@@ -1462,7 +1519,10 @@ mod tests {
                 format: ProviderFormat::Openai,
                 engine: Some(engine),
                 reasoning_format: None,
-                effective_reasoning: controlled.map(reasoning),
+                reasoning_policy: controlled.map(|c| ReasoningPolicy {
+                    override_policy: Some(reasoning(c)),
+                    ..Default::default()
+                }),
             };
 
             let bodies = build_candidates(
@@ -1488,25 +1548,24 @@ mod tests {
             let request = json!({
                 "model": "m",
                 "messages": [],
+                "response_format": { "type": "json_object" },
                 "reasoning_effort": "none"
             });
-            let (params, requested, _) =
+            let (params, _requested, _) =
                 crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
             let candidate: RouteCandidate = serde_json::from_value(json!({
                 "routeId": "self-hosted:m",
                 "format": "openai",
                 "engine": "vllm",
-                "reasoningFormat": format
+                "reasoningFormat": format,
+                "reasoningPolicy": {
+                    "override": { "effort": "none" }
+                }
             }))
             .unwrap();
 
-            let bodies = build_candidates(
-                &params,
-                Endpoint::ChatComplete,
-                &[candidate],
-                requested.as_ref(),
-            )
-            .unwrap();
+            let bodies =
+                build_candidates(&params, Endpoint::ChatComplete, &[candidate], None).unwrap();
             let body = &bodies[0].1;
             assert_eq!(body["chat_template_kwargs"][key], false);
             assert!(body.get("reasoning_effort").is_none());
@@ -1605,14 +1664,14 @@ mod tests {
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
-                effective_reasoning: None,
+                reasoning_policy: None,
             },
             RouteCandidate {
                 route_id: "anthropic:m".into(),
                 format: ProviderFormat::Anthropic,
                 engine: None,
                 reasoning_format: None,
-                effective_reasoning: None,
+                reasoning_policy: None,
             },
         ];
         let bodies = build_candidates(&params, Endpoint::ChatComplete, &candidates, None).unwrap();
