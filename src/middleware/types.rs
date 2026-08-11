@@ -39,6 +39,10 @@ pub enum ReasoningFormat {
     ReasoningEffort,
     #[serde(rename = "reasoning")]
     Reasoning,
+    #[serde(rename = "chat_template_thinking")]
+    ChatTemplateThinking,
+    #[serde(rename = "chat_template_enable_thinking")]
+    ChatTemplateEnableThinking,
 }
 
 /// Canonical public/control reasoning effort.
