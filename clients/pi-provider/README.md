@@ -1,7 +1,7 @@
 # @phala/pi-provider-aci
 
 Vendor-neutral **Pi** provider for [private-ai-gateway] (the ACI protocol),
-with attested TLS (SPKI) pinning and per-response receipt verification.
+with **attested TLS (SPKI) pinning** as the security control.
 
 This is the neutral core. Branded distributions add their identity on top and
 publish their own npm packages:
@@ -11,6 +11,15 @@ publish their own npm packages:
 
 Both are thin skins over this package (`createProvider` with a brand profile) —
 they are interchangeable, and the underlying protocol code lives here once.
+
+## Threat model: prevention, not audit
+
+This plugin's job is **prevention**: make sure the request and response are
+readable only by the attested workload. It does NOT do per-response receipt
+verification. The gateway still stamps `x-receipt-id` on every reply and serves
+signed receipts — those are a post-hoc audit trail, and this plugin deliberately
+does not consume them. If you want audit, verify receipts with the repo's
+reference verifier ([`@phala/aci-verifier`](../verifier-ts)) directly.
 
 ## Install (core)
 
@@ -25,37 +34,30 @@ export ACI_LLM_API_KEY=...
 - OpenAI-compatible provider (`aci`) with live model discovery from
   `/v1/models` (no hardcoded catalog).
 - `is_tee` filtering — only confidentially-served models are registered by default.
-- **Attested TLS (SPKI) pinning** — at session start the gateway attestation is
-  validated and the TLS connection is pinned to the attested
+- **Attested TLS (SPKI) pinning.** At session start the gateway attestation is
+  fetched and validated, then the TLS connection is pinned to the attested
   `workload_keyset.tls_public_keys` SPKI. **Fail closed by default**: with
   `pinning.enabled` (the default) an unpinnable session blocks inference rather
-  than silently downgrading to plain CA-TLS; the `/aci-settings` toggle
-  `failOpenOnUnpinned` opts into the old footer-warning behavior.
-- **Per-response receipt verification** — the footer shows
-  `verified` / `verified*` / `routed` / `attested` / `mismatch` after each
-  reply, backed by the repo's reference verifier
-  ([`@phala/aci-verifier`](../verifier-ts), `clients/verifier-ts`) — this is
-  the *same* code that ships with the gateway, not a private reimplementation.
-  `verified` means the receipt signature validated AND the body hashes were
-  checked against the bytes we saw; `verified*` means the signature validated
-  but body-hash bytes were not available inside pi's extension surface (pi does
-  not expose the raw response stream to extensions) — we say so rather than
-  overclaim. `mismatch` means a signature FAILED or the keyset did not match.
-- `/aci-settings` and `/attestation` commands.
+  than silently downgrading to plain CA-TLS — the `failOpenOnUnpinned` setting
+  opts into the old footer-warning behavior.
+- `/aci-settings` and `/attestation` commands (`/attestation` shows the pinned
+  report: keyset digest, binding status, keys, expiry).
 
-## How verification is wired
+## How the pin is established
 
-`src/aci-client.ts` fetches the ACI artifacts and delegates all cryptographic
-verification to `@phala/aci-verifier`:
+`src/aci-client.ts` fetches the attestation report and delegates binding to
+`@phala/aci-verifier` (`verifyReportBinding`, the repo's reference verifier):
+- recomputes the keyset digest from the served keyset (not trusted from the
+  report),
+- checks `report_data` binds our fresh nonce,
+- checks `not_after`.
 
-- report binding (`verifyReportBinding`) — keyset digest, `report_data`,
-  `not_after`;
-- receipt verification (`verifyReceipt`) — Ed25519 over JCS(document minus
-  `signature`), `api_version`, keyset binding;
-- body hashes (`checkRequestBodyHash` / `checkResponseBodyHash`).
-
-The provider's own `src/verify.ts` is a thin shim for these, plus the
-footer-facing classification. We deliberately do not reimplement the protocol.
+Only a report that passes binding yields an SPKI pin, so the pin is
+**attested** — not trust-on-first-use. `src/tls-pinning.ts` then wraps
+`globalThis.fetch` so hosts with a pin go through a dispatcher whose
+`checkServerIdentity` fails the TLS handshake when the peer SPKI does not
+match. Mismatch refuses the connection; a required-but-unpinned host blocks
+inference (the ACI bootstrap endpoints stay reachable to establish the pin).
 
 ## Branding / profiles
 

@@ -5,7 +5,7 @@
  * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
  * registers it with the Redpill identity (provider id, endpoint, env vars,
  * fallback catalog). All protocol logic — attestation, TLS SPKI pinning,
- * receipt verification, model discovery — lives in the core.
+ * model discovery — lives in the core.
  *
  * Usage:
  *   pi install npm:pi-provider-redpill

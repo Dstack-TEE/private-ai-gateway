@@ -25,16 +25,20 @@ pi provider extension:
   superseded pin).
 - [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
   extension that turns the gateway (or any ACI service) into a first-class
-  chat provider in pi's model picker, with attested TLS (SPKI) pinning and
-  per-response receipt verification. The npm workspaces monorepo ships the
-  vendor-neutral [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci)
-  core plus thin branded distributions,
+  chat provider in pi's model picker, with **attested TLS (SPKI) pinning** as
+  the security control (fail-closed by default). The npm workspaces monorepo
+  ships the vendor-neutral
+  [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci) core plus
+  thin branded distributions,
   [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill) and
-  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).  The core provides live model discovery from `/v1/models`, `is_tee`
-  filtering, attested TLS pinning that fails closed on mismatch, and a
-  footer that shows `verified` / `verified*` / `routed` / `attested` /
-  `mismatch` after each reply. No build step — pi loads `.ts` directly.
-  See [`pi-provider/README.md`](pi-provider/README.md) for install and use.
+  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
+  The core provides live model discovery from `/v1/models`, `is_tee`
+  filtering, and attested TLS pinning — the prompt and reply are readable
+  only by the attested workload. No build step — pi loads `.ts` directly.
+  Per-response receipt verification is intentionally not part of this
+  extension (prevention, not audit); use the `verifier-ts` library above if
+  you want to audit receipts. See [`pi-provider/README.md`](pi-provider/README.md)
+  for install and use.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded

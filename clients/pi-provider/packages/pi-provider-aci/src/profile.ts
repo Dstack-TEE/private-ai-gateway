@@ -8,8 +8,8 @@
 //
 // profile.ts owns the *identity* values (provider id, env names, default
 // endpoint, footer key, fallback catalog). Everything protocol-y (attestation,
-// TLS SPKI pinning, receipt verification, model discovery, config layering)
-// lives elsewhere and is identity-agnostic.
+// TLS SPKI pinning, model discovery, config layering) lives elsewhere and is
+// identity-agnostic.
 
 export interface ProviderProfile {
   /** Provider id registered in pi. */
