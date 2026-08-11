@@ -1,2 +1,9 @@
 node_modules/
 target/
+# Local pack staging debris under release/ (submodule roots are tracked)
+release/*
+!release/pi-provider-phala-cloud
+!release/pi-provider-phala-cloud/**
+!release/pi-provider-redpill
+!release/pi-provider-redpill/**
+release/**/node_modules/

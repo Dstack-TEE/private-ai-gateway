@@ -1,70 +1,120 @@
-# @phala/pi-provider-aci
+# pi-provider (SoT)
 
 Vendor-neutral **Pi** provider for [private-ai-gateway] (the ACI protocol),
 with **attested TLS (SPKI) pinning** as the security control.
 
-This is the neutral core. Branded distributions add their identity on top and
-publish their own npm packages:
+This directory is the **single source of truth** for the kernel and brand
+skins. Users do **not** install from here. Branded release artifacts are
+packed into standalone git repos:
 
-- [`pi-provider-redpill`](https://www.npmjs.com/package/pi-provider-redpill) — Redpill AI
-- [`pi-provider-phala-cloud`](https://www.npmjs.com/package/pi-provider-phala-cloud) — Phala Cloud
+| Brand | Artifact repo | Install |
+|---|---|---|
+| Phala Cloud | [Phala-Network/pi-provider-phala-cloud](https://github.com/Phala-Network/pi-provider-phala-cloud) | `pi install git:github.com/Phala-Network/pi-provider-phala-cloud` |
+| Redpill AI | [redpill-ai/pi-provider-redpill](https://github.com/redpill-ai/pi-provider-redpill) | `pi install git:github.com/redpill-ai/pi-provider-redpill` |
 
-Both are thin skins over this package (`createProvider` with a brand profile) —
-they are interchangeable, and the underlying protocol code lives here once.
+Those artifact checkouts also live here as submodules under
+`clients/release/`.
 
-## Threat model: prevention, not audit
+`@phala/aci-verifier` is **not** published to npm. Pack embeds a built copy
+under `vendor/aci-verifier/` inside each artifact (used for report binding
+when establishing the pin).
+
+## Threat model: prevention, not automatic audit
 
 This plugin's job is **prevention**: make sure the request and response are
-readable only by the attested workload. It does NOT do per-response receipt
-verification. The gateway still stamps `x-receipt-id` on every reply and serves
-signed receipts — those are a post-hoc audit trail, and this plugin deliberately
-does not consume them. If you want audit, verify receipts with the repo's
-reference verifier ([`@phala/aci-verifier`](../verifier-ts)) directly.
+readable only by the attested workload, via attested TLS (SPKI) pinning.
+There is **no field-level E2EE** and **no automatic per-response receipt
+verification**.
 
-## Install (core)
+The gateway still stamps `x-receipt-id` on every reply and serves signed
+receipts. This plugin:
+
+- does **not** verify receipts on the hot path;
+- **does** capture `x-receipt-id` and expose on-demand inspection:
+  `/aci-receipt [id]` and `/aci-session <id>` (raw document summary, no
+  signature verification);
+- for cryptographic receipt audit, use
+  [`@phala/aci-verifier`](../verifier-ts) directly.
+
+## User install
 
 ```bash
-pi install npm:@phala/pi-provider-aci
-export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
-export ACI_LLM_API_KEY=...
+# Phala Cloud (includes OAuth device login)
+pi install git:github.com/Phala-Network/pi-provider-phala-cloud
+# or try without persisting:
+git clone https://github.com/Phala-Network/pi-provider-phala-cloud
+cd pi-provider-phala-cloud && npm install && pi -e .
+
+# Redpill (API key only — no OAuth)
+pi install git:github.com/redpill-ai/pi-provider-redpill
 ```
 
-## What it adds
+## Layout (this monorepo)
 
-- OpenAI-compatible provider (`aci`) with live model discovery from
-  `/v1/models` (no hardcoded catalog).
-- `is_tee` filtering — only confidentially-served models are registered by default.
-- **Attested TLS (SPKI) pinning.** At session start the gateway attestation is
-  fetched and validated, then the TLS connection is pinned to the attested
-  `workload_keyset.tls_public_keys` SPKI. **Fail closed by default**: with
-  `pinning.enabled` (the default) an unpinnable session blocks inference rather
-  than silently downgrading to plain CA-TLS — the `failOpenOnUnpinned` setting
-  opts into the old footer-warning behavior.
-- `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
-  The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
-  verified) from each response, and the user can show the receipt document or
-  an attested session on demand with `/aci-receipt [id]` / `/aci-session <id>`
-  (`/attestation` shows the pinned report: keyset digest, binding, keys, expiry).
+```
+packages/pi-provider-aci/           vendor-neutral kernel (createProvider)
+packages/pi-provider-phala-cloud/  Phala brand skin (+ OAuth)
+packages/pi-provider-redpill/      Redpill brand skin (no OAuth)
+scripts/pack-brand.mjs             pack → standalone artifact root
+Makefile                           make pack / make stage
+../verifier-ts/                    reference verifier (built into vendor/)
+../release/<artifact>/             git submodules → published artifacts
+```
+
+## Develop here
+
+```bash
+cd clients/verifier-ts && npm ci && npm run build
+cd ../pi-provider && npm ci
+npm test
+npm run check
+```
+
+## Pack / publish artifacts
+
+```bash
+# build verifier, write both brands, npm install, pi -e . smoke
+make pack
+
+# write trees only (CI stage)
+make stage
+
+# single brand into a clone you will commit/push
+node scripts/pack-brand.mjs --brand phala-cloud --out /path/to/pi-provider-phala-cloud
+node scripts/pack-brand.mjs --brand redpill --out /path/to/pi-provider-redpill
+```
+
+Pack rules:
+
+- `core/**` and `vendor/**` in the artifact are always overwritten from SoT
+- brand `index.ts` is taken from `packages/pi-provider-<brand>/`
+- redpill pack **rejects** OAuth markers (API-key-only brand)
+- artifact `.npmrc` sets `legacy-peer-deps=true` so pi's
+  `npm install --omit=dev` does not materialise `@earendil-works/pi-*` peers
+
+## What the kernel adds
+
+- OpenAI-compatible provider with live model discovery from `/v1/models`
+- `is_tee` filtering (configurable)
+- Attested TLS (SPKI) pinning, fail-closed by default (no E2EE path)
+- `/aci-settings` and `/attestation` (pinned report status)
+- On-demand audit trail: `/aci-receipt [id]`, `/aci-session <id>`
+  (capture + fetch/summarize only; no signature verification on the hot path)
+- No automatic receipt footer / verified* classification
 
 ## How the pin is established
 
 `src/aci-client.ts` fetches the attestation report and delegates binding to
-`@phala/aci-verifier` (`verifyReportBinding`, the repo's reference verifier):
-- recomputes the keyset digest from the served keyset (not trusted from the
-  report),
+`@phala/aci-verifier` (`verifyReportBinding`):
+- recomputes the keyset digest from the served keyset,
 - checks `report_data` binds our fresh nonce,
 - checks `not_after`.
 
-Only a report that passes binding yields an SPKI pin, so the pin is
-**attested** — not trust-on-first-use. `src/tls-pinning.ts` then wraps
-`globalThis.fetch` so hosts with a pin go through a dispatcher whose
-`checkServerIdentity` fails the TLS handshake when the peer SPKI does not
-match. Mismatch refuses the connection; a required-but-unpinned host blocks
-inference (the ACI bootstrap endpoints stay reachable to establish the pin).
+Only a report that passes binding yields an SPKI pin.
+`src/tls-pinning.ts` wraps `globalThis.fetch` so pinned hosts fail the TLS
+handshake on SPKI mismatch.
 
-## Branding / profiles
-
-`createProvider(profile)` registers the provider with a brand identity:
+## Branding
 
 ```ts
 import { createProvider } from "@phala/pi-provider-aci";

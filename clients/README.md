@@ -23,27 +23,22 @@ pi provider extension:
   per §5.3 — a fixed `--session` list, or a `--require-claim` policy that
   derives the accepted set and refreshes it when the service refuses a
   superseded pin).
-- [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
-  extension that turns the gateway (or any ACI service) into a first-class
-  chat provider in pi's model picker, with **attested TLS (SPKI) pinning** as
-  the security control (fail-closed by default). The npm workspaces monorepo
-  ships the vendor-neutral
-  [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci) core plus
-  thin branded distributions,
-  [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill) and
-  [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
-  The core provides live model discovery from `/v1/models`, `is_tee`
-  filtering, and attested TLS pinning — the prompt and reply are readable
-  only by the attested workload. No build step — pi loads `.ts` directly.
-  Per-response receipt verification is intentionally not part of this
-  extension (prevention, not audit); use the `verifier-ts` library above if
-  you want to audit receipts. On request the plugin can show the latest
-  receipt and attested session as an audit trail (`/aci-receipt`, `/aci-session`).
-  See [`pi-provider/README.md`](pi-provider/README.md)
-  for install and use.
+- [`pi-provider`](pi-provider) — SoT for the [pi](https://pi.dev/) provider
+  extension (kernel + brand skins). Security control is **attested TLS
+  (SPKI) pinning** (fail-closed); there is no field-level E2EE and no
+  automatic per-response receipt verification. On request the plugin can
+  show the latest receipt / attested session as an audit trail
+  (`/aci-receipt`, `/aci-session`) without verifying signatures — use
+  `verifier-ts` for cryptographic audit. Users install **release artifacts**,
+  not this tree:
+  `pi install git:github.com/Phala-Network/pi-provider-phala-cloud` or
+  `pi install git:github.com/redpill-ai/pi-provider-redpill`
+  (also `npm install && pi -e .` inside a clone). Artifacts embed a built
+  `@phala/aci-verifier` under `vendor/`. Submodule checkouts:
+  [`release/`](release/). Pack: `make -C pi-provider pack`.
+  See [`pi-provider/README.md`](pi-provider/README.md).
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
-surfaces against a live deployment. The `pi-provider` extension is loaded
-with pi's `-e` flag pointing at one of the package directories (e.g.
-`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed as a
-pi package once published; see its README for the precise invocation.
+surfaces against a live deployment. For pi, install a brand artifact or load
+a local pack with `npm install && pi -e .`. SoT development can still use
+workspace paths under `pi-provider/packages/`.
