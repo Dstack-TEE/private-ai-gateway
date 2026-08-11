@@ -3,12 +3,14 @@
 //! state across events (a per-stream transform state).
 //!
 //! Three provider conversions are supported. Same-format streaming reaches this
-//! module only when response reasoning must be excluded. Cost injection, TTFT,
-//! and outcome are a separate metering pass downstream (`sse`).
+//! module too: every stream is sanitized here (identity rewrite + canonicalize,
+//! per chunk), and reasoning is excluded when the client opts out. Cost
+//! injection, TTFT, and outcome are a separate metering pass downstream (`sse`).
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::Bytes;
@@ -21,6 +23,7 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 use super::request_transform::Endpoint;
 use super::response_transform::{
     self, i64_field, map_finish_reason, now_millis, now_secs, transform_finish_reason,
+    ResponseIdentity,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -28,19 +31,27 @@ use super::types::ProviderFormat;
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
 /// Which streaming transform applies.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Clone` rather than `Copy`: `SanitizeResponse` carries per-request values
+/// (our request id, the client's model name), which no unit variant can.
+#[derive(Debug, Clone)]
 pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
+    /// Applied to every stream, including same-format passthrough, which is the
+    /// one path that previously relayed provider bytes verbatim. Carries the
+    /// endpoint so each chunk is canonicalized to that surface's output schema.
+    SanitizeResponse(Arc<ResponseIdentity>, Endpoint),
 }
 
 impl StreamTransform {
-    fn provider(self) -> &'static str {
+    fn provider(&self) -> &'static str {
         match self {
             StreamTransform::OpenaiToAnthropicMessages => "openai",
             StreamTransform::ExcludeReasoning => "openai",
+            StreamTransform::SanitizeResponse(_, _) => "openai",
             _ => "anthropic",
         }
     }
@@ -53,13 +64,25 @@ impl StreamTransform {
     // aborts dispatch — covers `: PROCESSING` heartbeats, ignored fields, and
     // name-only or empty-`data:` keep-alives).
     fn apply(
-        self,
+        &self,
         event: &str,
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Option<String>, ()> {
-        if matches!(self, StreamTransform::ExcludeReasoning) {
-            return exclude_reasoning_event(event).map(Some);
+        match self {
+            StreamTransform::ExcludeReasoning => {
+                return Ok(Some(edit_event_body(
+                    event,
+                    response_transform::exclude_reasoning,
+                )))
+            }
+            StreamTransform::SanitizeResponse(identity, endpoint) => {
+                return Ok(Some(edit_event_body(event, |body| {
+                    response_transform::rewrite_identity(body, identity);
+                    response_transform::canonicalize(body, *endpoint);
+                })))
+            }
+            _ => {}
         }
         let event = parse_event(event);
         match self {
@@ -70,7 +93,9 @@ impl StreamTransform {
                 openai_to_anthropic_messages_stream(&event, fallback_id, state)
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
-            StreamTransform::ExcludeReasoning => unreachable!(),
+            StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
+                unreachable!("handled above")
+            }
         }
     }
 }
@@ -771,22 +796,38 @@ fn replace_data_fields(event: &str, replacement: &str) -> String {
     output
 }
 
-fn exclude_reasoning_event(event: &str) -> Result<String, ()> {
+/// Apply an in-place body edit to one SSE event, leaving the framing alone.
+///
+/// Shared by the two same-format transforms (reasoning exclusion and response
+/// sanitization): both parse the payload, edit it, and re-emit only if it changed.
+/// Keep-alives, empty payloads and `[DONE]` pass through untouched.
+///
+/// Never fails the stream. Both callers are cleanup passes layered on top of a
+/// response that is already the client's surface — unlike a format conversion,
+/// which must parse every frame to produce valid output, an edit that cannot
+/// parse a frame has nothing to remove and passes it through verbatim. This is
+/// deliberately more tolerant than the conversions: sanitization is applied to
+/// every stream including same-format passthrough, which historically forwarded
+/// bytes without parsing at all, so a single non-JSON frame must not turn a stream
+/// that used to succeed into a failure.
+fn edit_event_body(event: &str, edit: impl FnOnce(&mut Value)) -> String {
     let parsed = parse_event(event);
     let Some(payload) = parsed.data.as_deref() else {
-        return Ok(framed_event(event));
+        return framed_event(event);
     };
     let payload = payload.trim();
     if payload.is_empty() || payload == "[DONE]" {
-        return Ok(framed_event(event));
+        return framed_event(event);
     }
-    let mut body: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let Ok(mut body) = serde_json::from_str::<Value>(payload) else {
+        return framed_event(event);
+    };
     let original = body.clone();
-    response_transform::exclude_reasoning(&mut body);
+    edit(&mut body);
     if body == original {
-        Ok(framed_event(event))
+        framed_event(event)
     } else {
-        Ok(replace_data_fields(event, &json_str(&body)))
+        replace_data_fields(event, &json_str(&body))
     }
 }
 
@@ -1164,6 +1205,47 @@ mod tests {
         assert!(collected[0].is_err(), "and not a clean EOF");
     }
 
+    /// The full production pipeline for a `/v1/messages` client of an OpenAI
+    /// upstream: the format conversion runs first and nests the upstream id and
+    /// model inside a `message_start`, then the identity rewrite runs. End to end,
+    /// the client must see neither. This is the stacked-transform case a
+    /// single-layer unit test cannot cover.
+    #[tokio::test]
+    async fn anthropic_stream_pipeline_hides_upstream_id_and_model() {
+        let upstream = "data: {\"id\":\"chatcmpl-7bdaaade5030\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n";
+        let events: Vec<Result<Bytes, ServiceError>> = vec![
+            Ok(Bytes::from(upstream)),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+        let converted = Box::pin(SseTransformStream::new(
+            inner,
+            StreamTransform::OpenaiToAnthropicMessages,
+        ));
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: Some("acme/model-a".to_string()),
+        });
+        // Messages surface: canonicalize no-ops for an unschematized surface, so
+        // the anthropic events are left intact and only id/model are rewritten.
+        let sanitized = SseTransformStream::new(
+            converted,
+            StreamTransform::SanitizeResponse(identity, Endpoint::Messages),
+        );
+        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+
+        let wire: String = collected
+            .into_iter()
+            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
+            .collect();
+        assert!(wire.contains("message_start"), "sanity: {wire}");
+        assert!(!wire.contains("chatcmpl-7bdaaade5030"), "leaked id: {wire}");
+        assert!(!wire.contains("vendor-model-int"), "leaked model: {wire}");
+        assert!(wire.contains("req_ours"), "{wire}");
+        assert!(wire.contains("acme/model-a"), "{wire}");
+        assert!(wire.contains("\"text\":\"hi\""), "content survived: {wire}");
+    }
+
     // Replay a fixture's input events through the transform (fixed fallback id),
     // collecting emitted data objects with `created` stripped (and a `__done`
     // sentinel for `[DONE]`), to compare against the Node-generated output.
@@ -1369,10 +1451,10 @@ mod tests {
 
     #[test]
     fn reasoning_exclusion_preserves_non_data_sse_fields() {
-        let output = exclude_reasoning_event(
+        let output = edit_event_body(
             "event: chunk\nid: 7\nretry: 100\n: keep\n{\"choices\":[{\"delta\":{\"content\":\"answer\",\"reasoning\":\"hidden\"}}],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
-        )
-        .unwrap();
+            response_transform::exclude_reasoning,
+        );
         assert!(output.contains("event: chunk\n"), "{output}");
         assert!(output.contains("id: 7\n"), "{output}");
         assert!(output.contains("retry: 100\n"), "{output}");
@@ -1380,6 +1462,80 @@ mod tests {
         assert!(output.contains("\"content\":\"answer\""), "{output}");
         assert!(output.contains("\"reasoning_tokens\":3"), "{output}");
         assert!(!output.contains("hidden"), "{output}");
+    }
+
+    /// The same-format streaming path is the one that used to hand provider
+    /// bytes to the client untouched, so the rewrite is verified on an event, not
+    /// only on a buffered body.
+    #[test]
+    fn identity_rewrites_a_streamed_chunk() {
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: Some("acme/model-a".to_string()),
+        });
+        let mut state = StreamState::default();
+        let output = StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete)
+            .apply(
+                "data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"matched_stop\":424242}]}",
+                "fb",
+                &mut state,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(output.contains("req_ours"), "{output}");
+        assert!(output.contains("acme/model-a"), "{output}");
+        assert!(!output.contains("matched_stop"), "{output}");
+        assert!(!output.contains("vendor-model-int"), "{output}");
+        assert!(output.contains("\"content\":\"hi\""), "{output}");
+    }
+
+    /// A same-format passthrough stream historically forwarded bytes without
+    /// parsing, so a lone non-JSON `data:` frame reached the client and the
+    /// stream still succeeded. Sanitization runs on every stream now, so it must
+    /// be no stricter: a frame it cannot parse is passed through, never rejected
+    /// (which `emit` would turn into a failed, truncated stream).
+    #[test]
+    fn identity_passes_through_an_unparseable_frame() {
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: None,
+        });
+        let mut state = StreamState::default();
+        let result = StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete).apply(
+            "data: : upstream keep-alive text, not json",
+            "fb",
+            &mut state,
+        );
+        assert!(
+            result.is_ok(),
+            "an unparseable frame must not fail the stream"
+        );
+        assert!(result
+            .unwrap()
+            .unwrap()
+            .contains("upstream keep-alive text"));
+    }
+
+    /// `[DONE]` and keep-alives carry no JSON; sanitization must leave them intact
+    /// or the client sees a truncated stream.
+    #[test]
+    fn identity_passes_through_terminators_and_keepalives() {
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: None,
+        });
+        let transform = StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete);
+        let mut state = StreamState::default();
+        for event in ["data: [DONE]", ": PROCESSING", "data: "] {
+            let output = transform
+                .apply(event, "fb", &mut state)
+                .unwrap_or_else(|_| panic!("rejected {event}"))
+                .unwrap();
+            assert!(
+                output.starts_with(event.split('\n').next().unwrap()),
+                "{output}"
+            );
+        }
     }
 
     #[test]
