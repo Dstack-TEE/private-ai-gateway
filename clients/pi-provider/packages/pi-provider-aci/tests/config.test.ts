@@ -19,8 +19,6 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.baseUrl, "https://gateway.test/v1");
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
-  assert.equal(validated.verify.autoFetchReceipt, true);
-  assert.equal(validated.verify.requireAttestationMatch, false);
   assert.equal(validated.verify.failOpenOnUnpinned, false); // fail-closed default
   assert.equal(validated.pinning.enabled, true);
 });

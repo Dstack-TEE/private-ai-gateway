@@ -57,7 +57,7 @@ import {
   mapAciServerModel,
 } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
-import { footerText, AciReceiptStore } from "./src/receipt-store.ts";
+import { AciAttestationStore } from "./src/attestation-store.ts";
 import { attestedSpkiSha256ForHost } from "./src/verify.ts";
 import type { WorkloadKeyset } from "./src/verify.ts";
 import {
@@ -88,7 +88,7 @@ interface AciRuntimeState {
   config: AciCloudConfig;
   projectTrusted: boolean;
   rawModels: AciServerModel[];
-  store: AciReceiptStore;
+  store: AciAttestationStore;
   /** TLS SPKI pin status for the configured base host (attested, per session). */
   pinning?: PinningStatus;
   overrides?: AciCloudConfigPatch;
@@ -110,7 +110,7 @@ function resolveApiKey(): string {
     const stored = readStoredCredential(PROVIDER_ID);
     if (stored?.type === "oauth") {
       // An expired OAuth token must not be sent to the gateway as a live
-      // bearer (it fails as a silent 401 that degrades to UNPINNED/verified*).
+      // bearer (it fails as a silent 401 that degrades to UNPINNED).
       if (typeof stored.access === "string" && stored.access) {
         const expires = stored.expires;
         if (typeof expires === "number" && Number.isFinite(expires) && expires <= Date.now()) {
@@ -253,10 +253,10 @@ function updateFooter(
   state: AciRuntimeState,
 ): void {
   try {
-    ctx.ui.setStatus(FOOTER_STATUS_KEY, footerText(state.store) + pinSuffix(state));
+    ctx.ui.setStatus(FOOTER_STATUS_KEY, pinSuffix(state));
   } catch {
-    // The session may have been replaced/reloaded between the async receipt
-    // fetch and this update; the captured ctx is stale. Nothing to render to.
+    // The session may have been replaced/reloaded between an async update and
+    // this render; the captured ctx is stale. Nothing to render to.
   }
 }
 
@@ -297,7 +297,6 @@ async function openSettingsMenu(
       list.updateValue("scope", scope);
       list.updateValue("isTeeOnly", drafts[scope].models.isTeeOnly ? "true" : "false");
       list.updateValue("thinkingFormat", drafts[scope].models.thinkingFormat);
-      list.updateValue("autoFetchReceipt", drafts[scope].verify.autoFetchReceipt ? "true" : "false");
       list.updateValue("failOpenOnUnpinned", drafts[scope].verify.failOpenOnUnpinned ? "true" : "false");
       list.updateValue("pinning", drafts[scope].pinning.enabled ? "true" : "false");
     };
@@ -331,12 +330,6 @@ async function openSettingsMenu(
       }
       if (id === "thinkingFormat") {
         drafts[scope].models.thinkingFormat = newValue as AciCloudConfig["models"]["thinkingFormat"];
-        list.updateValue(id, newValue);
-        save();
-        return;
-      }
-      if (id === "autoFetchReceipt") {
-        drafts[scope].verify.autoFetchReceipt = newValue === "true";
         list.updateValue(id, newValue);
         save();
         return;
@@ -380,13 +373,6 @@ async function openSettingsMenu(
         description: "How pi thinking levels map to provider parameters",
         currentValue: drafts[scope].models.thinkingFormat,
         values: [...THINKING_FORMAT_VALUES],
-      },
-      {
-        id: "autoFetchReceipt",
-        label: "Auto-verify receipts",
-        description: "Fetch the receipt + attestation after each response",
-        currentValue: drafts[scope].verify.autoFetchReceipt ? "true" : "false",
-        values: ["true", "false"],
       },
       {
         id: "failOpenOnUnpinned",
@@ -471,7 +457,6 @@ async function runAttestationCommand(
     `Keyset not_after: ${notAfter !== undefined ? new Date(notAfter * 1000).toISOString() : "unknown"}`,
     `Encryption keys (${e2eeKeys.length}): ${keySummary(e2eeKeys)}`,
     `Receipt signing keys (${receiptKeys.length}): ${keySummary(receiptKeys)}`,
-    `Last receipt: ${state.store.snapshot().receiptId ?? "none"}`,
   ];
   ctx.ui.notify(lines.join("\n"), "info");
 }
@@ -502,7 +487,7 @@ export function createProvider(
       config,
       projectTrusted: false,
       rawModels: discovered.raw,
-      store: new AciReceiptStore(),
+      store: new AciAttestationStore(),
       overrides,
     };
     registerAciProvider(pi, state);
@@ -511,30 +496,10 @@ export function createProvider(
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
       // Resolve the attested SPKI from a fresh report and pin TLS for this
-      // session (fail-open; footer shows "UNPINNED" if it cannot be done).
+      // session (fail-closed; footer shows "PIN REQUIRED" if it cannot be
+      // done, unless the user opted into failOpenOnUnpinned).
       await installAttestedTlsPin(state);
       updateFooter(ctx, state);
-    });
-
-    pi.on("after_provider_response", (event, ctx) => {
-      if (ctx.model?.provider !== PROVIDER_ID) return;
-      state.store.recordResponseHeaders(event.headers);
-      updateFooter(ctx, state);
-    });
-
-    pi.on("message_end", (event, ctx) => {
-      if (ctx.model?.provider !== PROVIDER_ID) return;
-      if (event.message.role !== "assistant") return;
-      const key = resolveApiKey();
-      if (!key || !state.config.verify.autoFetchReceipt) return;
-      void (async () => {
-        try {
-          await state.store.classifyLastResponse(key, state.config);
-        } catch (error) {
-          console.error(`${LOG_PREFIX} receipt classification failed:`, error);
-        }
-        updateFooter(ctx, state);
-      })();
     });
 
     const settingsCommand = `${PROVIDER_ID}-settings`;
@@ -564,24 +529,17 @@ export { PROVIDER_ID, PROVIDER_VERSION };
 export { profile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
 export { discoverAciModels, mapAciServerModel, inferThinkingFormat } from "./src/models.ts";
-// Verification is provided by the reference verifier via the aci-client shim
-// (which wraps @phala/aci-verifier). Re-export the pieces callers need.
+// Attestation + pin-source helpers (prevention). Receipt verification is not
+// part of this plugin. Re-export what callers need.
 export {
   type AttestationReport,
-  type ReceiptEnvelope,
+  type ReportVerification,
   type WorkloadKeyset,
+  attestedSpkiSha256ForHost,
   bindAttestation,
-  canonicalRequestBytes,
-  classifyReceipt,
   fetchAttestation,
-  fetchReceipt,
-  fetchSession,
-  isFullyVerified,
   keysetStaleAfterMs,
   newNonce,
   receiptSigningKeys,
 } from "./src/verify.ts";
-export {
-  verifyReceipt,
-  verifyReportBinding,
-} from "@phala/aci-verifier";
+export { verifyReportBinding } from "@phala/aci-verifier";

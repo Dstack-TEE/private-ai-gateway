@@ -1,13 +1,14 @@
 # Note (post-implementation)
 #
-# This plan predates the vendor-neutral restructure (0d69f9d) and the switch to
-# attested TLS pinning + the reference verifier. The current code:
+# This plan predates the vendor-neutral restructure (0d69f9d), the switch to
+# attested TLS pinning, and the later decision to ship PREVENTION only. The
+# current code:
 #   - no longer ships src/headers.ts, src/e2ee.ts, or per-field E2EE;
-#   - performs verification through @phala/aci-verifier (clients/verifier-ts),
-#     not a private reimplementation;
-#   - pins TLS fail-closed by default (verify.failOpenOnUnpinned opt-out);
-#   - reads the body-hash contract as request.received.body_hash /
-#     response.returned.body_hash (spec §7.4), not wire_hash.
+#   - validates the attestation through @phala/aci-verifier (clients/verifier-ts)
+#     and pins the attested TLS SPKI fail-closed by default
+#     (verify.failOpenOnUnpinned opt-out);
+#   - does NOT do per-response receipt verification (it is an audit trail, and
+#     the plugin is prevention-only).
 # Treat the body of this file as historical context, not the current design.
 
 # pi-provider-phala-cloud — Implementation Plan

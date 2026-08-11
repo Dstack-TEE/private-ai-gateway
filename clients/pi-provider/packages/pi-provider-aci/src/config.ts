@@ -31,10 +31,6 @@ export interface AciModelsConfig {
 }
 
 export interface AciVerifyConfig {
-  /** Automatically fetch the receipt after each response and update the footer. */
-  autoFetchReceipt: boolean;
-  /** Require a cached attestation whose workload matches the receipt. */
-  requireAttestationMatch: boolean;
   /** When true, an unpinnable session runs unpinned with a footer warning
    *  (fail-open). When false (default) an unpinned session blocks inference
    *  with a clear error rather than silently downgrading to CA-TLS. */
@@ -64,8 +60,6 @@ export type AciCloudConfigPatch = {
     allowlist: unknown;
   }>;
   verify?: Partial<{
-    autoFetchReceipt: unknown;
-    requireAttestationMatch: unknown;
     failOpenOnUnpinned: unknown;
   }>;
   pinning?: Partial<{ enabled: unknown }>;
@@ -80,8 +74,6 @@ export interface AciCloudConfigSources {
     allowlist: AciConfigSource;
   };
   verify: {
-    autoFetchReceipt: AciConfigSource;
-    requireAttestationMatch: AciConfigSource;
     failOpenOnUnpinned: AciConfigSource;
   };
   pinning: { enabled: AciConfigSource };
@@ -116,8 +108,6 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
     thinkingFormat: "auto",
   },
   verify: {
-    autoFetchReceipt: true,
-    requireAttestationMatch: false,
     failOpenOnUnpinned: false,
   },
   pinning: {
@@ -233,9 +223,6 @@ function envConfigPatch(env: NodeJS.ProcessEnv): AciCloudConfigPatch {
   const thinkingFormat = read(`${prefix}_THINKING_FORMAT`);
   if (thinkingFormat) patch.models = { ...patch.models, thinkingFormat };
 
-  const autoFetch = parseBoolean(read(`${prefix}_AUTO_VERIFY`) ?? undefined);
-  if (autoFetch !== undefined) patch.verify = { ...patch.verify, autoFetchReceipt: autoFetch };
-
   const defaultModel = read(`${prefix}_DEFAULT_MODEL`);
   if (defaultModel) patch.defaultModel = defaultModel;
 
@@ -336,16 +323,6 @@ function validateVerifyConfig(
 ): AciVerifyConfig {
   const verify = requireRecord(raw, configPath, pointer);
   return {
-    autoFetchReceipt: requireBoolean(
-      verify.autoFetchReceipt,
-      configPath,
-      `${pointer}/autoFetchReceipt`,
-    ),
-    requireAttestationMatch: requireBoolean(
-      verify.requireAttestationMatch,
-      configPath,
-      `${pointer}/requireAttestationMatch`,
-    ),
     failOpenOnUnpinned: requireBoolean(
       verify.failOpenOnUnpinned,
       configPath,
@@ -409,8 +386,6 @@ function buildSources(
       allowlist: sourceForPath(layers, ["models", "allowlist"]),
     },
     verify: {
-      autoFetchReceipt: sourceForPath(layers, ["verify", "autoFetchReceipt"]),
-      requireAttestationMatch: sourceForPath(layers, ["verify", "requireAttestationMatch"]),
       failOpenOnUnpinned: sourceForPath(layers, ["verify", "failOpenOnUnpinned"]),
     },
     pinning: { enabled: sourceForPath(layers, ["pinning", "enabled"]) },
