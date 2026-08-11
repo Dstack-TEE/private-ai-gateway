@@ -40,8 +40,11 @@ export ACI_LLM_API_KEY=...
   `pinning.enabled` (the default) an unpinnable session blocks inference rather
   than silently downgrading to plain CA-TLS — the `failOpenOnUnpinned` setting
   opts into the old footer-warning behavior.
-- `/aci-settings` and `/attestation` commands (`/attestation` shows the pinned
-  report: keyset digest, binding status, keys, expiry).
+- `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
+  The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
+  verified) from each response, and the user can show the receipt document or
+  an attested session on demand with `/aci-receipt [id]` / `/aci-session <id>`
+  (`/attestation` shows the pinned report: keyset digest, binding, keys, expiry).
 
 ## How the pin is established
 

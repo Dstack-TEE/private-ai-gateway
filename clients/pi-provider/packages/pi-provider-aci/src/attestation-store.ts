@@ -27,6 +27,18 @@ export interface Attested {
 export class AciAttestationStore {
   private _lastAttestationError?: string;
   private cachedAttestation?: Attested;
+  private lastReceiptId?: string;
+
+  /** Id of the most recent response's receipt (x-receipt-id header). Kept for
+   *  the on-request /aci-receipt audit command; no receipt is fetched or
+   *  verified in the normal path. */
+  recordReceiptId(receiptId: string | undefined): void {
+    this.lastReceiptId = receiptId;
+  }
+
+  get receiptId(): string | undefined {
+    return this.lastReceiptId;
+  }
 
   /** Validated binding for the cached attestation, if present. */
   get binding(): ReportVerification | undefined {
@@ -84,5 +96,6 @@ export class AciAttestationStore {
   reset(): void {
     this.cachedAttestation = undefined;
     this._lastAttestationError = undefined;
+    this.lastReceiptId = undefined;
   }
 }

@@ -18,7 +18,11 @@ export {
   attestedSpkiSha256ForHost,
   bindAttestation,
   fetchAttestation,
+  fetchReceipt,
+  fetchSession,
   keysetStaleAfterMs,
   newNonce,
   receiptSigningKeys,
+  summarizeReceipt,
+  summarizeSession,
 } from "./aci-client.ts";

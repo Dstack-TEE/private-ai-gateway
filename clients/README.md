@@ -37,7 +37,9 @@ pi provider extension:
   only by the attested workload. No build step — pi loads `.ts` directly.
   Per-response receipt verification is intentionally not part of this
   extension (prevention, not audit); use the `verifier-ts` library above if
-  you want to audit receipts. See [`pi-provider/README.md`](pi-provider/README.md)
+  you want to audit receipts. On request the plugin can show the latest
+  receipt and attested session as an audit trail (`/aci-receipt`, `/aci-session`).
+  See [`pi-provider/README.md`](pi-provider/README.md)
   for install and use.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
