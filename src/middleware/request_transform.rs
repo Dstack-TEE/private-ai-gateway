@@ -236,6 +236,12 @@ fn candidate_params(
                 Value::String(effort.as_str().to_string()),
             );
         }
+        (ProviderFormat::Openai, ReasoningFormat::ChatTemplateThinking) => {
+            set_chat_template_reasoning(object, effective, candidate, "thinking")?;
+        }
+        (ProviderFormat::Openai, ReasoningFormat::ChatTemplateEnableThinking) => {
+            set_chat_template_reasoning(object, effective, candidate, "enable_thinking")?;
+        }
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
@@ -245,17 +251,48 @@ fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &Rea
     let Some(Value::Object(kwargs)) = object.get_mut("chat_template_kwargs") else {
         return;
     };
-    let enabled = reasoning.enabled.unwrap_or_else(|| {
-        reasoning.max_tokens.is_some()
-            || reasoning
-                .effort
-                .is_some_and(|effort| effort != ReasoningEffort::None)
-    });
+    let Some(enabled) = reasoning_enabled(reasoning) else {
+        return;
+    };
     for key in ["thinking", "enable_thinking"] {
         if let Some(value) = kwargs.get_mut(key) {
             *value = Value::Bool(enabled);
         }
     }
+}
+
+fn reasoning_enabled(reasoning: &ReasoningConfig) -> Option<bool> {
+    reasoning
+        .enabled
+        .or_else(|| {
+            reasoning
+                .effort
+                .map(|effort| effort != ReasoningEffort::None)
+        })
+        .or(reasoning.max_tokens.map(|_| true))
+}
+
+fn set_chat_template_reasoning(
+    object: &mut Map<String, Value>,
+    reasoning: &ReasoningConfig,
+    candidate: &RouteCandidate,
+    key: &str,
+) -> Result<(), TransformError> {
+    if reasoning.max_tokens.is_some() {
+        return invalid_reasoning(candidate, "cannot represent max_tokens");
+    }
+    let Some(enabled) = reasoning_enabled(reasoning) else {
+        return invalid_reasoning(candidate, "reasoning configuration is empty");
+    };
+    let kwargs = object
+        .entry("chat_template_kwargs")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            TransformError::InvalidRequest("chat_template_kwargs must be an object".to_string())
+        })?;
+    kwargs.insert(key.to_string(), Value::Bool(enabled));
+    Ok(())
 }
 
 fn invalid_reasoning<T>(candidate: &RouteCandidate, message: &str) -> Result<T, TransformError> {
@@ -1405,6 +1442,41 @@ mod tests {
             assert_eq!(kwargs["thinking"], expected);
             assert_eq!(kwargs["enable_thinking"], expected);
             assert_eq!(kwargs["tokenize"], false);
+        }
+    }
+
+    #[test]
+    fn chat_template_reasoning_format_inserts_native_switch() {
+        for (format, key) in [
+            ("chat_template_thinking", "thinking"),
+            ("chat_template_enable_thinking", "enable_thinking"),
+        ] {
+            let request = json!({
+                "model": "m",
+                "messages": [],
+                "reasoning_effort": "none"
+            });
+            let (params, requested, _) =
+                crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+            let candidate: RouteCandidate = serde_json::from_value(json!({
+                "routeId": "self-hosted:m",
+                "format": "openai",
+                "engine": "vllm",
+                "reasoningFormat": format
+            }))
+            .unwrap();
+
+            let bodies = build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                &[candidate],
+                requested.as_ref(),
+            )
+            .unwrap();
+            let body = &bodies[0].1;
+            assert_eq!(body["chat_template_kwargs"][key], false);
+            assert!(body.get("reasoning_effort").is_none());
+            assert!(body.get("reasoning").is_none());
         }
     }
 

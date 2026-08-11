@@ -552,6 +552,40 @@ async fn control_override_reconciles_openrouter_reasoning_before_forwarding() {
 }
 
 #[tokio::test]
+async fn control_selects_native_kimi_reasoning_switch() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "chutes:moonshotai/kimi-k2.6",
+                "format": "openai",
+                "engine": "vllm",
+                "reasoningFormat": "chat_template_thinking"
+            }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, _, forwarded) = build_sequenced_service(vec![200]);
+    let mut input = chat_input();
+    input.params = json!({
+        "model": "moonshotai/kimi-k2.6",
+        "messages": [{ "role": "user", "content": "Return JSON" }],
+        "reasoning_effort": "none",
+        "response_format": { "type": "json_object" },
+        "max_tokens": 64
+    });
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_slice(&forwarded.lock().unwrap()[0]).unwrap();
+    assert_eq!(body["chat_template_kwargs"], json!({ "thinking": false }));
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("reasoning").is_none());
+}
+
+#[tokio::test]
 async fn buffered_success_transforms_injects_cost_and_meters() {
     // Anthropic upstream over /v1/chat/completions: response is transformed to the
     // OpenAI shape, cost is injected into the client body, and the metering report
