@@ -120,9 +120,19 @@ export function setPinningCaForTests(caPem: string | undefined): void {
 }
 
 function createPinnedDispatcher() {
+  // EnvHttpProxyAgent extends ProxyAgent and does NOT honor Agent `connect`
+  // options (they are dropped). TLS knobs for the origin connection go in
+  // `requestTls` (see undici ProxyAgent / EnvHttpProxyAgent docs). Using
+  // `connect` here silently ignored the pin callback and CA, so pinned hosts
+  // failed with UNABLE_TO_VERIFY_LEAF_SIGNATURE under a local test CA and
+  // would not enforce SPKI mismatch in production either.
   return new EnvHttpProxyAgent({
     allowH2: false,
-    connect: { checkServerIdentity, rejectUnauthorized, ...(ca ? { ca } : {}) },
+    requestTls: {
+      checkServerIdentity,
+      rejectUnauthorized,
+      ...(ca ? { ca } : {}),
+    },
   });
 }
 
