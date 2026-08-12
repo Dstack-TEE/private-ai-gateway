@@ -8,9 +8,10 @@
 // session is keyed by the private half of the attested key.
 //
 // Implementation is deliberately thin so it stays out of pi's transport:
-//   - one shared `EnvHttpProxyAgent` (honors HTTP(S)_PROXY like pi's own
-//     dispatcher) whose `connect.checkServerIdentity` fails closed unless the
-//     peer SPKI matches the pin registered for that host;
+//   - one shared dispatcher for pinned hosts whose TLS check fails closed
+//     unless the peer SPKI matches the pin registered for that host
+//     (`Agent`, or `ProxyAgent` when HTTP(S)_PROXY is set — undici's
+//     `EnvHttpProxyAgent` does not reliably apply origin TLS options);
 //   - a single wrapper around `globalThis.fetch` that injects that dispatcher
 //     per-request ONLY for pinned hosts and delegates everything else to the
 //     underlying fetch (pi's undici 8 fetch + its global dispatcher are left
@@ -27,7 +28,7 @@
 // (see index.ts). `checkServerIdentity` reads the live pin map, so a key
 // rotation is applied on the next request without recreating the dispatcher.
 
-import { EnvHttpProxyAgent } from "undici";
+import { Agent, ProxyAgent } from "undici";
 import { LOG_PREFIX } from "./constants.ts";
 import crypto from "node:crypto";
 
@@ -120,19 +121,31 @@ export function setPinningCaForTests(caPem: string | undefined): void {
 }
 
 function createPinnedDispatcher() {
-  // EnvHttpProxyAgent extends ProxyAgent and does NOT honor Agent `connect`
-  // options (they are dropped). TLS knobs for the origin connection go in
-  // `requestTls` (see undici ProxyAgent / EnvHttpProxyAgent docs). Using
-  // `connect` here silently ignored the pin callback and CA, so pinned hosts
-  // failed with UNABLE_TO_VERIFY_LEAF_SIGNATURE under a local test CA and
-  // would not enforce SPKI mismatch in production either.
-  return new EnvHttpProxyAgent({
+  // Origin TLS options must actually reach the connector:
+  // - Agent: via `connect`
+  // - ProxyAgent: via `requestTls` (origin leg after CONNECT)
+  // EnvHttpProxyAgent is intentionally avoided: it has dropped/ignored
+  // origin TLS knobs across undici 8.x paths we hit in CI.
+  const tls = {
+    checkServerIdentity,
+    rejectUnauthorized,
+    ...(ca ? { ca } : {}),
+  };
+  const proxy =
+    process.env.https_proxy ||
+    process.env.HTTPS_PROXY ||
+    process.env.http_proxy ||
+    process.env.HTTP_PROXY;
+  if (proxy) {
+    return new ProxyAgent({
+      uri: proxy,
+      allowH2: false,
+      requestTls: tls,
+    });
+  }
+  return new Agent({
     allowH2: false,
-    requestTls: {
-      checkServerIdentity,
-      rejectUnauthorized,
-      ...(ca ? { ca } : {}),
-    },
+    connect: tls,
   });
 }
 
