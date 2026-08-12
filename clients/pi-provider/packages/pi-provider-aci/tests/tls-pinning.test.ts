@@ -53,8 +53,13 @@ function makeLeaf(name: string): { key: string; cert: string; spki: string } {
 const leafA = makeLeaf("a");
 
 // Baseline dispatcher trusts the local CA so unpinned connections validate.
+// EnvHttpProxyAgent ignores Agent `connect` options — origin TLS knobs must
+// go in `requestTls` (same as the production pin dispatcher).
 undici.setGlobalDispatcher(
-  new undici.EnvHttpProxyAgent({ allowH2: false, connect: { rejectUnauthorized: true, ca: caPem } }),
+  new undici.EnvHttpProxyAgent({
+    allowH2: false,
+    requestTls: { rejectUnauthorized: true, ca: caPem },
+  }),
 );
 setPinningCaForTests(caPem);
 
