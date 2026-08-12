@@ -93,6 +93,21 @@ pub enum SpendMode {
     SubscriptionOverflow,
 }
 
+/// Deployment-level reasoning policy, read from config by the control plane
+/// and passed to the gateway verbatim. The gateway owns the decision logic —
+/// it has the request context (response_format, tools, max_tokens) needed to
+/// choose which field applies.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "override")]
+    pub override_policy: Option<ReasoningConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "default")]
+    pub default_policy: Option<ReasoningConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u64>,
+}
+
 /// One ordered failover candidate: a backend route id plus the upstream format.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -110,9 +125,9 @@ pub struct RouteCandidate {
     /// self-hosted engines use `reasoning_effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_format: Option<ReasoningFormat>,
-    /// Request-specific setting selected after capability filtering.
+    /// Raw reasoning policy from deployment config; the gateway decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning: Option<ReasoningConfig>,
+    pub reasoning_policy: Option<ReasoningPolicy>,
 }
 
 /// Provider routing block, forwarded verbatim to the control plane.
