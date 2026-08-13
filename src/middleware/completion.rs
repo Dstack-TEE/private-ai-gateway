@@ -595,6 +595,7 @@ pub async fn run(
                     attempt_index,
                     Some(&forward.selected_route),
                     raw_usage,
+                    None,
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
 
@@ -647,6 +648,7 @@ pub async fn run(
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
+                    errors::client_safe_error_message(&forward.upstream_body),
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -910,6 +912,7 @@ pub async fn run(
                 ),
                 attempt_index,
                 &forward.selected_route,
+                errors::client_safe_error_message(&forward.error.upstream_body),
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -1012,28 +1015,42 @@ impl Meter<'_> {
         }
     }
 
+    // `error_message` carries the upstream's own words when the attempt failed,
+    // already scrubbed to what a client may see. `error_source` stays unset:
+    // the control plane reads any value there as "one of our components broke",
+    // which would misattribute a provider's failure and take it out of that
+    // provider's health signal entirely.
     fn success(
         &self,
         status: u16,
         attempt_index: u32,
         selected_route_id: Option<&str>,
         usage: Option<Value>,
+        error_message: Option<String>,
     ) {
         self.spawn(PostReport {
             status,
             attempt_index: Some(attempt_index),
             selected_route_id: selected_route_id.map(str::to_string),
             usage,
+            error_message,
             ..self.base()
         });
     }
 
-    fn upstream_error(&self, status: u16, attempt_index: u32, selected_route_id: &str) {
+    fn upstream_error(
+        &self,
+        status: u16,
+        attempt_index: u32,
+        selected_route_id: &str,
+        error_message: Option<String>,
+    ) {
         self.spawn(PostReport {
             status,
             is_streaming: Some(true),
             attempt_index: Some(attempt_index),
             selected_route_id: Some(selected_route_id.to_string()),
+            error_message,
             ..self.base()
         });
     }
