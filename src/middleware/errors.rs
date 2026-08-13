@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 // Re-exported so call sites keep importing client-facing error shapes from one
 // place; the definitions are shared because the service layer builds them too.
 pub use crate::error_payload::{error_type, upstream_message, Surface};
-pub use crate::sse_protocol::{sse_protocol, stream_error_tail, SseProtocol};
+pub use crate::sse_protocol::{
+    chat_gateway_error, responses_error_event, responses_gateway_code, sse_protocol,
+    stream_error_tail, SseProtocol,
+};
 
 use crate::error_payload::envelope;
 
@@ -220,7 +223,9 @@ fn strip_error_code_prefix(message: &str) -> &str {
 /// Whether a message still carries a URL, a host, or an internal identifier —
 /// the structural shapes that point at who served a request. Names are matched by
 /// shape only; there is deliberately no list of company names to keep current.
-fn looks_identifying(message: &str) -> bool {
+/// `pub(crate)`: `response_transform` applies the same check to an error's
+/// `param` value, where the fallback is null rather than a generic line.
+pub(crate) fn looks_identifying(message: &str) -> bool {
     if message.contains("://") {
         return true;
     }

@@ -44,9 +44,17 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
 }
 
 /// Generic sanitized message for a non-actionable upstream status.
+///
+/// The 4xx arms matter as much as the 5xx ones: they are what a caller reads
+/// when their own request was rejected but the provider's wording could not be
+/// relayed, and the generic upstream line would send them to retry a request
+/// that cannot succeed.
 pub fn upstream_message(upstream_status: u16) -> &'static str {
     match upstream_status {
+        400 | 422 => "The request was rejected as invalid",
         401..=403 => "The upstream provider is currently unavailable",
+        404 => "The requested model or resource was not found",
+        413 => "The request is too large",
         429 => "Rate limit exceeded. Please retry after some time.",
         503 => "The model is currently unavailable. Please try again later.",
         504 => "The upstream provider timed out",

@@ -51,6 +51,59 @@ pub fn stream_success_terminator(protocol: SseProtocol) -> Option<&'static str> 
     }
 }
 
+/// The chat error object the gateway emits for a failure it will not attribute
+/// to the caller. One definition for its two producers: the tail this module
+/// appends to a stream that broke, and the rebuild of an upstream's own
+/// in-band error in `response_transform` — a client must not be able to tell
+/// the two apart, which a differing `code` or field order would give away.
+///
+/// `code` is the numeric status, unlike the HTTP error envelope's string-or-
+/// null: this object rides inside a 200 stream, where consumers read `code` as
+/// the status the failed chunk stands for.
+pub fn chat_gateway_error(status: u16) -> Value {
+    json!({
+        "message": upstream_message(status),
+        "type": error_type(Surface::Openai, status),
+        "code": status,
+        "param": Value::Null,
+    })
+}
+
+/// The Responses `code` the gateway emits for a failure it will not attribute
+/// to the caller: the surface's own official `rate_limit_exceeded` for a rate
+/// limit, its official generic otherwise. Both are in the documented code
+/// enum — a word from another surface's vocabulary would fail a strict
+/// client's validation of it.
+pub fn responses_gateway_code(status: u16) -> &'static str {
+    match status {
+        429 => "rate_limit_exceeded",
+        _ => "server_error",
+    }
+}
+
+/// The Responses in-stream error event. One definition for its two producers:
+/// the tail this module appends to a stream that broke, and the rebuild of an
+/// upstream's own in-band error in `response_transform` — a client should not
+/// be able to tell the two apart.
+///
+/// `code` and `param` are `string | null` on the wire; the parameter types
+/// enforce that, so no caller can smuggle a numeric code or a structured
+/// `param` into the event.
+pub fn responses_error_event(
+    code: Option<&str>,
+    message: &str,
+    param: Option<&str>,
+    sequence_number: u64,
+) -> Value {
+    json!({
+        "type": "error",
+        "code": code,
+        "message": message,
+        "param": param,
+        "sequence_number": sequence_number,
+    })
+}
+
 /// SSE bytes that end a broken response stream visibly to the client.
 ///
 /// A broken stream is ended gracefully rather than failed — a body `Err` would
@@ -85,23 +138,21 @@ pub fn stream_error_tail(
         SseProtocol::OpenaiResponses => {
             // The protocol numbers its events, so the error continues the
             // sequence rather than restarting it. A caller with no view of the
-            // stream has none to continue from.
-            let body = json!({
-                "type": "error",
-                "code": Value::Null,
-                "message": message,
-                "param": Value::Null,
-                "sequence_number": last_sequence_number.map_or(0, |last| last.saturating_add(1)),
-            });
+            // stream has none to continue from. The code is the one the
+            // gateway emits for any unattributed failure: a null here would
+            // let a client tell a gateway-detected break from an
+            // upstream-reported error, which are deliberately
+            // indistinguishable.
+            let body = responses_error_event(
+                Some(responses_gateway_code(502)),
+                message,
+                None,
+                last_sequence_number.map_or(0, |last| last.saturating_add(1)),
+            );
             format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
         }
         SseProtocol::OpenaiChat => {
-            let body = envelope(
-                Surface::Openai,
-                error_type(Surface::Openai, 502),
-                message,
-                request_id,
-            );
+            let body = json!({ "error": chat_gateway_error(502) });
             format!("\n\ndata: {}\n\ndata: [DONE]\n\n", json_str(&body))
         }
     }

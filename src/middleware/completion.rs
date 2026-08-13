@@ -612,7 +612,11 @@ pub async fn run(
                 // to the gateway's documented output schema, so the client sees one
                 // shape and no upstream-specific field — including any we have never
                 // seen — can leak.
-                response_transform::canonicalize(&mut transformed, endpoint);
+                response_transform::canonicalize(
+                    &mut transformed,
+                    endpoint,
+                    Some(request_id.as_str()),
+                );
                 (
                     upstream_status,
                     serde_json::to_vec(&transformed).unwrap_or_default(),
