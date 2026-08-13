@@ -46,6 +46,11 @@ pub const ID_6: CheckDef = def(
     "9.1(6)",
     "the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key)",
 );
+pub const POLICY_OS: CheckDef = def(
+    "policy-os",
+    "1.3",
+    "RTMR3 os-image-hash satisfies the production allowlist",
+);
 pub const RECEIPT_1: CheckDef = def(
     "receipt-1",
     "9.3(1)",

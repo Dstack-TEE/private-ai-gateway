@@ -66,6 +66,99 @@ export interface TranscriptOptions {
    * `aci serve` proxy for a pinned channel.
    */
   channel?: { observedSpkiSha256: string; host?: string };
+  /**
+   * Appraise the RTMR3 `os-image-hash` against this release's production
+   * allowlist (§1.3). This does not reconstruct MRTD/RTMR0-2. Use it only
+   * after a dstack verifier binds the same evidence to the OS-image hash.
+   */
+  requireProductionOs?: boolean;
+}
+
+const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
+interface DstackEvent {
+  imr: number;
+  event_type: number;
+  digest: string;
+  event: string;
+  event_payload: string;
+}
+
+// Source: the `is_dev: false` entries returned by `phala os-images --json` on
+// 2026-08-13 (dstack 0.5.8–0.5.9, standard and NVIDIA). The OS hashes were also
+// checked with `uv run python scripts/dstack_os_image.py <os-image-hash>`.
+//
+// Each value is that image's measured dstack v1 runtime-event digest:
+// SHA384(u32le(0x08000001) || ":os-image-hash:" || hex(os-image-hash)).
+// Upstream definition:
+// https://github.com/Dstack-TEE/dstack/blob/5d7d966e2d7ec179c6cf6794f2d214dd54661ef9/dstack/cc-eventlog/src/runtime_events.rs#L113-L139
+const PRODUCTION_DSTACK_OS_IMAGES = new Map([
+  // dstack-0.5.9 (standard)
+  [
+    'bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033',
+    'c936f709860155a455c519b505fe29bde21d1b778534a8f0b41b706b0f789eae2ea899e224fedb2331c18324aab4db93',
+  ],
+  // dstack-nvidia-0.5.9
+  [
+    '806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9',
+    '87cd7e9dd097fa5ccdadf01c77ae4d86eb69debae40c7c9ecd2b0e0ff8ddb37ceeafd3607a0f49c7cfb81eeeaffa17c1',
+  ],
+  // dstack-0.5.8 (standard)
+  [
+    '6427f4f5ded88b72d326bd973e581c1689c5080c6444a0cf90fec7d9e4c8b92a',
+    'dc15768ace33ac7ecd2f86dc032917ed0674d8218a8e138db68e16a4985b2fc4c4576a4b2c8697b83d2a88c990b6f855',
+  ],
+  // dstack-nvidia-0.5.8
+  [
+    '5d286131b20689d0d59bae1b34cd91cb78149016a9ef50afff51fb1a04cad5e4',
+    '040e24a4f644add401d92cedf588eef268bce2089298feac2e54a0f63af63fef47028c2915af65b61ab6161294251614',
+  ],
+]);
+
+function parseDstackEvents(report: AttestationReport): DstackEvent[] {
+  const raw = (report.attestation.evidence as Record<string, unknown> | undefined)?.event_log;
+  if (typeof raw !== 'string') throw new Error('attestation evidence carries no dstack event_log');
+  const values = JSON.parse(raw) as unknown;
+  if (!Array.isArray(values)) throw new Error('dstack event_log is not an array');
+
+  return values.map((value, index) => {
+    if (value === null || typeof value !== 'object') {
+      throw new Error(`dstack event_log entry ${index} is not an object`);
+    }
+    const { imr, event_type, digest, event, event_payload } = value as Record<string, unknown>;
+    if (
+      typeof imr !== 'number' ||
+      typeof event_type !== 'number' ||
+      typeof digest !== 'string' ||
+      typeof event !== 'string' ||
+      typeof event_payload !== 'string'
+    ) {
+      throw new Error(`dstack event_log entry ${index} has invalid fields`);
+    }
+    return { imr, event_type, digest, event, event_payload };
+  });
+}
+
+function productionDstackOs(report: AttestationReport): string {
+  let measurement: { hash: string; digest: string } | undefined;
+  for (const event of parseDstackEvents(report)) {
+    if (event.imr !== 3 || event.event_type !== DSTACK_RUNTIME_EVENT_TYPE) continue;
+    if (event.event === 'system-ready') break;
+    if (event.event !== 'os-image-hash') continue;
+    if (measurement !== undefined) {
+      throw new Error('verified event log carries multiple os-image-hash events');
+    }
+    measurement = {
+      hash: event.event_payload.toLowerCase(),
+      digest: event.digest.toLowerCase(),
+    };
+  }
+  if (measurement === undefined) throw new Error('verified event log carries no os-image-hash event');
+
+  const { hash, digest } = measurement;
+  if (PRODUCTION_DSTACK_OS_IMAGES.get(hash) !== digest) {
+    throw new Error(`OS-image hash ${hash} is not a reviewed production image`);
+  }
+  return hash;
 }
 
 const ID_TITLES: Record<string, [section: string, title: string]> = {
@@ -75,6 +168,7 @@ const ID_TITLES: Record<string, [section: string, title: string]> = {
   'id-4': ['9.1(4)', 'the running compose is measured into the quote (source provenance)'],
   'id-5': ['9.1(5)', 'private-key custody satisfies the verifier policy'],
   'id-6': ['9.1(6)', 'the channel actually used is bound to the attested keyset'],
+  'policy-os': ['1.3', 'RTMR3 os-image-hash satisfies the production allowlist'],
 };
 
 const UPSTREAM_TITLES: Record<string, [section: string, title: string]> = {
@@ -166,6 +260,9 @@ export async function verifyService(
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.pccsUrl !== undefined ? { pccsUrl: options.pccsUrl } : {}),
     ...(options.channel !== undefined ? { channel: options.channel } : {}),
+    ...(options.requireProductionOs !== undefined
+      ? { requireProductionOs: options.requireProductionOs }
+      : {}),
     online: true,
   });
 }
@@ -241,6 +338,7 @@ export async function reportTranscript(
   const publishesCompose =
     typeof (report.attestation.evidence as Record<string, unknown> | undefined)?.app_compose ===
     'string';
+  let composeVerified = false;
   if (!declared) {
     lines.push(line(ID_TITLES, 'id-4', 'fail', 'the report declares no source provenance (§4.1)'));
   } else if (!publishesCompose) {
@@ -263,6 +361,7 @@ export async function reportTranscript(
   } else {
     try {
       const compose = await verifyComposeMeasurement(report);
+      composeVerified = compose.ok;
       const bad = compose.checks.find((c) => !c.ok);
       lines.push(
         compose.ok
@@ -278,6 +377,40 @@ export async function reportTranscript(
           `published app_compose could not be verified: ${e instanceof Error ? e.message : String(e)}`,
         ),
       );
+    }
+  }
+
+  if (options.requireProductionOs) {
+    if (!composeVerified) {
+      lines.push(
+        line(
+          ID_TITLES,
+          'policy-os',
+          'fail',
+          'production OS allowlist cannot be evaluated until RTMR3 verifies',
+        ),
+      );
+    } else {
+      try {
+        const hash = productionDstackOs(report);
+        lines.push(
+          line(
+            ID_TITLES,
+            'policy-os',
+            'pass',
+            `RTMR3 os-image-hash ${hash} is in the reviewed production allowlist`,
+          ),
+        );
+      } catch (error) {
+        lines.push(
+          line(
+            ID_TITLES,
+            'policy-os',
+            'fail',
+            `RTMR3 os-image-hash did not satisfy the production allowlist: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      }
     }
   }
 

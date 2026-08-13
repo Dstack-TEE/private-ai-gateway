@@ -31,11 +31,12 @@ async fn main() {
 }
 
 async fn run() -> Result<i32, String> {
-    match args::Cli::parse().command {
-        args::Command::Verify(a) => verify::run(a).await,
-        args::Command::Audit(a) => audit::run(a).await,
-        args::Command::Sessions(a) => sessions::run(a).await,
-        args::Command::Send(a) => send::run(a).await,
-        args::Command::Serve(a) => serve::run(a).await,
+    let args = args::Cli::parse();
+    match args.command {
+        args::Command::Verify(a) => verify::run(a, args.require_production_os).await,
+        args::Command::Audit(a) => audit::run(a, args.require_production_os).await,
+        args::Command::Sessions(a) => sessions::run(a, args.require_production_os).await,
+        args::Command::Send(a) => send::run(a, args.require_production_os).await,
+        args::Command::Serve(a) => serve::run(a, args.require_production_os).await,
     }
 }

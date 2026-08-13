@@ -55,6 +55,24 @@ hashes you accept with `--accept-compose`, repeatable and available on
 cargo run --bin aci -- serve "$ACI_URL" --accept-compose 7c1e...40db
 ```
 
+For a production deployment, first run a dstack verifier over the report's
+quote, event log, and VM configuration. Require it to reproduce the boot
+measurements (MRTD and RTMR0-2), establish `os_image_hash`, and return
+`is_valid: true`. The [Phala direct verification path](providers/phala-direct/verification.md#how-the-os-image-is-classified)
+implements this check. Then appraise that hash with the ACI client's production
+allowlist:
+
+```bash
+cargo run --bin aci -- verify "$ACI_URL" --require-production-os
+```
+
+The ACI client verifies the DCAP quote and replays RTMR3, but does not perform
+the dstack boot-measurement reconstruction. `policy-os: pass` therefore means
+the RTMR3 `os-image-hash` is allowlisted. Treat it as production-OS evidence
+only when the dstack verifier independently bound the same hash to MRTD and
+RTMR0-2. Development, missing, and unknown hashes fail the allowlist; accepting
+a new image requires a verifier update.
+
 The compose hash is the value to pin because it is the one measured into
 RTMR3. `repo_url` and `repo_commit` ride along in the report unpinned: they
 are not bound into the quote, so they are a label to read, not evidence.
