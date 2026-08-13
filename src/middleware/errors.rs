@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 // Re-exported so call sites keep importing client-facing error shapes from one
 // place; the definitions are shared because the service layer builds them too.
 pub use crate::error_payload::{error_type, upstream_message, Surface};
-pub use crate::sse_protocol::{sse_protocol, stream_error_tail, SseProtocol};
+pub use crate::sse_protocol::{
+    chat_gateway_error, responses_error_event, responses_gateway_code, sse_protocol,
+    stream_error_tail, SseProtocol,
+};
 
 use crate::error_payload::envelope;
 
@@ -27,7 +30,12 @@ use crate::error_payload::envelope;
 /// across surfaces; only the envelope and `error.type` are surface-aware.
 pub fn map_upstream_status(status: u16) -> u16 {
     match status {
-        400 | 404 | 422 => status,
+        // 413 sits with the other request-fault statuses: an oversized request
+        // is the caller's to fix, and flattening it to 502 would both invite a
+        // retry that cannot succeed and contradict the relay path above, which
+        // returns it unflattened whenever the provider's message survives
+        // scrubbing.
+        400 | 404 | 413 | 422 => status,
         429 => 429,
         503 => 503,
         504 => 504,
@@ -220,7 +228,9 @@ fn strip_error_code_prefix(message: &str) -> &str {
 /// Whether a message still carries a URL, a host, or an internal identifier —
 /// the structural shapes that point at who served a request. Names are matched by
 /// shape only; there is deliberately no list of company names to keep current.
-fn looks_identifying(message: &str) -> bool {
+/// `pub(crate)`: `response_transform` applies the same check to an error's
+/// `param` value, where the fallback is null rather than a generic line.
+pub(crate) fn looks_identifying(message: &str) -> bool {
     if message.contains("://") {
         return true;
     }
@@ -449,6 +459,147 @@ pub(crate) fn is_upstream_capacity_signal(status: u16, body: &[u8]) -> bool {
             .any(|w| w == UPSTREAM_CAPACITY_MARKER)
 }
 
+/// Field values and prose a provider uses to say *this gateway's* account with
+/// it is out of quota or credit. Kept small and extended from what upstreams
+/// are actually seen to send; failing to recognize one only leaves today's
+/// behaviour, so the list is safe to grow lazily.
+const QUOTA_EXHAUSTED_KINDS: &[&str] = &[
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "billing_error",
+    "billing_not_active",
+];
+/// Prose markers for providers that report this only in the message, under a
+/// kind they also use for ordinary request faults. Deliberately narrow: an
+/// upstream 4xx often quotes the caller's own input back, so a marker loose
+/// enough to appear in a prompt would let a caller drive this classification.
+/// Each of these is a whole provider-authored clause, not a word that could
+/// ride in quoted content.
+const QUOTA_EXHAUSTED_PROSE: &[&str] = &[
+    "credit balance is too low",
+    "exceeded your current quota",
+    "no credits remaining",
+];
+
+/// Whether an upstream refusal says the provider is unpaid rather than busy.
+///
+/// The distinction exists only in the response body — the same 429 carries both
+/// "you are going too fast" and "your account is out of credit", and a provider
+/// may report the latter under 400 instead. Nothing downstream can recover it:
+/// the body stops here, and what reaches the usage record is this gateway's own
+/// generic text. So it is classified here or not at all.
+pub(crate) fn is_quota_exhausted_signal(status: u16, body: &[u8]) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value
+        .get("error")
+        .unwrap_or(&value)
+        .as_object()
+        .is_some_and(is_quota_exhausted_error)
+}
+
+/// The same classification against an error object already in hand — the shape
+/// an in-band error takes inside a 200 stream, where there is no status to
+/// consult. Both paths must agree: a provider that reports this condition
+/// under a kind the relay allowlist recognizes (some do, reusing the same
+/// `invalid_request_error` they use for real request faults) would otherwise
+/// be suppressed on one path and relayed verbatim on the other.
+pub(crate) fn is_quota_exhausted_error(error: &serde_json::Map<String, Value>) -> bool {
+    declared_kind_is_quota_exhausted(error)
+        || error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|message| {
+                QUOTA_EXHAUSTED_PROSE
+                    .iter()
+                    .any(|marker| message.contains(marker))
+            })
+}
+
+/// The account signal as the provider *stated* it, in a kind field it chose —
+/// no prose. Only this may drive anything acted on beyond the response itself.
+///
+/// An upstream 4xx often quotes the caller's own input back, so a prompt can
+/// put a prose marker into `error.message`. Withholding a message on that
+/// basis costs a caller some detail; letting it reclassify the attempt would
+/// hand a caller a lever over how this route is judged, which no request
+/// should have.
+pub(crate) fn declares_quota_exhausted(status: u16, body: &[u8]) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value
+        .get("error")
+        .unwrap_or(&value)
+        .as_object()
+        .is_some_and(declared_kind_is_quota_exhausted)
+}
+
+/// The status an upstream attempt is recorded under.
+///
+/// A provider refusing because our account with it is unpaid records as 402
+/// whatever status it chose to say that under, so the row names the condition
+/// rather than the wording. Every recorded attempt goes through this, not just
+/// the one whose answer was committed: an unpaid route is usually *not* the
+/// committed one — the walk fails over past it — and recording that attempt
+/// under its raw status would leave the condition invisible exactly where it
+/// matters most, on a model with more than one route.
+pub(crate) fn recorded_attempt_status(status: u16, body: &[u8]) -> u16 {
+    if declares_quota_exhausted(status, body) {
+        402
+    } else {
+        status
+    }
+}
+
+fn declared_kind_is_quota_exhausted(error: &serde_json::Map<String, Value>) -> bool {
+    ["code", "type"].into_iter().any(|key| {
+        error
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|kind| QUOTA_EXHAUSTED_KINDS.contains(&kind))
+    })
+}
+
+/// The client-facing parts for an upstream that refused because it is unpaid.
+///
+/// Two things have to happen here, and neither can happen anywhere else. The
+/// client must not be told to retry: a 429's "retry after some time" promises a
+/// recovery that will not come, and relaying the provider's own wording (which
+/// a 4xx otherwise earns) would tell the caller *their* balance is empty when
+/// it is this gateway's. So it takes the status an upstream 402 already takes —
+/// 502 — with the generic unavailable line. The usage record then follows the
+/// same reclassification, which is what moves it out of the neutral rate-limit
+/// bucket it would otherwise sit in.
+fn quota_exhausted_error_parts(
+    surface: Surface,
+    upstream_status: u16,
+    upstream_body: &[u8],
+    request_id: Option<&str>,
+) -> Option<(u16, Vec<u8>)> {
+    if !is_quota_exhausted_signal(upstream_status, upstream_body) {
+        return None;
+    }
+    let status = map_upstream_status(402);
+    Some((
+        status,
+        envelope_bytes(
+            surface,
+            error_type(surface, status),
+            upstream_message(402),
+            request_id,
+        ),
+    ))
+}
+
 fn capacity_error_parts(
     surface: Surface,
     upstream_status: u16,
@@ -488,6 +639,13 @@ pub fn normalize_upstream_error_parts(
     if let Some(parts) =
         image_input_error_parts(surface, received_body, upstream_status, body, request_id)
     {
+        return parts;
+    }
+    // A provider refusing because it is unpaid is not rate-limiting us, and the
+    // refusal is not the caller's to act on. Checked before both the capacity
+    // remap and the actionable-4xx relay, which would otherwise hand the caller
+    // a retry promise or the provider's own account wording.
+    if let Some(parts) = quota_exhausted_error_parts(surface, upstream_status, body, request_id) {
         return parts;
     }
     // A provider signalling it is out of capacity is busy, not broken: 429, not 5xx.
@@ -675,6 +833,48 @@ mod scrub_tests {
 #[cfg(test)]
 mod tests {
     use super::is_upstream_capacity_signal;
+
+    /// The same 429 carries both "slow down" and "your account is unpaid", and
+    /// some providers report the latter under 400. Only the unpaid one is
+    /// reclassified — to the status an upstream 402 already takes, with our own
+    /// wording, so the caller is neither promised a retry nor told their own
+    /// balance is empty.
+    #[test]
+    fn an_unpaid_provider_is_reclassified_away_from_rate_limiting() {
+        let unpaid = [
+            (429, br#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}"#.to_vec()),
+            (400, br#"{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the API."}}"#.to_vec()),
+        ];
+        for (status, body) in unpaid {
+            let (mapped, envelope) =
+                normalize_upstream_error_parts(Surface::Openai, status, &body, b"{}", None);
+            assert_eq!(mapped, 502, "status {status}");
+            let value: Value = serde_json::from_slice(&envelope).unwrap();
+            assert_eq!(value["error"]["type"], "upstream_error");
+            assert_eq!(
+                value["error"]["message"],
+                "The upstream provider is currently unavailable"
+            );
+            let wire = String::from_utf8(envelope).unwrap();
+            assert!(!wire.contains("quota"), "leaked account wording: {wire}");
+            assert!(!wire.contains("credit"), "leaked account wording: {wire}");
+        }
+
+        // A plain rate limit is untouched: still a 429, still retryable.
+        let (mapped, envelope) = normalize_upstream_error_parts(
+            Surface::Openai,
+            429,
+            br#"{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}"#,
+            b"{}",
+            None,
+        );
+        assert_eq!(mapped, 429);
+        let value: Value = serde_json::from_slice(&envelope).unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            "Rate limit exceeded. Please retry after some time."
+        );
+    }
 
     #[test]
     fn capacity_signal_is_429_or_the_marked_5xx_body() {

@@ -79,7 +79,11 @@ impl StreamTransform {
             StreamTransform::SanitizeResponse(identity, endpoint) => {
                 return Ok(Some(edit_event_body(event, |body| {
                     response_transform::rewrite_identity(body, identity);
-                    response_transform::canonicalize(body, *endpoint);
+                    response_transform::canonicalize(
+                        body,
+                        *endpoint,
+                        Some(identity.request_id.as_str()),
+                    );
                 })))
             }
             _ => {}
@@ -235,14 +239,24 @@ fn anthropic_chat_chunk(
 
     if parsed.get("type").and_then(Value::as_str) == Some("error") {
         if let Some(error) = parsed.get("error") {
+            // The error rides in the chunk's `error` member, as it does on the
+            // same-format path: that is the member a client detects a failed
+            // 200 stream by, and the sanitize stage rebuilds its interior into
+            // this surface's vocabulary. Putting the upstream's error type in
+            // `finish_reason` instead left the client no error to find and
+            // relayed a word this surface does not use.
             let body = json!({
                 "id": fallback_id,
                 "object": "chat.completion.chunk",
                 "created": now_secs(),
                 "model": "",
-                "provider": "anthropic",
+                "error": error.clone(),
+                // No finish reason: the stream did not finish, it failed, and
+                // `stop` would tell a client reading only this field that a
+                // truncated response completed normally. The `error` member
+                // above is what says what happened.
                 "choices": [{
-                    "finish_reason": error.get("type").cloned().unwrap_or(Value::Null),
+                    "finish_reason": Value::Null,
                     "delta": { "content": "" },
                 }],
             });
@@ -759,7 +773,7 @@ fn framed_event(event: &str) -> String {
     output
 }
 
-fn replace_data_fields(event: &str, replacement: &str) -> String {
+fn replace_data_fields(event: &str, replacement: &str, event_name: Option<&str>) -> String {
     let has_data_field = event.lines().any(|line| {
         line.trim_end_matches('\r')
             .split_once(':')
@@ -787,6 +801,14 @@ fn replace_data_fields(event: &str, replacement: &str) -> String {
                 output.push('\n');
                 replaced = true;
             }
+        } else if event_name.is_some()
+            && line
+                .split_once(':')
+                .is_some_and(|(field, _)| field == "event")
+        {
+            output.push_str("event: ");
+            output.push_str(event_name.unwrap_or_default());
+            output.push('\n');
         } else {
             output.push_str(line);
             output.push('\n');
@@ -825,10 +847,19 @@ fn edit_event_body(event: &str, edit: impl FnOnce(&mut Value)) -> String {
     let original = body.clone();
     edit(&mut body);
     if body == original {
-        framed_event(event)
-    } else {
-        replace_data_fields(event, &json_str(&body))
+        return framed_event(event);
     }
+    // An edit that renames the payload's `type` (the `response.error` →
+    // canonical `error` rebuild) must rename the SSE event field with it — a
+    // client subscribing by event name would otherwise never see it.
+    let renamed = match (
+        original.get("type").and_then(Value::as_str),
+        body.get("type").and_then(Value::as_str),
+    ) {
+        (Some(old), Some(new)) if old != new => Some(new.to_string()),
+        _ => None,
+    };
+    replace_data_fields(event, &json_str(&body), renamed.as_deref())
 }
 
 /// Splits the provider byte stream into SSE events and applies a stateful
@@ -1226,8 +1257,9 @@ mod tests {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
         });
-        // Messages surface: canonicalize no-ops for an unschematized surface, so
-        // the anthropic events are left intact and only id/model are rewritten.
+        // Messages surface: canonicalize touches only an in-band `error` event
+        // on this unschematized surface, so the anthropic events here are left
+        // intact and only id/model are rewritten.
         let sanitized = SseTransformStream::new(
             converted,
             StreamTransform::SanitizeResponse(identity, Endpoint::Messages),
@@ -1244,6 +1276,39 @@ mod tests {
         assert!(wire.contains("req_ours"), "{wire}");
         assert!(wire.contains("acme/model-a"), "{wire}");
         assert!(wire.contains("\"text\":\"hi\""), "content survived: {wire}");
+    }
+
+    /// A `response.error`-framed upstream error through the sanitize stage: the
+    /// payload is rebuilt as the canonical `error` event, and the SSE `event:`
+    /// field must be renamed with it — a client subscribing by event name would
+    /// otherwise never see the error the payload now claims to be.
+    #[tokio::test]
+    async fn sanitize_renames_the_sse_event_with_the_rebuilt_payload() {
+        let upstream = concat!(
+            "event: response.error\n",
+            "data: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"type\":\"insufficient_quota\",\"code\":\"credit_balance_exhausted\",\"message\":\"no credits, top up at https://console.acme.ai/billing\"}}\n\n",
+        );
+        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
+        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: Some("acme/model-a".to_string()),
+        });
+        let sanitized = SseTransformStream::new(
+            inner,
+            StreamTransform::SanitizeResponse(identity, Endpoint::CreateModelResponse),
+        );
+        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let wire: String = collected
+            .into_iter()
+            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
+            .collect();
+        assert!(wire.contains("event: error\n"), "{wire}");
+        assert!(!wire.contains("response.error"), "{wire}");
+        assert!(wire.contains("\"type\":\"error\""), "{wire}");
+        assert!(wire.contains("\"sequence_number\":2"), "{wire}");
+        assert!(!wire.contains("credit_balance_exhausted"), "{wire}");
+        assert!(!wire.contains("console.acme.ai"), "{wire}");
     }
 
     // Replay a fixture's input events through the transform (fixed fallback id),
@@ -1339,6 +1404,40 @@ mod tests {
         let error = out.iter().find(|e| e["type"] == json!("error")).unwrap();
         assert_eq!(error["error"]["type"], json!("overloaded_error"));
         assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
+    }
+
+    /// An Anthropic upstream's error on the chat surface must reach the client
+    /// as this surface's own in-band error — the `error` member a client
+    /// detects a failed 200 stream by — not as the upstream's error type in
+    /// `finish_reason`, which left nothing to detect and named a vocabulary
+    /// this surface does not use. Run through the production pair
+    /// (convert, then sanitize), since the rebuild happens in the second stage.
+    #[tokio::test]
+    async fn anthropic_stream_error_reaches_the_chat_client_as_an_error_member() {
+        let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n";
+        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
+        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+        let converted = Box::pin(SseTransformStream::new(
+            inner,
+            StreamTransform::AnthropicToOpenaiChat,
+        ));
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "req_ours".to_string(),
+            user_model: Some("acme/model-a".to_string()),
+        });
+        let sanitized = SseTransformStream::new(
+            converted,
+            StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete),
+        );
+        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let wire: String = collected
+            .into_iter()
+            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
+            .collect();
+        assert!(wire.contains("\"error\""), "no error member: {wire}");
+        assert!(!wire.contains("billing_error"), "leaked kind: {wire}");
+        assert!(!wire.contains("credit balance"), "leaked message: {wire}");
+        assert!(wire.contains("data: [DONE]"), "{wire}");
     }
 
     #[tokio::test]

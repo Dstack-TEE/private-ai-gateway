@@ -24,6 +24,7 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
             402 => "billing_error",
             403 => "permission_error",
             404 => "not_found_error",
+            413 => "request_too_large",
             429 => "rate_limit_error",
             504 => "timeout_error",
             s if s >= 500 => "api_error",
@@ -34,6 +35,9 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
             402 => "insufficient_quota",
             403 => "permission_error",
             404 => "not_found_error",
+            // No 413 arm: `request_too_large` is the Anthropic surface's word,
+            // and this surface has none — an oversized request is an invalid
+            // one here, which the fallthrough already says.
             429 => "rate_limit_error",
             503 => "service_unavailable",
             504 => "timeout_error",
@@ -44,9 +48,17 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
 }
 
 /// Generic sanitized message for a non-actionable upstream status.
+///
+/// The 4xx arms matter as much as the 5xx ones: they are what a caller reads
+/// when their own request was rejected but the provider's wording could not be
+/// relayed, and the generic upstream line would send them to retry a request
+/// that cannot succeed.
 pub fn upstream_message(upstream_status: u16) -> &'static str {
     match upstream_status {
+        400 | 422 => "The request was rejected as invalid",
         401..=403 => "The upstream provider is currently unavailable",
+        404 => "The requested model or resource was not found",
+        413 => "The request is too large",
         429 => "Rate limit exceeded. Please retry after some time.",
         503 => "The model is currently unavailable. Please try again later.",
         504 => "The upstream provider timed out",

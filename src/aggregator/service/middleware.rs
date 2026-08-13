@@ -22,7 +22,7 @@ use super::{
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
-use crate::middleware::errors::is_upstream_capacity_signal;
+use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::sse_framing::SseFramingObserver;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -505,6 +505,8 @@ impl AciService {
                         // any capacity signal: the walk exit decides whether to replay the
                         // capacity rejections or commit the retained answer.
                         let is_capacity = is_upstream_capacity_signal(status, &upstream_body);
+                        // Read before the body moves into `retained`.
+                        let attempt_status = recorded_attempt_status(status, &upstream_body);
                         let last_may_retry = (is_capacity || !capacity_indices.is_empty())
                             && capacity_retry_eligible(
                                 capacity_retry_done,
@@ -526,7 +528,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            failed_attempts.push((route_id.clone(), status));
+                            failed_attempts.push((route_id.clone(), attempt_status));
                             continue;
                         }
                         self.metrics
@@ -651,6 +653,8 @@ impl AciService {
                 // any capacity signal: the walk exit decides whether to replay the
                 // capacity rejections or commit the retained answer.
                 let is_capacity = is_upstream_capacity_signal(status, &upstream_response.body);
+                // Read before `upstream_response` moves into `retained`.
+                let attempt_status = recorded_attempt_status(status, &upstream_response.body);
                 let last_may_retry = (is_capacity || !capacity_indices.is_empty())
                     && capacity_retry_eligible(
                         capacity_retry_done,
@@ -674,7 +678,7 @@ impl AciService {
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    failed_attempts.push((route_id.clone(), status));
+                    failed_attempts.push((route_id.clone(), attempt_status));
                     continue;
                 }
 
