@@ -25,16 +25,32 @@ use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::receipt_signing_input;
 use private_ai_gateway::aci::types::{AttestationReport, WorkloadKeyset};
 use private_ai_gateway::aci::verifier::{
-    appraise_report, AppraisalInputs, CheckId, CheckResult, CustodyEvidence, Outcome,
+    appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
+    DstackEventLog, Outcome,
 };
 pub use private_ai_gateway::aci::verifier::{ChannelEvidence, QuoteSource};
 use serde_json::Value;
 
 use crate::client::{AciClient, HttpResult};
 use crate::transcript::{
-    Transcript, ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, RECEIPT_1, RECEIPT_2, RECEIPT_3, RECEIPT_4,
-    RECEIPT_NOTE, UPSTREAM_1, UPSTREAM_2,
+    Transcript, ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, POLICY_OS, RECEIPT_1, RECEIPT_2, RECEIPT_3,
+    RECEIPT_4, RECEIPT_NOTE, UPSTREAM_1, UPSTREAM_2,
 };
+
+// Source: the `is_dev: false` entries returned by `phala os-images --json` on
+// 2026-08-13 (dstack 0.5.8–0.5.9, standard and NVIDIA). Before adding an entry,
+// verify the published archive independently with:
+//   uv run python scripts/dstack_os_image.py <os-image-hash>
+const PRODUCTION_DSTACK_OS_IMAGES: &[&str] = &[
+    // dstack-0.5.9 (standard)
+    "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    // dstack-nvidia-0.5.9
+    "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9",
+    // dstack-0.5.8 (standard)
+    "6427f4f5ded88b72d326bd973e581c1689c5080c6444a0cf90fec7d9e4c8b92a",
+    // dstack-nvidia-0.5.8
+    "5d286131b20689d0d59bae1b34cd91cb78149016a9ef50afff51fb1a04cad5e4",
+];
 
 pub struct ReportCheckContext<'a> {
     /// The nonce this verifier supplied on the report fetch (§3.2).
@@ -49,6 +65,10 @@ pub struct ReportCheckContext<'a> {
     /// means the measurement is verified and reported, not pinned — the
     /// operator appraises the provenance themselves.
     pub accepted_composes: &'a [String],
+    /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
+    /// reviewed production allowlist. A separate dstack verifier must first
+    /// bind that hash to MRTD/RTMR0-2 for the same evidence.
+    pub require_production_os: bool,
     pub explain: bool,
 }
 
@@ -136,10 +156,60 @@ pub async fn run_report_checks(
     for result in &appraisal.results {
         render(transcript, result);
     }
+    if cx.require_production_os {
+        let provenance_verified = appraisal
+            .results
+            .iter()
+            .find(|result| result.id == CheckId::Provenance)
+            .is_some_and(CheckResult::passed);
+        if provenance_verified {
+            run_production_os_policy(transcript, report);
+        } else {
+            transcript.fail(
+                POLICY_OS,
+                "production OS allowlist cannot be evaluated until RTMR3 verifies",
+            );
+        }
+    }
     Ok(appraisal.identity.map(|binding| EstablishedIdentity {
         keyset: binding.keyset,
         keyset_digest: binding.keyset_digest,
     }))
+}
+
+fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
+    let result = (|| {
+        let event_log = report
+            .attestation
+            .evidence
+            .get("event_log")
+            .and_then(Value::as_str)
+            .ok_or("attestation evidence carries no dstack event_log")?;
+        // id-4 already established that this exact log replays to the quote.
+        let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
+            .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
+        let event = dstack_rtmr3_event(&events, "os-image-hash")
+            .map_err(|e| format!("dstack event log rejected: {e}"))?
+            .ok_or("verified event log carries no os-image-hash event")?;
+        let hash = event.event_payload.to_ascii_lowercase();
+        PRODUCTION_DSTACK_OS_IMAGES
+            .iter()
+            .any(|allowed| hash.eq_ignore_ascii_case(allowed))
+            .then_some(())
+            .ok_or_else(|| format!("OS-image hash {hash} is not a reviewed production image"))?;
+        Ok::<_, String>(hash)
+    })();
+
+    match result {
+        Ok(hash) => transcript.pass(
+            POLICY_OS,
+            format!("RTMR3 os-image-hash {hash} is in the reviewed production allowlist"),
+        ),
+        Err(error) => transcript.fail(
+            POLICY_OS,
+            format!("RTMR3 os-image-hash did not satisfy the production allowlist: {error}"),
+        ),
+    }
 }
 
 /// Parse the §7.2 receipt document and gate its `api_version` (Appendix B).
@@ -821,6 +891,7 @@ mod tests {
                 reason: "quote collateral offline",
             },
             accepted_composes: &[],
+            require_production_os: false,
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
             },

@@ -139,6 +139,8 @@ pub struct ProxyState {
     /// Compose hashes this operator accepts (§1.3), applied on the startup
     /// verify and on every keyset-change re-verify.
     accepted_composes: Vec<String>,
+    /// Apply the production dstack OS-image policy on startup and re-verification.
+    require_production_os: bool,
     trusted: Mutex<TrustedIdentity>,
     /// Set when an upstream response advertised a keyset digest other than the
     /// trusted one; blocks inference forwards until a fresh verify passes.
@@ -167,6 +169,7 @@ impl ProxyState {
         host: String,
         enforce_verified: bool,
         accepted_composes: Vec<String>,
+        require_production_os: bool,
         fixed_pins: Vec<String>,
         required_claims: Vec<RequiredClaim>,
         report: AttestationReport,
@@ -180,6 +183,7 @@ impl ProxyState {
             host,
             enforce_verified,
             accepted_composes,
+            require_production_os,
             trusted: Mutex::new(TrustedIdentity {
                 report: Arc::new(report),
                 keyset_digest,
@@ -234,8 +238,14 @@ impl ProxyState {
         if !self.blocked.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let verification =
-            verify_service(&self.base_url, None, &self.accepted_composes, false).await?;
+        let verification = verify_service(
+            &self.base_url,
+            None,
+            &self.accepted_composes,
+            self.require_production_os,
+            false,
+        )
+        .await?;
         if !verification.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".to_string());
         }
@@ -258,8 +268,15 @@ impl ProxyState {
     }
 }
 
-pub async fn run(args: ServeArgs) -> Result<i32, String> {
-    let verification = verify_service(&args.base_url, None, &args.accepted_composes, false).await?;
+pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
+    let verification = verify_service(
+        &args.base_url,
+        None,
+        &args.accepted_composes,
+        require_production_os,
+        false,
+    )
+    .await?;
     println!("== service verification: {} ==", verification.base_url);
     print!("{}", verification.transcript.render_human(false));
     if !verification.transcript.verified() {
@@ -288,6 +305,7 @@ pub async fn run(args: ServeArgs) -> Result<i32, String> {
         host,
         !args.allow_unverified,
         args.accepted_composes.clone(),
+        require_production_os,
         args.sessions.clone(),
         args.require_claims.clone(),
         report,
@@ -1030,6 +1048,7 @@ mod tests {
             host,
             false,
             Vec::new(),
+            false,
             Vec::new(),
             Vec::new(),
             vector_report(),
@@ -1204,6 +1223,7 @@ mod tests {
             host,
             true,
             Vec::new(),
+            false,
             Vec::new(),
             vec![crate::checks::RequiredClaim::parse("tee_attested").unwrap()],
             vector_report(),

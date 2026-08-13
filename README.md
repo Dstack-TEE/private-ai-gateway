@@ -107,7 +107,7 @@ Use this checklist before treating a deployment as private inference.
 
 | Check | Evidence |
 | --- | --- |
-| Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote and the attested keyset digest bound into it. For dstack, verify `evidence.app_compose` against the RTMR3-bound `compose-hash`; pin the hashes you accept with `aci verify --accept-compose`. Image and source-code acceptance remain verifier-policy TODOs. |
+| Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote and the attested keyset digest bound into it. For dstack, first use the [dstack verification path](docs/providers/phala-direct/verification.md#how-the-os-image-is-classified) to reproduce the boot measurements and bind `os_image_hash`, then use `--require-production-os` to appraise that hash. The ACI clients replay RTMR3 and can pin `compose-hash`, but do not reconstruct MRTD/RTMR0-2. Exact source-build acceptance remains verifier policy. |
 | Keys are bound to the workload | The keyset in the report lists receipt-signing, E2EE, and optional TLS SPKI keys. The quote binds the digest of the keyset itself; there is no separate identity key or endorsement. |
 | Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For an E2EE extension, verify its service key from the keyset. |
 | Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |

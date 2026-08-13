@@ -11,6 +11,12 @@ use crate::checks::RequiredClaim;
 #[derive(Debug, Parser)]
 #[command(name = "aci")]
 pub struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "Require the RTMR3 os-image-hash to be in the production allowlist. Use with a dstack verifier that checks the boot measurements."
+    )]
+    pub require_production_os: bool,
     #[command(subcommand)]
     pub command: Command,
 }

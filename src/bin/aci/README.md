@@ -21,6 +21,18 @@ fixed pin list into every request that does not pin its own, and
 `--require-claim <name[=source]>` derives the pin set from the audited
 current sessions, refreshing it when the service refuses a superseded pin.
 
+All five commands accept `--require-production-os`. Under that strict policy,
+the client reads the RTMR3-bound `os-image-hash` and requires it to be in the
+verifier's reviewed production-image allowlist. Development and unknown hashes
+fail closed. Updating the allowlist requires a verifier release.
+
+This option is an appraisal step, not a dstack boot verifier. The `aci` client
+verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
+RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
+dstack verifier over the same quote, event log, and VM configuration, and
+require `is_valid: true`; that result establishes `os_image_hash` from those
+boot measurements. See [How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+
 ## Where verification lives
 
 Every verification step is `src/aci`'s, so the gateway's own upstream

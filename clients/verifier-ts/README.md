@@ -21,6 +21,12 @@ evidence) exactly as observed.
   compose measurement (check 4) when the service publishes `app_compose`.
   Returns `{ verdict, lines, verification }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
+- **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
+  require the RTMR3 `os-image-hash` to be in this release's reviewed production
+  allowlist. Development and unknown hashes fail closed. This is an appraisal
+  step over RTMR3, not a dstack boot verifier. First use a dstack verifier to
+  reconstruct MRTD/RTMR0-2 from the same evidence and bind them to
+  `os_image_hash`; require the dstack result to report `is_valid: true`.
 - **Report binding (§9.1 checks 2–3):** `verifyReportBinding(report, nonce)`
   recomputes the keyset digest over the served `workload_keyset` object's
   JCS form, rebuilds the attestation statement for the nonce you
@@ -50,6 +56,12 @@ evidence) exactly as observed.
 
 ## What it does not do
 
+- **No dstack boot-measurement reconstruction.** Quote verification
+  authenticates the quote's RTMR fields, and this package replays RTMR3. It
+  does not reconstruct MRTD/RTMR0-2 from a dstack OS image. A
+  `requireProductionOs` pass is meaningful only together with a dstack
+  verifier result for the same quote, event log, and VM configuration. See
+  [How the OS image is classified](../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
   implemented in either in-tree verifier; both report an honest skip
   (conformance gaps item 1).
@@ -70,12 +82,15 @@ for malformed input.
 
 ## Usage
 
-One call verifies a whole service:
+One call runs the ACI checks and OS-hash appraisal. This example assumes a
+dstack verifier has already returned `is_valid: true` for the same evidence:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
 
-const { verdict, lines } = await verifyService('https://api.redpill.ai');
+const { verdict, lines } = await verifyService('https://tee.redpill.ai', {
+  requireProductionOs: true,
+});
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```

@@ -32,6 +32,7 @@ pub async fn verify_service(
     base_url: &str,
     nonce_arg: Option<&str>,
     accepted_composes: &[String],
+    require_production_os: bool,
     explain: bool,
 ) -> Result<ServiceVerification, String> {
     let base_url = normalize_base_url(base_url);
@@ -72,6 +73,7 @@ pub async fn verify_service(
             },
             channel,
             accepted_composes,
+            require_production_os,
             explain,
         },
     )
@@ -88,11 +90,12 @@ pub async fn verify_service(
     })
 }
 
-pub async fn run(args: VerifyArgs) -> Result<i32, String> {
+pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, String> {
     let verification = verify_service(
         &args.base_url,
         args.nonce.as_deref(),
         &args.accepted_composes,
+        require_production_os,
         args.explain,
     )
     .await?;
