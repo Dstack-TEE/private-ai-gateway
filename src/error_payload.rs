@@ -24,6 +24,7 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
             402 => "billing_error",
             403 => "permission_error",
             404 => "not_found_error",
+            413 => "request_too_large",
             429 => "rate_limit_error",
             504 => "timeout_error",
             s if s >= 500 => "api_error",
@@ -34,6 +35,9 @@ pub fn error_type(surface: Surface, status: u16) -> &'static str {
             402 => "insufficient_quota",
             403 => "permission_error",
             404 => "not_found_error",
+            // No 413 arm: `request_too_large` is the Anthropic surface's word,
+            // and this surface has none — an oversized request is an invalid
+            // one here, which the fallthrough already says.
             429 => "rate_limit_error",
             503 => "service_unavailable",
             504 => "timeout_error",

@@ -77,6 +77,12 @@ pub fn chat_gateway_error(status: u16) -> Value {
 pub fn responses_gateway_code(status: u16) -> &'static str {
     match status {
         429 => "rate_limit_exceeded",
+        // A request fault must not render as a server error: `code` is the only
+        // machine-readable field on this event, and `server_error` beside "the
+        // request was rejected as invalid" tells the client to retry something
+        // that cannot succeed. `invalid_prompt` is the enum's request-fault
+        // value. Statuses with no enum value (404) keep the generic.
+        400 | 413 | 422 => "invalid_prompt",
         _ => "server_error",
     }
 }
@@ -93,15 +99,21 @@ pub fn responses_error_event(
     code: Option<&str>,
     message: &str,
     param: Option<&str>,
-    sequence_number: u64,
+    sequence_number: Option<u64>,
 ) -> Value {
-    json!({
+    let mut event = json!({
         "type": "error",
         "code": code,
         "message": message,
         "param": param,
-        "sequence_number": sequence_number,
-    })
+    });
+    // Only when the upstream numbered its events. Inventing a 0 mid-stream
+    // would break the monotonic sequence a client tracks, and claim a position
+    // the protocol never gave this event.
+    if let Some(sequence_number) = sequence_number {
+        event["sequence_number"] = json!(sequence_number);
+    }
+    event
 }
 
 /// SSE bytes that end a broken response stream visibly to the client.
@@ -147,7 +159,7 @@ pub fn stream_error_tail(
                 Some(responses_gateway_code(502)),
                 message,
                 None,
-                last_sequence_number.map_or(0, |last| last.saturating_add(1)),
+                Some(last_sequence_number.map_or(0, |last| last.saturating_add(1))),
             );
             format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
         }

@@ -251,8 +251,12 @@ fn anthropic_chat_chunk(
                 "created": now_secs(),
                 "model": "",
                 "error": error.clone(),
+                // No finish reason: the stream did not finish, it failed, and
+                // `stop` would tell a client reading only this field that a
+                // truncated response completed normally. The `error` member
+                // above is what says what happened.
                 "choices": [{
-                    "finish_reason": "stop",
+                    "finish_reason": Value::Null,
                     "delta": { "content": "" },
                 }],
             });

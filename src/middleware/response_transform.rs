@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use super::errors::{
     chat_gateway_error, client_safe_error_text, error_type, is_actionable_client_error,
-    looks_identifying, map_upstream_status, responses_error_event, responses_gateway_code,
-    upstream_message, Surface,
+    is_quota_exhausted_error, looks_identifying, map_upstream_status, responses_error_event,
+    responses_gateway_code, upstream_message, Surface,
 };
 use super::request_transform::Endpoint;
 use super::types::ProviderFormat;
@@ -316,6 +316,37 @@ const RELAYABLE_ERROR_KINDS: &[&str] = &[
     "vector_store_timeout",
 ];
 
+/// Whether an in-band error may be relayed at all.
+///
+/// The kind decides it, except when the error body says the provider is
+/// refusing because our account with it is unpaid. Some providers report that
+/// under a kind this allowlist recognizes — the same `invalid_request_error`
+/// they use for real request faults — and its message names a balance rather
+/// than a host, so the identifying-marker scrub has nothing to catch and would
+/// relay it verbatim. The HTTP path classifies the identical body; both must
+/// reach the same answer or one provider error is suppressed on one path and
+/// leaked on the other.
+fn is_relayable_error(error: &serde_json::Map<String, Value>) -> bool {
+    !is_quota_exhausted_error(error) && is_relayable_kind(effective_error_kind(error))
+}
+
+/// The status a suppressed in-band error folds to.
+///
+/// An account refusal is ours whatever kind the provider filed it under, so it
+/// takes the status an upstream 402 takes, directly. Deferring to
+/// `suppressed_status` would let the `type` slot's fallback reclassify it — a
+/// provider that files this under `invalid_request_error` would have the
+/// caller told their request was invalid, when no request could have succeeded.
+fn suppressed_status_for(
+    object: &serde_json::Map<String, Value>,
+    type_slot: Option<&Value>,
+) -> u16 {
+    if is_quota_exhausted_error(object) {
+        return map_upstream_status(402);
+    }
+    suppressed_status(effective_error_kind(object), type_slot)
+}
+
 /// Whether an in-band error's kind is safe to relay. A string kind takes the
 /// allowlist. A numeric kind is an HTTP status by another name and takes the
 /// HTTP rule verbatim, so the in-band and buffered paths cannot disagree about
@@ -437,7 +468,8 @@ const ANTHROPIC_ERROR_TYPES: &[&str] = &[
 ];
 
 fn messages_error_type(kind: Option<&Value>) -> String {
-    match kind {
+    // An explicit `"type": null` claims nothing, exactly as an absent one does.
+    match kind.filter(|kind| !kind.is_null()) {
         None => error_type(Surface::Anthropic, 502).to_string(),
         Some(Value::String(kind)) if ANTHROPIC_ERROR_TYPES.contains(&kind.as_str()) => kind.clone(),
         _ => error_type(Surface::Anthropic, kind_http_status(kind)).to_string(),
@@ -459,7 +491,10 @@ fn messages_error_type(kind: Option<&Value>) -> String {
 /// upstream vocabulary or prose rides along.
 fn suppressed_status(kind: Option<&Value>, error_type_slot: Option<&Value>) -> u16 {
     match suppressed_error_status(kind) {
-        502 => match error_type_slot {
+        // An explicit `"type": null` claims nothing, exactly as an absent one
+        // does; without the filter it reaches the relayable test, which passes
+        // a null kind, and lands on the request-fault default.
+        502 => match error_type_slot.filter(|slot| !slot.is_null()) {
             Some(slot) if is_relayable_kind(Some(slot)) => kind_http_status(Some(slot)),
             _ => 502,
         },
@@ -575,17 +610,20 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
     if object.get("type").and_then(Value::as_str) != Some("error") {
         return;
     }
-    let error = object.get("error");
-    let kind = error
-        .and_then(|error| error.get("type"))
-        .filter(|kind| !kind.is_null());
-    let (kind, message) = if is_relayable_kind(kind) {
+    // The same kind resolution and the same suppressed-status rules as every
+    // other surface: read code-first, and let the account check outrank the
+    // kind. Reading the `type` slot alone would relay an unpaid provider as a
+    // rate limit here while the other paths call it an upstream error, and
+    // would file a caller's invalid request under a retryable provider fault.
+    let error = object.get("error").and_then(Value::as_object);
+    let kind = error.and_then(effective_error_kind);
+    let (kind, message) = if error.is_some_and(is_relayable_error) {
         (
             messages_error_type(kind),
             client_error_message(error.and_then(|error| error.get("message"))),
         )
     } else {
-        let status = suppressed_error_status(kind);
+        let status = error.map_or(502, |error| suppressed_status_for(error, error.get("type")));
         (
             error_type(Surface::Anthropic, status).to_string(),
             upstream_message(status).to_string(),
@@ -681,21 +719,29 @@ fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
     let kind = field("code")
         .filter(|code| !code.is_null())
         .or_else(|| nested.and_then(|error| error.get("type")));
-    let sequence_number = object
-        .get("sequence_number")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let event = if is_relayable_kind(kind) {
+    let sequence_number = object.get("sequence_number").and_then(Value::as_u64);
+    // The account check reads whichever object carries the error's own fields:
+    // the nested one when the provider wrapped it, the envelope otherwise.
+    let carrier = nested.and_then(Value::as_object).unwrap_or(&*object);
+    let quota_exhausted = is_quota_exhausted_error(carrier);
+    let event = if !quota_exhausted && is_relayable_kind(kind) {
         let message = client_error_message(field("message"));
         // `code` and `param` are `string | null` on this event. Only the
         // surface's own code vocabulary is kept; any other kind — numeric, or
         // another surface's word — nulls out, the relayed message carrying the
         // detail. `param` survives only as a safe parameter name.
-        let code = responses_error_code(kind);
+        // Same fallback as the buffered sibling, so the two agree on a kind
+        // this surface's enum does not name.
+        let code = responses_error_code(kind)
+            .or_else(|| kind.map(|_| responses_gateway_code(kind_http_status(kind))));
         let param = client_error_param(field("param"));
         responses_error_event(code, &message, param.as_deref(), sequence_number)
     } else {
-        let status = suppressed_status(kind, nested.and_then(|error| error.get("type")));
+        let status = if quota_exhausted {
+            map_upstream_status(402)
+        } else {
+            suppressed_status(kind, nested.and_then(|error| error.get("type")))
+        };
         responses_error_event(
             Some(responses_gateway_code(status)),
             upstream_message(status),
@@ -738,17 +784,22 @@ fn sanitize_responses_error_field(error: Option<&mut Value>) {
         ),
         Value::Object(object) => {
             let kind = effective_error_kind(object);
-            if is_relayable_kind(kind) {
+            if !is_quota_exhausted_error(object) && is_relayable_kind(kind) {
                 // Only the surface's own code vocabulary is kept; any other
                 // kind gets the generic code, with the scrubbed message still
                 // carrying the detail.
+                // A relayable kind outside this surface's enum still has a
+                // status; render the gateway code for *that*, not the generic
+                // server error — `server_error` beside "the request was
+                // rejected as invalid" tells the client to retry a request
+                // that cannot succeed.
                 let code = responses_error_code(kind)
-                    .unwrap_or_else(|| responses_gateway_code(502))
+                    .unwrap_or_else(|| responses_gateway_code(kind_http_status(kind)))
                     .to_string();
                 let message = client_error_message(object.get("message"));
                 (code, message)
             } else {
-                let status = suppressed_status(kind, object.get("type"));
+                let status = suppressed_status_for(object, object.get("type"));
                 (
                     responses_gateway_code(status).to_string(),
                     upstream_message(status).to_string(),
@@ -830,8 +881,8 @@ fn sanitize_error(error: Option<&mut Value>) {
         *error = chat_gateway_error(502);
         return;
     };
-    if !is_relayable_kind(effective_error_kind(object)) {
-        let status = suppressed_status(effective_error_kind(object), object.get("type"));
+    if !is_relayable_error(object) {
+        let status = suppressed_status_for(object, object.get("type"));
         *error = chat_gateway_error(status);
         return;
     }
@@ -1559,9 +1610,11 @@ mod identity_tests {
         assert!(!body.to_string().contains("console.acme.ai"));
 
         // A relayable kind from another surface's vocabulary is not a Responses
-        // code: it nulls out, the relayed message carrying the detail. An
-        // official code (`invalid_image`, asserted in the param cases below)
-        // is kept.
+        // code, but it still has a status: it renders as the enum value for
+        // that status, so the one machine-readable field agrees with the
+        // relayed message instead of calling a request fault a server error.
+        // An official code (`invalid_image`, asserted in the param cases below)
+        // is kept as-is.
         let mut body = json!({
             "type": "error",
             "code": "context_length_exceeded",
@@ -1570,15 +1623,15 @@ mod identity_tests {
             "sequence_number": 7
         });
         canonicalize(&mut body, Endpoint::CreateModelResponse, None);
-        assert_eq!(body["code"], Value::Null);
+        assert_eq!(body["code"], "invalid_prompt");
         assert_eq!(body["message"], "input exceeds the model context window");
         assert_eq!(body["param"], "input");
         assert_eq!(body["sequence_number"], 7);
 
-        // `code` and `param` are `string | null` on the wire: a numeric code
-        // has no official rendering and nulls out (the message carries the
-        // detail), and `param` nulls out when structured — or when it is an
-        // identifying string.
+        // `code` and `param` are `string | null` on the wire: a numeric code is
+        // never relayed as a number, it renders as the enum value for the
+        // status it names, and `param` nulls out when structured — or when it
+        // is an identifying string.
         let mut body = json!({
             "type": "error",
             "code": 400,
@@ -1587,7 +1640,7 @@ mod identity_tests {
             "sequence_number": 3
         });
         canonicalize(&mut body, Endpoint::CreateModelResponse, None);
-        assert_eq!(body["code"], Value::Null);
+        assert_eq!(body["code"], "invalid_prompt");
         assert_eq!(body["message"], "bad request");
         assert_eq!(body["param"], Value::Null);
         assert_eq!(body["sequence_number"], 3);
@@ -1702,10 +1755,10 @@ mod identity_tests {
         // whichever slot carried it: a `*_error` kind keeps naming its own
         // class of failure and must not be relabeled a request error, and a
         // type-only kind still yields its status.
+        // One kind per slot covers both axes: that the slot does not matter,
+        // and that the status comes from the kind rather than a fixed default.
         for (slot, kind, expect_type, expect_code) in [
             ("code", "overloaded_error", "overloaded_error", 503),
-            ("code", "not_found_error", "not_found_error", 404),
-            ("type", "overloaded_error", "overloaded_error", 503),
             ("type", "not_found_error", "not_found_error", 404),
         ] {
             let mut body = json!({ "error": { slot: kind, "message": "m" } });
@@ -1730,6 +1783,23 @@ mod identity_tests {
             "The request was rejected as invalid"
         );
 
+        // An account refusal reported under a kind the allowlist recognizes is
+        // still suppressed: its message names a balance rather than a host, so
+        // the identifying-marker scrub has nothing to catch and would relay it
+        // verbatim — telling the caller their own balance is empty. The HTTP
+        // path classifies the identical body, and the two must agree.
+        let mut body = json!({
+            "error": { "type": "invalid_request_error",
+                       "message": "Your credit balance is too low to access the API, please go to Plans & Billing." }
+        });
+        canonicalize(&mut body, Endpoint::ChatComplete, None);
+        assert_eq!(body["error"]["type"], "upstream_error");
+        assert_eq!(
+            body["error"]["message"],
+            "The upstream provider returned an error"
+        );
+        assert!(!body.to_string().contains("credit balance"));
+
         // A malformed error (neither object nor string) folds instead of
         // passing through — but stays non-null for metering.
         let mut body = json!({
@@ -1742,21 +1812,14 @@ mod identity_tests {
             "The upstream provider returned an error"
         );
 
-        // A relayed error with a null message still gets a string message and
-        // the full shape.
+        // A null message still yields a string one (the shape itself is pinned
+        // by the case above, which builds through the same path).
         let mut body = json!({
             "error": { "code": "invalid_image", "message": null }
         });
         canonicalize(&mut body, Endpoint::ChatComplete, None);
-        assert_eq!(
-            body["error"],
-            json!({
-                "message": "the provider returned an error",
-                "type": "invalid_request_error",
-                "param": null,
-                "code": 400
-            })
-        );
+        assert_eq!(body["error"]["message"], "the provider returned an error");
+        assert_eq!(body["error"]["code"], 400);
 
         // `param` survives only as a safe parameter name: a structured value
         // and an identifying string both null out, a plain name is kept.
@@ -1815,6 +1878,29 @@ mod identity_tests {
         });
         canonicalize(&mut body, Endpoint::Messages, None);
         assert_eq!(body["error"]["type"], "timeout_error");
+
+        // This surface reaches the same verdict as the others on the same
+        // body: an account refusal filed under a rate-limit kind is not a rate
+        // limit, and a caller's invalid request is not a provider fault.
+        let mut body = json!({
+            "type": "error",
+            "error": { "type": "rate_limit_error",
+                       "message": "Your credit balance is too low to access the API." }
+        });
+        canonicalize(&mut body, Endpoint::Messages, None);
+        assert_eq!(body["error"]["type"], "api_error");
+        assert_eq!(
+            body["error"]["message"],
+            "The upstream provider returned an error"
+        );
+
+        let mut body = json!({
+            "type": "error",
+            "error": { "type": "invalid_request_error", "code": "string_below_min_length",
+                       "message": "messages[0].content is too short" }
+        });
+        canonicalize(&mut body, Endpoint::Messages, None);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
     }
 
     /// Anthropic streaming events carry neither field; inventing them would

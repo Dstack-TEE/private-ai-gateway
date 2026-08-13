@@ -643,7 +643,7 @@ pub async fn run(
                     );
                 }
                 meter.success(
-                    reported_status(mapped, upstream_status),
+                    reported_status(mapped, upstream_status, &forward.upstream_body),
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
@@ -903,7 +903,11 @@ pub async fn run(
             }
             meter.failed_attempts(&forward.failed_attempts, true);
             meter.upstream_error(
-                reported_status(status, forward.error.upstream_status),
+                reported_status(
+                    status,
+                    forward.error.upstream_status,
+                    &forward.error.upstream_body,
+                ),
                 attempt_index,
                 &forward.selected_route,
             );
@@ -1092,7 +1096,16 @@ fn truncate(text: &str, max_chars: usize) -> String {
 // client-facing status when it is client-attributable (4xx) — a remapped
 // image-fetch failure must not count against the provider's health — otherwise
 // the raw upstream status, preserving the provider's real code in the logs.
-fn reported_status(mapped: u16, upstream_status: u16) -> u16 {
+fn reported_status(mapped: u16, upstream_status: u16, upstream_body: &[u8]) -> u16 {
+    // A provider refusing because our account with it is unpaid records as
+    // 402, whatever status it chose to say that under. The record then names
+    // the condition rather than the wording: a provider that reports this as a
+    // 429 and one that reports it as a literal 402 are the same row, and the
+    // 429 it may have arrived as does not stand for load it is not carrying.
+    let recorded = errors::recorded_attempt_status(upstream_status, upstream_body);
+    if recorded != upstream_status {
+        return recorded;
+    }
     if (400..500).contains(&mapped) {
         mapped
     } else {
