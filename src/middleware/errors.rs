@@ -160,7 +160,11 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
 
 /// The upstream's message, fit to hand to the client, or `None` to fall back to
 /// our own per-status text.
-fn client_safe_error_message(body: &[u8]) -> Option<String> {
+///
+/// `pub(crate)` so the usage record can carry it too: what is safe to show a
+/// caller is safe to store, and a status code alone leaves no way to ask why a
+/// route started failing.
+pub(crate) fn client_safe_error_message(body: &[u8]) -> Option<String> {
     scrub_identifying_markers(&extract_error_message(body)?)
 }
 
