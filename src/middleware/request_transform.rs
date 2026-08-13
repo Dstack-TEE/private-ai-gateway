@@ -1109,22 +1109,6 @@ fn oai_user_from_metadata(params: &Value) -> Result<Option<Value>, TransformErro
         .cloned())
 }
 
-// ── Engine reasoning-effort remap ────────────────────────────────────────────
-
-fn map_sglang_reasoning_effort(params: &Value) -> Result<Option<Value>, TransformError> {
-    Ok(match params.get("reasoning_effort") {
-        Some(Value::String(effort)) => {
-            let mapped = match effort.as_str() {
-                "minimal" => "low",
-                "xhigh" => "max",
-                other => other,
-            };
-            Some(Value::String(mapped.to_string()))
-        }
-        other => other.cloned(),
-    })
-}
-
 // ── Config tables ────────────────────────────────────────────────────────────
 
 fn openai_chat_complete_config(engine: Option<Engine>) -> ProviderConfig {
@@ -1172,22 +1156,15 @@ fn openai_chat_complete_config(engine: Option<Engine>) -> ProviderConfig {
         p!("frequency_penalty", with_min(-2), with_max(2)),
         p!("logprobs", with_default(json!(false))),
     ]);
-    if let Some(engine) = engine {
+    // Self-hosted engines take the full canonical effort vocabulary, so the
+    // effort value rides the shared pass-through above unchanged.
+    if engine.is_some() {
         config.extend(pass!(
             "top_k",
             "min_p",
             "repetition_penalty",
             "chat_template_kwargs",
         ));
-        if engine == Engine::Sglang {
-            *config
-                .iter_mut()
-                .find(|config| config.input == "reasoning_effort")
-                .unwrap() = p!(
-                "reasoning_effort",
-                with_transform(map_sglang_reasoning_effort)
-            );
-        }
     }
     config
 }
@@ -1474,7 +1451,7 @@ mod tests {
         assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[0].1["reasoning"]["effort"], "high");
         assert!(bodies[0].1.get("reasoning_effort").is_none());
-        assert_eq!(bodies[1].1["reasoning_effort"], "low");
+        assert_eq!(bodies[1].1["reasoning_effort"], "minimal");
         assert!(bodies[1].1.get("reasoning").is_none());
         // Candidate c has no policy — falls back to caller's requested reasoning.
         assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");

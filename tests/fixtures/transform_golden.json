@@ -97,7 +97,7 @@
     "output": {
       "model": "m",
       "messages": [],
-      "reasoning_effort": "low",
+      "reasoning_effort": "minimal",
       "top_k": 5,
       "min_p": 0.1
     }
@@ -115,7 +115,7 @@
     "output": {
       "model": "m",
       "messages": [],
-      "reasoning_effort": "max"
+      "reasoning_effort": "xhigh"
     }
   },
   {
