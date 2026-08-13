@@ -330,6 +330,25 @@ fn is_relayable_error(error: &serde_json::Map<String, Value>) -> bool {
     !is_quota_exhausted_error(error) && is_relayable_kind(effective_error_kind(error))
 }
 
+/// One structured line when an upstream error kind is withheld, so the relay
+/// allowlist is observable in production: a kind that keeps appearing here
+/// either belongs on the allowlist or confirms its suppression. Kind words are
+/// provider vocabulary — logged sanitized and capped like finish reasons, with
+/// no message content alongside.
+fn note_suppressed_kind(kind: Option<&Value>) {
+    let Some(kind) = kind else { return };
+    let kind = match kind {
+        Value::String(kind) => super::completion::sanitize_reason(kind),
+        Value::Number(status) => status.to_string(),
+        _ => return,
+    };
+    tracing::info!(
+        target: "request_outcome",
+        suppressed_kind = %kind,
+        "in-band error kind suppressed"
+    );
+}
+
 /// The status a suppressed in-band error folds to.
 ///
 /// An account refusal is ours whatever kind the provider filed it under, so it
@@ -623,6 +642,7 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
             client_error_message(error.and_then(|error| error.get("message"))),
         )
     } else {
+        note_suppressed_kind(kind);
         let status = error.map_or(502, |error| suppressed_status_for(error, error.get("type")));
         (
             error_type(Surface::Anthropic, status).to_string(),
@@ -737,6 +757,7 @@ fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
         let param = client_error_param(field("param"));
         responses_error_event(code, &message, param.as_deref(), sequence_number)
     } else {
+        note_suppressed_kind(kind);
         let status = if quota_exhausted {
             map_upstream_status(402)
         } else {
@@ -799,6 +820,7 @@ fn sanitize_responses_error_field(error: Option<&mut Value>) {
                 let message = client_error_message(object.get("message"));
                 (code, message)
             } else {
+                note_suppressed_kind(kind);
                 let status = suppressed_status_for(object, object.get("type"));
                 (
                     responses_gateway_code(status).to_string(),
@@ -882,6 +904,7 @@ fn sanitize_error(error: Option<&mut Value>) {
         return;
     };
     if !is_relayable_error(object) {
+        note_suppressed_kind(effective_error_kind(object));
         let status = suppressed_status_for(object, object.get("type"));
         *error = chat_gateway_error(status);
         return;

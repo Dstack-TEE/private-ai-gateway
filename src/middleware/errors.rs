@@ -459,22 +459,33 @@ pub(crate) fn is_upstream_capacity_signal(status: u16, body: &[u8]) -> bool {
             .any(|w| w == UPSTREAM_CAPACITY_MARKER)
 }
 
-/// Field values and prose a provider uses to say *this gateway's* account with
-/// it is out of quota or credit. Kept small and extended from what upstreams
-/// are actually seen to send; failing to recognize one only leaves today's
-/// behaviour, so the list is safe to grow lazily.
+/// Kind values a provider *declares* for "this gateway's account with me is out
+/// of quota or credit". A declared kind is provider-authored — request content
+/// cannot reach `code`/`type` — so unlike the prose table below this one may
+/// drive everything, including the recorded status. Each entry names where it
+/// was seen; failing to recognize one only leaves today's behaviour, so the
+/// list is safe to grow lazily from observed traffic.
 const QUOTA_EXHAUSTED_KINDS: &[&str] = &[
+    // OpenAI-compatible surfaces: quota / credit exhausted (both observed in
+    // the wild; the second is a compatible provider's spelling).
     "insufficient_quota",
     "credit_balance_exhausted",
-    "billing_error",
+    // OpenAI-compatible surfaces: billing not set up or deactivated — arrives
+    // as a 429, the masking this classifier exists to undo.
     "billing_not_active",
+    // The Anthropic surface's own 402 vocabulary; an upstream speaking that
+    // surface declares account trouble with it.
+    "billing_error",
 ];
 /// Prose markers for providers that report this only in the message, under a
-/// kind they also use for ordinary request faults. Deliberately narrow: an
-/// upstream 4xx often quotes the caller's own input back, so a marker loose
-/// enough to appear in a prompt would let a caller drive this classification.
-/// Each of these is a whole provider-authored clause, not a word that could
-/// ride in quoted content.
+/// kind they also use for ordinary request faults. Weaker evidence than a
+/// declared kind — an upstream 4xx often quotes the caller's own input back,
+/// so a prompt can plant one of these in `error.message`. Two consequences,
+/// both deliberate: each entry is a whole provider-authored clause rather than
+/// a word that could ride in quoted content, and a prose match may only
+/// suppress what the caller is shown — never drive the recorded status or
+/// anything else acted on beyond the response (see
+/// [`declares_quota_exhausted`]).
 const QUOTA_EXHAUSTED_PROSE: &[&str] = &[
     "credit balance is too low",
     "exceeded your current quota",
