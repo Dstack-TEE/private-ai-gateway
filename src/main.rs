@@ -450,12 +450,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         Arc::new(SystemClock),
     )?;
-    let session_store = Arc::new(JsonlSessionStore::open(&session_log_path).map_err(|err| {
-        invalid_input(format!(
-            "failed to open gateway session log {}: {err}",
-            session_log_path.display()
-        ))
-    })?);
+    let session_store = Arc::new(
+        JsonlSessionStore::open(&session_log_path, SystemClock.now_secs()).map_err(|err| {
+            invalid_input(format!(
+                "failed to open gateway session log {}: {err}",
+                session_log_path.display()
+            ))
+        })?,
+    );
     tracing::info!(session_log = %session_log_path.display(), "persisting attested sessions to JSONL log");
     // Reclaim the duplicate/expired lines accumulated while the process was down
     // before serving, then keep the file bounded on a periodic cadence.

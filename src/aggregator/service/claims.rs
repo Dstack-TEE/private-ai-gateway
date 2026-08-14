@@ -71,8 +71,8 @@ pub(super) fn chutes_instance_id<'a>(
 }
 
 /// Typed claims for one Chutes instance: the verifier's facts for that instance
-/// only, so the claim slice is not changed by a sibling joining or failing. The
-/// session separately retains the verification round's raw evidence.
+/// only, so its session is content-addressed on its own data and survives fleet
+/// churn (a sibling instance joining or failing does not change it).
 pub(super) fn per_instance_session_claims(
     event: &UpstreamVerifiedEvent,
     instance_id: &str,
@@ -91,13 +91,12 @@ pub(super) fn per_instance_session_claims(
 }
 
 /// One instance's slice of the Chutes `provider_claims` — that instance's own
-/// attestation facts, so its claims bind its CPU and GPU results while staying
+/// attestation facts, so its session binds its CPU and GPU evidence while staying
 /// stable under fleet churn. Everything fleet-shaped is dropped (the lists, the
 /// per-instance maps, and the *fleet-aggregate* GPU scalars — `all`/`any` over
 /// instances). What is kept is per-instance and nonce-free: the matched CPU
 /// measurement profile, this instance's TCB status, and this instance's GPU
-/// verification outcome (verified / arch). Raw nonce-bound quotes stay out of
-/// the claim slice and remain available through the session evidence.
+/// verification outcome (verified / arch). The raw nonce-bound quotes stay out.
 fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Value {
     let mut pc = serde_json::Map::new();
     let Some(Value::Object(map)) = full else {
@@ -780,8 +779,8 @@ mod claim_mapping_tests {
             c1.extra.get("gpu_verified").and_then(Value::as_bool),
             Some(true)
         );
-        // Fleet-wide fields are dropped, so the claim slice does not change when
-        // a sibling instance does. The session id also commits to raw evidence.
+        // Fleet-wide fields are dropped, so the slice (and the session content id)
+        // does not change when a sibling instance does (per-instance idempotency).
         assert!(!c1.extra.contains_key("verified_instance_ids"));
         assert!(!c1.extra.contains_key("instance_tcb_statuses"));
         assert!(!c1.extra.contains_key("instance_measurements"));

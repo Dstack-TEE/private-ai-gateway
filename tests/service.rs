@@ -303,44 +303,6 @@ async fn verified_upstream_binding_creates_attested_session() {
 }
 
 #[tokio::test]
-async fn chutes_per_instance_sessions_retain_verifier_evidence() {
-    let (service, _) = make_service(b"{}");
-    let evidence_bytes = br#"{"fixture":"chutes"}"#;
-    let evidence_digest = private_ai_gateway::aci::digest::sha256_hex(evidence_bytes);
-    let evidence_data = "data:application/json;base64,eyJmaXh0dXJlIjoiY2h1dGVzIn0=".to_string();
-    let event = UpstreamVerifiedEvent {
-        provider_type: Some("chutes".to_string()),
-        url_origin: Some("https://llm.chutes.ai".to_string()),
-        verifier_id: "private-ai-verifier/chutes/v1".to_string(),
-        evidence: Some(serde_json::json!({
-            "digest": evidence_digest,
-            "data": evidence_data,
-        })),
-        channel_bindings: ["instance-a", "instance-b"]
-            .into_iter()
-            .map(|instance_id| ChannelBinding::E2eePublicKeySha256 {
-                provider: "chutes".to_string(),
-                key_id: Some(instance_id.to_string()),
-                algorithm: "chutes-ml-kem-768".to_string(),
-                public_key_sha256: "aa".repeat(32),
-            })
-            .collect(),
-        ..verified_event("chutes", "model-tee")
-    };
-
-    service.record_session(&event);
-
-    let sessions = service.list_attested_sessions(Some("chutes"));
-    assert_eq!(sessions.len(), 2, "one session per Chutes instance");
-    for session in sessions {
-        let evidence = &session.document().evidence;
-        assert_eq!(evidence.digest.as_deref(), Some(evidence_digest.as_str()));
-        assert_eq!(evidence.data_uri.as_deref(), Some(evidence_data.as_str()));
-        assert!(evidence.digest_matches_data());
-    }
-}
-
-#[tokio::test]
 async fn verified_upstream_binding_fails_without_persisted_session() {
     let (svc, received) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
     let svc = svc.with_session_store(Arc::new(FailingSessionStore));
