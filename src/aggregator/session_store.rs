@@ -272,7 +272,16 @@ impl JsonlSessionStore {
     /// Takes an advisory exclusive lock on `<path>.lock` *before* reading the
     /// log, so only one process ever writes it — failing with
     /// [`io::ErrorKind::WouldBlock`] if another holds the lock.
-    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    ///
+    /// `now` drops records whose retention already lapsed instead of loading
+    /// them. They would be evicted by the first `compact` anyway, so this only
+    /// changes when the work happens — but it decides whether startup is
+    /// proportional to the *live* set or to everything appended since the last
+    /// compaction, which for a busy log is the difference between booting and
+    /// exhausting memory before serving a request. Taken as a parameter rather
+    /// than read from the clock so the store stays deterministic, like
+    /// `compact`.
+    pub fn open(path: impl AsRef<Path>, now: u64) -> io::Result<Self> {
         let path: PathBuf = path.as_ref().to_path_buf();
 
         // Single-writer lock first, before we read or write the log.
@@ -309,6 +318,11 @@ impl JsonlSessionStore {
                 };
                 next_seq = next_seq.max(seq_after);
                 if record.record_type != RECORD_TYPE_SESSION {
+                    continue;
+                }
+                // Ahead of the decode: a lapsed record costs a base64 decode, a
+                // parse and a digest hash before eviction would drop it.
+                if record.retention_until <= now {
                     continue;
                 }
                 let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
@@ -546,7 +560,7 @@ mod tests {
     /// so the retry belongs only in the test harness.
     fn open_store(path: &Path) -> JsonlSessionStore {
         for _ in 0..200 {
-            match JsonlSessionStore::open(path) {
+            match JsonlSessionStore::open(path, 0) {
                 Ok(store) => return store,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -579,6 +593,58 @@ mod tests {
             evidence: EvidenceRef::default(),
         })
         .unwrap()
+    }
+
+    /// Replay must be proportional to the live set, not to everything appended
+    /// since the last compaction. A lapsed record is dropped before it is
+    /// decoded, parsed and hashed — the work that made a busy log expensive to
+    /// boot from — and never reaches the index.
+    #[test]
+    fn replay_drops_lapsed_records_before_loading_them() {
+        let path = temp_path();
+        {
+            let store = open_store(&path);
+            let live = session("live", 0, 9_000);
+            let lapsed = session("lapsed", 0, 1_000);
+            store.put_session("fp-live", live, 9_000, 0).unwrap();
+            store.put_session("fp-lapsed", lapsed, 1_000, 0).unwrap();
+        }
+        assert_eq!(count_lines(&path), 2, "both records are on disk");
+
+        // Reopened past the lapsed record's deadline but before the live one's.
+        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let index = reopened.index.lock().unwrap();
+        assert_eq!(
+            index.by_id.len(),
+            1,
+            "only the live record is resident after replay"
+        );
+        assert!(
+            index.by_fingerprint.contains_key("fp-live"),
+            "the live record survives"
+        );
+        assert!(
+            !index.by_fingerprint.contains_key("fp-lapsed"),
+            "the lapsed record was never inserted"
+        );
+    }
+
+    /// The filter is a scheduling change, not a policy one: `now = 0` keeps
+    /// everything, so a caller that does not care still replays the whole log.
+    #[test]
+    fn replay_keeps_everything_when_nothing_has_lapsed() {
+        let path = temp_path();
+        {
+            let store = open_store(&path);
+            store
+                .put_session("fp-a", session("a", 0, 9_000), 9_000, 0)
+                .unwrap();
+            store
+                .put_session("fp-b", session("b", 0, 1_000), 1_000, 0)
+                .unwrap();
+        }
+        let reopened = JsonlSessionStore::open(&path, 0).unwrap();
+        assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
     }
 
     #[test]
@@ -744,7 +810,7 @@ mod tests {
         let path = temp_path();
         let first = open_store(&path);
 
-        let blocked = JsonlSessionStore::open(&path);
+        let blocked = JsonlSessionStore::open(&path, 0);
         assert!(
             matches!(&blocked, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
             "a second open must fail while the first holds the lock"
