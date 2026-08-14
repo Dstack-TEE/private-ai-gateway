@@ -704,6 +704,87 @@ async fn control_selects_native_kimi_reasoning_switch() {
     assert!(body.get("reasoning").is_none());
 }
 
+/// End to end for the shape that exposed the gap: a caller whose only way to
+/// say "no thinking" is the chat-template switch, and a route whose upstream
+/// ignores it. The switch has to reach that upstream as the dialect the route
+/// declared.
+#[tokio::test]
+async fn chat_template_switch_reaches_a_managed_route_as_its_own_dialect() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "vendor:acme/model-a",
+                "format": "openai",
+                "engine": "sglang",
+                "reasoningFormat": "reasoning_effort",
+                "reasoningPolicy": { "threshold": 2048 }
+            }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, _, forwarded) = build_sequenced_service(vec![200]);
+    let mut input = chat_input();
+    input.params = json!({
+        "model": "acme/model-a",
+        "messages": [{ "role": "user", "content": "How many apples?" }],
+        "max_tokens": 65536,
+        "temperature": 1,
+        "top_p": 0.95,
+        "chat_template_kwargs": { "thinking": false, "enable_thinking": false }
+    });
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_slice(&forwarded.lock().unwrap()[0]).unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+    // Still forwarded for an upstream that does act on it.
+    assert_eq!(
+        body["chat_template_kwargs"],
+        json!({ "thinking": false, "enable_thinking": false })
+    );
+}
+
+/// A route that declares no dialect keeps today's behavior exactly: the switch
+/// is a passthrough and nothing is synthesized. This is what keeps the change
+/// off the managed surfaces, where an invented reasoning parameter would be
+/// rejected rather than ignored.
+#[tokio::test]
+async fn chat_template_switch_stays_a_passthrough_without_a_declared_dialect() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "self-hosted:acme/model-a",
+                "format": "openai",
+                "engine": "vllm"
+            }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, _, forwarded) = build_sequenced_service(vec![200]);
+    let mut input = chat_input();
+    input.params = json!({
+        "model": "acme/model-a",
+        "messages": [{ "role": "user", "content": "How many apples?" }],
+        "chat_template_kwargs": { "thinking": false, "enable_thinking": false }
+    });
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_slice(&forwarded.lock().unwrap()[0]).unwrap();
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("reasoning").is_none());
+    assert_eq!(
+        body["chat_template_kwargs"],
+        json!({ "thinking": false, "enable_thinking": false })
+    );
+}
+
 #[tokio::test]
 async fn buffered_success_transforms_injects_cost_and_meters() {
     // Anthropic upstream over /v1/chat/completions: response is transformed to the

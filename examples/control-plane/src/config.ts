@@ -17,8 +17,15 @@ export interface RouteCandidate {
   format: Format;
   /** Self-hosted serving engine (sglang/vllm); absent for managed APIs. */
   engine?: 'sglang' | 'vllm';
-  /** Explicit upstream reasoning parameter dialect. */
-  reasoningFormat?: 'reasoning_effort' | 'reasoning';
+  /**
+   * Explicit upstream reasoning parameter dialect. Also opts the route into
+   * reading a `chat_template_kwargs` thinking switch as reasoning intent.
+   */
+  reasoningFormat?:
+    | 'reasoning_effort'
+    | 'reasoning'
+    | 'chat_template_thinking'
+    | 'chat_template_enable_thinking';
 }
 
 export interface ModelEntry {

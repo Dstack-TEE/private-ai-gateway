@@ -224,6 +224,8 @@ fn candidate_params(
         return Ok(params);
     }
     // Read request context before the mutable borrow below.
+    let derived = chat_template_reasoning_intent(&params, candidate, requested_reasoning);
+    let requested_reasoning = requested_reasoning.or(derived.as_ref());
     let effective = resolve_effective_reasoning(candidate, &params, requested_reasoning);
     let object = params
         .as_object_mut()
@@ -327,6 +329,65 @@ fn resolve_effective_reasoning(
         // Normal chat: caller's reasoning.
         requested.cloned()
     }
+}
+
+/// Read a switched-off `chat_template_kwargs` thinking flag as a request to
+/// disable reasoning.
+///
+/// The flag is the vLLM chat-template idiom, and for some callers it is the
+/// only way to say "no thinking" at all: a client whose model catalog exposes
+/// no `none` reasoning effort has nothing else to send, so it sets
+/// `{"thinking": false, "enable_thinking": false}` and no `reasoning` field.
+/// Left untranslated that is an opaque body key. It survives to the upstream
+/// only for self-hosted engines (see the passthrough allowlist), and only a
+/// real vLLM/SGLang server acts on it — a managed API behind the same route
+/// receives it and ignores it, so the model keeps thinking and the caller is
+/// silently not honoured. Reading it here turns the switch into ordinary
+/// reasoning intent, so it is subject to policy and gets encoded in whatever
+/// dialect the route actually speaks.
+///
+/// Three deliberate limits:
+///
+/// - An explicit `reasoning`/`reasoning_effort` always wins. It is the standard
+///   field and the more precise statement of intent; the switch only fills the
+///   silence.
+/// - Only `false` is read. Encoding "on" would have to invent an effort
+///   (`enabled: true` maps to `medium`), which is a stronger claim than the
+///   caller made and would change what a working request asks for.
+/// - Only OpenAI-format routes that declare a `reasoning_format` take part. A
+///   route whose dialect nobody configured cannot be assumed to want a
+///   synthesized parameter, and the Anthropic surface treats any reasoning as a
+///   hard error. Since this intent is inferred rather than stated, it must
+///   never be the reason a request fails: where it cannot be encoded, it is
+///   simply not derived, and the switch stays the passthrough it is today.
+fn chat_template_reasoning_intent(
+    params: &Value,
+    candidate: &RouteCandidate,
+    requested: Option<&ReasoningConfig>,
+) -> Option<ReasoningConfig> {
+    if requested.is_some()
+        || candidate.format != ProviderFormat::Openai
+        || candidate.reasoning_format.is_none()
+    {
+        return None;
+    }
+    let kwargs = params.get("chat_template_kwargs")?.as_object()?;
+    let mut disabled = false;
+    for key in ["thinking", "enable_thinking"] {
+        match kwargs.get(key).and_then(Value::as_bool) {
+            // Any switch left on ends the derivation, which covers both rules
+            // above at once: a plain "on" is never translated, and a caller who
+            // sets the two aliases against each other has stated no intent to
+            // read, so the body is left alone rather than a side picked.
+            Some(true) => return None,
+            Some(false) => disabled = true,
+            None => {}
+        }
+    }
+    disabled.then(|| ReasoningConfig {
+        enabled: Some(false),
+        ..Default::default()
+    })
 }
 
 fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
@@ -1513,6 +1574,180 @@ mod tests {
             assert_eq!(kwargs["thinking"], expected);
             assert_eq!(kwargs["enable_thinking"], expected);
             assert_eq!(kwargs["tokenize"], false);
+        }
+    }
+
+    /// The case that motivated `chat_template_reasoning_intent`: a caller
+    /// disables thinking the only way its catalog lets it, and the route is a
+    /// managed API that ignores the switch. Before, nothing was encoded and the
+    /// upstream kept thinking; now the switch is re-expressed in the dialect
+    /// the route declared.
+    #[test]
+    fn chat_template_switch_off_is_read_as_reasoning_intent() {
+        for reasoning_format in ["reasoning_effort", "reasoning"] {
+            let request = json!({
+                "model": "m",
+                "messages": [],
+                "max_tokens": 65536,
+                "chat_template_kwargs": { "thinking": false, "enable_thinking": false }
+            });
+            let (params, requested, _) =
+                crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+            assert!(requested.is_none(), "the switch is not a reasoning field");
+            let candidate: RouteCandidate = serde_json::from_value(json!({
+                "routeId": "managed:m",
+                "format": "openai",
+                "engine": "sglang",
+                "reasoningFormat": reasoning_format,
+            }))
+            .unwrap();
+
+            let bodies = build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                &[candidate],
+                requested.as_ref(),
+            )
+            .unwrap();
+            let body = &bodies[0].1;
+            if reasoning_format == "reasoning_effort" {
+                assert_eq!(body["reasoning_effort"], "none");
+            } else {
+                assert_eq!(body["reasoning"]["enabled"], false);
+            }
+            // The switch still rides along for an upstream that does honor it.
+            assert_eq!(body["chat_template_kwargs"]["thinking"], false);
+        }
+    }
+
+    /// Most requests that hit this also carry `tools`, which is a separate
+    /// branch of `resolve_effective_reasoning` — the derived intent has to
+    /// survive it. Above the policy threshold it is what disables reasoning; at
+    /// or below, the threshold already forces `none` and the two agree.
+    #[test]
+    fn chat_template_switch_survives_the_tools_branch() {
+        for (max_tokens, tool_choice) in [
+            (65536, json!("none")),
+            (65536, json!("auto")),
+            (65536, json!("required")),
+            (
+                65536,
+                json!({ "type": "function", "function": { "name": "get_current_weather" } }),
+            ),
+            (256, json!("auto")),
+        ] {
+            let request = json!({
+                "model": "m",
+                "messages": [],
+                "max_tokens": max_tokens,
+                "tools": [{
+                    "type": "function",
+                    "function": { "name": "get_current_weather", "parameters": {} }
+                }],
+                "tool_choice": tool_choice,
+                "chat_template_kwargs": { "thinking": false, "enable_thinking": false }
+            });
+            let (params, requested, _) =
+                crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+            let candidate: RouteCandidate = serde_json::from_value(json!({
+                "routeId": "managed:m",
+                "format": "openai",
+                "engine": "sglang",
+                "reasoningFormat": "reasoning_effort",
+                "reasoningPolicy": { "threshold": 2048 }
+            }))
+            .unwrap();
+
+            let bodies = build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                &[candidate],
+                requested.as_ref(),
+            )
+            .unwrap();
+            let body = &bodies[0].1;
+            assert_eq!(
+                body["reasoning_effort"], "none",
+                "max_tokens {max_tokens}, tool_choice {tool_choice}"
+            );
+            // The tool call itself must be untouched by the reasoning shaping.
+            assert_eq!(body["tool_choice"], tool_choice);
+            assert!(body["tools"].is_array());
+        }
+    }
+
+    /// The three limits the derivation deliberately keeps: an explicit
+    /// reasoning field wins, "on" is never synthesized, and a route that
+    /// declares no dialect is left exactly as it is today — the last one is
+    /// what keeps the Anthropic surface (where any reasoning is a hard error)
+    /// and managed OpenAI routes from newly rejecting a request that works.
+    #[test]
+    fn chat_template_switch_is_not_read_outside_its_limits() {
+        let candidate = |format: &str, reasoning_format: Option<&str>| -> RouteCandidate {
+            let mut fields = json!({
+                "routeId": "managed:m",
+                "format": format,
+                "engine": "sglang",
+            });
+            if let Some(dialect) = reasoning_format {
+                fields["reasoningFormat"] = dialect.into();
+            }
+            serde_json::from_value(fields).unwrap()
+        };
+        let base =
+            |kwargs: Value| json!({ "model": "m", "messages": [], "chat_template_kwargs": kwargs });
+
+        // Explicit reasoning wins over the switch.
+        let mut request = base(json!({ "thinking": false }));
+        request["reasoning_effort"] = "high".into();
+        let (params, requested, _) =
+            crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[candidate("openai", Some("reasoning_effort"))],
+            requested.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(bodies[0].1["reasoning_effort"], "high");
+
+        // Nothing is synthesized for a switch that is on, for a contradictory
+        // pair, for a route that declares no dialect, or for the Anthropic
+        // surface — the last two would otherwise be a shape the upstream
+        // rejects and an outright 400, from an intent nobody stated.
+        let off = json!({ "thinking": false, "enable_thinking": false });
+        for (kwargs, format, dialect) in [
+            (
+                json!({ "thinking": true, "enable_thinking": true }),
+                "openai",
+                Some("reasoning_effort"),
+            ),
+            (
+                json!({ "thinking": true, "enable_thinking": false }),
+                "openai",
+                Some("reasoning_effort"),
+            ),
+            (off.clone(), "openai", None),
+            (off.clone(), "anthropic", Some("reasoning_effort")),
+        ] {
+            let request = base(kwargs.clone());
+            let (params, requested, _) =
+                crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+            let bodies = build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                &[candidate(format, dialect)],
+                requested.as_ref(),
+            )
+            .expect("a derived intent must never be the reason a request fails");
+            let body = &bodies[0].1;
+            assert!(
+                body.get("reasoning_effort").is_none() && body.get("reasoning").is_none(),
+                "{kwargs} on {format}/{dialect:?} should stay a passthrough, got {body}"
+            );
+            if format == "openai" {
+                assert_eq!(body["chat_template_kwargs"], kwargs);
+            }
         }
     }
 
