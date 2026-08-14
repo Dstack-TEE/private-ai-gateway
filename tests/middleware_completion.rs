@@ -950,24 +950,25 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // load behind the 429s is never shed.
     let (control_url, posts) = spawn_control_capturing(
         200,
-        // Preemptible tier: no capacity-retry second pass — this test asserts
-        // the single walk's terminal report.
-        json!({ "allow": true, "userTier": "basic", "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
     )
     .await;
     let mw = middleware(control_url);
-    let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
+    // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
+    // pass and this stays a test about attribution. 429 would take the delayed
+    // capacity-retry path, which the capacity_retry_* suite covers on its own.
+    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
     let mut input = chat_input();
     input.stream = true;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
-    assert_eq!(status, 429, "the upstream status must reach the client");
+    assert_eq!(status, 503, "the upstream status must reach the client");
 
-    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(429)).await;
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
     assert_eq!(
         report["selectedRouteId"],
         json!("openai:gpt"),
-        "an unattributed upstream 429 counts against no route's health"
+        "an unattributed upstream failure counts against no route's health"
     );
     assert_eq!(report["isStreaming"], json!(true));
     assert_eq!(report["attemptIndex"], json!(0));
@@ -984,23 +985,20 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
 
 #[tokio::test]
 async fn repeated_route_id_still_reports_distinct_attempt_indices() {
-    // Failover exhausted: every candidate 429s, and each attempt must reach
+    // Failover exhausted: every candidate fails, and each attempt must reach
     // control as its own attributed report — the failed-over one via
     // failed_attempts, the last via upstream_error. The gateway does not dedupe
     // `candidates` — it forwards whatever control supplies, and control
     // implementations are swappable (the open-source stack ships its own). A
     // route id repeated in the list must still yield one report per attempt:
-    // control dedupes by (request_id, attempt, status), so two 429s sharing an
-    // attempt index would silently collapse into one, under-counting the
+    // control dedupes by (request_id, attempt, status), so two failures sharing
+    // an attempt index would silently collapse into one, under-counting the
     // pressure signal by half. The index is therefore derived from the number
     // of prior attempts, never looked up by route id.
     let (control_url, posts) = spawn_control_capturing(
         200,
         json!({
             "allow": true,
-            // Preemptible tier: no capacity-retry second pass — this test
-            // asserts the single walk's per-attempt attribution.
-            "userTier": "basic",
             "candidates": [
                 { "routeId": "openai:dup", "format": "openai" },
                 { "routeId": "openai:dup", "format": "openai" }
@@ -1009,25 +1007,27 @@ async fn repeated_route_id_still_reports_distinct_attempt_indices() {
     )
     .await;
     let mw = middleware(control_url);
-    let service = build_service_with_upstream(429, br#"{"error":"rate limited"}"#.to_vec());
+    // Retryable but not a capacity signal, so the walk is a single pass and the
+    // indices under test are the walk's own (see the note in the test above).
+    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
     let mut input = chat_input();
     input.stream = true;
 
     let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
-    assert_eq!(status, 429);
+    assert_eq!(status, 503);
 
     wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
     let indices: Vec<i64> = posts
         .lock()
         .unwrap()
         .iter()
-        .filter(|r| r["status"].as_i64() == Some(429))
+        .filter(|r| r["status"].as_i64() == Some(503))
         .filter_map(|r| r["attemptIndex"].as_i64())
         .collect();
     assert_eq!(
         indices,
         vec![0, 1],
-        "both 429s against the repeated route must carry distinct attempt indices"
+        "both failures against the repeated route must carry distinct attempt indices"
     );
 }
 
@@ -1267,20 +1267,21 @@ async fn a_real_failure_outranks_a_tee_ineligible_route_in_either_order() {
 
 #[tokio::test]
 async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
-    // Plain failover, no ACI constraint: the first candidate answers 429, the
-    // walk moves on, and the second cannot even be routed. A route that never
-    // reached an upstream must not overwrite one that did — the client's status
-    // is the real 429, not a 404 synthesized from the second candidate's own
-    // failure. Both streaming and buffered, which commit through separate
-    // paths.
+    // Plain failover, no ACI constraint: the first candidate answers a real
+    // failure, the walk moves on, and the second cannot even be routed. A route
+    // that never reached an upstream must not overwrite one that did — the
+    // client's status is the real 503, not a 404 synthesized from the second
+    // candidate's own failure. Both streaming and buffered, which commit
+    // through separate paths.
+    //
+    // 503 rather than 429 so the walk stays a single pass: a capacity signal
+    // would take the delayed retry, and the precedence under test here is the
+    // walk's own. The capacity_retry_* suite covers that path.
     for stream in [false, true] {
         let (control_url, posts) = spawn_control_capturing(
             200,
             json!({
                 "allow": true,
-                // Preemptible tier: no capacity-retry second pass — this test
-                // asserts the single walk's status precedence.
-                "userTier": "basic",
                 "candidates": [
                     { "routeId": "plain:gpt-test", "format": "openai" },
                     { "routeId": "missing-b:gpt-test", "format": "openai" }
@@ -1289,13 +1290,13 @@ async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
         )
         .await;
         let mw = middleware(control_url);
-        let (service, forwarded) = build_tee_aware_service_with_status(429);
+        let (service, forwarded) = build_tee_aware_service_with_status(503);
         let mut input = chat_input();
         input.stream = stream;
 
         let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
         assert_eq!(
-            status, 429,
+            status, 503,
             "stream={stream}: the real upstream status wins"
         );
         assert_eq!(
@@ -1304,11 +1305,11 @@ async fn a_later_candidate_that_never_answers_does_not_swallow_a_real_status() {
             "stream={stream}: only the routable candidate was contacted"
         );
 
-        // The committed 429 must be reported last: dashboards read a request's
+        // The committed failure must be reported last: dashboards read a request's
         // user-facing status as the one at the highest attempt index, so a
         // committed response sitting behind a later attempt would be misread.
         let report = wait_for_post(&posts, |r| {
-            r["status"].as_i64() == Some(429) && r["selectedRouteId"] == json!("plain:gpt-test")
+            r["status"].as_i64() == Some(503) && r["selectedRouteId"] == json!("plain:gpt-test")
         })
         .await;
         let committed = report["attemptIndex"].as_i64().unwrap_or(-1);
@@ -1804,8 +1805,10 @@ async fn capacity_retry_gives_non_preemptible_traffic_a_delayed_second_pass() {
     );
 }
 
+/// The tier used to suppress this pass. Asserting the reversal rather than
+/// deleting the case keeps the old rule from being reintroduced by accident.
 #[tokio::test(start_paused = true)]
-async fn capacity_retry_skips_preemptible_traffic() {
+async fn capacity_retry_covers_preemptible_traffic_too() {
     let (service, forwarded, _) = build_sequenced_service(vec![429, 200]);
     let result = service
         .forward_chat_completion_for_middleware(
@@ -1818,16 +1821,17 @@ async fn capacity_retry_skips_preemptible_traffic() {
         .unwrap();
     match result {
         MiddlewareForwardResult::Forwarded(forward) => {
-            // Preemptible traffic keeps the fast 429: the walk commits the
-            // held-back answer without a second pass.
-            assert_eq!(forward.upstream_status, 429);
+            assert_eq!(
+                forward.failed_attempts,
+                vec![("plain:gpt-test".to_string(), 429)]
+            );
         }
-        _ => panic!("expected the committed 429"),
+        _ => panic!("the delayed second pass must commit the 200"),
     }
     assert_eq!(
         *forwarded.lock().unwrap(),
-        vec!["plain:gpt-test".to_string()],
-        "preemptible traffic must not re-contact the upstream"
+        vec!["plain:gpt-test".to_string(), "plain:gpt-test".to_string()],
+        "the tier no longer suppresses the re-contact"
     );
 }
 

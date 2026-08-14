@@ -55,19 +55,20 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // capacity. An upstream 429 is a transient: the upstream's free capacity
 // fluctuates on the scale of seconds, so a rejection often clears moments
 // later. After the chain is exhausted, the request sleeps briefly and
-// re-tries exactly the candidates that answered 429 — once. Requests whose
-// x-user-tier marks them preemptible ('basic') keep the fast 429 instead
-// (their callers are expected to handle capacity signals themselves), and a
-// request that already spent long in the chain is returned rather than
-// delayed further. The jittered delay de-synchronizes requests bounced by
-// the same capacity dip.
+// re-tries exactly the candidates that answered 429 — once. A request that
+// already spent long in the chain is returned rather than delayed further.
+// The jittered delay de-synchronizes requests bounced by the same capacity dip.
+//
+// x-user-tier does not gate this. Preemptible callers were once excluded on
+// the reasoning that they handle capacity signals themselves; they do, by
+// routing away, which costs more than the delay. The tier governs shedding
+// under pressure, not retries.
 const CAPACITY_RETRY_DELAY_MS: u64 = 2_000;
 const CAPACITY_RETRY_MAX_ELAPSED: Duration = Duration::from_secs(10);
-const PREEMPTIBLE_TIER: &str = "basic";
 
 /// Whether this request may still take the delayed capacity-retry pass.
-fn capacity_retry_eligible(done: bool, user_tier: Option<&str>, started: Instant) -> bool {
-    !done && user_tier != Some(PREEMPTIBLE_TIER) && started.elapsed() <= CAPACITY_RETRY_MAX_ELAPSED
+fn capacity_retry_eligible(done: bool, started: Instant) -> bool {
+    !done && started.elapsed() <= CAPACITY_RETRY_MAX_ELAPSED
 }
 
 fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> bool {
@@ -508,11 +509,7 @@ impl AciService {
                         // Read before the body moves into `retained`.
                         let attempt_status = recorded_attempt_status(status, &upstream_body);
                         let last_may_retry = (is_capacity || !capacity_indices.is_empty())
-                            && capacity_retry_eligible(
-                                capacity_retry_done,
-                                req.context.user_tier.as_deref(),
-                                forward_started,
-                            );
+                            && capacity_retry_eligible(capacity_retry_done, forward_started);
                         if (!is_last || last_may_retry)
                             && should_fail_over(status, received_body, &upstream_body)
                         {
@@ -656,11 +653,7 @@ impl AciService {
                 // Read before `upstream_response` moves into `retained`.
                 let attempt_status = recorded_attempt_status(status, &upstream_response.body);
                 let last_may_retry = (is_capacity || !capacity_indices.is_empty())
-                    && capacity_retry_eligible(
-                        capacity_retry_done,
-                        req.context.user_tier.as_deref(),
-                        forward_started,
-                    );
+                    && capacity_retry_eligible(capacity_retry_done, forward_started);
                 if (!is_last || last_may_retry)
                     && should_fail_over(status, received_body, &upstream_response.body)
                 {
@@ -699,16 +692,11 @@ impl AciService {
                 );
             }
 
-            // Chain exhausted without a 2xx. Non-preemptible traffic gets one
-            // delayed second pass over the candidates that answered 429 — a
-            // capacity wall is a second-scale transient, unlike the hard
-            // failures which stay abandoned.
+            // Chain exhausted without a 2xx. One delayed second pass over the
+            // candidates that answered 429 — a capacity wall is a second-scale
+            // transient, unlike the hard failures which stay abandoned.
             if !capacity_indices.is_empty()
-                && capacity_retry_eligible(
-                    capacity_retry_done,
-                    req.context.user_tier.as_deref(),
-                    forward_started,
-                )
+                && capacity_retry_eligible(capacity_retry_done, forward_started)
             {
                 capacity_retry_done = true;
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
