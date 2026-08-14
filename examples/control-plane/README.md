@@ -14,10 +14,21 @@ endpoints below).
   (empty list = anonymous allowed). Reasoning-aware routing is optional and this
   minimal example does not implement it. A candidate can return
   `effectiveReasoning` to override the normalized request. Candidates can set
-  `reasoningFormat` to `"reasoning_effort"` or `"reasoning"` to select the
+  `reasoningFormat` to `"reasoning_effort"`, `"reasoning"`,
+  `"chat_template_thinking"` or `"chat_template_enable_thinking"` to select the
   upstream parameter dialect explicitly. When omitted, the gateway preserves
   its legacy behavior: managed routes use nested `reasoning`, while SGLang and
   vLLM routes use `reasoning_effort`.
+
+  Declaring a dialect also opts the route into reading a caller's
+  `chat_template_kwargs` thinking switch. Some callers can only express "no
+  thinking" that way, and left untranslated the switch reaches the upstream as
+  an opaque key that only a real vLLM/SGLang server acts on — a vendor API
+  behind the same route ignores it and keeps thinking. On a route that declares
+  a dialect, a switch set to `false` is re-encoded in that dialect. An explicit
+  `reasoning`/`reasoning_effort` still wins, and a switch set to `true` is never
+  translated: encoding "on" would have to invent an effort the caller did not
+  ask for.
 - `POST /consult/post` — accepts the usage report and drops it (no billing).
 
 No database; configuration only.
