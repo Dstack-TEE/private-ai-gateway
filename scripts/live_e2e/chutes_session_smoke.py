@@ -6,7 +6,7 @@ each with its own E2EE key), sends a request, and asserts:
 
   1. the attested-session list has one session per *verified instance*, each
      bound to that instance's E2EE key (`e2ee_public_key_sha256` with a `key_id`),
-     not one bundled session, and
+     not one bundled session, and each full session retains valid evidence, and
   2. the request's receipt cites one of those per-instance sessions — i.e. the
      session of the instance that actually served — so the chain receipt ->
      instance session -> that instance's claims holds.
@@ -20,6 +20,8 @@ Usage (from scripts/, with CHUTES_API_KEY in the environment):
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import signal
@@ -59,6 +61,29 @@ def instance_binding(session: dict) -> dict | None:
         if binding.get("type") == "e2ee_public_key_sha256" and binding.get("key_id"):
             return binding
     return None
+
+
+def get_session(session_id: str) -> dict | None:
+    r = requests.get(f"{BASE}/v1/aci/sessions/{session_id}", timeout=30)
+    if r.status_code != 200:
+        return None
+    if hashlib.sha256(r.content).hexdigest() != session_id:
+        return None
+    return r.json()
+
+
+def evidence_digest_matches_data(session: dict) -> bool:
+    evidence = session.get("evidence") or {}
+    digest = evidence.get("digest")
+    data_uri = evidence.get("data")
+    if not isinstance(digest, str) or not isinstance(data_uri, str):
+        return False
+    try:
+        encoded = data_uri.split(";base64,", 1)[1]
+        decoded = base64.b64decode(encoded, validate=True)
+    except (IndexError, ValueError):
+        return False
+    return digest == f"sha256:{hashlib.sha256(decoded).hexdigest()}"
 
 
 def send_request() -> tuple[int, str | None]:
@@ -163,13 +188,19 @@ def main() -> int:
                 print("FAIL: no attested sessions recorded for Chutes")
                 return 1
 
-            # 1. Every Chutes session is a single per-instance E2EE channel.
+            # 1. Every Chutes session is a single per-instance E2EE channel and
+            #    retains the verifier input required for a deep audit.
             key_ids: list[str] = []
             for s in sessions:
                 binding = instance_binding(s)
                 if binding is None:
                     print(f"FAIL: session {s.get('session_id')} is not a per-instance E2EE channel: "
                           f"{s.get('channel_binding')}")
+                    return 1
+                session_id = s.get("session_id")
+                full_session = get_session(session_id) if isinstance(session_id, str) else None
+                if full_session is None or not evidence_digest_matches_data(full_session):
+                    print(f"FAIL: session {session_id} has missing or invalid evidence")
                     return 1
                 key_ids.append(binding["key_id"])
             if len(set(key_ids)) != len(key_ids):
