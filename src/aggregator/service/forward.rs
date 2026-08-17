@@ -84,6 +84,8 @@ pub(super) fn attested_route_eligible(is_tee: Option<bool>) -> bool {
 /// Local key over a channel's verified material — the dedup handle the hot
 /// path uses to find "the current session for this channel" without sealing a
 /// new document per request. Never served; carries no protocol meaning.
+const CHUTES_EVIDENCE_FINGERPRINT_V1: &str = "chutes-establishing-evidence-v1";
+
 #[derive(Serialize)]
 struct ChannelMaterial<'a> {
     upstream_name: &'a str,
@@ -92,7 +94,7 @@ struct ChannelMaterial<'a> {
     identity: &'a Option<WorkloadIdentityRef>,
     channel_binding: &'a [ChannelBinding],
     claims: &'a SessionClaims,
-    evidence_digest: &'a Option<String>,
+    evidence_digest: Option<&'a str>,
 }
 
 impl ChannelMaterial<'_> {
@@ -822,6 +824,18 @@ impl AciService {
         now: u64,
         expires_at: u64,
     ) -> Result<String, ServiceError> {
+        // Chutes evidence is nonce-bound, so a fresh verification changes its
+        // digest even when this instance's binding and claims are unchanged.
+        // Keep the establishing evidence in the sealed document, but reuse the
+        // live session until its material changes or its validity ends.
+        let is_chutes_instance = channel_bindings
+            .first()
+            .is_some_and(|binding| chutes_instance_id(event, binding).is_some());
+        let fingerprint_evidence_digest = if is_chutes_instance {
+            Some(CHUTES_EVIDENCE_FINGERPRINT_V1)
+        } else {
+            evidence.digest.as_deref()
+        };
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -829,7 +843,7 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: &evidence.digest,
+            evidence_digest: fingerprint_evidence_digest,
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;

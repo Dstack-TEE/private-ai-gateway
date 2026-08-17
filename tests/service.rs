@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 mod common;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
 use private_ai_gateway::aci::upstream::{
@@ -492,6 +493,52 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     assert_eq!(
         second_session.document().evidence.digest.as_deref(),
         Some(second_digest.as_str())
+    );
+}
+
+#[test]
+fn chutes_nonce_refresh_reuses_evidenceful_sessions() {
+    let (service, _) = make_service(b"{}");
+    let event = |round: usize, key: &str| {
+        let evidence = format!("chutes-round-{round}");
+        UpstreamVerifiedEvent {
+            provider_type: Some("chutes".to_string()),
+            url_origin: Some("https://llm.chutes.ai".to_string()),
+            verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+            evidence: Some(serde_json::json!({
+                "digest": private_ai_gateway::aci::digest::sha256_hex(evidence.as_bytes()),
+                "data": format!("data:text/plain;base64,{}", BASE64.encode(&evidence)),
+            })),
+            channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
+                provider: "chutes".to_string(),
+                key_id: Some("inst-a".to_string()),
+                algorithm: "chutes-ml-kem-768".to_string(),
+                public_key_sha256: key.repeat(32),
+            }],
+            provider_claims: Some(serde_json::json!({})),
+            ..verified_event("chutes", "model-tee")
+        }
+    };
+
+    service.record_session(&event(0, "aa"));
+    let initial_id = service.list_attested_sessions(Some("chutes"))[0]
+        .session_id()
+        .to_string();
+    service.record_session(&event(1, "aa"));
+    let sessions = service.list_attested_sessions(Some("chutes"));
+    assert_eq!(
+        sessions.len(),
+        1,
+        "nonce-only refresh must reuse the session"
+    );
+    assert_eq!(sessions[0].session_id(), initial_id);
+    assert!(sessions[0].document().evidence.digest_matches_data());
+
+    service.record_session(&event(1, "bb"));
+    assert_eq!(
+        service.list_attested_sessions(Some("chutes")).len(),
+        2,
+        "a changed instance binding must create a new session"
     );
 }
 

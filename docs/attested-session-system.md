@@ -26,6 +26,14 @@ process-owned store. The session's validity period reuses
 `receipt_ttl_seconds`, and retention extends per citing receipt, satisfying
 the §8 rule that a session outlives every receipt citing it.
 
+The session id and the store's local reuse fingerprint serve different
+purposes. The session id commits to the complete immutable record, including
+its establishing evidence. For a Chutes instance, the reuse fingerprint omits
+the nonce-bound fleet evidence digest but still includes the instance binding
+and per-instance claims. An unchanged instance therefore keeps its existing
+session and original evidence; a changed binding or claim creates a new
+session. Other providers include the evidence digest in the reuse fingerprint.
+
 Full trace:
 
 ```

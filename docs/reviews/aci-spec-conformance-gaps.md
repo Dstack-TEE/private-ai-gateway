@@ -3,7 +3,7 @@
 Where this implementation currently falls short of, or diverges from,
 [the ACI Spec](../../spec/aci.md). The spec is authoritative; these are
 implementation compromises, not spec changes. Each item is a candidate work
-item.
+item. Item numbers are stable identifiers, so resolved gaps leave holes.
 
 ## Verifier coverage
 
@@ -36,40 +36,6 @@ item.
    silently. Sessions do better: the JSONL store survives restarts and
    extends retention per citing receipt (§8 retention rule).
 
-4. **Chutes per-instance sessions carry no §8.2 evidence.** The Chutes
-   verifier's raw evidence is fleet-wide and nonce-bound, so sealing it into
-   each per-instance session would mint a new session id for every
-   verification round and every fleet change. The implementation instead
-   seals per-instance sessions with an empty `evidence` object
-   (`record_attested_upstream_session`), keeping them content-addressed on
-   per-instance facts only. Consequence: the §9.2 deep-audit step fails
-   closed on Chutes-cited sessions (`aci` CLI upstream-2; verifier-ts
-   `checkSessionEvidence`) — a §9.2(4) deep audit is impossible for Chutes
-   even once built (see the §9.2 audits item below), while receipt
-   verification and the §9.1/§9.3 checks are unaffected. The
-   session store still accepts these records (its §8.2 check rejects only
-   evidence whose `data` does not hash to `digest`).
-
-   Sealing the evidence in was tried and reverted. The predicted new session
-   id per round is what happens, and it compounds: each round appends a fresh
-   record per instance instead of resolving to the existing one, and each
-   record now carries the fleet-wide bundle, so the log grows without bound
-   relative to the live set. Startup replays that log into the index, so a
-   long enough gap since the last compaction exhausts memory before the
-   process serves a request — and because the kill lands during startup, it
-   repeats on every restart with no path back except moving the file aside.
-
-   So the fix has to keep the evidence *out* of what the session id commits
-   to. Emitting a per-instance evidence slice, the work item below, removes
-   the fleet-wide half but not the nonce-bound half, so on its own it still
-   mints a new id per round. Retaining the evidence under its own digest and
-   linking sessions to it out of band addresses both, and retains every
-   round's evidence rather than only the latest. Either way, two properties
-   the store depends on need stating explicitly, because nothing currently
-   enforces them: a session's identity must not commit to anything that
-   changes per verification round, and replay must stay proportional to the
-   live set rather than to everything appended since the last compaction.
-
 5. **Streaming upstream errors carry no receipt.** A streaming request whose
    upstream answers non-200 is returned as a buffered error without a
    receipt (inherited dstack-vllm-proxy behavior,
@@ -95,14 +61,13 @@ item.
 
 8. **Session validity is advertised far longer than a session can actually
     serve.** `expires_at` is set to `now + receipt_ttl_seconds` (default
-    3600), but each verification round mints a fresh nonce, so the evidence
-    digest — part of the channel fingerprint — changes every
-    `verifier_cache_seconds` (default 300) and a new session supersedes the
-    old one. The list endpoint keeps advertising the superseded session as
-    current until its `expires_at`, so a client that verified and pinned it
-    (§5.3) is refused `session_not_accepted` while the service still lists
-    it. Fix direction: end a session's validity period when a re-verification
-    supersedes it, so "current" means current.
+    3600). For providers other than Chutes, a nonce-bound evidence digest is
+    part of the channel fingerprint, so the default proactive refresh every
+    240 seconds can supersede the old session while the list endpoint still
+    advertises it as current until `expires_at`. A client that pinned it
+    (§5.3) is then refused `session_not_accepted`. Fix direction: end a
+    session's validity period when a re-verification supersedes it, so
+    "current" means current.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry
