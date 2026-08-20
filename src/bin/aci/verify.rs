@@ -14,9 +14,9 @@ use crate::checks::{
 use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient};
 use crate::transcript::Transcript;
 
-/// Everything `aci send` and `aci serve` need after a full online
-/// verify: the transcript, the report, and the client that observed the
-/// channel (ready to have the attested SPKI pinned).
+/// Everything `aci send`, `aci curl`, and `aci serve` need after a full online
+/// verify: the transcript, the report, and the client that observed the channel
+/// (ready to have the attested SPKI pinned).
 pub struct ServiceVerification {
     pub transcript: Transcript,
     pub report: AttestationReport,

@@ -2,9 +2,9 @@
 
 Two client surfaces, library and command line:
 
-Both currently ship as source in this repository. The npm package is marked
-`private`, and the repository does not publish a prebuilt `aci` binary; build
-the library with npm or run the CLI with Cargo from a checkout.
+The TypeScript package is currently private and built from source. The `aci`
+CLI ships as checksum-verified Linux and macOS release binaries for x86-64 and
+ARM64. See the [`aci` CLI reference](../src/bin/aci/README.md) for installation.
 
 - [`verifier-ts`](verifier-ts) — `@phala/aci-verifier`, a TypeScript verifier
   for the browser and Node. One call, `verifyService(url)`, fetches the
@@ -19,7 +19,8 @@ the library with npm or run the CLI with Cargo from a checkout.
   It reuses the reference implementation's verification code:
   `aci verify` (live attestation), `aci audit` (saved artifacts),
   `aci sessions` (the §9.2 audit of the service's current attested
-  sessions, with a `--require-claim` claims policy), `aci send` (one
+  sessions, with a `--require-claim` claims policy), `aci curl` (run the
+  installed curl over the attested SPKI-pinned channel), `aci send` (one
   inference with receipt verification), and `aci serve` (a local verifying
   proxy: forwards any endpoint over the pinned channel, records each
   exchange's digests for on-demand receipt verification, and pins sessions

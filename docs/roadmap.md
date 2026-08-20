@@ -2,7 +2,7 @@
 
 This page records current implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-08-15.
 
 ## Implemented
 
@@ -19,8 +19,9 @@ The current gateway includes:
 - multi-domain downstream TLS identities and TEE-only middleware domains;
 - the E2EE v2 compatibility extension for chat completions, text completions,
   and embeddings;
-- the `aci` CLI for live verification, offline audit, session inspection, one
-  verified chat request, and a local verifying proxy;
+- the `aci` CLI for live verification, offline audit, session inspection,
+  arbitrary curl requests over an attested SPKI-pinned channel, one verified
+  chat request with receipt checks, and a local verifying proxy;
 - unit and integration tests, ACI test vectors, a TypeScript verifier, provider-verifier tooling, and a live provider suite.
 
 Implementation does not imply that every provider proves the same claims. Review [Provider verification](providers/README.md) and treat unproven claims as unknown.
@@ -62,9 +63,8 @@ These boundaries are present in the current code and should inform deployment de
 ### API and client coverage
 
 - Move live verification cases to canonical `/v1/aci/*` artifacts while retaining explicit legacy compatibility tests.
-- Extend the first-class client beyond `aci send` so arbitrary supported API
-  requests can use the same verification, pinning, receipt, and session-policy
-  checks.
+- Extend `aci curl` beyond preflight verification and SPKI pinning so arbitrary
+  supported API requests can also opt into receipt and session-policy checks.
 - Define or reject a native Anthropic Messages E2EE profile at the API boundary.
 - Expand Responses API conformance and streaming interoperability tests.
 
