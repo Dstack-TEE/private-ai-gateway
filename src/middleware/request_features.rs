@@ -178,6 +178,22 @@ impl Acc {
     }
 }
 
+/// The per-text half of the estimate formula, for callers that need a
+/// PER-ITEM count (batch prompts take the max item) rather than Acc's
+/// running totals.
+fn text_tokens(text: &str) -> u64 {
+    let mut ascii_bytes = 0u64;
+    let mut non_ascii_chars = 0u64;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii_bytes += 1;
+        } else {
+            non_ascii_chars += 1;
+        }
+    }
+    ascii_bytes / 5 + non_ascii_chars / 3
+}
+
 /// RFC 2104 HMAC over SHA-256, hand-rolled from the `sha2` already in the
 /// tree rather than a new dependency; pinned against an RFC 4231 vector in
 /// the tests below.
@@ -216,23 +232,34 @@ pub fn extract(
                 acc.begin_message("user");
                 acc.text(prompt);
             }
-            // Legacy completions also allow arrays: batch prompts (estimates
-            // sum — capacity semantics), literal token ids (exact count, better
-            // than any estimate), or a batch of token-id arrays. A shape not
-            // handled contributes nothing, which stays a lower bound.
+            // Legacy completions also allow arrays: a batch of string
+            // prompts, ONE tokenized prompt (a flat token-id array — exact
+            // count, better than any estimate), or a batch of tokenized
+            // prompts. Each batch item runs against the model's context
+            // window ON ITS OWN, so the routable number is the LARGEST item,
+            // not the sum — summing 100 prompts of 1k tokens each would read
+            // as 100k and wrongly rule out every model that could serve them.
+            // No prefix either: a batch is not a conversation, so there is
+            // nothing for cache affinity to key.
             Some(Value::Array(items)) => {
-                for item in items {
-                    match item {
-                        Value::String(text) => {
-                            acc.begin_message("user");
-                            acc.text(text);
-                        }
-                        Value::Number(_) => acc.extra_tokens += 1,
-                        Value::Array(ids) => {
-                            acc.extra_tokens += ids.iter().filter(|v| v.is_number()).count() as u64;
-                        }
-                        _ => {}
+                if !items.is_empty() && items.iter().all(Value::is_number) {
+                    acc.extra_tokens += items.len() as u64;
+                } else {
+                    let mut largest = 0u64;
+                    for item in items {
+                        let item_tokens = match item {
+                            Value::String(text) => {
+                                acc.modalities.insert("text");
+                                text_tokens(text)
+                            }
+                            Value::Array(ids) => {
+                                ids.iter().filter(|v| v.is_number()).count() as u64
+                            }
+                            _ => 0,
+                        };
+                        largest = largest.max(item_tokens);
                     }
+                    acc.extra_tokens += largest;
                 }
             }
             _ => {}
@@ -522,17 +549,19 @@ mod tests {
     }
 
     #[test]
-    fn estimate_sits_under_realistic_tokenizer_output() {
-        // 400 ASCII chars of ordinary English run ~90-100 real tokens
-        // (~4-4.5 chars/token); /5 = 80 stays under. (/4 would land ON the
-        // average, not below it — the original review catch.)
+    fn estimate_pins_the_formula_coefficients() {
+        // A FORMULA pin, not a tokenizer comparison: the estimate depends only
+        // on character counts, so any 400-ASCII-char input yields the same 80
+        // (repeated chars included — which real BPE would compress far below
+        // that, one reason the estimate is a heuristic, not a bound). The
+        // coefficient rationale — /5 under English's ~4-4.5 chars/token, /3
+        // under CJK-optimised tokenizers' ~2-2.7 — lives on
+        // `estimated_prompt_tokens`; validating it against real tokenizers is
+        // production-sample work, not a unit test.
         let ascii = features(&chat(
             json!([{ "role": "user", "content": "a".repeat(400) }]),
         ));
         assert_eq!(ascii.estimated_prompt_tokens, 80);
-        // 400 CJK chars on a CJK-optimised tokenizer run ~148-200 real tokens
-        // (2-2.7 chars/token); /3 = 133 stays under the whole range — /2 = 200
-        // would sit at its top.
         let cjk = features(&chat(
             json!([{ "role": "user", "content": "谢".repeat(400) }]),
         ));
@@ -672,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn array_prompts_are_counted_not_reported_empty() {
+    fn batch_prompts_report_the_largest_item_not_the_sum() {
         let f = |prompt: Value| {
             extract(
                 Endpoint::Complete,
@@ -682,13 +711,18 @@ mod tests {
             )
             .unwrap()
         };
-        // Batch of string prompts: estimates sum (capacity semantics).
-        let strings = f(json!(["a".repeat(500), "b".repeat(500)]));
+        // Each batch item meets the context window alone, so the routable
+        // number is the largest item: summing would wrongly rule out every
+        // model that can serve the batch one prompt at a time.
+        let strings = f(json!(["a".repeat(500), "b".repeat(1000)]));
         assert_eq!(strings.estimated_prompt_tokens, 200);
         assert_eq!(strings.input_modalities, vec!["text"]);
-        // Literal token ids are an exact count — better than any estimate.
+        // A flat token-id array is ONE tokenized prompt: exact count.
         assert_eq!(f(json!([1, 2, 3, 4])).estimated_prompt_tokens, 4);
-        assert_eq!(f(json!([[1, 2, 3], [4, 5]])).estimated_prompt_tokens, 5);
+        // A batch of tokenized prompts: largest again.
+        assert_eq!(f(json!([[1, 2, 3], [4, 5]])).estimated_prompt_tokens, 3);
+        // Not a conversation — nothing for affinity to key.
+        assert_eq!(f(json!(["a".repeat(9000)])).prefix_hash, None);
     }
 
     #[test]

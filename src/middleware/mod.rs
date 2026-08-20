@@ -46,6 +46,20 @@ pub struct Middleware {
 
 impl Middleware {
     pub fn new(config: &MiddlewareConfig) -> Result<Self, String> {
+        // A weak key would silently void the documented guarantee ("control
+        // cannot dictionary-test"): HMAC with an empty or guessable secret is
+        // as computable as the plain hash. Refuse to start rather than run
+        // with a promise the configuration cannot keep.
+        if let Some(secret) = &config.prefix_hash_secret {
+            if secret.trim().len() < 32 {
+                return Err(format!(
+                    "middleware.prefix_hash_secret is {} bytes after trimming; a keyed \
+                     prefix hash needs a random secret of at least 32 bytes — unset it \
+                     entirely for the (documented) plain-SHA-256 fallback",
+                    secret.trim().len()
+                ));
+            }
+        }
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
@@ -137,6 +151,28 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    #[test]
+    fn refuses_a_prefix_hash_secret_too_weak_to_key_anything() {
+        let config = |secret: Option<&str>| MiddlewareConfig {
+            control_url: "http://control.example".to_string(),
+            control_token: None,
+            control_timeout_ms: None,
+            control_post_timeout_ms: None,
+            sse_keepalive_ms: None,
+            send_request_features: None,
+            prefix_hash_secret: secret.map(str::to_string),
+            tee_only_domains: Vec::new(),
+        };
+        // Empty and short secrets would make the HMAC as computable as the
+        // plain hash while the docs promise otherwise — starting up would be
+        // running with a broken promise.
+        for weak in ["", "   ", "test", "0123456789012345678901234567890"] {
+            assert!(Middleware::new(&config(Some(weak))).is_err(), "{weak:?}");
+        }
+        assert!(Middleware::new(&config(Some(&"x".repeat(32)))).is_ok());
+        assert!(Middleware::new(&config(None)).is_ok());
     }
 
     #[tokio::test]

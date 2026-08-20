@@ -32,7 +32,7 @@ use super::request_features;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
-use super::types::{ErrorSource, PostReport, ProviderFormat, SpendMode};
+use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
 use super::{pricing, response_transform, stream_transform};
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -406,7 +406,7 @@ pub async fn run(
         return finalize_generated(status, body, &[], e2ee, outcome_ctx);
     }
 
-    let candidates = consult.candidates.clone().unwrap_or_default();
+    let candidates = drop_conflicting_route_twins(consult.candidates.clone().unwrap_or_default());
     if candidates.is_empty() {
         // Not found, not malformed — 404 is what the `model_not_found` body has
         // always said, and what an OpenAI-compatible client expects for a model
@@ -1017,6 +1017,30 @@ pub async fn run(
     }
 }
 
+/// Enforce at the consult boundary what the selected-format lookups below
+/// assume: one route id, one description. A repeated id is legitimate (an
+/// ordered candidate list may name a route twice), but only as an IDENTICAL copy —
+/// a later copy that disagrees on format/engine/anything would make the
+/// route-id -> format lookup ambiguous, so it is dropped (keeping the first,
+/// which is what the lookups resolve to anyway) and logged as control's bug.
+/// This turns the invariant from an assumption about our control plane into a
+/// property of whatever arrives on the wire.
+fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
+    let mut kept: Vec<RouteCandidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match kept.iter().find(|k| k.route_id == candidate.route_id) {
+            Some(first) if *first != candidate => {
+                tracing::error!(
+                    route_id = %candidate.route_id,
+                    "control returned conflicting candidates under one route id; dropping the later copy"
+                );
+            }
+            _ => kept.push(candidate),
+        }
+    }
+    kept
+}
+
 // Posts usage reports to the control plane (fire-and-forget). Buffered reports
 // have no TTFT and `is_streaming = false`; the status recorded is the raw upstream
 // status, distinct from the client-facing mapped status.
@@ -1381,6 +1405,33 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
+        RouteCandidate {
+            route_id: route_id.into(),
+            format,
+            engine: None,
+            reasoning_format: None,
+            reasoning_policy: None,
+        }
+    }
+
+    #[test]
+    fn conflicting_route_twins_are_dropped_identical_ones_kept() {
+        let kept = drop_conflicting_route_twins(vec![
+            twin("a:m", ProviderFormat::Anthropic),
+            // Identical repeat: an ordered list may name a route twice.
+            twin("a:m", ProviderFormat::Anthropic),
+            // Conflicting repeat: would make the format lookup ambiguous.
+            twin("a:m", ProviderFormat::Openai),
+            twin("b:m", ProviderFormat::Openai),
+        ]);
+        assert_eq!(kept.len(), 3);
+        assert!(kept[..2]
+            .iter()
+            .all(|c| c.format == ProviderFormat::Anthropic));
+        assert_eq!(kept[2].route_id, "b:m");
+    }
 
     #[test]
     fn observed_failure_policy() {

@@ -39,7 +39,10 @@ pub struct MiddlewareConfig {
     /// HMAC key for the consult prefix hash. When set, the cache-affinity key
     /// is HMAC-SHA256(secret, prefix): the control plane cannot dictionary-
     /// test guessed prompts, so the hash carries no content signal beyond
-    /// equality. Every gateway replica must share the same value, or affinity
+    /// equality. Must be a random value of at least 32 bytes — the gateway
+    /// refuses to start on anything shorter, because HMAC under an empty or
+    /// guessable key is as computable as the plain hash it claims to improve
+    /// on. Every gateway replica must share the same value, or affinity
     /// silently fragments per replica. Unset falls back to plain SHA-256
     /// (equality linkable; a fully-known 4KB template is confirmable).
     #[serde(default)]
