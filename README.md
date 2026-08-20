@@ -3,19 +3,72 @@
 Private inference you can verify.
 
 Private AI Gateway sits between your app and AI providers. Keep the OpenAI or
-Anthropic API shape you already use. When a request needs private inference,
-the gateway verifies the confidential-computing backend before it sends your
-prompt. If verification passes, your app gets the normal model response plus
-`x-receipt-id`, which points to a signed receipt for the request.
+Anthropic API shape you already use. The gateway verifies confidential
+workloads and binds each network hop to their attested keys before your prompt
+leaves the protected path.
 
 This repo contains the Rust reference implementation of
 [Attested Confidential Inference (ACI)](spec/aci.md). Use it to test ACI or
-build your own gateway and provider integrations. It's a developer preview that
-you run yourself. This project doesn't host an API.
+build your own gateway and provider integrations. It is a developer preview.
 
-Start with the [ACI quickstart](docs/quickstart.md) to verify a live deployment
-with the `aci` CLI, or read the [ACI specification](spec/aci.md) for the trust
-model and wire protocol.
+## Try a private inference request
+
+Install the `aci` CLI on Linux or macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/install-aci.sh \
+  | sh
+```
+
+Then use the Chat Completions API you already know. Replace `YOUR_API_KEY` and
+`MODEL_ID` with values from your provider:
+
+```bash
+~/.local/bin/aci curl https://api.redpill.ai/v1/chat/completions -- \
+  --fail-with-body \
+  --no-buffer \
+  --header "Authorization: Bearer YOUR_API_KEY" \
+  --header "content-type: application/json" \
+  --data-binary '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "Why is this request private?"}],
+    "stream": true,
+    "provider": {"aci_verified": true}
+  }'
+```
+
+Before curl sends the body, `aci` verifies a fresh hardware quote, the measured
+gateway workload, and the TLS key it reached. It then pins curl to that exact
+key. The transcript appears on stderr while the normal API response streams on
+stdout. Abridged verification output:
+
+```text
+PASS  id-1  hardware quote verifies and binds report_data
+PASS  id-4  measured workload provenance connects to public source
+PASS  id-6  the TLS channel is bound to the attested keyset
+VERIFIED (5 pass, 1 skipped: custody policy not implemented)
+PINNED      curl -> attested TLS key
+```
+
+The `provider.aci_verified` field handles the next hop. It tells the verified
+gateway code to refuse the request unless the selected model backend passes its
+own attestation and channel-binding checks. When your policy accepts the
+measured gateway and provider workloads, plaintext stays inside those attested
+workloads. The model processes it there. Under the TEE threat model, the model
+operator and cloud host cannot inspect the protected memory that holds it.
+
+The full transcript reports every skipped policy check. The current CLI does
+not yet evaluate private-key custody, and `aci curl` does not verify the
+response receipt. Use [`aci send`](docs/quickstart.md#verify-one-inference-end-to-end)
+or [`aci serve`](docs/quickstart.md#use-it-as-a-local-endpoint) for receipt
+verification, and read the [verification guide](docs/attested-confidential-inference.md)
+before sending sensitive data.
+
+This repo contains the implementation and verifier. It does not issue Redpill
+API credentials or operate the example service. Continue with the
+[ACI quickstart](docs/quickstart.md) for the full verification path, or read the
+[ACI specification](spec/aci.md) for the trust model and wire protocol.
 
 ## Why this exists
 
@@ -225,7 +278,7 @@ curl --fail --silent --show-error \
 Check the captured files with the `aci` CLI:
 
 ```bash
-cargo run --bin aci -- audit \
+aci audit \
   --report report.json \
   --receipt receipt.json \
   --nonce "$NONCE" \
@@ -290,7 +343,7 @@ same one-hour retention window unless the binary configuration changes in code.
 | Path | Contents |
 | --- | --- |
 | `src/aci/` | ACI wire types, canonicalization, receipts, E2EE, upstream transports, and verifiers |
-| `src/bin/aci/` | `aci` verifier, audit, session, send, and local proxy commands |
+| `src/bin/aci/` | `aci` verifier, audit, session, curl, send, and local proxy commands |
 | `src/aggregator/` | request service, routing state, receipts, sessions, and metrics |
 | `src/http/` | Axum routes and HTTP response handling |
 | `src/middleware/` | in-process control-plane client, transforms, failover, pricing, and SSE handling |

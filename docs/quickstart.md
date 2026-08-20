@@ -4,19 +4,25 @@ Verify a live ACI deployment yourself. The commands below run against
 `https://api.redpill.ai`, a live deployment of the reference implementation;
 point `ACI_URL` at any ACI service to verify that instead.
 
-You need a Rust toolchain plus `curl`, `jq`, and `openssl`. The `aci` CLI
-lives in this repository:
+You need `curl`. The evidence-inspection steps also use `jq` and `openssl`.
+Install the latest `aci` CLI release on Linux or macOS:
 
 ```bash
-git clone https://github.com/Dstack-TEE/private-ai-gateway.git
-cd private-ai-gateway
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/install-aci.sh \
+  | sh
 export ACI_URL=https://api.redpill.ai
 ```
+
+The installer verifies the release SHA-256 and writes `aci` to
+`~/.local/bin`. If that directory is not already on `PATH`, add it before
+continuing. From a source checkout, replace each `aci` command below with
+`cargo run --bin aci --`.
 
 ## 1. Verify the service with one command
 
 ```bash
-cargo run --bin aci -- verify "$ACI_URL"
+aci verify "$ACI_URL"
 ```
 
 The CLI fetches `GET /v1/aci/attestation` with a fresh 32-byte random nonce
@@ -49,10 +55,10 @@ id-4 verifies that the compose the service booted is the one measured into the
 quote, and prints the hash. It does not decide whether that compose is one you
 want: that is your verifier policy ([aci.md](../spec/aci.md) §1.3). Pin the
 hashes you accept with `--accept-compose`, repeatable and available on
-`verify`, `send`, `serve` and `audit`:
+`verify`, `curl`, `send`, `serve`, and `audit`:
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL" --accept-compose 7c1e...40db
+aci curl "$ACI_URL/v1/models" --accept-compose 7c1e...40db -- --silent
 ```
 
 For a production deployment, first run a dstack verifier over the report's
@@ -63,7 +69,7 @@ implements this check. Then appraise that hash with the ACI client's production
 allowlist:
 
 ```bash
-cargo run --bin aci -- verify "$ACI_URL" --require-production-os
+aci verify "$ACI_URL" --require-production-os
 ```
 
 The ACI client verifies the DCAP quote and replays RTMR3, but does not perform
@@ -77,7 +83,41 @@ The compose hash is the value to pin because it is the one measured into
 RTMR3. `repo_url` and `repo_commit` ride along in the report unpinned: they
 are not bound into the quote, so they are a label to read, not evidence.
 
-## 2. Look at the evidence yourself
+## 2. Send a familiar API request over the verified channel
+
+Replace `YOUR_API_KEY` and `MODEL_ID` with values from your provider:
+
+```bash
+aci curl "$ACI_URL/v1/chat/completions" -- \
+  --fail-with-body \
+  --no-buffer \
+  --header "Authorization: Bearer YOUR_API_KEY" \
+  --header "content-type: application/json" \
+  --data-binary '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "Say hi"}],
+    "stream": true,
+    "provider": {"aci_verified": true}
+  }'
+```
+
+`aci curl` first runs the service checks from step 1. If they pass, it converts
+the observed TLS SPKI digest to curl's `sha256//...` pin format and starts the
+installed curl with that pin. Verification output goes to stderr. The untouched
+API response goes to stdout, including SSE streaming.
+
+The pin binds the client-to-gateway connection. The
+`provider.aci_verified: true` constraint makes the gateway refuse the request
+unless the chosen model backend also passed verification. This command does
+not fetch or verify the response receipt. Use `aci send` or `aci serve` for
+that deeper check.
+
+Put curl arguments after `--`. Pass short options separately, such as
+`-X POST`, because grouped or attached short options are rejected. The wrapper
+also rejects curl options that can replace the verified URL, SPKI pin,
+protocol policy, redirect policy, config, or transfer scope.
+
+## 3. Look at the evidence yourself
 
 The report is plain JSON, keyset included: `attestation.workload_keyset`
 is the keyset object itself, and its digest is over the keyset's JCS form
@@ -125,13 +165,13 @@ statement bytes, the digests, and the expected values.
 byte. To re-run the checks against saved artifacts:
 
 ```bash
-cargo run --bin aci -- audit --report report.json --nonce "$NONCE"
+aci audit --report report.json --nonce "$NONCE"
 ```
 
-## 3. Use it as a local endpoint
+## 4. Use it as a local endpoint
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL"
+aci serve "$ACI_URL"
 ```
 
 `aci serve` verifies the service first, prints the transcript, and refuses
@@ -192,7 +232,7 @@ To go from trusting the service's own gating to pinning the exact sessions
 you accept, first audit the current attested sessions:
 
 ```bash
-cargo run --bin aci -- sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
+aci sessions "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 Each current session record is fetched and audited
@@ -200,25 +240,26 @@ Each current session record is fetched and audited
 claims policy print as `ACCEPTED`. Then pin, either way:
 
 ```bash
-# Fixed accepted set: requests use its intersection with their own pins, or
-# this set when they supply none. A disjoint request fails locally.
-cargo run --bin aci -- serve "$ACI_URL" --session <session-id>
+# Fixed accepted set: requests intersect their own pins with this set.
+# Requests without pins use this set. A disjoint request fails locally.
+aci serve "$ACI_URL" --session <session-id>
 
 # Policy pins: derive the set from the required claims. Refuses to start if
 # nothing qualifies, and refreshes the set when the service refuses a
 # superseded pin (HTTP 412) before retrying the request once.
-cargo run --bin aci -- serve "$ACI_URL" --require-claim tee_attested=hardware_proven
+aci serve "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
 A request that already carries `provider.aci_session_ids` is narrowed to its
-intersection with the local accepted set. On-demand receipt verification also checks the cited session
-against the pins (§9.3(6)) and the required claims (§9.2(3)).
+intersection with the local accepted set. On-demand receipt verification also
+checks the cited session against the pins (§9.3(6)) and the required claims
+(§9.2(3)).
 
-## 4. Verify one inference end to end
+## 5. Verify one inference end to end
 
 ```bash
 export ACI_API_KEY=<your api key>
-cargo run --bin aci -- send "$ACI_URL" --prompt "What are you running on?"
+aci send "$ACI_URL" --prompt "What are you running on?"
 ```
 
 `aci send` verifies the service (fail closed), sends one chat completion
@@ -248,7 +289,7 @@ structured data. Verified serving is demanded by default (the §5.3
 serve through anything else, and the transcript checks that the receipt
 cites one of yours.
 
-## 5. Verify from a browser or any web app
+## 6. Verify from a browser or any web app
 
 The [`@phala/aci-verifier`](../clients/verifier-ts) library verifies a service
 from a browser tab or any web project in one call:
@@ -267,7 +308,7 @@ pin (check 6), which a plain browser cannot reach. A prebuilt ESM bundle
 (`npm run build:bundle`) drops into a `<script type="module">` with no build
 step.
 
-## 6. Going deeper
+## 7. Going deeper
 
 [README.md](../spec/README.md) routes the rest by task. [aci.md](../spec/aci.md) §9 is the
 procedure this walkthrough exercised.
