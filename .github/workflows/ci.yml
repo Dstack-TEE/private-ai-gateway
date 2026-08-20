@@ -24,6 +24,13 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
 
+      - name: Check aci installer
+        run: |
+          sh -n install-aci.sh
+          sh -n tests/install_aci.sh
+          shellcheck install-aci.sh tests/install_aci.sh
+          sh tests/install_aci.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

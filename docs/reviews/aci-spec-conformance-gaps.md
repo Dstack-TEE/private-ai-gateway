@@ -195,13 +195,10 @@ item.
 
 18. **The live E2E scripts predate the simplified protocol.** Parts of
    `scripts/live_e2e/` (e.g. `cases/embeddings.py`, `cases/lifecycle.py`)
-   still assert removed mechanism (transparency events), and
-   `scripts/phala_multi_upstream_smoke.sh` /
-   `scripts/local_multi_upstream_smoke.sh` still use `workload_id` and
-   `accepted_workload_ids`. The in-process integration suites (`tests/`)
-   and `docs/live-e2e-test-suite.md` cover the new protocol; the live
-   scripts need the same pass, and the public deployment serves the
-   previous build until redeployed.
+   still assert removed transparency events. The multi-upstream smoke scripts
+   and attested-session case have been migrated to the simplified schema, and
+   the in-process integration suites (`tests/`) cover the new protocol. The
+   remaining live lifecycle cases need the same pass.
 
 19. **Client CI triggers are path-scoped.** `verifier-ts` tests pin the spec
    test vectors byte-for-byte, but the workflow triggers only on

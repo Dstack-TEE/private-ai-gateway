@@ -1,591 +1,355 @@
 # Private AI Gateway
 
-Private AI Gateway is an OpenAI-compatible gateway for **Attested Confidential
-Inference (ACI)**. It publishes dstack workload attestation for the gateway,
-verifies configured private-inference upstreams before forwarding prompts, and
-signs per-request receipts.
+Private inference you can verify.
 
-A relying party evaluates three artifacts before accepting a response: the
-gateway attestation report, the provider verification event for the selected
-route, and the signed receipt that binds the response to the gateway identity.
+Private AI Gateway sits between your app and AI providers. Keep the OpenAI or
+Anthropic API shape you already use. The gateway verifies confidential
+workloads and binds each network hop to their attested keys before your prompt
+leaves the protected path.
 
-This repository is the reference implementation of the
-[ACI Spec](spec/aci.md) (earlier draft discussion in
-[`Dstack-TEE/dstack#694`](https://github.com/Dstack-TEE/dstack/pull/694)). It is
-also the workload that
-[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher)
-can fetch, build, and run inside a dstack v2 application VM.
+This repo contains the Rust reference implementation of
+[Attested Confidential Inference (ACI)](spec/aci.md). Use it to test ACI or
+build your own gateway and provider integrations. It is a developer preview.
 
-Start here:
+## Try a private inference request
 
-- [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
-  `aci` CLI, then use it as a local OpenAI-compatible endpoint.
-- [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
+Install the `aci` CLI on Linux or macOS:
 
-## Audience
-
-- Security auditors should start with the claim, limits, request flow, and
-  auditor checklist.
-- New users and agent developers should start with the short mental model and
-  local smoke path before reading provider-specific details.
-
-## Security Claim
-
-When the gateway is correctly deployed in dstack with reviewed code, reviewed
-runtime config, and supported provider adapters, a relying party can verify
-these facts:
-
-1. **Gateway identity**: the gateway is a specific workload running in a genuine
-   TEE, with reported source provenance and a stable workload keyset.
-2. **Client channel binding**: the user-facing TLS SPKI, when configured, or
-   E2EE public keys are published in the attested keyset, so a client can bind
-   an API session to the verified workload identity.
-3. **Upstream verification**: before a prompt is forwarded, the backend verifies
-   the selected upstream provider and gets an enforceable channel binding, such
-   as a TLS SPKI or provider E2EE key.
-4. **Fail-closed forwarding**: if verification is required and the gateway
-   cannot verify the upstream or enforce the verified binding, it does not send
-   the prompt.
-5. **Per-request evidence**: every provider-backed inference response carries
-   `x-receipt-id`. The signed receipt records the user-visible request hash, the
-   selected provider route, upstream verification, provider-facing request hash,
-   and response hash.
-
-### Limits
-
-- It does not make an arbitrary upstream provider private. A provider is only
-  acceptable when its adapter can verify a provider-specific identity and
-  enforce the request channel binding.
-- It does not hide plaintext from gateway middleware. Middleware is optional,
-  but if enabled it sees plaintext after downstream E2EE termination and must be
-  part of the same attested deployment and audit boundary.
-- It does not provide durable public transparency yet. Receipts are currently
-  kept in memory with a configurable TTL; public transparency log integration is
-  not implemented.
-- It does not make a local developer run equivalent to an attested production
-  deployment. The production claim depends on dstack attestation, dstack KMS,
-  pinned source provenance, and reviewed runtime policy.
-
-## How A Request Is Protected
-
-```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 40, "rankSpacing": 70}}}%%
-flowchart LR
-  user["User<br/>OpenAI SDK"]
-  upstream["Upstream<br/>providers"]
-
-  subgraph gateway["Private AI Gateway"]
-    frontend["Frontend"]
-    middleware["Optional<br/>middleware"]
-    backend["Backend"]
-
-    frontend -->|"in-process"| middleware
-    middleware -->|"target"| backend
-    frontend -->|"direct"| backend
-  end
-
-  user <-->|"attested session"| frontend
-  backend <-->|"attested session"| upstream
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/install-aci.sh \
+  | sh
 ```
 
-1. The user verifies `GET /v1/aci/attestation?nonce=<fresh nonce>` and accepts
-   the gateway workload keyset.
-2. The user sends an OpenAI-compatible request over ordinary TLS or the E2EE
-   v2 compatibility extension.
-3. The frontend records the user-facing request and downstream E2EE state.
-4. Optional middleware may handle auth, billing, routing, cache-aware logic, or
-   rewrites. Middleware does not create verification facts.
-5. The backend validates the target route, verifies or refreshes the upstream
-   lease, enforces the verified channel binding, and forwards the provider
-   request.
-6. The response returns through the same path. The frontend signs the receipt
-   after it has observed the final user-visible response.
+Then use the Chat Completions API you already know. Replace `YOUR_API_KEY` and
+`MODEL_ID` with values from your provider:
 
-## Auditor Checklist
+```bash
+~/.local/bin/aci curl https://api.redpill.ai/v1/chat/completions -- \
+  --fail-with-body \
+  --no-buffer \
+  --header "Authorization: Bearer YOUR_API_KEY" \
+  --header "content-type: application/json" \
+  --data-binary '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "Why is this request private?"}],
+    "stream": true,
+    "provider": {"aci_verified": true}
+  }'
+```
 
-Use this checklist before treating a deployment as private inference.
+Before curl sends the body, `aci` verifies a fresh hardware quote, the measured
+gateway workload, and the TLS key it reached. It then pins curl to that exact
+key. The transcript appears on stderr while the normal API response streams on
+stdout. Abridged verification output:
 
-| Check | Evidence |
-| --- | --- |
-| Gateway identity is real | `GET /v1/aci/attestation?nonce=<fresh nonce>` proves the TEE quote and the attested keyset digest bound into it. For dstack, first use the [dstack verification path](docs/providers/phala-direct/verification.md#how-the-os-image-is-classified) to reproduce the boot measurements and bind `os_image_hash`, then use `--require-production-os` to appraise that hash. The ACI clients replay RTMR3 and can pin `compose-hash`, but do not reconstruct MRTD/RTMR0-2. Exact source-build acceptance remains verifier policy. |
-| Keys are bound to the workload | The keyset in the report lists receipt-signing, E2EE, and optional TLS SPKI keys. The quote binds the digest of the keyset itself; there is no separate identity key or endorsement. |
-| Client session is bound | For direct TLS, verify the server certificate SPKI matches the attested keyset. For an E2EE extension, verify its service key from the keyset. |
-| Upstream is verified | Receipt event `upstream.verified` must be `verified` for the provider and canonical model id. |
-| Channel binding is enforceable | The upstream verification event must include a binding the backend can enforce on the actual request path. |
-| Upstream session is auditable | `upstream.verified.session_id`, when present, points to `GET /v1/aci/sessions/{session_id}`. The id is the SHA-256 of the exact served session document bytes, so the fetched record is provably the one the receipt cited. |
-| Middleware is in boundary | If middleware is enabled, audit its source/config and confirm it runs inside the same attested deployment. |
-| Response is bound | Verify the receipt signature under the attested receipt key and compare the response hash in `response.returned`. |
-| Provider is admissible | Review the provider's `docs/providers/<provider>/review.md` against `docs/providers/audit-criteria.md`. |
+```text
+PASS  id-1  hardware quote verifies and binds report_data
+PASS  id-4  measured workload provenance connects to public source
+PASS  id-6  the TLS channel is bound to the attested keyset
+VERIFIED (5 pass, 1 skipped: custody policy not implemented)
+PINNED      curl -> attested TLS key
+```
 
-Provider verification and transport binding are backend responsibilities.
-Middleware and user-controlled headers can select routes, but they do not create
-verification facts.
+The `provider.aci_verified` field handles the next hop. It tells the verified
+gateway code to refuse the request unless the selected model backend passes its
+own attestation and channel-binding checks. When your policy accepts the
+measured gateway and provider workloads, plaintext stays inside those attested
+workloads. The model processes it there. Under the TEE threat model, the model
+operator and cloud host cannot inspect the protected memory that holds it.
 
-## What New Users Should Know
+The full transcript reports every skipped policy check. The current CLI does
+not yet evaluate private-key custody, and `aci curl` does not verify the
+response receipt. Use [`aci send`](docs/quickstart.md#verify-one-inference-end-to-end)
+or [`aci serve`](docs/quickstart.md#use-it-as-a-local-endpoint) for receipt
+verification, and read the [verification guide](docs/attested-confidential-inference.md)
+before sending sensitive data.
 
-You can talk to the gateway with normal OpenAI-compatible clients. The
-additional ACI artifacts are:
+This repo contains the implementation and verifier. It does not issue Redpill
+API credentials or operate the example service. Continue with the
+[ACI quickstart](docs/quickstart.md) for the full verification path, or read the
+[ACI specification](spec/aci.md) for the trust model and wire protocol.
 
-- `GET /v1/aci/attestation?nonce=<n>`: proves which gateway workload you are
-  talking to.
-- `x-receipt-id`: returned on provider-backed inference responses.
-- `GET /v1/aci/receipts/{id}`: fetches the signed receipt by chat id or receipt id.
-- `GET /v1/aci/sessions/{session_id}`: fetches an attested-session audit
-  record referenced by a receipt.
-- Optional [E2EE v2 compatibility headers](spec/e2ee-v2.md): encrypt
-  content-bearing request and response fields to an attested key when the
-  client wants application-level encryption in addition to TLS. V2 is enabled
-  by default, is supported through at least February 10, 2027, and is planned
-  to be replaced by E2EE v3.
+## Why this exists
 
-Useful terms:
+HTTPS protects your connection to a domain. It can't tell you which program is
+handling your prompt, whether that program runs in protected hardware, or
+whether a gateway sent the prompt to a different backend.
 
-- **TEE**: trusted execution environment. In this project, the gateway relies on
-  dstack/TDX evidence to prove where the workload is running.
-- **E2EE**: field-level end-to-end encryption between a client and the verified
-  gateway workload, used when TLS alone is not enough for the client.
-- **Workload keyset**: the attested document listing the gateway's
-  receipt-signing, E2EE, and TLS keys. The TEE quote binds its digest, making
-  the keyset the unit of workload identity.
-- **dstack KMS**: the dstack key-release service used by this implementation to
-  obtain stable workload keys inside an approved TEE workload.
-- **TDX quote / DCAP**: Intel TDX attestation evidence and the verification
-  path used for dstack and ACI service upstream reports.
-- **Receipt**: a signed per-request event log that binds the observed request,
-  provider route, upstream verification result, and returned response.
-- **SPKI digest**: a SHA-256 digest of a TLS public key used as channel-binding
-  evidence when a verifier or attested keyset supplies it.
+ACI lets you check those details. It connects the gateway's attested keyset, the
+provider's attestation, the channel used for forwarding, and the request and
+response hashes in one verifiable trail.
 
-## Evidence Encoding
+The gateway and model still need plaintext to do their jobs. Private inference
+makes the workloads that see that plaintext verifiable. The optional E2EE v2
+compatibility extension also hides supported inference fields from
+infrastructure between your app and the gateway workload.
 
-ACI evidence objects are byte-preserving:
+## Add one field
+
+Your app doesn't need a new SDK. Add `provider.aci_verified` to any supported
+request that must use a verified provider:
 
 ```json
 {
-  "digest": "sha256:<sha256-of-decoded-data-bytes>",
-  "data": "data:<content-type>;base64,<exact-bytes>"
+  "model": "public-model-id",
+  "messages": [
+    {"role": "user", "content": "Explain remote attestation in one sentence."}
+  ],
+  "provider": {
+    "aci_verified": true
+  }
 }
 ```
 
-The gateway computes `digest` over the bytes obtained by decoding the data URI,
-not over a parsed JSON value. When a verifier needs to preserve multiple
-upstream responses, `data` may be a `multipart/mixed` data URI whose parts carry
-their original content type, source URL, and body bytes.
+With that flag set:
 
-Do not infer provider semantics from the generic evidence wrapper. Provider
-meaning belongs to the provider verifier and the provider review document. The
-gateway enforces only the generic verifier result and channel binding.
+- verification or channel-binding failure stops the request before the provider
+  receives your prompt
+- a successful response includes `x-receipt-id`, which points to a signed
+  receipt covering the request, response, route, and verification result
 
-## Project Status
+The receipt stores hashes, not your prompt or response body. When the provider
+returns an enforceable binding, the receipt also links to an immutable session
+record with the provider's claims and evidence.
 
-`0.1.0` is a developer preview. The request path is implemented, but production
-release still depends on provider strict-release review, durable operational
-storage decisions, and production compose wiring for a concrete middleware
-container.
+## Where your data goes
 
-| Area | Status |
-| --- | --- |
-| Workload keyset, quote-bound keyset digest, attestation report | Implemented |
-| Signed receipts | Implemented |
-| Chat/completions, streaming, embeddings, `/v1/models` | Implemented; embeddings are buffered |
-| Downstream E2EE v2 compatibility extension and legacy vLLM E2EE | Implemented for chat/completions/embeddings; streaming E2EE for chat/completions |
-| Runtime upstream config file and admin API | Implemented |
-| Gateway-owned Prometheus metrics | Implemented |
-| Provider adapters | Implemented for Tinfoil, NEAR AI, Chutes, SecretAI, PhalaDirect, ACI service, and generic OpenAI-compatible upstreams |
-| Attested-session audit records | Implemented for upstream sessions; downstream sessions pending TLS/domain work |
-| Middleware framework | Implemented over HTTP on Unix domain sockets |
-| Receipt store | In-memory; receipt TTL is configurable. The gateway never stores request bodies (receipts hold hashes, not content). |
-| Public transparency log | Not implemented |
-
-The binary has no ephemeral-key or stub-quote startup mode. It loads
-receipt-signing and E2EE keys from dstack KMS through the Rust `dstack-sdk`,
-and it uses the same SDK for TDX quotes.
-
-## Quick Start For New Users
-
-This repository expects a dstack SDK endpoint. By default the gateway uses
-`/var/run/dstack.sock`. For local development, set `dstack_endpoint` in the
-gateway config to a forwarded dstack socket.
-
-Prerequisites:
-
-- Rust stable toolchain.
-- A reachable dstack SDK endpoint.
-- `docker compose`, `curl`, `jq`, `cargo`, `sha256sum`, and `awk` for the local
-  multi-upstream smoke test.
-
-Run checks:
-
-```bash
-cargo test
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+```mermaid
+flowchart LR
+    client[Your app] -->|inference request| gateway[Attested gateway workload]
+    gateway -->|channel bound to verified key| provider[Verified provider workload]
+    provider -->|model response| gateway
+    gateway -->|response and receipt ID| client
+    gateway -.->|auth, routing, usage, and status metadata| control[Optional control plane]
 ```
 
-Start an identity-only gateway:
+Two workloads see plaintext: the attested gateway workload and the verified
+provider workload that runs the model. The optional E2EE v2 compatibility
+extension keeps supported prompt fields encrypted until they reach the gateway
+workload. The provider binding stops an ACI-required request from using a
+channel that doesn't match the verified provider key.
+
+The optional control plane stays out of the inference-content path. The gateway
+doesn't send it prompt or response bodies, raw bearer tokens, or provider
+credentials. It gets the bearer-token hash, requested model, routing options,
+and the metadata needed for auth, pricing, and usage reporting. The routing
+object is forwarded as-is, so don't put prompts or secrets in it. The
+[control-plane contract](docs/control-plane-contract.md) lists every field.
+
+## How the proof works
+
+A trusted execution environment (TEE) is a hardware-isolated place to run code.
+This gateway uses Intel TDX through dstack. ACI builds a verification chain on
+top of it:
+
+1. The gateway publishes a nonce-bound attestation report whose hardware quote
+   binds the workload keyset digest. The nonce prevents an old report from
+   passing as a fresh one.
+2. A provider adapter checks the selected backend's evidence before the prompt
+   leaves the gateway.
+3. The gateway takes the provider key from that evidence and requires the real
+   forwarding channel to use it.
+4. After the response, the gateway signs a receipt containing request and
+   response hashes, the route, and the verification result.
+5. For a deeper audit, the receipt can link to a content-addressed session with
+   the full provider evidence.
+
+You still decide what counts as trusted: hardware roots, measurements, workload
+source, provider adapters, and claims. The reference `aci` CLI and TypeScript
+client verify the quote and report-binding chain; their default policy still
+leaves some appraisal decisions, including private-key custody and exact
+source-build acceptance, to the relying party. Read the
+[verification and security guide](docs/attested-confidential-inference.md)
+before sending sensitive data.
+
+> [!IMPORTANT]
+> Private inference is opt-in. Configuring a TEE provider does not make every
+> request fail closed. Set `provider.aci_verified: true`, pass a non-empty
+> `provider.aci_session_ids` allowlist, or use a hostname listed in
+> `middleware.tee_only_domains`. Without one of these constraints, the gateway
+> may still forward after verification fails and record the failure in the
+> receipt.
+
+## Pick a routing mode
+
+The gateway has two routing modes:
+
+- Direct mode maps the public model ID through `upstreams.json` and sends the
+  request to one configured upstream.
+- Middleware mode asks an external control plane to authorize the request,
+  price it, and return an ordered route list. Request handling stays in the
+  gateway's Rust process. The control plane receives metadata, not inference
+  content or provider credentials.
+
+## API coverage
+
+Current API coverage:
+
+- OpenAI Chat Completions, legacy Completions, Embeddings, and Responses create
+- Anthropic Messages
+- buffered and SSE responses where the selected surface supports streaming
+- the ACI E2EE v2 compatibility extension for Chat Completions, Completions,
+  and Embeddings
+- canonical attestation, receipt, session, metrics, and admin APIs
+- legacy dstack-vllm-proxy attestation and signature aliases
+
+The [HTTP API reference](docs/api-reference.md) lists every route, mode-specific
+behavior, authentication rule, and size limit.
+
+## Run it locally
+
+The production binary has no generated-key or fake-quote mode. A local run
+still needs a reachable dstack SDK endpoint. If the process is outside a dstack
+CVM, first [forward and verify a dev CVM socket](docs/getting-started.md#connect-to-the-dstack-sdk).
+
+### Prerequisites
+
+- Rust stable
+- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- a reachable dstack SDK endpoint
+
+The smoke suites need extra tools. See the [testing guide](docs/live-e2e-test-suite.md)
+before running them.
+
+### Start the gateway
+
+Install the Python environment used by the provider verifiers:
+
+```bash
+uv sync --locked
+```
+
+Create a static gateway config:
 
 ```bash
 mkdir -p /tmp/private-ai-gateway-state
-printf '[]\n' >/tmp/private-ai-gateway-upstreams.seed.json
-cat >/tmp/private-ai-gateway.config.json <<EOF
+
+cat >/tmp/private-ai-gateway.config.json <<'JSON'
 {
+  "bind": "127.0.0.1:8086",
   "state_dir": "/tmp/private-ai-gateway-state",
-  "upstream_config_seed_path": "/tmp/private-ai-gateway-upstreams.seed.json",
   "dstack_endpoint": "unix:/tmp/aci-dstack-sock-dev.dstack.sock"
 }
-EOF
+JSON
+```
 
+Start the service:
+
+```bash
 PRIVATE_AI_GATEWAY_CONFIG_PATH=/tmp/private-ai-gateway.config.json \
-cargo run --release --bin private-ai-gateway
+  cargo run --release --locked --bin private-ai-gateway
 ```
 
-This starts the gateway and proves the identity surface, but it intentionally
-does not configure inference routes.
-
-In another terminal:
+The gateway starts with no inference routes when
+`/tmp/private-ai-gateway-state/upstreams.json` is absent or empty. In another
+terminal, confirm the process and fetch a nonce-bound canonical report:
 
 ```bash
-curl -sS http://127.0.0.1:8086/
-curl -sS "http://127.0.0.1:8086/v1/aci/attestation?nonce=$(openssl rand -hex 32)"
+curl --fail --silent --show-error http://127.0.0.1:8086/health
+
+NONCE="$(openssl rand -hex 32)"
+curl --fail --silent --show-error \
+  "http://127.0.0.1:8086/v1/aci/attestation?nonce=$NONCE" \
+  -o report.json
 ```
 
-To exercise actual inference behavior without provider API keys, run the local
-multi-upstream smoke test:
+`/health` should return `{"status":"ok"}`. A successful report contains
+`api_version: "aci/1"`, a `workload_keyset_digest`, and the plain
+`attestation.workload_keyset` object bound by the quote.
+
+For local inference without provider credentials, run the
+[multi-upstream smoke test](docs/live-e2e-test-suite.md#run-the-local-multi-upstream-smoke-test).
+For a real provider, continue with the
+[configuration reference](docs/configuration-reference.md#upstream-configuration).
+
+## Verify the response
+
+Save the response body exactly as received and read `x-receipt-id` from the
+headers. Fetch the receipt with the same bearer token you used for inference:
 
 ```bash
-DSTACK_SOCK=/tmp/aci-dstack-sock-dev.dstack.sock \
-scripts/local_multi_upstream_smoke.sh
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer $API_KEY" \
+  "$GATEWAY_URL/v1/aci/receipts/$RECEIPT_ID" \
+  -o receipt.json
 ```
 
-The smoke test runs two mocked upstream ACI services plus one gateway, all using
-the forwarded dstack socket. It asserts model routing, receipts, upstream
-verification events, and metrics.
-
-## Verify A Response
-
-A relying party verifies the gateway identity first, then verifies that a
-receipt was signed by a key listed in the attested keyset.
-
-1. Fetch `GET /v1/aci/attestation?nonce=<fresh nonce>`.
-2. Send the inference request and save the response body plus the
-   `x-receipt-id` response header.
-3. Fetch `GET /v1/aci/receipts/{id}` with that receipt id.
-4. Verify the attestation report, keyset, receipt signature, response hash, and
-   `upstream.verified` event.
-
-Use the helper script when the gateway is reachable:
+Check the captured files with the `aci` CLI:
 
 ```bash
-uv run python scripts/live_e2e/user_verify.py \
-  --base-url http://127.0.0.1:8086 \
-  --chat-id "$RECEIPT_ID" \
-  --nonce "$NONCE"
-```
-
-The script's `--chat-id` argument accepts either a chat id or a receipt id. To
-verify already captured artifacts, run the `aci` CLI offline:
-
-```bash
-cargo run --bin aci -- audit \
+aci audit \
   --report report.json \
   --receipt receipt.json \
-  --nonce "$NONCE"
+  --nonce "$NONCE" \
+  --response-body response.json
 ```
 
-[docs/quickstart.md](docs/quickstart.md) is the full walkthrough against a
-live deployment.
+This runs the same quote, binding-chain, receipt, body-hash, and session checks
+as the live client. Review skipped checks in the transcript and apply your own
+source provenance, key-custody, key-expiry, and provider policy. The
+[verification guide](docs/attested-confidential-inference.md) covers the full
+flow.
 
-## Configure Upstreams
+Browser and Node clients can use the local
+[`@phala/aci-verifier`](clients/verifier-ts/README.md) package for service,
+quote, report-binding, receipt, body-hash, and session verification. The package
+is private in this repository and currently built from source.
 
-The gateway owns one mutable state directory. Set `state_dir` in the static
-gateway config; if omitted, the default is `/var/lib/private-ai-gateway`.
-The active upstream config is always `upstreams.json` inside that directory.
+## Docs
 
-A missing, empty, or whitespace-only file is valid and means no upstreams are
-configured yet. Inference routes require a JSON array with at least one
-upstream:
+Start at the [documentation index](docs/README.md). The main paths are:
 
-```json
-[
-  {
-    "name": "tinfoil-glm51",
-    "provider": "tinfoil",
-    "base_url": "https://inference.tinfoil.sh",
-    "models": {
-      "glm51-tinfoil": "glm-5-1"
-    },
-    "bearer_token": "<tinfoil-api-key>"
-  }
-]
-```
-
-`models` maps public model ids to provider-facing upstream model ids. In
-no-middleware mode, the public model id is also the target route id. Private
-Chutes deployments that use Basic authentication and the attested E2EE transport
-are documented in [Private Chutes configuration](docs/providers/chutes/configuration.md).
-
-For other scoped private OpenAI-compatible endpoints that require Basic
-authentication, keep the credential in `bearer_token` and set
-`"basic_auth": true`. The flag defaults to `false`, which uses Bearer
-authentication.
-
-In middleware mode, middleware selects a backend target route of this form:
-
-```text
-<upstream name>:<public model id in upstream config>
-```
-
-Supported `provider` values:
-
-| Provider | Use |
+| Goal | Document |
 | --- | --- |
-| `openai-compatible` | Generic OpenAI-compatible upstream with no provider-owned verifier. |
-| `aci-service` | Upstream ACI service that exposes ACI attestation and dstack/DCAP evidence. |
-| `tinfoil` | Tinfoil provider adapter using provider-owned verification through `private-ai-verifier`. |
-| `near-ai` | NEAR AI gateway adapter with TLS binding from the provider report. |
-| `chutes` | Chutes adapter with provider E2EE key verification and encrypted `/e2e/invoke` transport. |
-| `secret-ai` | Direct SecretAI SecretVM adapter with CPU/GPU verification, measured production workload reporting, optional workload pinning, and enforced inference TLS SPKI. See [docs/providers/secret-ai/verification.md](docs/providers/secret-ai/verification.md). |
-| `phala-direct` | Direct Phala dstack-vllm-proxy endpoint (one per model) with TLS SPKI binding from the version-2 attestation report. See [docs/providers/phala-direct/verification.md](docs/providers/phala-direct/verification.md). |
+| Understand the trust model and verify artifacts | [ACI verification and security model](docs/attested-confidential-inference.md) |
+| Run the gateway locally | [Local development](docs/getting-started.md) |
+| Configure the gateway, middleware, or an upstream | [Configuration reference](docs/configuration-reference.md) |
+| Integrate an HTTP client | [HTTP API reference](docs/api-reference.md) |
+| Implement a control plane | [Control-plane contract](docs/control-plane-contract.md) |
+| Deploy with dstack git-launcher | [Deployment guide](deploy/README.md) |
+| Review provider verification | [Provider index](docs/providers/README.md) |
+| Run tests and live provider checks | [Testing guide](docs/live-e2e-test-suite.md) |
+| Implement the protocol | [ACI specification](spec/README.md) |
+| Contribute a change | [Contributing guide](CONTRIBUTING.md) |
 
-ACI service verification policy is set on the upstream entry with
-`accepted_subjects`, `accepted_image_digests`,
-`accepted_dstack_kms_root_public_keys`, and `pccs_url`.
+## Security boundaries
 
-Tinfoil, NEAR AI, Chutes, SecretAI, and PhalaDirect use the Python provider
-verifier bridge. Set `PRIVATE_AI_VERIFIER_DIR` only when you need to override
-the bridge's vendored `confidential_verifier` package with an external checkout.
+Keep these limits in mind before treating a deployment as private:
 
-For one-command Compose deployments, set `upstream_config_seed_path` in the
-static gateway config to a read-only seed file. The gateway validates and
-copies the seed to `<state_dir>/upstreams.json` only when the active config is
-missing or empty. An existing admin-updated config is never overwritten.
+- A generic OpenAI-compatible route stays a normal TLS route. It becomes
+  confidential only when an implemented provider adapter can verify it and bind
+  the forwarding channel.
+- Requests without an ACI constraint may continue after verification fails.
+- The attested gateway workload sees plaintext. The external control plane gets
+  routing and usage metadata, but not prompt or response bodies.
+- Receipts live in memory for one hour and disappear on restart. They store body
+  hashes, not the request or response itself.
+- Reported source or image metadata still needs a verifier policy. Reporting a
+  value doesn't mean your deployment has approved it.
+- A local process using a forwarded dev socket has the remote CVM's identity and
+  measurements. It is not equivalent to a reviewed production deployment.
 
-When `admin_token` is set in the gateway config, operators can inspect and
-replace the live config:
+Attested-session records are stored in `<state_dir>/sessions.jsonl` and use the
+same one-hour retention window unless the binary configuration changes in code.
 
-```bash
-curl -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  http://127.0.0.1:8086/v1/admin/upstreams
+## Repository layout
 
-curl -X PUT \
-  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  -H "content-type: application/json" \
-  --data-binary @upstreams.json \
-  http://127.0.0.1:8086/v1/admin/upstreams
-```
-
-The admin view redacts bearer tokens and returns the active `config_digest`.
-If no admin token is configured, the admin endpoint returns `404`.
-
-## Deploy With Git Launcher
-
-The recommended dstack deployment path uses `git-launcher`:
-
-1. `git-launcher` clones this repo at a pinned commit.
-2. It runs this repo's `entrypoint.sh`.
-3. `entrypoint.sh` builds `private-ai-gateway` with `cargo build --release
-   --locked --bin private-ai-gateway`.
-4. The built binary runs with runtime config from Compose environment, mounted
-   files, dstack encrypted secrets, and dstack KMS.
-
-Source provenance in attestation reports is derived from the git-launcher pin,
-not from gateway JSON. If the launcher config is absent, the report omits
-source provenance and the value is unknown. The current native verifier does not
-yet bind the reported commit or image digest to reviewed source; that policy is
-an explicit TODO.
-
-The canonical report publishes the exact measured `app_compose` preimage so an
-independent verifier can check it against the RTMR3-bound `compose-hash`. Keep
-plaintext secrets out of the Compose file. Supply values through Phala encrypted
-environment variables; the measured Compose contains the variable references,
-not their values.
-
-The launcher stays generic. Build, install, and run logic belongs to this repo.
-For production, prefer a Rust-capable gateway image so the toolchain is covered
-by a gateway-owned image digest instead of installing Rust at boot.
-
-Deployment files:
-
-- [deploy/README.md](deploy/README.md)
-- [deploy/compose.yaml](deploy/compose.yaml)
-- [deploy/upstreams.example.json](deploy/upstreams.example.json)
-- [entrypoint.sh](entrypoint.sh)
-
-## Middleware
-
-The gateway runs in no-middleware mode unless middleware is configured. In
-middleware mode the middleware runs in-process, between the frontend and
-backend:
-
-- Public `/v1/models` and its sub-catalogs are served from the control plane.
-- Public inference requests are decrypted and normalized by the frontend, then
-  handed to the middleware, which consults the control plane to
-  authorize and route the request and shapes the provider request.
-- The middleware selects a configured target route, forwards through the
-  backend, transforms the response, injects usage cost, and reports usage back
-  to the control plane. Verification facts still come from the backend.
-- Streaming responses stay streaming across backend, middleware, and frontend.
-- Middleware-generated OpenAI-compatible responses are passed through downstream
-  E2EE when the original user request used E2EE.
-
-The middleware is configured by the `middleware` section of the static gateway
-config; see the [configuration reference](docs/configuration-reference.md#middleware).
-
-## API Surface
-
-| Endpoint | Purpose |
+| Path | Contents |
 | --- | --- |
-| `GET /` | Basic ACI version and keyset digest. |
-| `GET /v1/models` | OpenAI-compatible model list from backend or middleware. |
-| `POST /v1/chat/completions` | OpenAI-compatible chat completions. |
-| `POST /v1/completions` | OpenAI-compatible legacy completions. |
-| `POST /v1/embeddings` | OpenAI-compatible buffered embeddings. |
-| `GET /v1/aci/attestation?nonce=<n>` | Gateway attestation report: quote, keyset, provenance. |
-| `GET /v1/aci/receipts/{id}` | Signed ACI receipt by chat id or receipt id. |
-| `GET /v1/aci/sessions/{session_id}` | Attested-session record referenced by a receipt. |
-| `GET /v1/aci/sessions?upstream_name=&model=` | List a provider's imported attested sessions. |
-| `GET /v1/attestation/report` · `GET /v1/signature/{id}` | Legacy dstack-vllm-proxy aliases. |
-| `GET /v1/metrics` | Gateway-owned Prometheus metrics. |
-| `GET /v1/admin/upstreams` | Authenticated upstream config snapshot. |
-| `PUT /v1/admin/upstreams` | Authenticated upstream config replacement. |
+| `src/aci/` | ACI wire types, canonicalization, receipts, E2EE, upstream transports, and verifiers |
+| `src/bin/aci/` | `aci` verifier, audit, session, curl, send, and local proxy commands |
+| `src/aggregator/` | request service, routing state, receipts, sessions, and metrics |
+| `src/http/` | Axum routes and HTTP response handling |
+| `src/middleware/` | in-process control-plane client, transforms, failover, pricing, and SSE handling |
+| `clients/verifier-ts/` | browser and Node ACI verifier |
+| `deploy/` | dstack git-launcher deployment example |
+| `docs/` | operator guides, references, security notes, and review records |
+| `examples/` | Rust verification examples and the sample control plane |
+| `scripts/` | provider verifier bridge and smoke suites |
+| `spec/` | ACI specification, related work, and test vectors |
+| `tests/` | Rust integration tests and provider-verifier tests |
 
-## Runtime Configuration
+## License
 
-The full field and environment-variable reference is
-[docs/configuration-reference.md](docs/configuration-reference.md).
-
-The gateway consumes one read-only JSON config and one writable state directory:
-
-| Item | Path | Mutability |
-| --- | --- | --- |
-| Static gateway config | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required. Read at startup. |
-| Gateway state directory | `state_dir` inside the gateway config, default `/var/lib/private-ai-gateway` | Gateway-owned writable files. |
-
-The gateway derives its writable files from `state_dir`: `upstreams.json` for
-the active upstream database and `sessions.jsonl` for the attested-session log.
-Deployment-owned read-only inputs, such as an upstream seed file or TLS
-certificates, stay explicit paths in the static config.
-
-Unknown config fields are rejected at startup. See
-[docs/configuration-reference.md](docs/configuration-reference.md) for the
-minimal config example and the full field reference.
-
-For client-facing TLS binding, set `tls.domain_certificates` with one mounted
-leaf certificate per public hostname. The gateway reads each certificate,
-computes `sha256(SPKI)`, and publishes that digest in the attested keyset. Raw
-SPKI configuration is not supported; all TLS bindings are derived from mounted
-certificate material.
-
-### Multi-Domain Listening
-
-The gateway process still has one `bind` listener. Multi-domain support means
-the same gateway workload can answer attestation requests for multiple public
-hostnames and select the correct downstream TLS binding from the request host.
-TLS termination, certificate issuance, DNS, SNI routing, and reverse-proxy
-configuration are deployment-owned and out of scope for this repo.
-
-For each public hostname, mount the leaf certificate that the external
-TLS-terminating component serves for that hostname, then list it in
-`tls.domain_certificates`:
-
-```json
-{
-  "tls": {
-    "domain_certificates": [
-      {
-        "domain": "api.example.com",
-        "certificate_path": "/run/certs/api.pem"
-      },
-      {
-        "domain": "chat.example.com",
-        "certificate_path": "/run/certs/chat.pem"
-      }
-    ]
-  }
-}
-```
-
-The component in front of the gateway must forward the original HTTP `Host`.
-Clients should request the attestation report through the same public hostname
-they will use for gateway traffic. For example, a frontend pinned to
-`https://chat.example.com` should fetch
-`https://chat.example.com/v1/aci/attestation`; the gateway will bind
-`chat.example.com` to the SPKI derived from `/run/certs/chat.pem`.
-
-When domain bindings are configured,
-`GET /v1/aci/attestation` uses the request `Host` to add the matching
-`attestation.evidence.downstream_tls_binding` entry while keeping all configured
-TLS keys in the attested keyset. Requests whose `Host` does not match a
-configured domain binding fail closed instead of returning an unbound report.
-
-`dstack_endpoint` accepts HTTP(S) endpoints and Unix socket endpoints such as
-`unix:/var/run/dstack.sock`.
-
-## Test And Smoke Suites
-
-Run the standard local checks:
-
-```bash
-cargo test
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-```
-
-Run local multi-upstream smoke after changing routing, upstream verification,
-receipt hashing, dynamic upstream config, or metrics:
-
-```bash
-scripts/local_multi_upstream_smoke.sh
-```
-
-Run live upstream smoke after changing provider adapters, attested sessions, or
-receipt audit fields:
-
-```bash
-uv run python scripts/live_e2e/run.py --profile quick --port 0
-```
-
-The live smoke verifies every configured upstream in
-`scripts/live_e2e/providers.json`, sends one request per supported surface, then
-checks each receipt's `upstream.verified.session_id` against
-`GET /v1/aci/sessions/{session_id}`.
-
-Run the slower Phala deployment smoke when you need to validate the deployment
-surface:
-
-```bash
-scripts/phala_multi_upstream_smoke.sh
-```
-
-The Phala smoke deploys two mocked upstream ACI services and one gateway CVM,
-then asserts model routing, provider-facing request hashes, verified upstream
-events, and metrics model ids.
-
-## Repository Map
-
-```text
-src/main.rs                    binary entrypoint and runtime config
-src/dstack.rs                  dstack SDK KMS key provider and quote provider
-src/aci/                       ACI wire types, keys, receipts, upstreams
-src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
-src/aggregator/upstream_config.rs runtime upstream config and provider adapters
-src/http/app.rs                Axum HTTP routers and middleware/backend wiring
-src/bin/aci/                   `aci` verifier CLI: verify, audit, sessions, send, serve
-clients/                       verifier-ts verifier library (browser + node)
-docs/                          design notes, configuration reference, provider reviews
-deploy/                        git-launcher and dstack compose examples
-examples/                      cargo example binaries + a reference control plane (control-plane/)
-scripts/                       local and Phala smoke tests
-tests/                         unit and integration coverage
-```
-
-## More Docs
-
-- [ACI spec, quickstart, and test vectors](spec/README.md)
-- [Client verifiers](clients/README.md)
-- [Deployment guide](deploy/README.md)
-- [Configuration reference](docs/configuration-reference.md)
-- [Live E2E test suite](docs/live-e2e-test-suite.md)
-- [Providers (verification + audit)](docs/providers/README.md)
-- [Provider audit criteria](docs/providers/audit-criteria.md)
-- [Roadmap](docs/roadmap.md)
+[Apache License 2.0](LICENSE)

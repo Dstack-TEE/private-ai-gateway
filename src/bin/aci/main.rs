@@ -1,13 +1,14 @@
 //! `aci` — reference client for the ACI protocol (`spec/aci.md`).
 //!
-//! Verify a live service, audit saved artifacts offline, or run one
-//! verified chat completion end to end.
+//! Verify a live service, audit saved artifacts offline, or run requests over
+//! an attested, SPKI-pinned channel.
 
 mod args;
 mod audit;
 mod capture;
 mod checks;
 mod client;
+mod curl;
 mod send;
 mod serve;
 mod sessions;
@@ -37,6 +38,7 @@ async fn run() -> Result<i32, String> {
         args::Command::Audit(a) => audit::run(a, args.require_production_os).await,
         args::Command::Sessions(a) => sessions::run(a, args.require_production_os).await,
         args::Command::Send(a) => send::run(a, args.require_production_os).await,
+        args::Command::Curl(a) => curl::run(a, args.require_production_os).await,
         args::Command::Serve(a) => serve::run(a, args.require_production_os).await,
     }
 }

@@ -1,77 +1,82 @@
-# Chutes — attested session verification & binding
+# Chutes Verification
 
-- **TEE:** Intel TDX (CPU) + NVIDIA Confidential Compute (GPU)
-- **Session binding:** `e2ee_public_key_sha256`
-- **Verifier:** the provider-verifier bridge, directly (`scripts/private_ai_provider_verifier.py`
-  → `verify_chutes` / `chutes_verify_instance`). Uses `dcap_qvl` for the quote; no
-  vendored verifier class.
-- **Status:** sound.
-- **Audit:** see [review.md](review.md).
+The Chutes adapter verifies each discovered TDX instance and encrypts provider traffic to that instance's attested ML-KEM public key.
 
-## What is verified
+| Property | Current behavior |
+| --- | --- |
+| Attestation scope | Per instance |
+| Verifier | `scripts/provider_verifier/chutes.py` through the provider-verifier bridge |
+| Verifier ID | `private-ai-verifier/chutes/v1` |
+| Enforced binding | `e2ee_public_key_sha256` |
+| Transport | Encrypted `/e2e/invoke` request and response |
 
-For each E2EE instance Chutes returns, `chutes_verify_instance` does, in order:
+See [Private Chutes configuration](configuration.md) for dedicated origins and chute-ID pins.
 
-1. **Fetch evidence.** Pull the instance's TDX quote and GPU evidence from the Chutes
-   API (`/e2e/instances/{chute_id}`, `/chutes/{chute_id}/evidence`).
-2. **Bind the E2EE key into the quote.** Compute
-   `expected = SHA256(nonce ‖ e2e_pubkey)`, parse `report_data` from the quote bytes
-   (`chutes_report_data`, TDX v4 offset `quote[48+520 : 48+584]`), and require
-   `report_data[0:32] == expected`. This is the anti-tamper binding.
-3. **Reject debug mode.** `chutes_debug_enabled` checks the TD attributes debug bit.
-4. **Verify the quote.** `dcap_qvl.get_collateral_and_verify(quote)` performs real Intel
-   DCAP verification (fetches collateral, checks the signature chain). The status must
-   be `UpToDate`.
-5. **Match the measurement profile.** The quote measurements must match a reviewed
-   public profile (`chutes_measurement_name` against the provider reference).
-6. **Verify the GPU.** `chutes_verify_gpu` POSTs the GPU evidence to NVIDIA NRAS over
-   TLS with `nonce = expected_report_data`, requires `x-nvidia-overall-att-result`, and
-   checks `eat_nonce == expected_report_data`.
+## Verification algorithm
 
-## What binds the session
+The adapter resolves the model's chute, discovers E2EE instances, and fetches the public measurement profiles and instance evidence. For each instance that has both evidence and an E2EE public key, it:
 
-The E2EE public key is bound into the TDX quote's `report_data`
-(`report_data[0:32] = SHA256(nonce ‖ e2e_pubkey)`), and the quote signature is verified
-by DCAP. So possession of a decryptable channel under that key implies you are talking
-to the attested enclave. The emitted binding is
-`e2ee_public_key_sha256 = SHA256(decoded ML-KEM public key)`.
+1. Decodes the TDX quote and computes `SHA256(nonce || e2e_pubkey)` using the provider's exact string concatenation format.
+2. Requires the first 32 bytes of TDX `report_data` to equal that digest.
+3. Rejects the TDX debug attribute.
+4. Fetches DCAP collateral and verifies the quote with `dcap_qvl`.
+5. Requires the verified quote measurements to match a published Chutes profile.
+6. Records the granular TCB status returned by the quote verifier.
+7. Sends available GPU evidence to NVIDIA NRAS, checks the returned overall result and nonce, and records the outcome as supplemental metadata.
 
-## What a tamper rejects
+An instance produces a binding only if steps 1 through 5 succeed. At least one instance binding is required for the provider result to be `verified`.
 
-- Tampered quote → DCAP signature verification fails (confirmed live:
-  `ISV enclave report signature is invalid`).
-- Wrong nonce → `report_data[0:32] != SHA256(nonce ‖ e2e_pubkey)` →
-  `Chutes E2EE key binding does not match report_data`.
-- Wrong/forged E2EE key → same binding mismatch.
-- `OutOfDate`/`SWHardeningNeeded` TCB → rejected (only `UpToDate` accepted).
+## Channel binding and forwarding
 
-## Transport enforcement
+The binding contains the instance ID, the `chutes-ml-kem-768` algorithm label, and `SHA256(decoded public key bytes)`. The TDX report-data check proves that the evidence nonce and public key belong to the verified instance.
 
-The backend encrypts each request body to the verified E2EE public key
-(ML-KEM-768 + HKDF-SHA256 + ChaCha20-Poly1305) and sends it to `/e2e/invoke`, then
-decrypts the response. A response that decrypts proves the bound enclave served it.
+The backend selects only an instance present in the current verified binding set. It encapsulates to that ML-KEM-768 key, derives a ChaCha20-Poly1305 key, sends the encrypted body to `/e2e/invoke`, and decrypts the buffered or streaming response. A key digest mismatch or decryption failure rejects that attempt.
 
-## Notes
+Each verified instance becomes its own attested session. Fleet membership changes do not change an unchanged instance's session ID.
 
-- Cold evidence verification is slow (~138 s); it runs off the request path via the
-  verification lease + a pooled nonce session. See the lifecycle doc.
-- `/e2e/instances` is aggressively rate-limited; the default
-  `chutes_e2ee_discovery_rounds: 3` can self-trigger a `429` on a cold chute.
-  `rounds: 1` is gentler.
-- NVIDIA NRAS tokens are fetched online over TLS and nonce-checked; the JWT signature
-  itself is not additionally verified against NRAS' JWKS (tracked defense-in-depth
-  follow-up in the roadmap).
+## Session claims
+
+| Claim | Mapping |
+| --- | --- |
+| `tee_attested` | Asserted from the verified TDX quote and bound E2EE channel. |
+| `tcb_up_to_date` | Asserted only for `UpToDate`; another reported state is refuted; absence is unknown. |
+| `gpu_attested` | Asserted as verifier-derived only when NRAS succeeds and its nonce matches. This proves a genuine CC GPU, not its binding to the serving CPU TEE. |
+| `os_known_good` | Unknown. |
+| `serving_software_known_good` | Unknown. |
+| `model_weights_provenance` | Unknown. |
+
+A stale TCB status is recorded, not rejected by the current bridge. Relying parties that require a current TCB must reject the refuted session claim.
+
+## Limitations
+
+- GPU evidence is supplemental. Failure or absence does not reject an otherwise verified CPU and E2EE-key binding.
+- The bridge decodes the NRAS JWT returned over authenticated TLS and checks its signed-result fields and nonce, but does not independently verify that JWT against NRAS JWKS.
+- Published measurement matching does not by itself prove model weights.
+- Instance discovery and evidence endpoints are provider-controlled and rate-limited. The default three discovery rounds can increase cold-start cost.
 
 ## Reproduce
 
-```bash
-set -a; . /home/h4x/workspace/redpill/.env; set +a
-cd /home/h4x/workspace/redpill/private-ai-gateway
-echo '{"api_version":"aci.provider-verifier.request.v1","provider":"chutes",
-  "upstream_name":"chutes-live","url_origin":"https://api.chutes.ai",
-  "model_id":"moonshotai/Kimi-K2.5-TEE",
-  "forwarded_body_hash":"sha256:'"$(printf '0%.0s' {1..64})"'","required":true,
-  "timeout_seconds":300,
-  "provider_options":{"chutes_api_key":"'"$CHUTES_API_KEY"'","chutes_e2ee_discovery_rounds":"1"}}' \
-  | uv run python scripts/private_ai_provider_verifier.py
+From the repository root, with `CHUTES_API_KEY` set:
+
+```sh
+request_hash="sha256:$(printf '0%.0s' {1..64})"
+jq -n \
+  --arg key "$CHUTES_API_KEY" \
+  --arg hash "$request_hash" \
+  '{
+    api_version: "aci.provider-verifier.request.v1",
+    provider: "chutes",
+    upstream_name: "chutes-live",
+    url_origin: "https://api.chutes.ai",
+    model_id: "moonshotai/Kimi-K2.5-TEE",
+    forwarded_body_hash: $hash,
+    required: true,
+    timeout_seconds: 300,
+    provider_options: {
+      chutes_api_key: $key,
+      chutes_e2ee_discovery_rounds: "1"
+    }
+  }' | uv run python scripts/private_ai_provider_verifier.py
 ```
+
+The command prints evidence and public bindings. Treat its output as sensitive operational evidence even though it should not echo the credential.

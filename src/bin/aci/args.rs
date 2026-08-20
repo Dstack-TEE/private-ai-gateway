@@ -1,15 +1,17 @@
 //! Argument parsing for the `aci` CLI, built on clap's derive API.
 
+use std::ffi::OsString;
+
 use clap::{Args, Parser, Subcommand};
 
 use crate::checks::RequiredClaim;
 
 /// Reference client for the ACI protocol (spec/aci.md).
 ///
-/// Verify a live service, audit saved artifacts offline, or run one
-/// verified chat completion end to end.
+/// Verify a live service, audit saved artifacts offline, or run requests over
+/// an attested, SPKI-pinned channel.
 #[derive(Debug, Parser)]
-#[command(name = "aci")]
+#[command(name = "aci", version)]
 pub struct Cli {
     #[arg(
         long,
@@ -45,6 +47,10 @@ pub enum Command {
                  is also read from the ACI_API_KEY environment variable."
     )]
     Send(SendArgs),
+    #[command(
+        about = "Verify the target's ACI service, then run the system curl with its TLS SPKI pinned."
+    )]
+    Curl(CurlArgs),
     #[command(
         about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
                  Verifies the service on startup and refuses to start unless VERIFIED, \
@@ -219,6 +225,27 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct CurlArgs {
+    #[arg(help = "HTTPS URL to request after its ACI service has been verified.")]
+    pub url: String,
+    #[arg(
+        long = "accept-compose",
+        value_name = "HEX",
+        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
+                it the compose measurement is verified and reported, and you appraise \
+                the provenance yourself."
+    )]
+    pub accepted_composes: Vec<String>,
+    #[arg(
+        last = true,
+        allow_hyphen_values = true,
+        value_name = "CURL_ARG",
+        help = "Arguments passed to curl. Put them after `--`; aci owns the URL and transport-security options."
+    )]
+    pub curl_args: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
 pub struct SessionsArgs {
     #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
     pub base_url: String,
@@ -329,5 +356,36 @@ mod tests {
         );
         let err = session_id("not-hex").unwrap_err();
         assert!(err.contains("spec 5.3"), "{err}");
+    }
+
+    #[test]
+    fn curl_args_after_separator_are_passed_through() {
+        let cli = Cli::try_parse_from([
+            "aci",
+            "curl",
+            "https://example.com/v1/chat/completions",
+            "--accept-compose",
+            "abcd",
+            "--",
+            "--header",
+            "content-type: application/json",
+            "--data-binary",
+            "@request.json",
+        ])
+        .unwrap();
+        let Command::Curl(args) = cli.command else {
+            panic!("expected curl command");
+        };
+        assert_eq!(args.accepted_composes, ["abcd"]);
+        assert_eq!(
+            args.curl_args,
+            [
+                "--header",
+                "content-type: application/json",
+                "--data-binary",
+                "@request.json",
+            ]
+            .map(OsString::from)
+        );
     }
 }
