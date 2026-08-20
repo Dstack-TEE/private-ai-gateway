@@ -126,6 +126,7 @@ async fn relays_catalogs_from_control() {
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
             send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap(),
@@ -161,6 +162,7 @@ async fn relays_catalog_query_string_to_control() {
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
             send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap(),

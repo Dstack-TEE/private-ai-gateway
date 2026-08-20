@@ -843,6 +843,7 @@ mod tests {
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
             send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();

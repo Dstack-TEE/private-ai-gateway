@@ -239,6 +239,7 @@ pub async fn run(
     service: &AciService,
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
+    prefix_hash_secret: Option<&str>,
     input: CompletionInput,
 ) -> Response {
     let CompletionInput {
@@ -331,7 +332,12 @@ pub async fn run(
     // never leaves this process. Computed before the consult (its whole point
     // is to inform it) and echoed on the post report via the meters below.
     let request_features = if send_request_features {
-        request_features::extract(endpoint, &params, reasoning_requirements.as_ref())
+        request_features::extract(
+            endpoint,
+            &params,
+            reasoning_requirements.as_ref(),
+            prefix_hash_secret.map(str::as_bytes),
+        )
     } else {
         None
     };
@@ -517,6 +523,12 @@ pub async fn run(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            // Looked up in the ORIGINAL list even though shaping may have
+            // skipped candidates: a route id names one deployment and a
+            // deployment has one format, so a repeated id (an ordered list
+            // may name a route twice) cannot disagree on format — and
+            // same-id copies shape identically, so a skip can never split
+            // them either.
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -765,6 +777,12 @@ pub async fn run(
             // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
             // comments are injected downstream and never enter its line reassembly.
             let response_header_map = gateway_owned_headers(&content_type);
+            // Looked up in the ORIGINAL list even though shaping may have
+            // skipped candidates: a route id names one deployment and a
+            // deployment has one format, so a repeated id (an ordered list
+            // may name a route twice) cannot disagree on format — and
+            // same-id copies shape identically, so a skip can never split
+            // them either.
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)

@@ -54,13 +54,16 @@ pub enum ResponseFormatKind {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestFeatures {
-    /// Lenient LOWER bound on the prompt's token count (no tokenizer here, and
-    /// none needed): ascii_bytes/4 + non_ascii_chars/2, media floors, no
-    /// uplift. English sits at ~2.7-3.7 chars/token so /4 under-counts it, and
-    /// CJK on CJK-optimised tokenizers (the compressed end of the range)
-    /// sits at ~0.37-0.5 tokens/char so /2 under-counts that. The direction is the
-    /// contract: the true count is almost certainly >= this, so a filter that
-    /// drops on `estimate > window` never drops a request that fit.
+    /// Lenient LOWER bound on the prompt's token count (no tokenizer here):
+    /// ascii_bytes/5 + non_ascii_chars/3 + directly-counted tokens. The
+    /// coefficients sit past the cheap end of what real tokenizers produce —
+    /// English runs ~4-4.5 chars/token, CJK on CJK-optimised tokenizers (the
+    /// compressed end of the range) runs ~2-2.7 chars/token — so on ordinary text the
+    /// true count exceeds this estimate. It is NOT a mathematical bound:
+    /// pathologically compressible input (long whitespace/character runs that
+    /// BPE folds into run-tokens) can still come in under it. The control
+    /// plane's contract absorbs that residue: the estimate only steers between
+    /// candidates, and its keep-all rule forbids it from emptying the list.
     pub estimated_prompt_tokens: u64,
     pub has_tools: bool,
     /// Catalog vocabulary, deduped, in stable order.
@@ -79,7 +82,9 @@ pub struct RequestFeatures {
 struct Acc {
     ascii_bytes: u64,
     non_ascii_chars: u64,
-    media_tokens: u64,
+    /// Tokens counted directly rather than estimated from text: media floors
+    /// with a documented basis, and literal token-id arrays (exact).
+    extra_tokens: u64,
     modalities: BTreeSet<&'static str>,
     prefix: Vec<u8>,
 }
@@ -130,7 +135,7 @@ impl Acc {
     /// distinguishing snippet of its url/data to the prefix.
     fn media(&mut self, modality: &'static str, floor_tokens: u64, reference: Option<&str>) {
         self.modalities.insert(modality);
-        self.media_tokens += floor_tokens;
+        self.extra_tokens += floor_tokens;
         self.prefix_push(modality.as_bytes());
         self.prefix_push(b"\0");
         if let Some(reference) = reference {
@@ -143,17 +148,54 @@ impl Acc {
     }
 
     fn estimated_tokens(&self) -> u64 {
-        self.ascii_bytes / 4 + self.non_ascii_chars / 2 + self.media_tokens
+        self.ascii_bytes / 5 + self.non_ascii_chars / 3 + self.extra_tokens
     }
 
-    fn prefix_hash(&self) -> Option<String> {
-        if self.prefix.is_empty() {
+    /// The affinity key, or `None` when there is nothing worth keying.
+    ///
+    /// Emitted only when the canonical prefix filled the whole cap. Below it
+    /// the "prefix" is the entire conversation so far, which means two things
+    /// at once: the key would change on every appended turn (a single-shot
+    /// Redis entry that can never stick), and a conversation under ~1k tokens
+    /// is below the smallest prefix providers cache anyway. Dropping those
+    /// also removes the one real dictionary target — a complete short prefix
+    /// like `user\0hi` is trivially enumerable; a full 4KB one is only
+    /// guessable when the guesser already holds every byte of it.
+    ///
+    /// With a secret the digest is HMAC-SHA256 keyed inside the gateway, so
+    /// the control plane cannot even test guesses of fully-known templates;
+    /// without one it is plain SHA-256, which keeps prefix equality linkable
+    /// and known 4KB templates confirmable (stated in the config docs).
+    fn prefix_hash(&self, secret: Option<&[u8]>) -> Option<String> {
+        if self.prefix.len() < PREFIX_CAP {
             return None;
         }
-        let mut hasher = Sha256::new();
-        hasher.update(&self.prefix);
-        Some(hex::encode(hasher.finalize())[..32].to_string())
+        let digest: [u8; 32] = match secret {
+            Some(key) => hmac_sha256(key, &self.prefix),
+            None => Sha256::digest(&self.prefix).into(),
+        };
+        Some(hex::encode(digest)[..32].to_string())
     }
+}
+
+/// RFC 2104 HMAC over SHA-256, hand-rolled from the `sha2` already in the
+/// tree rather than a new dependency; pinned against an RFC 4231 vector in
+/// the tests below.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut padded = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        padded[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        padded[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(padded.map(|b| b ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(padded.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
 }
 
 /// Extract features for the endpoints whose body shape this module knows.
@@ -163,26 +205,55 @@ pub fn extract(
     endpoint: Endpoint,
     params: &Value,
     requirements: Option<&ReasoningConfig>,
+    prefix_secret: Option<&[u8]>,
 ) -> Option<RequestFeatures> {
     let mut acc = Acc::default();
     match endpoint {
         Endpoint::ChatComplete => walk_openai_messages(params, &mut acc),
         Endpoint::Messages => walk_anthropic(params, &mut acc),
-        Endpoint::Complete => {
-            if let Some(prompt) = params.get("prompt").and_then(Value::as_str) {
+        Endpoint::Complete => match params.get("prompt") {
+            Some(Value::String(prompt)) => {
                 acc.begin_message("user");
                 acc.text(prompt);
             }
-        }
+            // Legacy completions also allow arrays: batch prompts (estimates
+            // sum — capacity semantics), literal token ids (exact count, better
+            // than any estimate), or a batch of token-id arrays. A shape not
+            // handled contributes nothing, which stays a lower bound.
+            Some(Value::Array(items)) => {
+                for item in items {
+                    match item {
+                        Value::String(text) => {
+                            acc.begin_message("user");
+                            acc.text(text);
+                        }
+                        Value::Number(_) => acc.extra_tokens += 1,
+                        Value::Array(ids) => {
+                            acc.extra_tokens += ids.iter().filter(|v| v.is_number()).count() as u64;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        },
         Endpoint::Embed | Endpoint::CreateModelResponse => return None,
     }
 
-    let has_tools = matches!(params.get("tools"), Some(Value::Array(tools)) if !tools.is_empty());
+    // Legacy `functions` is still forwarded by the request transform, so it is
+    // tools for routing purposes too. (`function_call` alone, with no
+    // functions to call, states nothing.)
+    let non_empty =
+        |key: &str| matches!(params.get(key), Some(Value::Array(items)) if !items.is_empty());
+    let has_tools = non_empty("tools") || non_empty("functions");
     if has_tools {
-        // Tool schemas are serialized into the prompt upstream; count them,
-        // JSON being ASCII-heavy the /4 lower bound holds.
-        if let Ok(serialized) = serde_json::to_string(&params["tools"]) {
-            acc.text_outside_prefix(&serialized);
+        // Tool schemas are serialized into the prompt upstream; count them.
+        for key in ["tools", "functions"] {
+            if non_empty(key) {
+                if let Ok(serialized) = serde_json::to_string(&params[key]) {
+                    acc.text_outside_prefix(&serialized);
+                }
+            }
         }
     }
 
@@ -212,7 +283,7 @@ pub fn extract(
         input_modalities: acc.modalities.iter().copied().collect(),
         reasoning: reasoning_intent(endpoint, params, requirements),
         response_format,
-        prefix_hash: acc.prefix_hash(),
+        prefix_hash: acc.prefix_hash(prefix_secret),
     })
 }
 
@@ -242,16 +313,20 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                                 .and_then(|i| i.get("url"))
                                 .and_then(Value::as_str),
                         ),
+                        // Audio/video floors are 0: no provider documents a
+                        // minimum billing for them, and a floor the input may
+                        // undercut (an empty clip) breaks the lower-bound
+                        // direction. The modality is the routable fact.
                         Some("input_audio") => acc.media(
                             "audio",
-                            500,
+                            0,
                             part.get("input_audio")
                                 .and_then(|a| a.get("data"))
                                 .and_then(Value::as_str),
                         ),
                         Some("video_url") => acc.media(
                             "video",
-                            500,
+                            0,
                             part.get("video_url")
                                 .and_then(|v| v.get("url"))
                                 .and_then(Value::as_str),
@@ -270,6 +345,19 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                 }
             }
             _ => {}
+        }
+        // Same reasoning as anthropic tool_use: arguments are prompt tokens
+        // (estimate), not affinity identity (prefix).
+        if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                if let Some(arguments) = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                {
+                    acc.text_outside_prefix(arguments);
+                }
+            }
         }
     }
 }
@@ -301,41 +389,62 @@ fn walk_anthropic(params: &Value, acc: &mut Acc) {
             Some(Value::String(text)) => acc.text(text),
             Some(Value::Array(blocks)) => {
                 for block in blocks {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            acc.text(block.get("text").and_then(Value::as_str).unwrap_or(""))
-                        }
-                        Some("image") => {
-                            let source = block.get("source");
-                            acc.media(
-                                "image",
-                                85,
-                                source
-                                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
-                                    .and_then(Value::as_str),
-                            );
-                        }
-                        Some("document") => {
-                            let source = block.get("source");
-                            acc.media(
-                                "file",
-                                0,
-                                source
-                                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
-                                    .and_then(Value::as_str),
-                            );
-                        }
-                        Some("tool_result") => {
-                            if let Some(text) = block.get("content").and_then(Value::as_str) {
-                                acc.text(text);
-                            }
-                        }
-                        _ => {}
-                    }
+                    anthropic_content_block(block, acc);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// One Anthropic content block. Split out because `tool_result.content` may
+/// itself be a block array (text/image/document all legal there) — a
+/// tool-returned image must set the modality like a user-sent one, or routing
+/// hands the request to a text-only backend that the upstream then rejects.
+fn anthropic_content_block(block: &Value, acc: &mut Acc) {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => acc.text(block.get("text").and_then(Value::as_str).unwrap_or("")),
+        Some("image") => {
+            let source = block.get("source");
+            acc.media(
+                "image",
+                85,
+                source
+                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
+                    .and_then(Value::as_str),
+            );
+        }
+        Some("document") => {
+            let source = block.get("source");
+            acc.media(
+                "file",
+                0,
+                source
+                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
+                    .and_then(Value::as_str),
+            );
+        }
+        // Tool inputs are real prompt tokens, so they feed the estimate — but
+        // deliberately NOT the prefix: the affinity key trades distinctiveness
+        // for stability, and two conversations differing only in tool history
+        // sharing a routing preference costs nothing.
+        Some("tool_use") => {
+            if let Some(input) = block.get("input") {
+                if let Ok(serialized) = serde_json::to_string(input) {
+                    acc.text_outside_prefix(&serialized);
+                }
+            }
+        }
+        Some("tool_result") => match block.get("content") {
+            Some(Value::String(text)) => acc.text(text),
+            Some(Value::Array(blocks)) => {
+                for inner in blocks {
+                    anthropic_content_block(inner, acc);
+                }
+            }
+            _ => {}
+        },
+        _ => {}
     }
 }
 
@@ -409,23 +518,25 @@ mod tests {
     }
 
     fn features(params: &Value) -> RequestFeatures {
-        extract(Endpoint::ChatComplete, params, None).unwrap()
+        extract(Endpoint::ChatComplete, params, None, None).unwrap()
     }
 
     #[test]
-    fn estimate_is_a_lower_bound_for_ascii_and_cjk() {
-        // 400 ASCII chars ≈ 100+ real tokens; /4 stays at or under.
+    fn estimate_sits_under_realistic_tokenizer_output() {
+        // 400 ASCII chars of ordinary English run ~90-100 real tokens
+        // (~4-4.5 chars/token); /5 = 80 stays under. (/4 would land ON the
+        // average, not below it — the original review catch.)
         let ascii = features(&chat(
             json!([{ "role": "user", "content": "a".repeat(400) }]),
         ));
-        assert_eq!(ascii.estimated_prompt_tokens, 100);
-        // 400 CJK chars: the design-doc coefficient (1 token/char) would say
-        // 400+, which OVERSHOOTS the ~150-200 a CJK-optimised tokenizer
-        // produces; /2 stays under it.
+        assert_eq!(ascii.estimated_prompt_tokens, 80);
+        // 400 CJK chars on a CJK-optimised tokenizer run ~148-200 real tokens
+        // (2-2.7 chars/token); /3 = 133 stays under the whole range — /2 = 200
+        // would sit at its top.
         let cjk = features(&chat(
             json!([{ "role": "user", "content": "谢".repeat(400) }]),
         ));
-        assert_eq!(cjk.estimated_prompt_tokens, 200);
+        assert_eq!(cjk.estimated_prompt_tokens, 133);
     }
 
     #[test]
@@ -439,15 +550,39 @@ mod tests {
     }
 
     #[test]
+    fn audio_sets_the_modality_but_never_invents_tokens() {
+        // An empty clip must not carry a made-up floor — the estimate's only
+        // contract is the lower-bound direction.
+        let f = features(&chat(json!([{ "role": "user", "content": [
+            { "type": "input_audio", "input_audio": { "data": "" } },
+        ]}])));
+        assert_eq!(f.input_modalities, vec!["audio"]);
+        assert_eq!(f.estimated_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn legacy_functions_are_tools() {
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        params["functions"] = json!([{ "name": "lookup", "parameters": {
+            "type": "object", "properties": { "q": { "type": "string",
+            "description": "d".repeat(600) } } } }]);
+        let f = features(&params);
+        assert!(f.has_tools);
+        assert!(f.estimated_prompt_tokens > 100);
+    }
+
+    #[test]
     fn tools_and_schema_count_toward_the_estimate_but_not_the_prefix() {
-        let plain = chat(json!([{ "role": "user", "content": "hi" }]));
+        // Long enough to fill the prefix cap, so the hash comparison below is
+        // between real keys, not two Nones.
+        let plain = chat(json!([{ "role": "user", "content": "h".repeat(5000) }]));
         let mut with_tools = plain.clone();
         with_tools["tools"] = json!([{ "type": "function", "function": {
             "name": "get_weather", "parameters": { "type": "object",
             "properties": { "q": { "type": "string", "description": "x".repeat(400) } } } } }]);
         let (a, b) = (features(&plain), features(&with_tools));
         assert!(b.has_tools);
-        assert!(b.estimated_prompt_tokens > a.estimated_prompt_tokens + 100);
+        assert!(b.estimated_prompt_tokens > a.estimated_prompt_tokens + 80);
         // The affinity key must not fracture on tool-schema edits: the
         // upstream caches by the message prefix, not the tool block.
         assert_eq!(a.prefix_hash, b.prefix_hash);
@@ -469,13 +604,91 @@ mod tests {
     }
 
     #[test]
-    fn short_prefixes_distinguish_by_role_and_text() {
-        let user = features(&chat(json!([{ "role": "user", "content": "hi" }])));
-        let assistant = features(&chat(json!([{ "role": "assistant", "content": "hi" }])));
+    fn sub_cap_prefixes_emit_no_hash() {
+        // A conversation that has not filled the cap is both worthless to key
+        // (the key would change every turn, and it is under the smallest
+        // prefix providers cache) and the one dictionary-guessable case —
+        // `user\0hi` is enumerable, a full 4KB prefix is not.
+        assert_eq!(
+            features(&chat(json!([{ "role": "user", "content": "hi" }]))).prefix_hash,
+            None
+        );
+        assert_eq!(features(&chat(json!([]))).prefix_hash, None);
+    }
+
+    #[test]
+    fn full_prefixes_distinguish_by_role_and_text() {
+        let long = "x".repeat(5000);
+        let user = features(&chat(json!([{ "role": "user", "content": long }])));
+        let assistant = features(&chat(
+            json!([{ "role": "assistant", "content": "x".repeat(5000) }]),
+        ));
         assert_ne!(user.prefix_hash, assistant.prefix_hash);
         assert_eq!(user.prefix_hash.as_ref().unwrap().len(), 32);
-        // No messages, nothing to key on.
-        assert_eq!(features(&chat(json!([]))).prefix_hash, None);
+    }
+
+    #[test]
+    fn secret_keys_the_hash() {
+        let params = chat(json!([{ "role": "user", "content": "s".repeat(5000) }]));
+        let hash = |secret: Option<&[u8]>| {
+            extract(Endpoint::ChatComplete, &params, None, secret)
+                .unwrap()
+                .prefix_hash
+        };
+        let (plain, k1, k2) = (hash(None), hash(Some(b"k1")), hash(Some(b"k2")));
+        // Same prefix, three different keys under three different secrets:
+        // without the secret the control plane could recompute `plain`; with
+        // one it cannot test guesses at all.
+        assert!(plain.is_some() && k1.is_some() && k2.is_some());
+        assert_ne!(plain, k1);
+        assert_ne!(k1, k2);
+        // Deterministic under one secret — replicas sharing it share keys.
+        assert_eq!(k1, hash(Some(b"k1")));
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        // RFC 4231 test case 2 pins the hand-rolled construction.
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            hex::encode(mac),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_result_blocks_carry_modalities() {
+        // A tool that returns an image makes this a vision request as surely
+        // as a user attaching one — text-only candidates must drop.
+        let params = json!({ "model": "m", "messages": [{ "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "t1", "content": [
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "aGk=" } },
+                { "type": "text", "text": "the chart" },
+            ]},
+        ]}]});
+        let f = extract(Endpoint::Messages, &params, None, None).unwrap();
+        assert_eq!(f.input_modalities, vec!["image", "text"]);
+        assert!(f.estimated_prompt_tokens >= 85);
+    }
+
+    #[test]
+    fn array_prompts_are_counted_not_reported_empty() {
+        let f = |prompt: Value| {
+            extract(
+                Endpoint::Complete,
+                &json!({ "model": "m", "prompt": prompt }),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        // Batch of string prompts: estimates sum (capacity semantics).
+        let strings = f(json!(["a".repeat(500), "b".repeat(500)]));
+        assert_eq!(strings.estimated_prompt_tokens, 200);
+        assert_eq!(strings.input_modalities, vec!["text"]);
+        // Literal token ids are an exact count — better than any estimate.
+        assert_eq!(f(json!([1, 2, 3, 4])).estimated_prompt_tokens, 4);
+        assert_eq!(f(json!([[1, 2, 3], [4, 5]])).estimated_prompt_tokens, 5);
     }
 
     #[test]
@@ -495,7 +708,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            extract(Endpoint::ChatComplete, &plain, Some(&disabled))
+            extract(Endpoint::ChatComplete, &plain, Some(&disabled), None)
                 .unwrap()
                 .reasoning,
             ReasoningIntent::Disabled
@@ -516,13 +729,13 @@ mod tests {
             ]}],
             "thinking": { "type": "disabled" },
         });
-        let f = extract(Endpoint::Messages, &params, None).unwrap();
+        let f = extract(Endpoint::Messages, &params, None, None).unwrap();
         assert_eq!(f.reasoning, ReasoningIntent::Disabled);
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
-        // The system prompt leads the canonical prefix: same first bytes as an
-        // OpenAI-shape body would produce for the same conversation start.
-        assert!(f.prefix_hash.is_some());
+        // Short conversation: below the cap, so no affinity key (see
+        // sub_cap_prefixes_emit_no_hash).
+        assert!(f.prefix_hash.is_none());
     }
 
     #[test]
@@ -544,6 +757,6 @@ mod tests {
 
     #[test]
     fn unknown_shapes_send_nothing() {
-        assert!(extract(Endpoint::Embed, &json!({ "input": "x" }), None).is_none());
+        assert!(extract(Endpoint::Embed, &json!({ "input": "x" }), None, None).is_none());
     }
 }

@@ -446,6 +446,7 @@ fn middleware(control_url: String) -> Middleware {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
+        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -886,6 +887,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
+        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -1555,6 +1557,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
+        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -1617,6 +1620,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
+        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -2093,7 +2097,11 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
         br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
     );
 
-    let response = mw.handle_completion(&service, chat_input()).await;
+    // Long enough to fill the 4KB prefix cap — sub-cap conversations emit no
+    // affinity hash on purpose (worthless to key, and dictionary-guessable).
+    let mut input = chat_input();
+    input.params["messages"][0]["content"] = json!("s".repeat(5000));
+    let response = mw.handle_completion(&service, input).await;
     assert_eq!(response.status().as_u16(), 200);
 
     let pre = pres.lock().unwrap().first().cloned().unwrap();
@@ -2129,6 +2137,7 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: Some(false),
+        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();

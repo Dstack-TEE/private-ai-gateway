@@ -36,6 +36,14 @@ pub struct MiddlewareConfig {
     /// byte-for-byte — the rollback lever if extraction ever misbehaves.
     #[serde(default)]
     pub send_request_features: Option<bool>,
+    /// HMAC key for the consult prefix hash. When set, the cache-affinity key
+    /// is HMAC-SHA256(secret, prefix): the control plane cannot dictionary-
+    /// test guessed prompts, so the hash carries no content signal beyond
+    /// equality. Every gateway replica must share the same value, or affinity
+    /// silently fragments per replica. Unset falls back to plain SHA-256
+    /// (equality linkable; a fully-known 4KB template is confirmable).
+    #[serde(default)]
+    pub prefix_hash_secret: Option<String>,
     /// Hosts (matched against the request `Host` header) that serve TEE models
     /// only. On these hosts the model catalog is forced to `?tee=true`,
     /// non-TEE models are refused (404) at consult, and serving is forced to
