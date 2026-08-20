@@ -54,8 +54,9 @@ pub enum ResponseFormatKind {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestFeatures {
-    /// Lenient LOWER bound on the prompt's token count (no tokenizer here):
-    /// ascii_bytes/5 + non_ascii_chars/3 + directly-counted tokens. The
+    /// Low-biased heuristic estimate of the prompt's token count (no
+    /// tokenizer here): ascii_bytes/5 + non_ascii_chars/3 + directly-counted
+    /// tokens. The
     /// coefficients sit past the cheap end of what real tokenizers produce —
     /// English runs ~4-4.5 chars/token, CJK on CJK-optimised tokenizers (the
     /// compressed end of the range) runs ~2-2.7 chars/token — so on ordinary text the
@@ -70,8 +71,9 @@ pub struct RequestFeatures {
     pub input_modalities: Vec<&'static str>,
     pub reasoning: ReasoningIntent,
     pub response_format: ResponseFormatKind,
-    /// Hex SHA-256 (truncated to 32 chars, `hash_api_key` style) of the
-    /// canonical first bytes of the conversation — the cache-affinity key.
+    /// The cache-affinity key: hex SHA-256 — or HMAC-SHA256 when
+    /// `middleware.prefix_hash_secret` is set — of the canonical first bytes
+    /// of the conversation, truncated to 32 chars (`hash_api_key` style).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
 }
