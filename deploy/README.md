@@ -1,163 +1,147 @@
-# Deploying Private AI Gateway With git-launcher
+# Deploy with git-launcher
 
-This directory contains the one-file dstack compose path for launching
-Private AI Gateway through
-[`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/main/git-launcher).
+This directory contains the reference dstack deployment for Private AI Gateway. It uses `git-launcher` to check out an exact gateway commit, then runs the repository-owned `entrypoint.sh` inside the confidential VM.
 
-The launcher fetches a pinned `private-ai-gateway` commit, verifies `HEAD`,
-scrubs the checkout, preserves the container environment, and runs the gateway
-repo's own [`../entrypoint.sh`](../entrypoint.sh). The launcher remains
-generic; install, build, run, and ACI policy live in this repo.
+The checked-in manifest is an auditable starting point. It is not a complete production platform. Authentication, rate limiting, external TLS termination, secret delivery, monitoring, backup, and availability remain deployment responsibilities.
 
-The checked-in compose runs in no-middleware mode: the public ACI frontend and
-verified-provider backend are the same process, and traffic is forwarded
-directly from frontend to backend. To enable middleware, configure it in the
-static gateway config (this compose leaves it disabled). See the
-[configuration reference](../docs/configuration-reference.md#middleware).
+## Deployment model
 
-## One-Command Deploy
+The default [`compose.yaml`](compose.yaml) runs one gateway process in direct-upstream mode:
 
-The compose hard-codes the released launcher image:
+```text
+client -> external TLS terminator -> gateway :8086 -> configured providers
+```
+
+The gateway serves HTTP on port `8086`; it does not terminate TLS. Configure the optional in-process middleware and its external HTTP control plane in the static config when policy-based routing is required.
+
+The compose pins this launcher image by digest:
 
 ```text
 docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b
 ```
 
-That digest comes from
-[`git-launcher-v0.3.0`](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.3.0).
+Review the launcher image, gateway commit, complete compose content, and runtime policy together. The launcher image alone does not identify the deployed workload.
 
-Prepare an audited gateway commit, then run:
+## Prepare the deployment
 
-```bash
-cd deploy
+Choose a reviewed, full 40-character gateway commit and generate a strong admin token. The admin token authorizes runtime upstream replacement.
+
+The checked-in upstream seed is empty. Before deployment, either:
+
+- replace the `gateway-upstreams` content in `compose.yaml` with reviewed routes; or
+- keep it empty and use `PUT /v1/admin/upstreams` after the process starts.
+
+[`upstreams.example.json`](upstreams.example.json) demonstrates current Anthropic, Tinfoil, NEAR AI, Chutes, and Phala-direct entries. It contains placeholders, not production policy.
+
+Do not place plaintext credentials in measured compose content. Supply secrets through the deployment's encrypted environment, KMS, or mounted secret mechanism. Keep only secret-variable references in the manifest.
+
+## One-Command Deploy
+
+From this directory:
+
+```sh
 phala deploy -n private-ai-gateway -c compose.yaml \
-  -e PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha> \
+  -e PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-commit> \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 ```
 
-For local/dev deploys, you can also copy
-[`gateway.env.example`](./gateway.env.example), fill in its values, and pass it
-as `-e gateway.env`. For production, pass variables with repeated `-e KEY=VALUE`
-arguments so secrets such as admin tokens do not remain in a plaintext env file.
+For a development deployment, [`gateway.env.example`](gateway.env.example) shows the required variables. Passing individual encrypted variables is preferable for a production deployment because it avoids a plaintext secrets file.
 
-`compose.yaml` inlines the launcher config, the static gateway config, and the
-initial upstream config. dstack measures the raw manifest into `compose_hash`,
-and the published `app_compose` contains variable references rather than their
-values.
-After deployment, the gateway listens on port `8086`.
+Wait for the process to build and start, then check liveness:
 
-The gateway consumes two JSON files:
-
-| File | Compose config | Runtime role |
-| --- | --- | --- |
-| Static gateway config | `gateway-config` | Startup policy: bind address, TLS certificate bindings, dstack endpoint, admin token, gateway state directory, and read-only seed paths. |
-| Upstream seed config | `gateway-upstreams` seed copied to `<state_dir>/upstreams.json` on first boot | Initial provider/model routing policy. The live file is replaced by the admin API. |
-
-The checked-in compose starts with an empty upstream seed:
-
-```json
-[]
+```sh
+curl --fail http://<gateway-host>:8086/health
 ```
 
-For a real deployment, replace the `gateway-upstreams` `content:` block in
-`compose.yaml` with the provider routes you want to boot with, or keep it
-empty and set the config after boot through `PUT /v1/admin/upstreams`.
-[`upstreams.example.json`](./upstreams.example.json) shows the current
-three-provider shape.
+Liveness only proves that the process is serving requests. It does not prove provider availability or successful attestation.
 
 ## Ownership boundary
 
-The launcher is build-system agnostic. It does not know this repo is Rust and
-does not contain a Cargo install command. Its default-mode contract is:
+The launcher is build-system agnostic. It performs four operations: clone the repository, check out `COMMIT_SHA`, preserve the container environment, and run `bash entrypoint.sh` from the pinned checkout. The compose does not set `REPO_SUBDIR` because the gateway entrypoint is at the repository root.
 
-1. Clone `REPO_URL`.
-2. Check out exactly `COMMIT_SHA`.
-3. Preserve the container environment.
-4. Run `bash entrypoint.sh` from the pinned repo.
+The gateway repository owns everything after that boundary:
 
-Everything after step 4 is gateway-owned:
-
-| Concern | Owner | Location |
+| Concern | Owner | Source |
 | --- | --- | --- |
-| Workload source pin | Launcher config | `gateway-pin` in `compose.yaml` |
-| Static gateway config | Deployment compose | `gateway-config` in `compose.yaml` |
-| Runtime bootstrap env | Deployment compose | service `environment:` in `compose.yaml` points at the static gateway config and cache directory |
-| Initial upstream config | Deployment compose | `gateway-upstreams` in `compose.yaml` |
-| Toolchain bootstrap | Gateway repo | `../entrypoint.sh` |
-| Build and exec | Gateway repo | `../entrypoint.sh` |
-| Downstream ACI frontend | Gateway binary | `../src` |
-| Verified-provider backend | Gateway binary | `../src` |
-| Optional routing middleware | Gateway deployment | Router helpers exist, but this compose and static config do not wire middleware |
+| Launcher image and source pin | Deployment | `compose.yaml` and `gateway-pin` |
+| Static gateway policy | Deployment | `gateway-config` in `compose.yaml` |
+| Initial upstream policy | Deployment | `gateway-upstreams` in `compose.yaml` |
+| Toolchain bootstrap, build, and exec | Gateway repository | `entrypoint.sh` |
+| HTTP, ACI, routing, and provider verification | Gateway binary | `src/` |
+| Optional routing and authorization decisions | External control plane | `middleware.control_url` |
 
-The public gateway repo root contains `entrypoint.sh`, so the launcher config
-does not set `REPO_SUBDIR`.
-
-## Volumes and Reboots
-
-The compose uses two persistent volumes with different meanings:
-
-| Volume | Mount | Meaning |
-| --- | --- | --- |
-| `gateway-checkout` | `/var/lib/git-launcher` | Source checkout cache owned by `git-launcher`. Scrubbed on every boot with `git reset --hard` and `git clean -ffdx`. |
-| `gateway-state` | `/var/lib/private-ai-gateway` | Gateway-owned mutable state: active upstream config, attested-session log, and Rust build cache. |
-
-Do not put gateway state or build artefacts under `WORK_DIR`. The source
-checkout is allowed to disappear and reclone. By default `entrypoint.sh` stores
-Cargo/Rustup/target state under
-`PRIVATE_AI_GATEWAY_CACHE_DIR=/var/lib/private-ai-gateway/cache`, so restarts
-can reuse the toolchain and crate/build cache without making the source checkout
-mutable.
-
-## Gateway And Upstream Config
-
-The complete config and environment-variable reference is
-[`../docs/configuration-reference.md`](../docs/configuration-reference.md).
-
-The static gateway config is mounted read-only:
+The static gateway config is mounted at:
 
 ```text
 /etc/private-ai-gateway/gateway.config.json
 ```
 
-It is selected by the only gateway config-path env variable in the compose:
+The compose selects it with:
 
 ```text
 PRIVATE_AI_GATEWAY_CONFIG_PATH=/etc/private-ai-gateway/gateway.config.json
 ```
 
-The gateway config names the writable state directory:
+See [Configuration reference](../docs/configuration-reference.md) for every field and validation rule.
 
-```text
-/var/lib/private-ai-gateway
+## Persistent volumes
+
+| Volume | Mount | Contents |
+| --- | --- | --- |
+| `gateway-checkout` | `/var/lib/git-launcher` | Launcher-owned source checkout. It is scrubbed on boot. |
+| `gateway-state` | `/var/lib/private-ai-gateway` | Active upstream config, sessions, and the build/toolchain cache. |
+
+The gateway state directory contains:
+
+- `upstreams.json`
+- `sessions.jsonl` and `sessions.jsonl.lock`
+- `cache/` for Cargo, rustup, and release build output in this deployment
+
+Do not share one state volume between concurrently running gateway processes. The session store has a single-writer lock, and the rest of the state is not a multi-replica coordination protocol.
+
+### Seed behavior
+
+The read-only seed is mounted at `/etc/private-ai-gateway/upstreams.seed.json` and selected by `upstream_config_seed_path`. On startup, the gateway copies it to `<state_dir>/upstreams.json` only when the active file is missing or contains only whitespace.
+
+An existing active file always wins. Updating the seed in a later compose revision does not replace routes already stored on the persistent volume. Use the admin API for a controlled replacement. Delete the state volume only as an intentional destructive reset that also removes session and cache state.
+
+## Configure upstreams after startup
+
+Inspect the redacted active config:
+
+```sh
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN}" \
+  http://<gateway-host>:8086/v1/admin/upstreams
 ```
 
-Inside that directory, the gateway owns `upstreams.json` and `sessions.jsonl`.
-Operators do not configure those writable file paths individually.
+Replace all routes atomically:
 
-The compose-mounted seed is read-only:
-
-```text
-/etc/private-ai-gateway/upstreams.seed.json
+```sh
+curl --fail --silent --show-error \
+  -X PUT \
+  -H "Authorization: Bearer ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  --data-binary @upstreams.json \
+  http://<gateway-host>:8086/v1/admin/upstreams
 ```
 
-The state directory and seed path are configured inside `gateway-config`:
+The gateway validates the complete array, writes the active file atomically, swaps runtime routing state, and starts verification prewarm. The admin response redacts provider credentials.
 
-```json
-{
-  "state_dir": "/var/lib/private-ai-gateway",
-  "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json"
-}
-```
+Supported provider values are:
 
-### Multi-Domain Listener Usage
+- `openai-compatible`
+- `anthropic`
+- `aci-service`
+- `tinfoil`
+- `near-ai`
+- `chutes`
+- `secret-ai`
+- `phala-direct`
 
-The compose keeps a single gateway listener on port `8086`. To serve multiple
-public domains, configure DNS, TLS termination, SNI routing, and reverse proxying
-outside this repo, and forward each public hostname to that listener with the
-original HTTP `Host` intact.
+## Bind public TLS identities
 
-Mount the leaf certificate used for each public hostname and list those
-hostnames in the static gateway config:
+TLS termination sits outside the gateway, but the gateway can include the terminator's leaf-certificate SPKI in its attested workload keyset. Mount each leaf certificate and add it to the static config:
 
 ```json
 {
@@ -166,109 +150,34 @@ hostnames in the static gateway config:
       {
         "domain": "api.example.com",
         "certificate_path": "/run/certs/api.pem"
-      },
-      {
-        "domain": "chat.example.com",
-        "certificate_path": "/run/certs/chat.pem"
       }
     ]
   }
 }
 ```
 
-When a client requests `/v1/aci/attestation` through `chat.example.com`, the
-gateway selects the `chat.example.com` certificate SPKI for
-`attestation.evidence.downstream_tls_binding`. A request with an unknown `Host`
-returns `404 not_found` instead of an attestation report.
+Preserve the original HTTP `Host` when proxying to port `8086`. The canonical `GET /v1/aci/attestation` handler selects the matching domain binding. When domain bindings are configured, an unknown or malformed host receives `404` instead of a report for another identity.
 
-At startup, if `<state_dir>/upstreams.json` is missing or whitespace-only, the
-gateway validates the seed and copies it into that active config file. If the
-active config already contains anything, the seed is ignored and the active
-config wins. This lets a single compose boot a complete initial deployment
-without blocking later admin updates.
+The verifier must also compare that reported SPKI with the certificate served to the client. Merely listing a certificate file in the workload does not prove that an external terminator uses it.
 
-Changing `gateway-upstreams` in a later compose revision does not overwrite an
-existing active config volume. Use the admin API to replace the config, or
-delete the `gateway-state` volume intentionally before redeploying.
+## Verify the deployment
 
-The static gateway config, seed, and bootstrap environment references are part
-of the attested Compose. The canonical attestation endpoint publishes that raw
-Compose preimage for independent verification. Do not place plaintext secrets
-in it. Pass secrets through dstack encrypted environment variables, KMS, or
-mounted secret files. Keep only variable references in Compose.
+Before accepting inference, a relying party should check:
 
-Source provenance is not set in the gateway config. The gateway reports the
-`REPO_URL` and `COMMIT_SHA` observed by git-launcher. The canonical report also
-returns the raw measured `app_compose`, so a verifier can hash it and match the
-RTMR3-bound `compose-hash`. The checked-in manifest measures the commit variable
-name, not its encrypted value. Binding the reported commit and accepted image
-digests to reviewed source is intentionally left as a verifier-policy TODO.
-
-Example seed:
-
-```json
-[
-  {
-    "name": "tinfoil",
-    "provider": "tinfoil",
-    "base_url": "https://inference.tinfoil.sh",
-    "models": {
-      "kimi-k2": "kimi-k2-6"
-    },
-    "bearer_token": "<tinfoil-api-key>"
-  }
-]
-```
-
-Supported provider values are `openai-compatible`, `aci-service`, `tinfoil`,
-`near-ai`, `chutes`, `secret-ai`, and `phala-direct`.
-
-For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
-`/v1/aci/attestation`. The router fetches the report through normal TLS,
-derives the attested TLS SPKI binding from that report, then pins that SPKI for
-the actual upstream model request.
-
-## Runtime Admin API
-
-When `admin_token` is set in the static gateway config, the same active config
-can be inspected and replaced:
-
-```bash
-curl -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  http://127.0.0.1:8086/v1/admin/upstreams
-
-curl -X PUT \
-  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
-  -H "content-type: application/json" \
-  --data-binary @upstreams.json \
-  http://127.0.0.1:8086/v1/admin/upstreams
-```
-
-The admin response redacts bearer tokens and returns the active config digest.
-
-## Verification Surface
-
-A verifier checks:
-
-| Layer | What to compare |
+| Layer | Required comparison |
 | --- | --- |
-| Launcher image | The image digest in the attested compose equals `sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b` and verifies through the `git-launcher-v0.3.0` Sigstore provenance. |
-| Launcher config | `REPO_URL` and `COMMIT_SHA` in `gateway-pin` match the audited gateway commit. |
-| Gateway config | `gateway-config` matches the reviewed startup policy, including TLS certificate bindings, state directory, dstack endpoint, admin token, and read-only input paths. |
-| Runtime env | Service `environment:` points at the reviewed gateway config and cache location. |
-| Upstream seed | `gateway-upstreams` is the reviewed initial provider policy. |
-| Gateway report | `/v1/aci/attestation` binds the ACI keyset (with dstack KMS custody evidence), the TLS SPKI if configured, and the git-launcher source provenance when present. |
+| Compose | Exact services, image digests, mounts, ports, configs, and secret references match reviewed policy. |
+| Launcher | `REPO_URL` and the full `COMMIT_SHA` identify reviewed gateway source. |
+| Gateway static config | Bind address, state paths, dstack endpoint, TLS bindings, admin posture, and middleware settings match policy. |
+| Initial upstream seed | Routes, credentials delivery, provider types, model mappings, verification pins, and refresh settings match policy. |
+| Hardware report | Quote, freshness, nonce, `report_data`, event log, measured compose, and key custody satisfy the verifier profile. |
+| TLS | The client-observed leaf SPKI matches the selected report binding. |
+| Request | The request explicitly requires ACI verification or arrives on a reviewed TEE-only route. |
 
-The launcher image digest alone does not identify the workload; the compose
-config is part of the trust surface.
+Use [Verify an attested inference](../docs/attested-confidential-inference.md) for the artifact flow. The legacy `/v1/attestation/report` endpoint is retained for compatibility; new deployment verification should use `/v1/aci/attestation`.
 
-## Toolchain Posture
+## Toolchain trust
 
-The current `entrypoint.sh` can bootstrap Rust with apt + rustup inside the
-TEE. That keeps the first deploy path simple, but it is a development-grade
-trust surface.
+`entrypoint.sh` builds `private-ai-gateway` in release mode with `cargo build --release --locked`. If Cargo is absent, it installs `rustup` through the runtime Ubuntu package repositories and resolves the current stable Rust toolchain.
 
-The production target is a gateway-owned image that already contains the
-Rust toolchain, or eventually the prebuilt gateway binary. The launcher still
-does not own that toolchain; the image would be built and attested by this repo
-and referenced by digest in `compose.yaml`.
+That bootstrap is a development-grade trust path: the runtime archive metadata, rustup distribution, resolved stable compiler, and fetched crates participate in the effective build. A production gateway-owned image should pin and attest the compiler and dependencies, or contain a reviewed prebuilt binary. The locked Cargo dependency graph prevents resolver drift but does not by itself make the runtime toolchain reproducible.

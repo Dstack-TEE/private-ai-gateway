@@ -1,183 +1,103 @@
 # Configuration Reference
 
-Private AI Gateway uses one read-only static config file and one writable state
-directory. Operators must choose the config file with
-`PRIVATE_AI_GATEWAY_CONFIG_PATH` and put gateway policy in that file.
+Private AI Gateway reads one static JSON file at startup and owns one writable
+state directory. Upstream routes have a separate JSON schema because operators
+can replace them at runtime.
 
-## Runtime Files
+Unknown fields are rejected in both schemas.
 
-| Item | Owner | Runtime path |
-| --- | --- | --- |
-| Static gateway config | Deployment | Required. Selected by `PRIVATE_AI_GATEWAY_CONFIG_PATH`. |
-| Upstream seed config | Deployment | Selected by `upstream_config_seed_path` in the static gateway config. |
-| Active upstream config | Gateway | `<state_dir>/upstreams.json` |
-| Attested-session log | Gateway | `<state_dir>/sessions.jsonl` |
+## Static Gateway Config Fields
+
+Set `PRIVATE_AI_GATEWAY_CONFIG_PATH` to a readable JSON file. The binary does
+not expose the individual static fields as environment variables. Provider
+verifier child processes use the bridge variables listed under
+[Environment Variables](#environment-variables).
 
 Operators configure `state_dir`, not the individual writable files inside it.
-The gateway creates `state_dir` on startup, seeds `upstreams.json` from the
-read-only upstream seed only when the active file is missing or empty, and
-updates `upstreams.json` through `PUT /v1/admin/upstreams` or an authenticated
-`upstream_pull` source.
+The gateway creates the directory on startup and owns the files within it.
 
-Unknown fields in the static gateway config are rejected at startup.
-
-## Minimal Config
-
-This is the smallest practical container config.
+Minimal container configuration:
 
 ```json
 {
   "bind": "0.0.0.0:8086",
   "state_dir": "/var/lib/private-ai-gateway",
-  "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
-  "upstream_pull": {
-    "url": "https://control.example/api/admin/gateway-upstreams/config",
-    "token": "<dedicated-machine-pull-token>",
-    "refresh_seconds": 300,
-    "request_timeout_seconds": 90
-  },
-  "admin_token": "<long-random-admin-token>",
   "dstack_endpoint": "unix:/var/run/dstack.sock"
 }
 ```
 
-## Config Fields
+### Static fields
 
-| Field | Default | Meaning |
+| Field | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `bind` | string | `127.0.0.1:8086` | TCP listener address. The gateway serves HTTP and does not terminate TLS. |
+| `state_dir` | string | `/var/lib/private-ai-gateway` | Writable directory owned by one gateway process. An empty string is rejected. |
+| `upstream_config_seed_path` | string | unset | Read-only upstream JSON copied to `<state_dir>/upstreams.json` only when the active file is missing or whitespace-only. |
+| `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
+| `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
+| `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
+| `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
+| `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. |
+| `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report advertises no supported E2EE versions and v2 requests fail. |
+| `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
+| `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
+| `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
+
+### Runtime state files
+
+The gateway derives these paths from `state_dir`:
+
+| Path | Mutability | Purpose |
 | --- | --- | --- |
-| `bind` | `127.0.0.1:8086` | Public HTTP listener address. Use `0.0.0.0:8086` in containers that expose the gateway port. |
-| `state_dir` | `/var/lib/private-ai-gateway` | Gateway-owned writable state directory. The active upstream config and attested-session log are derived from this directory. |
-| `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
-| `upstream_pull` | unset | Optional authenticated HTTPS source for the complete runtime upstream config. See [Upstream Pull](#upstream-pull). |
-| `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
-| `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
-| `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
-| `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
+| `upstreams.json` | Replaced through the admin API or `upstream_pull` | Active upstream routes and credentials. |
+| `sessions.jsonl` | Append and periodic compaction | Attested-session records. |
+| `sessions.jsonl.lock` | Advisory lock | Prevents two gateway processes from owning one session log. |
 
-## Upstream Pull
+The gateway compacts `sessions.jsonl` before serving and once per hour. It
+skips malformed or tampered records during replay, removes expired records, and
+rewrites live records through an atomic rename.
 
-`upstream_pull` lets every replica fetch the same complete runtime config from
-the control API without requiring the control API to reach replica-private
-addresses. It is intended for a secret-bearing endpoint: the dedicated token is
-sent only in an `Authorization: Bearer` header over HTTPS. Redirects are refused
-so the credential cannot be forwarded to another origin.
+Do not share one state directory between running gateway processes. The second
+process fails to acquire the session-log lock.
 
-| Field | Default | Use |
-| --- | --- | --- |
-| `upstream_pull.url` | required | HTTPS URL returning schema version 1 with an `upstreams` array. URLs containing credentials or a fragment are rejected. |
-| `upstream_pull.token` | required | Dedicated 32–256 byte machine credential. It must differ from the gateway admin token and middleware control token; do not reuse a user/admin API key. Newlines are rejected. |
-| `upstream_pull.refresh_seconds` | `300` | Successful polling cadence. Replicas apply ±10% jitter; failures retry with bounded exponential backoff. |
-| `upstream_pull.request_timeout_seconds` | `90` | Whole-request timeout, including response transfer. Responses larger than 4 MiB are rejected. |
+### Seed behavior
+
+When `upstream_config_seed_path` is set, startup follows this order:
+
+1. Read `<state_dir>/upstreams.json` if it exists.
+2. Keep it when it contains any non-whitespace bytes.
+3. Otherwise read and validate the seed.
+4. Copy the validated seed to the active path.
+
+An existing active file wins even if a new deployment changes the seed. Replace
+the active config through `PUT /v1/admin/upstreams` or reset the state volume as
+an explicit operator action.
+
+## Upstream pull
+
+`upstream_pull` lets each replica fetch the complete runtime config without
+requiring the control API to reach replica-private addresses. The gateway sends
+the dedicated token only in an `Authorization: Bearer` header over HTTPS and
+refuses redirects so the credential cannot move to another origin.
+
+| Field | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `upstream_pull.url` | string | required | HTTPS URL returning schema version 1 with an `upstreams` array. Credentials and fragments are rejected. |
+| `upstream_pull.token` | string | required | Dedicated 32 to 256 byte machine credential. It must differ from `admin_token` and `middleware.control_token`. Newlines are rejected. |
+| `upstream_pull.refresh_seconds` | positive integer | `300` | Successful polling cadence. Replicas apply ±10% jitter; failures retry with bounded exponential backoff. |
+| `upstream_pull.request_timeout_seconds` | positive integer | `90` | Whole-request timeout, including response transfer. Responses larger than 4 MiB are rejected. |
 
 A pulled config is parsed, validated, and built completely before the active
-file and in-memory router are atomically replaced. Invalid responses and HTTP or
-TLS failures retain the last valid local config. An unchanged digest is not
+file and in-memory router are atomically replaced. Invalid responses and HTTP
+or TLS failures retain the last valid local config. An unchanged digest is not
 rewritten. On a new replica whose local config is empty, failure of the initial
 pull aborts startup so an empty router cannot enter the load-balancer pool.
 
-## Middleware
+## Downstream TLS binding
 
-The optional `middleware` section runs the middleware in the request
-path. When present, the gateway consults a control plane at `control_url` to
-authorize and route each request, shapes the provider request, injects response
-cost, and reports usage back to the control plane — all in-process, with no
-out-of-process hop. When the section is omitted the gateway serves directly.
-
-| Field | Default | Use |
-| --- | --- | --- |
-| `middleware.control_url` | required | Base URL of the control plane the gateway consults for routing, authorization, catalogs, and usage reporting. |
-| `middleware.control_token` | unset | Bearer token sent to the control plane. When unset, no `Authorization` header is sent. |
-| `middleware.control_timeout_ms` | `60000` | Timeout for the pre-request consult and catalog fetches. A failed or timed-out consult fails closed. |
-| `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
-| `middleware.sse_keepalive_ms` | `5000` | Keep-alive interval for streaming responses, measured from the start of the upstream forward. A streaming request with no upstream response headers after one interval is committed as `200 text/event-stream` and heartbeated (`: PROCESSING`) until the upstream answers; a later forward failure is delivered as the surface's in-band error event whose `code`/`type` is the status the request would otherwise have carried, while the usage report keeps the real status. A response committed this early carries no `x-receipt-id` header — when the upstream answers and the stream finalizes, the receipt is issued and fetchable by the response `id`, but an early-committed stream whose forward fails never drafts one. E2EE requests and requests carrying an ACI constraint (`provider.aci_verified` — the aci CLI's default — or pinned session ids) are never committed early, and neither is a request whose current candidate has already failed once (a same-route retry usually ends in a relayable HTTP status, 429 above all, which an early 200 would demote to an in-band error). Once a stream is open the same interval drives idle heartbeats. `0` disables the heartbeat and the pre-upstream commit with it. |
-| `middleware.prefix_hash_secret` | unset | HMAC key for the consult prefix hash (the cache-affinity key). When set, it must contain at least 32 bytes of randomly generated secret material (after trimming whitespace) — anything shorter fails startup, because HMAC under a weak key is as computable as the plain hash it claims to improve on. The hash is then HMAC-SHA256(secret, prefix), so the control plane cannot dictionary-test guessed prompts — it carries no content signal beyond prefix equality. Every gateway replica must share the same value, or affinity silently fragments per replica; rotating it invalidates live affinity keys, which roll off within their 600s TTL. Unset falls back to plain SHA-256: prefix equality stays linkable and a fully-known 4KB template can be confirmed by hashing it. Either way the hash is only sent when the canonical prefix fills its 4KB cap — shorter (dictionary-enumerable) prefixes are never keyed. |
-| `middleware.send_request_features` | `true` | Extract content-derived request features (a low-biased token-count estimate — deliberately under real tokenizer output on ordinary text, but a heuristic, not a guaranteed bound; the control plane may steer on it but never empties a candidate list on it — plus input modalities, tools/response-format flags, reasoning intent, and a prefix hash for cache affinity) and send them in the pre-request consult. Content never leaves the gateway — only numbers, closed enums and a one-way hash. `false` restores the featureless consult body byte-for-byte; it is the rollback lever if extraction misbehaves. |
-| `middleware.tee_only_domains` | `[]` | Hosts (matched against the request `Host` header, case-insensitive) that serve TEE models only. On these hosts the model catalog is forced to `?tee=true`, a non-TEE model is refused with `404` at the pre-consult (before any forward), and serving is forced to attested (`aci_verified`) upstreams — a client cannot opt out via `provider.aci_verified:false`. Two predicates apply by design: the catalog/consult gate uses the model's `is_tee` capability flag, while serving is enforced against the deployment's attestation, so a listed `is_tee` model with no live attested deployment still fails closed (`503`). Empty (the default) leaves every host unrestricted. |
-
-Request outcome observation is always on and needs no configuration: every
-failed request that reaches the middleware completion path (consult denials,
-routing/shaping failures, upstream errors, stream failures, client
-disconnects; final 429s excepted, they are recorded per-attempt in the usage
-pipeline) emits a `request_outcome` tracing line carrying the client-facing
-and upstream status, route, attempt chain length, TTFT/duration, finish
-reasons, and terminal marker. Requests rejected before that path — malformed
-JSON, E2EE setup failures — do not produce lines, so
-complete request accounting still needs the usage pipeline; an oversized body
-does emit a `phase=body_too_large` line carrying the request id, and is
-answered with the surface's JSON `413` envelope (the Anthropic envelope shape
-also carries the id; the OpenAI shape, matching the upstream wire format,
-does not).
-A client that disconnects before the upstream's first byte is reported to the
-usage pipeline as a `499` with the route that was in flight and no TTFT; a
-gateway-enforced connect or read deadline is reported as a `504`, per attempt
-and as the client-facing status. Consult denials
-that carry a key identity (`userId` on the pre-consult response), every
-429/5xx denial, and the no-route 404 are also reported to the usage
-pipeline (`errorSource: "control"`, no route) so the control plane can
-account for them; unauthenticated denials (401/402/403) are trace-only. A
-request emits
-at most one primary line; a late receipt/E2EE finalization failure appends
-one supplemental `phase=finalize_error` line for the same `request_id`
-(aggregate by unique request id, letting `finalize_error` supersede).
-Completed
-responses are logged only when their finish reasons fall outside the standard
-OpenAI/Anthropic set (`anomalous_finish=true`) — the "error smuggled through a
-success" class. The `detail` field (a 240-char snippet of the upstream error
-body, which may quote request fragments) is emitted only when the
-`request_outcome` target is enabled at `debug`; at the default level it is
-blank. Silence or re-route the target via `RUST_LOG` (the subscriber uses
-`EnvFilter`).
-
-```json
-{
-  "middleware": {
-    "control_url": "https://control.example",
-    "control_token": "<control-plane-bearer-token>"
-  }
-}
-```
-
-Only `control_url` is required.
-
-## Source Provenance
-
-Source provenance is not a gateway config field. The gateway reports source
-provenance from the dstack git-launcher pin at
-`/etc/git-launcher/gateway.conf`:
-
-```text
-REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
-COMMIT_SHA=<audited-full-40-or-64-hex-commit-sha>
-WORK_DIR=/var/lib/git-launcher/private-ai-gateway
-```
-
-When the launcher config is absent, source provenance is unknown and the
-gateway omits `source_provenance` from attestation reports. Production
-deployments should use `git-launcher`. The native ACI-service verifier checks
-that `attestation.evidence.app_compose` hashes to the `compose-hash` event bound
-into RTMR3. Binding the reported repository commit or image digest to reviewed
-source remains a verifier-policy TODO.
-
-The canonical attestation endpoint publishes the raw measured `app_compose`.
-Never place plaintext tokens, API keys, or passwords in Compose. Use Phala
-encrypted environment variables and leave only variable references in the
-measured file. Their encrypted values are not published or bound by
-`app_compose`.
-
-If the launcher config exists, `COMMIT_SHA` must be a full 40- or 64-character
-hexadecimal commit hash. Branch names, tags, and short hashes are rejected at
-startup.
-
-## TLS Binding
-
-TLS binding is optional. Configure it only when clients verify the gateway's
-public TLS certificate SPKI from the attested keyset.
-
-| Field | Use |
-| --- | --- |
-| `tls.domain_certificates` | One mounted leaf certificate per public hostname. |
-
-For multi-domain listening, use `tls.domain_certificates`:
+The gateway does not serve TLS, but it can attest the leaf certificate keys
+used by a TLS terminator in the same reviewed deployment. Configure one mounted
+leaf certificate for each public hostname:
 
 ```json
 {
@@ -196,89 +116,242 @@ For multi-domain listening, use `tls.domain_certificates`:
 }
 ```
 
-Raw SPKI digest inputs are not supported. The gateway reads mounted leaf
-certificates, computes `sha256(SPKI)`, and publishes those digests in the
-attested keyset. When `tls.domain_certificates` is configured, the request
-`Host` selects the matching downstream TLS binding for
-`/v1/aci/attestation`. Unknown hosts return `404 not_found`.
+| Field | Contract |
+| --- | --- |
+| `tls.domain_certificates` | Array of unique domain and certificate entries. An empty array disables configured downstream bindings. |
+| `tls.domain_certificates[].domain` | Hostname without a scheme, port, path, whitespace, comma, or trailing dot. Matching is lowercase. |
+| `tls.domain_certificates[].certificate_path` | Non-empty path to a PEM or DER leaf certificate readable at startup. |
 
-## Upstream Config
+At startup, the gateway parses each first PEM certificate (or the DER file),
+computes `SHA256(SubjectPublicKeyInfo)`, and places the digest and domain in the
+workload keyset. Raw digest input is not supported.
 
-The upstream seed file and active upstream database use the same JSON shape: an
-array of upstream entries. The seed file is deployment-owned and read-only. The
-active file at `<state_dir>/upstreams.json` is gateway-owned and is replaced by
-the admin API.
+When at least one domain binding exists, both canonical and legacy attestation
+handlers require a `Host` that matches a configured domain. The report includes
+the selected `attestation.evidence.downstream_tls_binding`. Unknown or malformed
+hosts return `404` instead of an unbound report.
+
+TLS issuance, renewal, SNI routing, and private-key custody remain deployment
+responsibilities. A verifier must confirm that the certificate served to the
+client matches the SPKI selected in the report.
+
+## Middleware fields
+
+The optional middleware runs in the gateway process. It calls an external
+control plane over HTTP or HTTPS and then calls the ACI service in-process.
+
+```json
+{
+  "middleware": {
+    "control_url": "https://control.example",
+    "control_token": "<control-plane-bearer-token>",
+    "tee_only_domains": ["confidential.example.com"]
+  }
+}
+```
+
+| Field | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `middleware.control_url` | string | required | Non-empty base URL. `/consult/pre`, `/consult/post`, and catalog paths are appended to it. |
+| `middleware.control_token` | string | unset | Optional bearer token sent to the control plane. Blank strings are treated as unset. |
+| `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
+| `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
+| `middleware.sse_keepalive_ms` | integer | `10000` | Idle SSE comment interval. Zero disables keep-alive comments. |
+| `middleware.prefix_hash_secret` | string | unset | HMAC key for the consult prefix hash. After trimming, it must contain at least 32 bytes. Every replica must share the same value. When unset, the gateway uses plain SHA-256, which leaves prefix equality linkable. |
+| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash. No prompt text is sent. Set false to restore the featureless consult body. |
+| `middleware.tee_only_domains` | string array | `[]` | Hostnames whose catalog queries force `tee=true` and whose inference requests require an ACI-verified route. Matching uses the normalized HTTP `Host`. |
+
+The control plane must implement the
+[control-plane contract](control-plane-contract.md). In particular, it must
+deny non-TEE models when a pre-consult contains `tee: true` if the deployment
+expects a `404` at the catalog and authorization layer. The gateway still
+enforces successful upstream verification before serving any request on a
+TEE-only hostname.
+
+### Request outcome logs
+
+Middleware mode emits structured `request_outcome` tracing records for terminal
+failures and anomalous finish reasons. The default info-level record contains
+statuses, route, phase, timing, and sanitized identifiers. Raw upstream detail
+is blank unless `RUST_LOG` enables `request_outcome=debug`; that detail can
+contain provider error text and fragments of client input.
+
+Malformed JSON, body-limit rejections, and E2EE setup failures occur before the
+middleware completion path and do not emit a `request_outcome` record. Use the
+control-plane usage pipeline when complete accounting is required. Consult
+denials carrying `userId`, every `429` or `5xx` consult denial, and the no-route
+`404` are also reported to that pipeline with `errorSource: "control"` and no
+route. Unauthenticated `401`, `402`, and `403` denials remain trace-only.
+
+A request emits at most one primary outcome. A late receipt or E2EE
+finalization error adds one `phase=finalize_error` record with the same
+`request_id`; aggregators should let that record supersede the primary outcome.
+
+## Upstream configuration
+
+The seed and active upstream files use a JSON array. Each entry owns one
+provider origin and maps one or more public model IDs to provider model IDs.
 
 ```json
 [
   {
-    "name": "route-a",
-    "provider": "aci-service",
-    "base_url": "https://upstream-a.example",
+    "name": "tinfoil-primary",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
     "models": {
-      "public-model": "provider-model"
+      "confidential-chat": "kimi-k2-6"
     },
-    "accepted_subjects": ["app-id:0x<measured-app-id>"],
-    "accepted_dstack_kms_root_public_keys": ["<kms-root-public-key>"]
+    "bearer_token": "<provider-api-key>"
   }
 ]
 ```
 
-Supported `provider` values:
-
-| Provider | Use |
-| --- | --- |
-| `openai-compatible` | Generic OpenAI-compatible upstream with no provider-owned verifier. |
-| `aci-service` | ACI service that exposes dstack/DCAP evidence. |
-| `tinfoil` | Tinfoil provider adapter. |
-| `near-ai` | NEAR AI provider adapter. |
-| `chutes` | Chutes provider adapter. |
-| `secret-ai` | Direct SecretAI SecretVM origin with optional workload pinning; see [SecretAI verification](providers/secret-ai/verification.md). |
-| `phala-direct` | Direct Phala dstack-vllm-proxy endpoint. |
-
-Provider verification policy belongs on the upstream entry. For ACI service
-routes, configure accepted keyset subjects, image digests, or dstack KMS
-root public keys. For `aci-service` upstreams a subject anchors only in its
-measured form — `app-id:0x<hex>` of the RTMR3-verified app id. The upstream
-does not need to set a keyset `subject` of its own. For `secret-ai` the same
-field pins measured SecretVM workload ids on that entry.
-
-For `secret-ai`, `base_url` must be the root HTTPS inference origin. The optional
-`accepted_subjects` field pins measured SecretVM workloads in this form:
+In direct mode, the public model ID selects the first configured route for that
+model. Middleware route IDs have this exact form:
 
 ```text
-secretvm:<cpu-type>:<environment>:<template>:<artifacts-version>:sha256:<compose-sha256>
+<upstream name>:<public model ID>
 ```
 
-Without this field, the verifier still reconstructs and reports the exact
-production workload, but does not assert that its serving software was
-operator-approved. When pins are configured, a nonmatching workload fails
-verification. TDX workloads must report DCAP status `UpToDate`. An SEV-SNP
-origin must meet the componentwise AMD TCB minimum embedded in the verifier.
+The gateway rewrites the request's top-level `model` to the provider model ID
+before provider verification and forwarding. The receipt commits to both the
+client-observed body and the provider-facing body.
 
-For `aci-service`, `base_url` is the HTTPS origin used for both model traffic and
-`/v1/aci/attestation`. The router fetches the report through normal TLS,
-derives the attested TLS SPKI binding from that report, then pins that SPKI for
-the actual upstream model request.
+### Provider values
+
+| Value | Classification | Transport and verifier |
+| --- | --- | --- |
+| `openai-compatible` | non-TEE | OpenAI-compatible HTTP with no provider verifier. |
+| `anthropic` | non-TEE | Native Anthropic HTTP using `x-api-key` and `anthropic-version: 2023-06-01`; requires `path`. |
+| `aci-service` | TEE | Native Rust ACI report, dstack/DCAP, KMS-custody, and TLS-SPKI verifier. |
+| `tinfoil` | TEE | Tinfoil verifier through the Python bridge and TLS-SPKI enforcement. |
+| `near-ai` | TEE | NEAR AI verifier through the Python bridge, external dstack verifier, and TLS-SPKI enforcement. |
+| `chutes` | TEE | Per-instance attestation and encrypted Chutes E2EE transport. |
+| `secret-ai` | TEE | SecretVM CPU, GPU, workload, and inference-SPKI verifier. |
+| `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
+
+TEE classification makes a route eligible for `provider.aci_verified`. A
+successful provider verifier and enforceable binding are still required at
+request time.
+
+### Upstream fields
+
+| Field | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `name` | string | required | Unique non-empty upstream name. |
+| `provider` | enum | `openai-compatible` | One provider value from the table above. |
+| `base_url` | string | required | Non-empty provider origin. `secret-ai` requires a root HTTPS URL without user info, path, query, or fragment. |
+| `path` | string | unset | Upstream path for chat-shaped surfaces. Leading `/` is added when missing. `anthropic` requires a non-empty path, normally `/v1/messages`. Other surfaces retain their public path. |
+| `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
+| `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
+| `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
+| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, or optional SecretAI measured-workload pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. |
+| `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
+| `accepted_dstack_kms_root_public_keys` | string array | unset | ACI-service accepted dstack KMS root public keys. |
+| `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service DCAP verifier. |
+| `verifier_cache_seconds` | positive integer | `300` | Provider-verification cache lifetime. Zero is rejected. |
+| `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
+| `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
+| `verifier_request_timeout_seconds` | positive integer | `60` | Provider verification timeout. Zero is rejected. |
+| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - 60, 1)` | Background verification refresh cadence. Zero disables proactive refresh for this entry. |
+| `session_refresh_seconds` | integer | `45` for Chutes; disabled otherwise | Chutes nonce-session refresh cadence. Zero disables it. |
+| `chutes_e2ee_api_base` | string | `https://api.chutes.ai` | Chutes discovery, evidence, and E2EE API base. Chutes only. |
+| `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
+| `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
+| `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
+
+An `aci-service` entry must provide at least one accepted subject or image
+digest and at least one accepted KMS root public key. The verifier rejects an
+empty acceptance policy. The upstream keyset does not need to self-assert the
+accepted subject; the verifier derives the `app-id:0x<hex>` subject from
+measured evidence.
+
+Chutes-specific fields on another provider are rejected. For private Chutes
+origins that use Basic authentication, follow the
+[private Chutes configuration](providers/chutes/configuration.md).
+
+### Empty configuration
+
+A missing, empty, or whitespace-only `upstreams.json` parses as an empty route
+list. An explicit empty array has the same meaning. The identity, attestation,
+metrics, and admin endpoints remain available; inference model routing fails
+until routes are configured.
+
+## Admin API
+
+When `admin_token` is set, inspect the active config:
+
+```bash
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+  http://127.0.0.1:8086/v1/admin/upstreams
+```
+
+The response includes `config_path`, a JCS SHA-256 `config_digest`, and redacted
+entries. It replaces `bearer_token` with `bearer_token_configured: true|false`.
+
+Replace the config atomically:
+
+```bash
+curl --fail --silent --show-error \
+  -X PUT \
+  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @upstreams.json \
+  http://127.0.0.1:8086/v1/admin/upstreams
+```
+
+The gateway validates the complete array before writing a temporary file and
+renaming it over the active path. It swaps the in-memory router and verifier
+state after the write succeeds, then starts verification prewarm in the
+background.
+
+## Source provenance
+
+Source provenance is not a JSON config field. The binary reads
+`/etc/git-launcher/gateway.conf` when present and accepts:
+
+```text
+REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+COMMIT_SHA=<full-40-or-64-character-hex-commit>
+WORK_DIR=/var/lib/git-launcher/private-ai-gateway
+```
+
+`REPO_URL` and `COMMIT_SHA` are required when the file exists. A branch, tag,
+short hash, or non-hex commit is rejected. When the launcher file is absent, the
+report omits source provenance.
+
+The report publishes the measured `app_compose` preimage. The native ACI-service
+verifier checks that it hashes to the RTMR3-bound `compose-hash` event. That
+integrity check does not decide whether the launcher, repository revision,
+image, compiler, or dependencies are approved. Verifier policy must make those
+acceptance decisions.
+
+Never put plaintext credentials in measured Compose content. Use deployment
+secret facilities and keep only variable references in the manifest.
 
 ## Environment Variables
 
-The gateway runtime reads only these environment variables. Provider verifier
-bridges may consume provider-specific environment variables such as
-`DSTACK_VERIFIER_URL` or `PRIVATE_AI_VERIFIER_DIR`.
+The gateway process and provider-verifier children use:
 
 | Variable | Use |
 | --- | --- |
-| `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required. Selects the static gateway config file. |
-| `RUST_LOG` | Tracing filter consumed by `tracing_subscriber`. |
+| `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required path to the static gateway config. |
+| `RUST_LOG` | `tracing_subscriber` filter. Defaults to `info`. |
+| `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. |
+| `DSTACK_VERIFIER_URL` | External verifier URL consumed by NEAR AI and PhalaDirect bridge code. Those adapters default to `http://localhost:8080` when unset. |
 
-Deployment tooling also uses these variables:
+The repository entrypoint and deployment manifest also use:
 
 | Variable | Use |
 | --- | --- |
-| `PRIVATE_AI_GATEWAY_CACHE_DIR` | `entrypoint.sh` build and toolchain cache root. Defaults to `/var/lib/private-ai-gateway/cache`. |
-| `CARGO_HOME` | Optional override for Cargo cache. Defaults under `PRIVATE_AI_GATEWAY_CACHE_DIR`. |
-| `RUSTUP_HOME` | Optional override for Rustup state. Defaults under `PRIVATE_AI_GATEWAY_CACHE_DIR`. |
-| `CARGO_TARGET_DIR` | Optional override for Cargo build output. Defaults under `PRIVATE_AI_GATEWAY_CACHE_DIR`. |
-| `PRIVATE_AI_GATEWAY_REPO_COMMIT` | Used by `deploy/compose.yaml` interpolation for the git-launcher `COMMIT_SHA` pin. |
-| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Used by `deploy/compose.yaml` interpolation for the static config's `admin_token`. |
+| `PRIVATE_AI_GATEWAY_CACHE_DIR` | Toolchain and build cache root. Defaults to `/var/lib/private-ai-gateway/cache`. |
+| `CARGO_HOME` | Cargo cache override used by `entrypoint.sh`. |
+| `RUSTUP_HOME` | Rustup state override used by `entrypoint.sh`. |
+| `CARGO_TARGET_DIR` | Cargo output override used by `entrypoint.sh`. |
+| `PRIVATE_AI_GATEWAY_REPO_COMMIT` | Compose interpolation for the git-launcher source pin. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Compose interpolation for the static config's admin token. |
+
+Provider credentials belong in the upstream config or the deployment mechanism
+that renders it. The live test harness reads its own provider key variables; see
+the [testing guide](live-e2e-test-suite.md).

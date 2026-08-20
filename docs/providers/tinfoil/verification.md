@@ -1,88 +1,74 @@
-# Tinfoil — attested session verification & binding
+# Tinfoil Verification
 
-- **TEE:** AMD SEV-SNP (TDX also supported) + NVIDIA Confidential Compute
-- **Session binding:** `tls_spki_sha256`
-- **Verifier:** the official `tinfoil` Python SDK
-  (`SecureClient(enclave, repo).verify()`), called from the bridge
-  (`scripts/private_ai_provider_verifier.py` → `verify_tinfoil`).
-- **Status:** sound (replaced a hand-rolled, unsound verifier in commit `747b117`).
-- **Audit:** see [review.md](review.md).
+The Tinfoil adapter uses Tinfoil's official Python SDK to verify its confidential model router and pins the router's attested TLS public key.
 
-## What is verified
+| Property | Current behavior |
+| --- | --- |
+| Attestation scope | Router |
+| Verifier | `scripts/provider_verifier/tinfoil.py` using `tinfoil.SecureClient` |
+| Verifier ID | `tinfoil-verifier/v1` |
+| Enforced binding | `tls_spki_sha256` |
+| Default source repository | `tinfoilsh/confidential-model-router` |
 
-`verify_tinfoil` constructs `SecureClient(enclave=<host>, repo=<repo>)` (default repo
-`tinfoilsh/confidential-model-router`), calls `.verify()`, and reads
-`get_verification_document()`. The SDK runs Tinfoil's full reference chain — the same
-checks as `tinfoilsh/verifier` — exposed as four steps:
+## Verification algorithm
 
-1. **`fetch_digest`** — fetch the repo's latest release artifact digest.
-2. **`verify_code`** — fetch the Sigstore bundle and verify it cryptographically:
-   SCTs, **Rekor** transparency-log inclusion, and a **certificate identity** of
-   `https://token.actions.githubusercontent.com` with the repo's tag-workflow pattern.
-   This yields the golden code measurement (provenance bound to the open-source repo).
-3. **`verify_enclave`** — verify the hardware report. For SEV-SNP: the report signature
-   against the **VCEK**, the **VCEK → ASK → ARK** certificate chain to AMD's embedded
-   root, and policy (`Debug=false`, `MigrateMA=false`, `SMT`, minimum TCB). For TDX:
-   DCAP collateral + policy. Extracts `report_data[0:32]` as the TLS public-key
-   fingerprint.
-4. **`compare_measurements`** — the enclave's measurement must equal the
-   Sigstore-attested code measurement.
+The bridge constructs `SecureClient(enclave=<origin host>, repo=<repository>)`, calls `verify()`, and reads the verification document. The SDK owns the hardware and provenance verification chain. Its documented steps are:
 
-`doc.security_verified` must be true.
+1. Resolve the repository's release artifact digest.
+2. Verify the Sigstore bundle, transparency-log inclusion, and expected GitHub Actions certificate identity.
+3. Verify the SEV-SNP or TDX hardware report and its platform policy.
+4. Extract the TLS public-key fingerprint from hardware report data.
+5. Compare the enclave measurement with the Sigstore-proven release measurement.
 
-## What binds the session
+The bridge then requires:
 
-`report_data[0:32]` is the TLS public-key fingerprint, and the AMD signature covers the
-whole report (including `report_data`). The bridge emits
-`tls_spki_sha256 = doc.tls_public_key`, which equals `report_data[0:32]` — the exact
-value the gateway already enforced, now cryptographically proven rather than read from
-an unauthenticated report.
+- `security_verified` to be true;
+- a non-empty TLS public-key fingerprint; and
+- router scope, either selected explicitly by the SDK or implied by the reviewed router repository.
 
-> Why this matters: the previous hand-rolled `_verify_snp` performed **no** AMD
-> signature verification — it only compared the measurement to a *public* Sigstore
-> value. A forged report with the public measurement and any `report_data` (any TLS
-> key) passed. See [review.md](review.md) for the provider audit.
+The emitted evidence preserves the repository, release digest, code and enclave fingerprints, TLS fingerprint, HPKE key, overall verdict, and per-step statuses.
 
-## What a tamper rejects
+## Channel binding and forwarding
 
-Confirmed live against `inference.tinfoil.sh` (decompress the SEV report, flip a byte,
-recompress, verify):
+For SEV-SNP, the signed report covers the TLS fingerprint in `report_data`. The official verifier checks the AMD certificate chain and policy. For TDX, the SDK applies its DCAP path. The bridge emits the verified fingerprint as `tls_spki_sha256`.
 
-- Tampered `report_data` → `Attestation signature verification failed`.
-- Tampered measurement → `Attestation signature verification failed`.
-- Tampered signature → `Attestation signature verification failed`.
+The gateway compares the binding with the live HTTPS certificate before forwarding. All models behind the same Tinfoil router share the verifier cache and session. The served model remains a receipt field.
 
-(The signature covers the whole report, so every one of these is caught — unlike the
-old verifier, which accepted `report_data` and signature tampering.)
+## Session claims
 
-## Transport enforcement
+| Claim | Mapping |
+| --- | --- |
+| `tee_attested` | Asserted from the official hardware verifier and bound TLS channel. |
+| `tcb_up_to_date` | Asserted as verifier-derived because Tinfoil's overall verifier gates TCB policy but does not expose a separable raw status. |
+| `serving_software_known_good` | Asserted as verifier-derived from the Sigstore-proven release measurement. |
+| `gpu_attested` | Unknown. |
+| `os_known_good` | Unknown. |
+| `model_weights_provenance` | Unknown. |
 
-The backend enforces the verified `tls_spki_sha256` against the upstream HTTPS
-connection before forwarding.
+## Limitations
 
-## Notes
-
-- Verification needs egress to Tinfoil's endpoints: the attestation endpoint
-  (`<host>/.well-known/tinfoil-attestation`), `kds-proxy.tinfoil.sh` (AMD VCEK),
-  the GitHub attestation proxy, and Sigstore's TUF root.
-- Router mode: by default this verifies the **router** enclave
-  (`tinfoilsh/confidential-model-router`). Tinfoil is a router
-  (`AttestationScope::PerRouter`): the attested session is that one verified
-  enclave channel, shared by every model behind it, so verification is keyed on
-  the channel and the served model is a receipt-level identifier. Per-model TEE
-  coverage is delegated to the verified router, which attests the model enclaves
-  it fronts. Override the repo via `provider_options.tinfoil_repo`.
-- Pin the dependency deliberately; the SDK is the source of truth for the check set,
-  so upgrades should be reviewed.
+- The gateway delegates the hardware, TCB, and source-provenance check set to the pinned Tinfoil SDK. A dependency upgrade changes the verifier trust root and must be reviewed.
+- The default path proves the confidential router channel. Per-model TEE coverage depends on the verified router's own model-enclave policy and is not independently recorded by this gateway.
+- `release_digest` is preserved as evidence but is not checked against a separate operator allowlist in gateway configuration.
+- Verification needs egress to Tinfoil attestation and key-distribution endpoints, its GitHub attestation proxy, and Sigstore trust material.
+- The adapter does not establish GPU-to-router binding or model-weight provenance in the ACI session claims.
 
 ## Reproduce
 
-```bash
-cd /home/h4x/workspace/redpill/private-ai-gateway
-echo '{"api_version":"aci.provider-verifier.request.v1","provider":"tinfoil",
-  "upstream_name":"tinfoil-live","url_origin":"https://inference.tinfoil.sh",
-  "model_id":"kimi-k2-6",
-  "forwarded_body_hash":"sha256:'"$(printf '0%.0s' {1..64})"'","required":true,
-  "timeout_seconds":300}' \
-  | uv run python scripts/private_ai_provider_verifier.py
+From the repository root:
+
+```sh
+request_hash="sha256:$(printf '0%.0s' {1..64})"
+jq -n --arg hash "$request_hash" '{
+  api_version: "aci.provider-verifier.request.v1",
+  provider: "tinfoil",
+  upstream_name: "tinfoil-live",
+  url_origin: "https://inference.tinfoil.sh",
+  model_id: "kimi-k2-6",
+  forwarded_body_hash: $hash,
+  required: true,
+  timeout_seconds: 300
+}' | uv run python scripts/private_ai_provider_verifier.py
 ```
+
+See the dated [router admissions review](review.md) for the inspected provider revision and historical conditions.
