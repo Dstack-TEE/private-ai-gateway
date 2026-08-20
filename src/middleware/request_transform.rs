@@ -191,26 +191,49 @@ pub fn transform_to_provider_request(
 
 /// Shape one body per candidate, preserving failover order. Each entry is the
 /// candidate's `route_id` and its transformed body.
+///
+/// A candidate that cannot shape THIS request is skipped (logged at debug,
+/// never surfaced to the client), and the remaining candidates keep the
+/// request alive: with capability filtering upstream, one mis-described
+/// backend must cost an attempt, not the whole request. Only when every
+/// candidate fails does the first error surface — that is a request nothing
+/// could serve, and the 400 it produces is the same one the all-or-nothing
+/// version produced.
 pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
     candidates: &[RouteCandidate],
     requested_reasoning: Option<&ReasoningConfig>,
 ) -> Result<Vec<(String, Value)>, TransformError> {
-    candidates
-        .iter()
-        .map(|candidate| {
-            let candidate_params =
-                candidate_params(params, endpoint, candidate, requested_reasoning)?;
-            let body = transform_to_provider_request(
-                candidate.format,
-                &candidate_params,
-                endpoint,
-                candidate.engine,
-            )?;
-            Ok((candidate.route_id.clone(), body))
-        })
-        .collect()
+    let mut shaped: Vec<(String, Value)> = Vec::new();
+    let mut first_error: Option<TransformError> = None;
+    for candidate in candidates {
+        let body = candidate_params(params, endpoint, candidate, requested_reasoning).and_then(
+            |candidate_params| {
+                transform_to_provider_request(
+                    candidate.format,
+                    &candidate_params,
+                    endpoint,
+                    candidate.engine,
+                )
+            },
+        );
+        match body {
+            Ok(body) => shaped.push((candidate.route_id.clone(), body)),
+            Err(err) => {
+                tracing::debug!(
+                    route_id = %candidate.route_id,
+                    error = %err,
+                    "candidate cannot shape this request; skipping"
+                );
+                first_error.get_or_insert(err);
+            }
+        }
+    }
+    match (shaped.is_empty(), first_error) {
+        (true, Some(err)) => Err(err),
+        _ => Ok(shaped),
+    }
 }
 
 fn candidate_params(
@@ -1461,6 +1484,41 @@ mod tests {
         )
         .unwrap();
         assert!(responses.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn build_candidates_skips_unshapeable_and_keeps_rest() {
+        let params = json!({ "model": "m", "input": "x" });
+        let shapeable = |id: &str| RouteCandidate {
+            route_id: id.into(),
+            format: ProviderFormat::Openai,
+            engine: None,
+            reasoning_format: None,
+            reasoning_policy: None,
+        };
+        // (Anthropic, Embed) has no transform: that candidate is skipped and
+        // the shapeable one still carries the request.
+        let unshapeable = RouteCandidate {
+            route_id: "anthropic:a".into(),
+            format: ProviderFormat::Anthropic,
+            engine: None,
+            reasoning_format: None,
+            reasoning_policy: None,
+        };
+        let bodies = build_candidates(
+            &params,
+            Endpoint::Embed,
+            &[unshapeable.clone(), shapeable("openai:b")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "openai:b");
+
+        // Only when EVERY candidate fails does the error surface — the same
+        // 400 the all-or-nothing version produced.
+        let err = build_candidates(&params, Endpoint::Embed, &[unshapeable], None);
+        assert!(err.is_err());
     }
 
     #[test]

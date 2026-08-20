@@ -254,6 +254,13 @@ const CHAT_USAGE: &[&str] = &[
     "total_tokens",
     "prompt_tokens_details",
     "completion_tokens_details",
+    // Prompt-cache counters, both public wire dialects (read/creation and
+    // hit/miss). Stripping them hid real cache activity from
+    // streaming clients — and from billing's cache_hit flag.
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
     "reasoning_tokens",
     "server_tool_use",
     "server_tool_use_details",

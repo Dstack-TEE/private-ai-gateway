@@ -387,6 +387,46 @@ async fn spawn_control_capturing(
     (format!("http://{addr}"), posts)
 }
 
+// Stub control plane that captures /consult/pre bodies AND /consult/post
+// reports — for asserting what the gateway sends, not only what it does.
+async fn spawn_control_capturing_pre(
+    pre_body: Value,
+) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) {
+    let pres: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let posts: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let pre = Arc::new(pre_body);
+    let pres_route = pres.clone();
+    let posts_route = posts.clone();
+    let app = Router::new()
+        .route(
+            "/consult/pre",
+            post(move |Json(body): Json<Value>| {
+                let pre = pre.clone();
+                let pres = pres_route.clone();
+                async move {
+                    pres.lock().unwrap().push(body);
+                    (axum::http::StatusCode::OK, Json((*pre).clone()))
+                }
+            }),
+        )
+        .route(
+            "/consult/post",
+            post(move |Json(body): Json<Value>| {
+                let posts = posts_route.clone();
+                async move {
+                    posts.lock().unwrap().push(body);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), pres, posts)
+}
+
 // Poll the captured reports for one matching `pred` (consult_post is fire-and-forget).
 async fn wait_for_post(posts: &Arc<Mutex<Vec<Value>>>, pred: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..40 {
@@ -405,6 +445,7 @@ fn middleware(control_url: String) -> Middleware {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        send_request_features: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -844,6 +885,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        send_request_features: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -859,6 +901,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1511,6 +1554,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        send_request_features: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -1527,6 +1571,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1571,6 +1616,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        send_request_features: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -1588,6 +1634,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: settled.clone(),
@@ -2028,4 +2075,71 @@ async fn capacity_retry_streaming_second_pass_commits_the_stream() {
         _ => panic!("the delayed second pass must commit the stream"),
     }
     assert_eq!(forwarded.lock().unwrap().len(), 2);
+}
+
+// ── Request features (Phase C) ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
+    let (control_url, pres, posts) = spawn_control_capturing_pre(json!({
+        "allow": true,
+        "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],
+        "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+    }))
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream(
+        200,
+        br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+    );
+
+    let response = mw.handle_completion(&service, chat_input()).await;
+    assert_eq!(response.status().as_u16(), 200);
+
+    let pre = pres.lock().unwrap().first().cloned().unwrap();
+    let features = &pre["request"];
+    assert!(
+        features["estimatedPromptTokens"].is_u64(),
+        "pre body must carry request features: {pre}"
+    );
+    assert_eq!(features["reasoning"], json!("unspecified"));
+    assert_eq!(features["responseFormat"], json!("text"));
+    assert_eq!(features["inputModalities"], json!(["text"]));
+    let hash = features["prefixHash"]
+        .as_str()
+        .expect("prefix hash")
+        .to_string();
+    assert_eq!(hash.len(), 32);
+
+    // The post report echoes the hash — billing keys cache affinity on it.
+    let report = wait_for_post(&posts, |r| r["selectedRouteId"].is_string()).await;
+    assert_eq!(report["prefixHash"].as_str(), Some(hash.as_str()));
+}
+
+#[tokio::test]
+async fn send_request_features_off_restores_the_featureless_pre_body() {
+    let (control_url, pres, _posts) = spawn_control_capturing_pre(json!({
+        "allow": false, "status": 403, "message": "denied"
+    }))
+    .await;
+    let mw = Middleware::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+        send_request_features: Some(false),
+        tee_only_domains: Vec::new(),
+    })
+    .unwrap();
+    let service = build_service();
+
+    let _ = mw.handle_completion(&service, chat_input()).await;
+    let pre = pres.lock().unwrap().first().cloned().unwrap();
+    // The rollback lever: off must mean the pre body of the featureless era,
+    // not a request field with empty innards.
+    assert!(
+        pre.get("request").is_none(),
+        "unexpected request field: {pre}"
+    );
 }

@@ -28,6 +28,7 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
+use super::request_features;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
@@ -237,6 +238,7 @@ pub async fn run(
     control: &ControlClient,
     service: &AciService,
     sse_keepalive_ms: Option<u64>,
+    send_request_features: bool,
     input: CompletionInput,
 ) -> Response {
     let CompletionInput {
@@ -325,8 +327,23 @@ pub async fn run(
     // it here would silently drop a caller's restrictions on a malformed field.
     let provider = params.get("provider");
 
+    // Content-derived scalars for request-aware routing; the content itself
+    // never leaves this process. Computed before the consult (its whole point
+    // is to inform it) and echoed on the post report via the meters below.
+    let request_features = if send_request_features {
+        request_features::extract(endpoint, &params, reasoning_requirements.as_ref())
+    } else {
+        None
+    };
+
     let consult = control
-        .consult_pre(model, api_key_hash.as_deref(), provider, tee_only)
+        .consult_pre(
+            model,
+            api_key_hash.as_deref(),
+            provider,
+            tee_only,
+            request_features.as_ref(),
+        )
         .await;
 
     let meter = Meter {
@@ -338,6 +355,9 @@ pub async fn run(
         spend_mode: consult.spend_mode,
         user_id: consult.user_id,
         virtual_key_id: consult.virtual_key_id,
+        prefix_hash: request_features
+            .as_ref()
+            .and_then(|features| features.prefix_hash.clone()),
         started,
     };
 
@@ -728,6 +748,7 @@ pub async fn run(
                 selected_route_id: Some(forward.selected_route.clone()),
                 attempt_index,
                 upstream_status,
+                prefix_hash: meter.prefix_hash.clone(),
                 started,
                 downstream_abort: downstream_abort.clone(),
                 settled: meter_settled.clone(),
@@ -990,6 +1011,9 @@ struct Meter<'a> {
     spend_mode: Option<SpendMode>,
     user_id: Option<i64>,
     virtual_key_id: Option<i64>,
+    /// Echoed on every report so billing can key cache affinity; see
+    /// `PostReport::prefix_hash`.
+    prefix_hash: Option<String>,
     started: Instant,
 }
 
@@ -1012,6 +1036,7 @@ impl Meter<'_> {
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,
+            prefix_hash: self.prefix_hash.clone(),
         }
     }
 

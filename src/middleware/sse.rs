@@ -76,6 +76,8 @@ pub struct StreamReport {
     pub selected_route_id: Option<String>,
     pub attempt_index: u32,
     pub upstream_status: u16,
+    /// Echoed on the settle report; see `PostReport::prefix_hash`.
+    pub prefix_hash: Option<String>,
     pub started: Instant,
     /// Set by the response-body wrapper when the downstream finalizer
     /// (receipt drafting / E2EE) errors mid-consumption. The meter's drop then
@@ -115,6 +117,7 @@ impl StreamReport {
             error_source: downstream.then_some(ErrorSource::Gateway),
             error_message: downstream
                 .then(|| "downstream finalizer aborted the response".to_string()),
+            prefix_hash: self.prefix_hash.clone(),
         };
         let control = self.control.clone();
         // Fire-and-forget. Guard against being called from a drop that runs
@@ -839,6 +842,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            send_request_features: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();
@@ -854,6 +858,7 @@ mod tests {
             selected_route_id: None,
             attempt_index: 0,
             upstream_status: 200,
+            prefix_hash: None,
             started: Instant::now(),
             downstream_abort: Arc::new(AtomicBool::new(false)),
             settled: Arc::new(AtomicBool::new(false)),

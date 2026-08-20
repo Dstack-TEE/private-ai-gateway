@@ -11,6 +11,7 @@ pub mod control;
 pub mod errors;
 pub mod pricing;
 pub mod reasoning;
+pub mod request_features;
 pub mod request_transform;
 pub mod response_transform;
 pub mod sse;
@@ -35,6 +36,8 @@ use errors::Surface;
 pub struct Middleware {
     control: ControlClient,
     sse_keepalive_ms: Option<u64>,
+    /// See `MiddlewareConfig::send_request_features`; `None` means on.
+    send_request_features: bool,
     /// Normalized (lowercased) TEE-only host set; see `MiddlewareConfig::tee_only_domains`.
     tee_only_domains: HashSet<String>,
 }
@@ -44,6 +47,7 @@ impl Middleware {
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
+            send_request_features: config.send_request_features.unwrap_or(true),
             tee_only_domains: config
                 .tee_only_domains
                 .iter()
@@ -99,7 +103,14 @@ impl Middleware {
         service: &AciService,
         input: CompletionInput,
     ) -> Response {
-        completion::run(&self.control, service, self.sse_keepalive_ms, input).await
+        completion::run(
+            &self.control,
+            service,
+            self.sse_keepalive_ms,
+            self.send_request_features,
+            input,
+        )
+        .await
     }
 }
 
@@ -133,6 +144,7 @@ mod tests {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            send_request_features: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();
@@ -159,6 +171,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            send_request_features: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();
@@ -175,6 +188,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            send_request_features: None,
             tee_only_domains: vec!["Tee.Example.com".to_string(), "  ".to_string()],
         })
         .unwrap();
