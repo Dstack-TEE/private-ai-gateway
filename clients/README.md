@@ -2,6 +2,10 @@
 
 Two client surfaces, library and command line:
 
+Both currently ship as source in this repository. The npm package is marked
+`private`, and the repository does not publish a prebuilt `aci` binary; build
+the library with npm or run the CLI with Cargo from a checkout.
+
 - [`verifier-ts`](verifier-ts) — `@phala/aci-verifier`, a TypeScript verifier
   for the browser and Node. One call, `verifyService(url)`, fetches the
   report with a fresh nonce and returns a full §9.1 transcript. It also

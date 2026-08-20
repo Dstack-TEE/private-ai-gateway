@@ -1,5 +1,10 @@
 # Router-Mode Soundness Review
 
+> [!NOTE]
+> This is a point-in-time audit of the revisions listed below, dated 2026-05-18.
+> Source paths and line numbers refer to the repository layout at that time. Use
+> the provider `verification.md` pages for the current gateway adapters.
+
 Reviewer: Codex (router-mode soundness lane only).
 Date: 2026-05-18 UTC.
 Scope: soundness, privacy, provenance, attested source/config/image/measurement,
@@ -271,8 +276,9 @@ What we do today (read-only review, no changes made):
   `ExternalProviderVerifier::private_inference(...)` and run our Python bridge
   `scripts/private_ai_provider_verifier.py` (`verify_tinfoil`, `verify_nearai`).
   Each returns one `channel_bindings` entry of type `tls_spki_sha256` bound to
-  the provider URL origin (`src/aci/verifier.rs:749-839`,
-  `scripts/private_ai_provider_verifier.py:286-376`).
+  the provider URL origin (`src/aci/verifier/providers.rs`,
+  `scripts/provider_verifier/tinfoil.py`, and
+  `scripts/provider_verifier/nearai.py`).
 - The ACI backend forwards over an HTTPS connection that enforces the verified
   SPKI; that part of the chain is consistent with what both routers expect.
 - We do not pin model-side measurements ourselves, do not surface the
@@ -419,4 +425,5 @@ change.
   beyond what is visible in this repo.
 - An end-to-end signature-verification audit of the response signature
   chain emitted by either provider; we relied on the existing
-  `examples/verify_aci_artifacts.rs` and `tests/receipt.rs` for that.
+  `aci audit` implementation under `src/bin/aci/` and `tests/receipt.rs` for
+  that.

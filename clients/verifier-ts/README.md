@@ -13,6 +13,9 @@ ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
 evidence) exactly as observed.
 
+The package is currently marked `private` and is built from this repository;
+it is not a supported npm release yet.
+
 ## What it verifies
 
 - **A whole service (§9.1):** `verifyService(url)` fetches the report with a

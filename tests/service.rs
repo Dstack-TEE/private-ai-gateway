@@ -69,7 +69,7 @@ impl SessionStore for FailingSessionStore {
         None
     }
 
-    fn list_sessions(&self, _provider: Option<&str>, _now: u64) -> Vec<AttestedSession> {
+    fn list_sessions(&self, _upstream_name: Option<&str>, _now: u64) -> Vec<AttestedSession> {
         Vec::new()
     }
 }

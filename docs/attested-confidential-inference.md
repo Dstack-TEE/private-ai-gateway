@@ -7,6 +7,12 @@ normative protocol definition is the [ACI Spec](../spec/aci.md).
 Primary reader: developers who call the OpenAI-compatible API and verifiers who
 need to prove which attested gateway served a response.
 
+> [!IMPORTANT]
+> Upstream verification is a request constraint, not a global gateway mode.
+> Set `provider.aci_verified` to `true`, or provide a non-empty
+> `provider.aci_session_ids` allowlist, when the request must fail closed unless
+> the selected upstream verifies.
+
 ## Placeholders
 
 | Placeholder | Meaning |
@@ -21,7 +27,7 @@ need to prove which attested gateway served a response.
 ## What Verification Proves
 
 The API returns normal OpenAI-compatible responses and adds verifiable evidence.
-A verifier checks two layers:
+A verifier answers three separate questions:
 
 1. The gateway attestation report proves which workload keyset serves the API:
    the hardware quote binds the keyset digest and the verifier's fresh nonce,
@@ -29,6 +35,9 @@ A verifier checks two layers:
 2. The per-response receipt proves request and response hashes, selected
    upstream verification, and the receipt signature under a key from the
    attested keyset.
+3. For an aggregator, the receipt's `upstream.verified` event and cited session
+   show which verified provider channel was used and preserve the claims,
+   binding, and evidence for independent policy appraisal.
 
 Verification does not rely on the product API server saying "verified". The
 verifier fetches artifacts, validates signatures and hashes locally, and applies
@@ -52,7 +61,8 @@ curl "$API_BASE_URL/v1/chat/completions" \
     "model": "'"$MODEL"'",
     "messages": [
       {"role": "user", "content": "Explain why attestation matters in one sentence."}
-    ]
+    ],
+    "provider": {"aci_verified": true}
   }'
 ```
 

@@ -1,101 +1,86 @@
-# Providers
+# Provider Verification
 
-One directory per upstream provider. Each holds up to two documents:
+This section documents the TEE provider adapters that can produce verified upstream sessions. It is for operators setting acceptance policy and reviewers auditing what each `verified` result actually proves.
 
-- **`verification.md`** — a living reference for **how the gateway verifies this provider
-  and what cryptographically binds the session** it then enforces. Tracks the code.
-- **`review.md`** — a point-in-time **admissions audit** against
-  [`audit-criteria.md`](audit-criteria.md) (verdict, criteria status, required adapter
-  changes, open questions).
+Provider pages use two document types:
 
-| Provider | TEE | Session binding | Verification | Audit |
+- `verification.md` is a living reference tied to the current adapter and forwarding code.
+- `review.md` is a dated admissions audit. It preserves the evidence and decision at that time and can contain unresolved work that has since moved.
+
+Do not use a dated review as a substitute for the living verification page or current source.
+
+## Provider matrix
+
+| Provider | Attested boundary | Enforced binding | Living reference | Dated audit |
 | --- | --- | --- | --- | --- |
-| Chutes | Intel TDX + NVIDIA CC | `e2ee_public_key_sha256` | [configuration](chutes/configuration.md), [verification](chutes/verification.md) | [review](chutes/review.md) |
-| NEAR AI | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](near-ai/verification.md) | [review](near-ai/review.md) |
-| Tinfoil | AMD SEV-SNP (or TDX) + NVIDIA CC | `tls_spki_sha256` | [verification](tinfoil/verification.md) | [review](tinfoil/review.md) |
-| AciService (first-party) | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](aci-service/verification.md) | — (first-party) |
-| PhalaDirect | Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](phala-direct/verification.md) | [review](phala-direct/review.md) |
-| SecretAI | AMD SEV-SNP or Intel TDX + NVIDIA CC | `tls_spki_sha256` | [verification](secret-ai/verification.md) | [review](secret-ai/review.md) |
+| ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
+| Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Review](chutes/review.md) |
+| NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Review](near-ai/review.md) |
+| Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Review](phala-direct/review.md) |
+| SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Review](secret-ai/review.md) |
+| Tinfoil | Confidential model router | `tls_spki_sha256` | [Verification](tinfoil/verification.md) | [Review](tinfoil/review.md) |
 
-The two columns are different document *types* — `verification.md` tracks the running
-code; `review.md` is a dated audit snapshot — so they are kept side by side rather than
-merged. The framework and cross-cutting reviews:
+`openai-compatible` and `anthropic` are supported transport adapters, but they do not create verified TEE sessions.
 
-- [`audit-criteria.md`](audit-criteria.md) — the admission framework, including
-  criteria 13 (source & platform provenance) and 14 (platform TCB freshness).
-- Source review lanes (router-mode providers):
-  [router-mode-soundness.md](../reviews/router-mode-soundness.md),
-  [router-mode-load-balancing-cache.md](../reviews/router-mode-load-balancing-cache.md),
-  and the process in [router-mode-provider-review.md](../router-mode-provider-review.md).
+## Shared verification invariant
 
-## Prefix-cache tenant isolation
+A provider verifier can return `verified` only with at least one enforceable channel binding. The request path then enforces the selected binding before forwarding the prompt:
 
-As observed on 2026-07-13, Private AI Gateway does not guarantee per-tenant
-prefix-cache partitioning for the active Kimi-K2.6 providers. The gateway
-preserves a caller's `cache_salt` but does not derive one from the authenticated
-Redpill tenant.
+- `tls_spki_sha256` pins `SHA256(SubjectPublicKeyInfo)` on the actual upstream TLS connection.
+- `e2ee_public_key_sha256` restricts Chutes selection to an attested instance and encrypts the request to that instance's ML-KEM public key.
 
-- Tinfoil [replaces `cache_salt`](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.118/cache_salt.go)
-  with a value derived from Redpill's shared upstream credential. The gateway
-  does not set `user_cache_secret`, so Redpill tenants share one namespace.
-- Chutes passes `cache_salt` to vLLM but does not generate it. Unsalted requests
-  share the serving instance's namespace.
+The verifier proves that the binding belongs to the attested workload according to that provider's evidence format. The forwarding backend proves that the connection or encrypted request uses the same binding. A receipt records the result and selected session.
 
-Tinfoil's behavior is attestation-backed. Chutes configuration is control-plane
-evidence and is not bound by its current attestation. The intended interface is
-caller-controlled: preserve `cache_salt` for Chutes and translate it to
-`user_cache_secret` for Tinfoil. The gateway should not derive or override the
-partition from Redpill tenant identity.
+This invariant is implemented across `src/aci/verifier/`, `src/aci/upstream/`, and `src/aggregator/service/forward.rs`. It is covered by provider bridge tests, upstream-verifier tests, and channel-binding tests.
 
-## The shared verification model
+## Claims are not uniform
 
-**A session binding is only trustworthy if it is bound into a verified attestation or
-an attestation-gated key-release protocol.** Every provider produces exactly one kind
-of binding. The bound value either lives inside the signed quote/report or identifies
-the attested policy that gates the provider's encryption secret. Each `verification.md`
-states plainly *what is bound* and *what a tamper rejects*.
+`verified` means that the provider adapter's mandatory checks and binding enforcement succeeded. It does not assert every session claim.
 
-The two binding types:
+The session layer records these claim states separately:
 
-- **`tls_spki_sha256`** — SHA-256 fingerprint of the upstream's TLS public key; the
-  backend enforces it against the actual upstream HTTPS connection before forwarding.
-- **`e2ee_public_key_sha256`** — SHA-256 of the upstream's end-to-end public key; the
-  backend encrypts the request body to that key, so only the attested enclave can
-  decrypt.
+- TEE attestation;
+- GPU attestation;
+- platform TCB freshness;
+- OS provenance;
+- serving-software provenance;
+- model-weight provenance.
 
-### Invariant: verified ⟹ enforceable binding
+Each can be asserted, refuted, or unknown. Apply relying-party policy to the claim source and evidence. In particular, do not equate a verified CPU channel with proven model weights or a CPU-bound GPU.
 
-A "verified" result that carries no enforceable channel binding is rejected
-(`src/aggregator/service/forward.rs`). Forwarding fails closed if the selected backend cannot enforce
-the accepted binding
-(`tests/upstream_verifier.rs::service_fails_if_selected_backend_cannot_enforce_channel_binding`).
-A provider can never be "verified but unpinned."
+The common audit rubric is [Provider audit criteria](audit-criteria.md). Cross-provider router reviews are preserved in [Router-mode soundness](../reviews/router-mode-soundness.md) and [Router load balancing and cache](../reviews/router-mode-load-balancing-cache.md).
 
-### The attested session record
+## Audit a request
 
-When an upstream is verified, `record_attested_upstream_session`
-(`src/aggregator/service/forward.rs`) content-addresses the verified binding,
-verifier id, target, claims, and evidence into a stable `session_id` (the
-SHA-256 of the served session bytes, 64-hex), stores an `AttestedSession`
-served by `GET /v1/aci/sessions/{session_id}`, and attaches that `session_id`
-to the receipt's `upstream.verified` event. `expires_at` bounds validity for
-new forwarding decisions; retention runs at least as long as any receipt
-citing it (see
-[../upstream-verification-lifecycle.md](../upstream-verification-lifecycle.md)).
+For a request that must use a verified provider:
 
-### How a relying party verifies it end-to-end
+1. Set `provider.aci_verified` to `true`, or send an approved `provider.aci_session_ids` allowlist.
+2. Verify the gateway report and establish its workload keyset.
+3. Verify the receipt signature and exact body hashes.
+4. Require an `upstream.verified` event with `required: true` and `result: verified`.
+5. Resolve its `session_id` through `GET /v1/aci/sessions/{session_id}`.
+6. Recompute the session identifier and evidence digest.
+7. Apply the provider-specific policy described by the living verification page.
 
-1. `GET /v1/aci/attestation?nonce=<random>` — verify the gateway's own ACI report.
-2. `GET /v1/aci/receipts/{chat_id}` — verify the receipt signature under the attested keyset.
-3. Read `upstream.verified.session_id`; `GET /v1/aci/sessions/{session_id}`.
-4. Recompute the SHA-256 of the fetched session bytes and confirm it equals the
-   cited `session_id` (nothing the middleware can forge), then audit the
-   record's channel bindings, claims, and evidence digest.
-5. The gateway has already enforced that binding on the wire before forwarding.
+The full client flow is in [Verify an attested inference](../attested-confidential-inference.md).
 
-`scripts/live_e2e/user_verify.py` and `scripts/live_e2e/cases/attested_sessions.py`
-implement this check; `verified_upstream_binding_creates_attested_session` covers record
-creation.
+## Prefix-cache isolation observation
 
-A soundness pass (2026-06) tamper-tested every provider against its live upstream; each
-`verification.md` records those results under "What a tamper rejects".
+The following is a dated operational observation, not a protocol guarantee: as observed on 2026-07-13, the gateway preserved caller-supplied `cache_salt` but did not derive a tenant-specific cache partition for the active Tinfoil and Chutes routes. Tinfoil and Chutes applied their own provider behavior after forwarding.
+
+Revalidate provider code and deployment configuration before relying on cache partitioning. Attestation can bind a provider implementation, but it does not turn an unreviewed cache policy into tenant isolation.
+
+## Updating a provider page
+
+When verifier behavior changes, update the living page in the same change. Include:
+
+- the evidence endpoints and freshness mechanism;
+- every mandatory rejection check;
+- the exact value bound into hardware evidence;
+- how forwarding enforces that value;
+- typed claims and their sources;
+- evidence or checks that are supplemental only;
+- current tests and a repository-relative reproduction command;
+- limitations that affect a relying-party decision.
+
+Preserve old audit results as dated records. Add a short supersession note rather than rewriting what the earlier audit observed.
