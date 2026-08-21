@@ -11,6 +11,7 @@ pub mod control;
 pub mod errors;
 pub mod pricing;
 pub mod reasoning;
+pub mod request_features;
 pub mod request_transform;
 pub mod response_transform;
 pub mod sse;
@@ -35,15 +36,35 @@ use errors::Surface;
 pub struct Middleware {
     control: ControlClient,
     sse_keepalive_ms: Option<u64>,
+    /// See `MiddlewareConfig::send_request_features`; `None` means on.
+    send_request_features: bool,
+    /// See `MiddlewareConfig::prefix_hash_secret`.
+    prefix_hash_secret: Option<String>,
     /// Normalized (lowercased) TEE-only host set; see `MiddlewareConfig::tee_only_domains`.
     tee_only_domains: HashSet<String>,
 }
 
 impl Middleware {
     pub fn new(config: &MiddlewareConfig) -> Result<Self, String> {
+        // A weak key would silently void the documented guarantee ("control
+        // cannot dictionary-test"): HMAC with an empty or guessable secret is
+        // as computable as the plain hash. Refuse to start rather than run
+        // with a promise the configuration cannot keep.
+        if let Some(secret) = &config.prefix_hash_secret {
+            if secret.trim().len() < 32 {
+                return Err(format!(
+                    "middleware.prefix_hash_secret is {} bytes after trimming; a keyed \
+                     prefix hash needs a random secret of at least 32 bytes — unset it \
+                     entirely for the (documented) plain-SHA-256 fallback",
+                    secret.trim().len()
+                ));
+            }
+        }
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
+            send_request_features: config.send_request_features.unwrap_or(true),
+            prefix_hash_secret: config.prefix_hash_secret.clone(),
             tee_only_domains: config
                 .tee_only_domains
                 .iter()
@@ -99,7 +120,15 @@ impl Middleware {
         service: &AciService,
         input: CompletionInput,
     ) -> Response {
-        completion::run(&self.control, service, self.sse_keepalive_ms, input).await
+        completion::run(
+            &self.control,
+            service,
+            self.sse_keepalive_ms,
+            self.send_request_features,
+            self.prefix_hash_secret.as_deref(),
+            input,
+        )
+        .await
     }
 }
 
@@ -124,6 +153,28 @@ mod tests {
         format!("http://{addr}")
     }
 
+    #[test]
+    fn refuses_a_prefix_hash_secret_too_weak_to_key_anything() {
+        let config = |secret: Option<&str>| MiddlewareConfig {
+            control_url: "http://control.example".to_string(),
+            control_token: None,
+            control_timeout_ms: None,
+            control_post_timeout_ms: None,
+            sse_keepalive_ms: None,
+            send_request_features: None,
+            prefix_hash_secret: secret.map(str::to_string),
+            tee_only_domains: Vec::new(),
+        };
+        // Empty and short secrets would make the HMAC as computable as the
+        // plain hash while the docs promise otherwise — starting up would be
+        // running with a broken promise.
+        for weak in ["", "   ", "test", "0123456789012345678901234567890"] {
+            assert!(Middleware::new(&config(Some(weak))).is_err(), "{weak:?}");
+        }
+        assert!(Middleware::new(&config(Some(&"x".repeat(32)))).is_ok());
+        assert!(Middleware::new(&config(None)).is_ok());
+    }
+
     #[tokio::test]
     async fn handle_catalog_relays_control_response() {
         let base_url = spawn_stub_control().await;
@@ -133,6 +184,8 @@ mod tests {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();
@@ -159,6 +212,8 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
         })
         .unwrap();
@@ -175,6 +230,8 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            send_request_features: None,
+            prefix_hash_secret: None,
             tee_only_domains: vec!["Tee.Example.com".to_string(), "  ".to_string()],
         })
         .unwrap();

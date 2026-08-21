@@ -228,4 +228,8 @@ pub struct PostReport {
     pub error_source: Option<ErrorSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Echo of the pre-consult request features' prefix hash, so billing can
+    /// record which deployment actually served this prefix (cache affinity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_hash: Option<String>,
 }

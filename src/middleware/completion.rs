@@ -28,10 +28,11 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
+use super::request_features;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
-use super::types::{ErrorSource, PostReport, ProviderFormat, SpendMode};
+use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
 use super::{pricing, response_transform, stream_transform};
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -237,6 +238,8 @@ pub async fn run(
     control: &ControlClient,
     service: &AciService,
     sse_keepalive_ms: Option<u64>,
+    send_request_features: bool,
+    prefix_hash_secret: Option<&str>,
     input: CompletionInput,
 ) -> Response {
     let CompletionInput {
@@ -325,8 +328,28 @@ pub async fn run(
     // it here would silently drop a caller's restrictions on a malformed field.
     let provider = params.get("provider");
 
+    // Content-derived scalars for request-aware routing; the content itself
+    // never leaves this process. Computed before the consult (its whole point
+    // is to inform it) and echoed on the post report via the meters below.
+    let request_features = if send_request_features {
+        request_features::extract(
+            endpoint,
+            &params,
+            reasoning_requirements.as_ref(),
+            prefix_hash_secret.map(str::as_bytes),
+        )
+    } else {
+        None
+    };
+
     let consult = control
-        .consult_pre(model, api_key_hash.as_deref(), provider, tee_only)
+        .consult_pre(
+            model,
+            api_key_hash.as_deref(),
+            provider,
+            tee_only,
+            request_features.as_ref(),
+        )
         .await;
 
     let meter = Meter {
@@ -338,6 +361,9 @@ pub async fn run(
         spend_mode: consult.spend_mode,
         user_id: consult.user_id,
         virtual_key_id: consult.virtual_key_id,
+        prefix_hash: request_features
+            .as_ref()
+            .and_then(|features| features.prefix_hash.clone()),
         started,
     };
 
@@ -380,7 +406,7 @@ pub async fn run(
         return finalize_generated(status, body, &[], e2ee, outcome_ctx);
     }
 
-    let candidates = consult.candidates.clone().unwrap_or_default();
+    let candidates = drop_conflicting_route_twins(consult.candidates.clone().unwrap_or_default());
     if candidates.is_empty() {
         // Not found, not malformed — 404 is what the `model_not_found` body has
         // always said, and what an OpenAI-compatible client expects for a model
@@ -497,6 +523,12 @@ pub async fn run(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            // Looked up in the ORIGINAL list even though shaping may have
+            // skipped candidates: a route id names one deployment and a
+            // deployment has one format, so a repeated id (an ordered list
+            // may name a route twice) cannot disagree on format — and
+            // same-id copies shape identically, so a skip can never split
+            // them either.
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -728,6 +760,7 @@ pub async fn run(
                 selected_route_id: Some(forward.selected_route.clone()),
                 attempt_index,
                 upstream_status,
+                prefix_hash: meter.prefix_hash.clone(),
                 started,
                 downstream_abort: downstream_abort.clone(),
                 settled: meter_settled.clone(),
@@ -744,6 +777,12 @@ pub async fn run(
             // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
             // comments are injected downstream and never enter its line reassembly.
             let response_header_map = gateway_owned_headers(&content_type);
+            // Looked up in the ORIGINAL list even though shaping may have
+            // skipped candidates: a route id names one deployment and a
+            // deployment has one format, so a repeated id (an ordered list
+            // may name a route twice) cannot disagree on format — and
+            // same-id copies shape identically, so a skip can never split
+            // them either.
             let selected_format = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
@@ -978,6 +1017,30 @@ pub async fn run(
     }
 }
 
+/// Enforce at the consult boundary what the selected-format lookups below
+/// assume: one route id, one description. A repeated id is legitimate (an
+/// ordered candidate list may name a route twice), but only as an IDENTICAL copy —
+/// a later copy that disagrees on format/engine/anything would make the
+/// route-id -> format lookup ambiguous, so it is dropped (keeping the first,
+/// which is what the lookups resolve to anyway) and logged as control's bug.
+/// This turns the invariant from an assumption about our control plane into a
+/// property of whatever arrives on the wire.
+fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
+    let mut kept: Vec<RouteCandidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match kept.iter().find(|k| k.route_id == candidate.route_id) {
+            Some(first) if *first != candidate => {
+                tracing::error!(
+                    route_id = %candidate.route_id,
+                    "control returned conflicting candidates under one route id; dropping the later copy"
+                );
+            }
+            _ => kept.push(candidate),
+        }
+    }
+    kept
+}
+
 // Posts usage reports to the control plane (fire-and-forget). Buffered reports
 // have no TTFT and `is_streaming = false`; the status recorded is the raw upstream
 // status, distinct from the client-facing mapped status.
@@ -990,6 +1053,9 @@ struct Meter<'a> {
     spend_mode: Option<SpendMode>,
     user_id: Option<i64>,
     virtual_key_id: Option<i64>,
+    /// Echoed on every report so billing can key cache affinity; see
+    /// `PostReport::prefix_hash`.
+    prefix_hash: Option<String>,
     started: Instant,
 }
 
@@ -1012,6 +1078,7 @@ impl Meter<'_> {
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,
+            prefix_hash: self.prefix_hash.clone(),
         }
     }
 
@@ -1338,6 +1405,33 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
+        RouteCandidate {
+            route_id: route_id.into(),
+            format,
+            engine: None,
+            reasoning_format: None,
+            reasoning_policy: None,
+        }
+    }
+
+    #[test]
+    fn conflicting_route_twins_are_dropped_identical_ones_kept() {
+        let kept = drop_conflicting_route_twins(vec![
+            twin("a:m", ProviderFormat::Anthropic),
+            // Identical repeat: an ordered list may name a route twice.
+            twin("a:m", ProviderFormat::Anthropic),
+            // Conflicting repeat: would make the format lookup ambiguous.
+            twin("a:m", ProviderFormat::Openai),
+            twin("b:m", ProviderFormat::Openai),
+        ]);
+        assert_eq!(kept.len(), 3);
+        assert!(kept[..2]
+            .iter()
+            .all(|c| c.format == ProviderFormat::Anthropic));
+        assert_eq!(kept[2].route_id, "b:m");
+    }
 
     #[test]
     fn observed_failure_policy() {
