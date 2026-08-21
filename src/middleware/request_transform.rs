@@ -197,20 +197,46 @@ pub fn build_candidates(
     candidates: &[RouteCandidate],
     requested_reasoning: Option<&ReasoningConfig>,
 ) -> Result<Vec<(String, Value)>, TransformError> {
+    build_candidates_with_user_tier(params, endpoint, candidates, requested_reasoning, None)
+}
+
+/// Shape candidate bodies and apply tier-derived request priority to Phala routes.
+pub(super) fn build_candidates_with_user_tier(
+    params: &Value,
+    endpoint: Endpoint,
+    candidates: &[RouteCandidate],
+    requested_reasoning: Option<&ReasoningConfig>,
+    user_tier: Option<&str>,
+) -> Result<Vec<(String, Value)>, TransformError> {
     candidates
         .iter()
         .map(|candidate| {
             let candidate_params =
                 candidate_params(params, endpoint, candidate, requested_reasoning)?;
-            let body = transform_to_provider_request(
+            let mut body = transform_to_provider_request(
                 candidate.format,
                 &candidate_params,
                 endpoint,
                 candidate.engine,
             )?;
+            inject_phala_priority(&mut body, candidate, user_tier);
             Ok((candidate.route_id.clone(), body))
         })
         .collect()
+}
+
+fn inject_phala_priority(body: &mut Value, candidate: &RouteCandidate, user_tier: Option<&str>) {
+    let priority = match user_tier {
+        Some("premium") => -100,
+        _ => 0,
+    };
+    let is_phala = matches!(candidate.route_id.split_once(':'), Some(("phala", _)));
+    if !is_phala {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert("priority".to_string(), Value::from(priority));
+    }
 }
 
 fn candidate_params(
