@@ -184,7 +184,7 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     let mut params = params.clone();
-    inject_stream_options(&mut params);
+    inject_stream_options(&mut params, endpoint);
     let config = select_config(format, endpoint, engine)?;
     transform_using_provider_config(&config, &params)
 }
@@ -558,17 +558,11 @@ fn set_nested_property(obj: &mut Value, path: &str, value: Value) {
         .insert(parts[parts.len() - 1].to_string(), value);
 }
 
-// Mutate `params` to request usage on streaming: only
-// when `stream === true` and `stream_options.include_usage` is not already true.
-fn inject_stream_options(params: &mut Value) {
-    if params.get("stream") != Some(&Value::Bool(true)) {
+fn inject_stream_options(params: &mut Value, endpoint: Endpoint) {
+    if !matches!(endpoint, Endpoint::ChatComplete | Endpoint::Complete) {
         return;
     }
-    let already = params
-        .get("stream_options")
-        .and_then(|so| so.get("include_usage"))
-        == Some(&Value::Bool(true));
-    if already {
+    if params.get("stream") != Some(&Value::Bool(true)) {
         return;
     }
     if let Some(obj) = params.as_object_mut() {
@@ -582,6 +576,14 @@ fn inject_stream_options(params: &mut Value) {
             .as_object_mut()
             .unwrap()
             .insert("include_usage".to_string(), Value::Bool(true));
+        stream_options
+            .as_object_mut()
+            .unwrap()
+            .insert("continuous_usage_stats".to_string(), Value::Bool(true));
+        obj.insert("continuous_usage_stats".to_string(), Value::Bool(true));
+        if endpoint == Endpoint::Complete {
+            obj.insert("include_usage".to_string(), Value::Bool(true));
+        }
     }
 }
 
@@ -1185,6 +1187,7 @@ fn openai_chat_complete_config(engine: Option<Engine>) -> ProviderConfig {
         "response_format",
         "top_logprobs",
         "stream_options",
+        "continuous_usage_stats",
         "service_tier",
         "parallel_tool_calls",
         "max_completion_tokens",
@@ -1233,6 +1236,8 @@ fn openai_chat_complete_config(engine: Option<Engine>) -> ProviderConfig {
 fn openai_complete_config() -> ProviderConfig {
     let mut config = pass!(
         "stream_options",
+        "include_usage",
+        "continuous_usage_stats",
         "stop",
         "best_of",
         "logit_bias",
@@ -1436,7 +1441,11 @@ mod tests {
             json!({ "model": "m", "messages": [], "stream": true }),
             None,
         );
-        assert_eq!(chat_out["stream_options"], json!({ "include_usage": true }));
+        assert_eq!(
+            chat_out["stream_options"],
+            json!({ "include_usage": true, "continuous_usage_stats": true })
+        );
+        assert_eq!(chat_out["continuous_usage_stats"], json!(true));
 
         // Legacy /v1/completions must also carry include_usage to upstream, or
         // usage-only streaming providers (e.g. vLLM) never emit a usage chunk
@@ -1450,7 +1459,28 @@ mod tests {
         .unwrap();
         assert_eq!(
             complete_out["stream_options"],
-            json!({ "include_usage": true })
+            json!({ "include_usage": true, "continuous_usage_stats": true })
+        );
+        assert_eq!(complete_out["include_usage"], json!(true));
+        assert_eq!(complete_out["continuous_usage_stats"], json!(true));
+
+        let existing_include_usage = chat(
+            ProviderFormat::Openai,
+            json!({
+                "model": "m",
+                "messages": [],
+                "stream": true,
+                "stream_options": { "include_usage": true }
+            }),
+            None,
+        );
+        assert_eq!(
+            existing_include_usage["stream_options"],
+            json!({ "include_usage": true, "continuous_usage_stats": true })
+        );
+        assert_eq!(
+            existing_include_usage["continuous_usage_stats"],
+            json!(true)
         );
 
         let responses = transform_to_provider_request(
@@ -1461,6 +1491,7 @@ mod tests {
         )
         .unwrap();
         assert!(responses.get("stream_options").is_none());
+        assert!(responses.get("continuous_usage_stats").is_none());
     }
 
     #[test]

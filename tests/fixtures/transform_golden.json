@@ -62,8 +62,10 @@
       "messages": [],
       "stream": true,
       "stream_options": {
-        "include_usage": true
-      }
+        "include_usage": true,
+        "continuous_usage_stats": true
+      },
+      "continuous_usage_stats": true
     }
   },
   {
