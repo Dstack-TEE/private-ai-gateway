@@ -33,6 +33,9 @@ pub enum Engine {
 /// OpenAI Chat Completions uses `reasoning_effort`. Some OpenAI-compatible
 /// providers instead expose a richer nested `reasoning` object, so candidates
 /// can opt into that dialect explicitly.
+///
+/// `thinking_type` is DeepSeek's shape: `thinking: {"type": "enabled" |
+/// "disabled"}` is the switch and `reasoning_effort` the level.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ReasoningFormat {
     #[serde(rename = "reasoning_effort")]
@@ -43,6 +46,8 @@ pub enum ReasoningFormat {
     ChatTemplateThinking,
     #[serde(rename = "chat_template_enable_thinking")]
     ChatTemplateEnableThinking,
+    #[serde(rename = "thinking_type")]
+    ThinkingType,
 }
 
 /// Canonical public/control reasoning effort.

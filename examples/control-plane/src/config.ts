@@ -25,7 +25,8 @@ export interface RouteCandidate {
     | 'reasoning_effort'
     | 'reasoning'
     | 'chat_template_thinking'
-    | 'chat_template_enable_thinking';
+    | 'chat_template_enable_thinking'
+    | 'thinking_type';
 }
 
 export interface ModelEntry {
