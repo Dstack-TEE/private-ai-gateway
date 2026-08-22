@@ -384,10 +384,13 @@ pub async fn run(
                 &detail_snippet(message.as_bytes()),
             );
         }
-        // Record 5xx and 429 denials as gateway failures; other user denials
-        // (401/402/404) are caller-attributable and left unrecorded. Tagging
-        // these ErrorSource::Control keeps them out of upstream-health signals.
-        if status == 429 || status >= 500 {
+        // Report every denial the control plane could attribute to a key
+        // (identity present), plus 429/5xx regardless. Unauthenticated
+        // denials (401/402/403, malformed-body 400) stay unreported: a report
+        // without identity is unattributable and a scanner would otherwise
+        // flood the usage pipeline. ErrorSource::Control keeps these out of
+        // upstream-health signals.
+        if consult.user_id.is_some() || status == 429 || status >= 500 {
             meter.gateway_failure(status, ErrorSource::Control, message, stream);
         }
         if status == 429 {
@@ -425,6 +428,9 @@ pub async fn run(
                 "",
             );
         }
+        // The control plane answered with nothing to route to; report it as
+        // its failure so the request is accounted for, like a denial.
+        meter.gateway_failure(404, ErrorSource::Control, &message, stream);
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
         return finalize_generated(404, body, &[], e2ee, outcome_ctx);
     }

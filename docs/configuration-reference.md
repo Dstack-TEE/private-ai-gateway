@@ -73,7 +73,12 @@ pipeline) emits a `request_outcome` tracing line carrying the client-facing
 and upstream status, route, attempt chain length, TTFT/duration, finish
 reasons, and terminal marker. Requests rejected before that path — malformed
 JSON, oversized bodies, E2EE setup failures — do not produce lines, so
-complete request accounting still needs the usage pipeline. A request emits
+complete request accounting still needs the usage pipeline. Consult denials
+that carry a key identity (`userId` on the pre-consult response), every
+429/5xx denial, and the no-route 404 are also reported to the usage
+pipeline (`errorSource: "control"`, no route) so the control plane can
+account for them; unauthenticated denials (401/402/403) are trace-only. A
+request emits
 at most one primary line; a late receipt/E2EE finalization failure appends
 one supplemental `phase=finalize_error` line for the same `request_id`
 (aggregate by unique request id, letting `finalize_error` supersede).
