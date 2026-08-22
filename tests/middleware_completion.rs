@@ -590,6 +590,55 @@ async fn denial_returns_forbidden_envelope() {
 }
 
 #[tokio::test]
+async fn identity_bearing_denial_is_reported_as_a_control_failure() {
+    // A 4xx denial the control plane attributed to a key must reach the
+    // usage pipeline: reported with errorSource "control", the identity, and
+    // no route — not a 5xx, not a 429, yet still accounted for.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": false,
+            "status": 400,
+            "message": "This model does not support image input.",
+            "userId": 7,
+            "virtualKeyId": 3
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service();
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 400);
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(400)).await;
+    assert_eq!(report["errorSource"], json!("control"));
+    assert_eq!(report["userId"], json!(7));
+    assert_eq!(report["virtualKeyId"], json!(3));
+    assert!(report["selectedRouteId"].is_null());
+    assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn empty_candidates_is_reported_as_a_control_failure() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [], "userId": 7, "virtualKeyId": 3 }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service();
+
+    let (status, _, _) = response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 404);
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(404)).await;
+    assert_eq!(report["errorSource"], json!("control"));
+    assert_eq!(report["userId"], json!(7));
+    assert!(report["selectedRouteId"].is_null());
+}
+
+#[tokio::test]
 async fn control_unavailable_fails_closed() {
     // Unreachable control plane -> consult_pre fails closed with a 503 denial.
     let mw = middleware("http://127.0.0.1:1".to_string());
