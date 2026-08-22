@@ -1,0 +1,36 @@
+{
+  "name": "pi-provider-phala-cloud",
+  "version": "0.2.0",
+  "description": "Phala Cloud Confidential AI for Pi — attested TLS (SPKI) pinning + per-response receipt verification",
+  "keywords": [
+    "ai-provider",
+    "attestation",
+    "confidential-ai",
+    "phala",
+    "phala-cloud",
+    "pi",
+    "pi-provider",
+    "tee",
+    "verifiable"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "package.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@phala/pi-provider-aci": "^0.2.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

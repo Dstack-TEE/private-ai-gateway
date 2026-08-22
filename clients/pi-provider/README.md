@@ -1,0 +1,81 @@
+# @phala/pi-provider-aci
+
+Vendor-neutral **Pi** provider for [private-ai-gateway] (the ACI protocol),
+with **attested TLS (SPKI) pinning** as the security control.
+
+This is the neutral core. Branded distributions add their identity on top and
+publish their own npm packages:
+
+- [`pi-provider-redpill`](https://www.npmjs.com/package/pi-provider-redpill) — Redpill AI
+- [`pi-provider-phala-cloud`](https://www.npmjs.com/package/pi-provider-phala-cloud) — Phala Cloud
+
+Both are thin skins over this package (`createProvider` with a brand profile) —
+they are interchangeable, and the underlying protocol code lives here once.
+
+## Threat model: prevention, not audit
+
+This plugin's job is **prevention**: make sure the request and response are
+readable only by the attested workload. It does NOT do per-response receipt
+verification. The gateway still stamps `x-receipt-id` on every reply and serves
+signed receipts — those are a post-hoc audit trail, and this plugin deliberately
+does not consume them. If you want audit, verify receipts with the repo's
+reference verifier ([`@phala/aci-verifier`](../verifier-ts)) directly.
+
+## Install (core)
+
+```bash
+pi install npm:@phala/pi-provider-aci
+export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
+export ACI_LLM_API_KEY=...
+```
+
+## What it adds
+
+- OpenAI-compatible provider (`aci`) with live model discovery from
+  `/v1/models` (no hardcoded catalog).
+- `is_tee` filtering — only confidentially-served models are registered by default.
+- **Attested TLS (SPKI) pinning.** At session start the gateway attestation is
+  fetched and validated, then the TLS connection is pinned to the attested
+  `workload_keyset.tls_public_keys` SPKI. **Fail closed by default**: with
+  `pinning.enabled` (the default) an unpinnable session blocks inference rather
+  than silently downgrading to plain CA-TLS — the `failOpenOnUnpinned` setting
+  opts into the old footer-warning behavior.
+- `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
+  The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
+  verified) from each response, and the user can show the receipt document or
+  an attested session on demand with `/aci-receipt [id]` / `/aci-session <id>`
+  (`/attestation` shows the pinned report: keyset digest, binding, keys, expiry).
+
+## How the pin is established
+
+`src/aci-client.ts` fetches the attestation report and delegates binding to
+`@phala/aci-verifier` (`verifyReportBinding`, the repo's reference verifier):
+- recomputes the keyset digest from the served keyset (not trusted from the
+  report),
+- checks `report_data` binds our fresh nonce,
+- checks `not_after`.
+
+Only a report that passes binding yields an SPKI pin, so the pin is
+**attested** — not trust-on-first-use. `src/tls-pinning.ts` then wraps
+`globalThis.fetch` so hosts with a pin go through a dispatcher whose
+`checkServerIdentity` fails the TLS handshake when the peer SPKI does not
+match. Mismatch refuses the connection; a required-but-unpinned host blocks
+inference (the ACI bootstrap endpoints stay reachable to establish the pin).
+
+## Branding / profiles
+
+`createProvider(profile)` registers the provider with a brand identity:
+
+```ts
+import { createProvider } from "@phala/pi-provider-aci";
+export default createProvider({
+  providerId: "my-brand",
+  label: "My Brand",
+  defaultBaseUrl: "https://gateway.example/v1",
+  apiKeyEnv: "MY_LLM_API_KEY",
+  envPrefix: "MY",
+  fallbackModels: [...],
+});
+```
+
+[private-ai-gateway]: https://github.com/Dstack-TEE/private-ai-gateway
