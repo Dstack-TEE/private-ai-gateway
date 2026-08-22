@@ -48,3 +48,27 @@ jobs:
       - name: Test
         working-directory: clients/pi-provider
         run: npm test
+
+  pack-artifacts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/verifier-ts/package-lock.json
+
+      - name: Install verifier
+        working-directory: clients/verifier-ts
+        run: npm ci
+
+      - name: Install pi (for artifact smoke)
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+      - name: Pack brand artifacts
+        working-directory: clients/pi-provider
+        run: make pack
+        env:
+          PI_OFFLINE: "1"

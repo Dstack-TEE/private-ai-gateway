@@ -1,0 +1,6 @@
+[submodule "clients/release/pi-provider-phala-cloud"]
+	path = clients/release/pi-provider-phala-cloud
+	url = https://github.com/Phala-Network/pi-provider-phala-cloud.git
+[submodule "clients/release/pi-provider-redpill"]
+	path = clients/release/pi-provider-redpill
+	url = https://github.com/redpill-ai/pi-provider-redpill.git

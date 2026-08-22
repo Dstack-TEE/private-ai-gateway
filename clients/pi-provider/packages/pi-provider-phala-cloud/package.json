@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-phala-cloud",
   "version": "0.2.0",
-  "description": "Phala Cloud Confidential AI for Pi — attested TLS (SPKI) pinning + per-response receipt verification",
+  "description": "Phala Cloud Confidential AI for Pi \u2014 attested TLS (SPKI) pinning (prevention)",
   "keywords": [
     "ai-provider",
     "attestation",

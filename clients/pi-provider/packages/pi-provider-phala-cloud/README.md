@@ -2,33 +2,27 @@
 
 Phala Cloud Confidential AI for Pi, powered by [private-ai-gateway].
 
-A thin, Phala Cloud-branded distribution of the vendor-neutral
-[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci): standard
-chat plus **attested TLS (SPKI) pinning** — the prompt and reply are readable
-only by the attested workload.
-
-## Install
+SoT brand skin for Phala Cloud (**attested TLS / SPKI pinning** — prevention,
+not receipt audit). Users install the **release artifact**, not this path:
 
 ```bash
-pi install npm:pi-provider-phala-cloud
+pi install git:github.com/Phala-Network/pi-provider-phala-cloud
+# or
+git clone https://github.com/Phala-Network/pi-provider-phala-cloud
+cd pi-provider-phala-cloud && npm install && pi -e .
 ```
 
-Sign in with a Phala Cloud account (`/login phala`, RFC 8628 device flow —
-no API key to manage), or set one directly:
-
-```bash
-export PHALA_LLM_API_KEY=...
-```
+Auth: `/login phala` (RFC 8628 device flow) or `PHALA_LLM_API_KEY`.
 
 ```text
 /login phala
-/model phala/openai/gpt-oss-20b
+/model phala/<model-id>
 ```
 
-Config: `/phala-settings` · Attestation status: `/attestation`
+Config: `/phala-settings` · Attestation: `/attestation`
 
-Interchangeable with `pi-provider-redpill` — both share the same
-protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral
-[`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci) instead.
+Kernel + verifier changes land in the monorepo (`pi-provider-aci`,
+`clients/verifier-ts`) and are packed into the artifact via
+`make -C clients/pi-provider pack-phala-cloud`.
 
 [private-ai-gateway]: https://github.com/Dstack-TEE/private-ai-gateway
