@@ -15,8 +15,10 @@ endpoints below).
   minimal example does not implement it. A candidate can return
   `effectiveReasoning` to override the normalized request. Candidates can set
   `reasoningFormat` to `"reasoning_effort"`, `"reasoning"`,
-  `"chat_template_thinking"` or `"chat_template_enable_thinking"` to select the
-  upstream parameter dialect explicitly. When omitted, the gateway preserves
+  `"chat_template_thinking"`, `"chat_template_enable_thinking"` or
+  `"thinking_type"` (DeepSeek's `thinking: {"type": ...}` switch, with
+  `reasoning_effort` as the level) to select the upstream parameter dialect
+  explicitly. When omitted, the gateway preserves
   its legacy behavior: managed routes use nested `reasoning`, while SGLang and
   vLLM routes use `reasoning_effort`.
 

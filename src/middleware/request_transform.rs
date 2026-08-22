@@ -256,6 +256,12 @@ fn candidate_params(
     for key in ["reasoning", "reasoning_effort", "include_reasoning"] {
         object.remove(key);
     }
+    // On the OpenAI wire `thinking` is the thinking_type dialect's key, written
+    // below from the effective reasoning and never taken from the caller. On
+    // the Anthropic wire it is the caller's own control and passes through.
+    if candidate.format == ProviderFormat::Openai {
+        object.remove("thinking");
+    }
     let Some(effective) = effective else {
         return Ok(params);
     };
@@ -294,6 +300,25 @@ fn candidate_params(
         }
         (ProviderFormat::Openai, ReasoningFormat::ChatTemplateEnableThinking) => {
             set_chat_template_reasoning(object, &effective, candidate, "enable_thinking")?;
+        }
+        (ProviderFormat::Openai, ReasoningFormat::ThinkingType) => {
+            if effective.max_tokens.is_some() {
+                return invalid_reasoning(candidate, "cannot represent max_tokens");
+            }
+            let Some(enabled) = reasoning_enabled(&effective) else {
+                return invalid_reasoning(candidate, "reasoning configuration is empty");
+            };
+            object.insert(
+                "thinking".to_string(),
+                json!({ "type": if enabled { "enabled" } else { "disabled" } }),
+            );
+            // The level only means something next to an enabled switch.
+            if let Some(effort) = effective.effort.filter(|_| enabled) {
+                object.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String(effort.as_str().to_string()),
+                );
+            }
         }
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
@@ -1218,6 +1243,7 @@ fn openai_chat_complete_config(engine: Option<Engine>) -> ProviderConfig {
         "prediction",
         "reasoning",
         "reasoning_effort",
+        "thinking",
         "web_search_options",
         "prompt_cache_key",
         "safety_identifier",
@@ -1841,6 +1867,96 @@ mod tests {
             assert!(body.get("reasoning_effort").is_none());
             assert!(body.get("reasoning").is_none());
         }
+    }
+
+    /// DeepSeek's dialect: `thinking.type` is the switch, `reasoning_effort`
+    /// the level. The switch is always written; the level only next to an
+    /// enabled switch; a budget cannot be expressed at all.
+    #[test]
+    fn thinking_type_reasoning_format_writes_switch_and_level() {
+        let candidate: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "vendor:m",
+            "format": "openai",
+            "reasoningFormat": "thinking_type",
+        }))
+        .unwrap();
+        let shape = |request: Value| {
+            let (params, requested, _) =
+                crate::middleware::reasoning::normalize_chat_request(&request).unwrap();
+            build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                std::slice::from_ref(&candidate),
+                requested.as_ref(),
+            )
+            .map(|bodies| bodies[0].1.clone())
+        };
+        let base = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
+        let with = |field: &str, value: Value| {
+            let mut request = base.clone();
+            request[field] = value;
+            request
+        };
+
+        for (request, thinking, effort) in [
+            (with("reasoning_effort", "none".into()), "disabled", None),
+            (
+                with("reasoning", json!({ "enabled": false })),
+                "disabled",
+                None,
+            ),
+            (
+                with("reasoning", json!({ "effort": "high" })),
+                "enabled",
+                Some("high"),
+            ),
+            (
+                with("reasoning", json!({ "enabled": true })),
+                "enabled",
+                None,
+            ),
+            // A caller's chat-template switch is read as intent on a route
+            // that declares a dialect, and lands in this dialect.
+            (
+                with(
+                    "chat_template_kwargs",
+                    json!({ "thinking": false, "enable_thinking": false }),
+                ),
+                "disabled",
+                None,
+            ),
+        ] {
+            let body = shape(request.clone()).unwrap();
+            assert_eq!(body["thinking"], json!({ "type": thinking }), "{request}");
+            assert_eq!(
+                body.get("reasoning_effort").and_then(Value::as_str),
+                effort,
+                "{request}"
+            );
+            assert!(body.get("reasoning").is_none(), "{request}");
+        }
+
+        // A budget has no encoding on this wire.
+        assert!(shape(with("reasoning", json!({ "max_tokens": 512 }))).is_err());
+
+        // With nothing to say the switch stays absent, and a caller-supplied
+        // `thinking` does not stand in for it: on the OpenAI wire the gateway
+        // owns that key. On the Anthropic wire it is the caller's own control
+        // and still passes through.
+        let callers = with(
+            "thinking",
+            json!({ "type": "enabled", "budget_tokens": 1024 }),
+        );
+        let body = shape(callers.clone()).unwrap();
+        assert!(body.get("thinking").is_none());
+        let anthropic: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "anthropic:m",
+            "format": "anthropic",
+        }))
+        .unwrap();
+        let bodies =
+            build_candidates(&callers, Endpoint::ChatComplete, &[anthropic], None).unwrap();
+        assert_eq!(bodies[0].1["thinking"]["budget_tokens"], 1024);
     }
 
     #[test]
