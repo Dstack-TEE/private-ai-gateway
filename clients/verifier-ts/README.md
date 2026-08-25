@@ -95,6 +95,44 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
 
+### Node: verified transport
+
+Node applications can establish an instance-scoped, SPKI-pinned connection
+and inject its `fetch` into an OpenAI-compatible SDK. The connection rejects
+HTTP, cross-origin requests, expired identities, and TLS peers whose SPKI is
+not in the verified workload keyset. It never replaces `globalThis.fetch`.
+
+```ts
+import OpenAI from 'openai';
+import { connectAci } from '@phala/aci-verifier/node';
+
+const aci = await connectAci({
+  baseURL: 'https://api.example.com/v1',
+  apiKey: process.env.ACI_API_KEY,
+  policy: {
+    requireProductionOs: true,
+    expectedSource: {
+      repoUrl: 'https://github.com/Dstack-TEE/private-ai-gateway',
+      repoCommit: '<reviewed-commit>',
+    },
+  },
+});
+
+const openai = new OpenAI({
+  baseURL: aci.baseURL,
+  apiKey: process.env.ACI_API_KEY,
+  fetch: aci.fetch,
+});
+
+await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
+await aci.close();
+```
+
+`expectedSource` is optional because deployments choose their own release
+policy, but applications making a reviewed-code claim should set it. Compose
+measurement proves what was measured into RTMR3; it does not independently
+prove that a self-declared repository commit was reviewed.
+
 Or drive the individual checks:
 
 ```ts
