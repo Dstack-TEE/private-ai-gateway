@@ -49,14 +49,14 @@ test('connectAci rejects a self-consistent report without a hardware quote', asy
   await assert.rejects(
     connectAci({
       baseURL: 'https://gateway.example/v1',
-      policy: { requireComposeMeasurement: false },
       bootstrapFetch: async (input) =>
         Response.json(await nonceReport(typeof input === 'string' ? input : input.toString())),
     }),
     (error: unknown) =>
       error instanceof AciConnectionError &&
       error.code === 'attestation_verification' &&
-      error.message.includes('id-1'),
+      error.message.includes('id-1') &&
+      error.message.includes('id-4'),
   );
 });
 

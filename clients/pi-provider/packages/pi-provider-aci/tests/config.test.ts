@@ -19,6 +19,20 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.baseUrl, "https://gateway.test/v1");
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
+  assert.deepEqual(validated.trust, {});
+});
+
+test("validateAciCloudConfig: normalizes accepted compose hashes", () => {
+  const validated = validateAciCloudConfig({
+    ...BASE,
+    trust: { acceptedComposeHashes: ["AB".repeat(32)] },
+  });
+  assert.deepEqual(validated.trust.acceptedComposeHashes, ["ab".repeat(32)]);
+});
+
+test("validateAciCloudConfig: rejects malformed compose hashes", () => {
+  const bad = { ...BASE, trust: { acceptedComposeHashes: ["not-a-hash"] } };
+  assert.throws(() => validateAciCloudConfig(bad), /64-character SHA-256 hex digest/);
 });
 
 test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {

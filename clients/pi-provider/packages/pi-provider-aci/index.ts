@@ -123,7 +123,14 @@ async function installAciConnection(state: AciRuntimeState): Promise<void> {
   }
 
   try {
-    const connection = await connectAci({ baseURL: state.config.baseUrl, apiKey });
+    const connection = await connectAci({
+      baseURL: state.config.baseUrl,
+      apiKey,
+      policy:
+        state.config.trust.acceptedComposeHashes === undefined
+          ? {}
+          : { acceptedComposeHashes: state.config.trust.acceptedComposeHashes },
+    });
     state.connection = connection;
     state.connectionError = undefined;
   } catch (error) {
@@ -428,6 +435,9 @@ async function runAttestationCommand(
   const e2eeKeys = keyset.e2ee_public_keys;
   const receiptKeys = keyset.receipt_signing_keys;
   const notAfter = keyset.not_after;
+  const releasePolicy = state.config.trust.acceptedComposeHashes?.length
+    ? "accepted"
+    : "measurement verified, not pinned";
   const keySummary = (keys: Array<{ key_id?: unknown; algo?: unknown }>) =>
     keys.length === 0
       ? "none"
@@ -436,6 +446,8 @@ async function runAttestationCommand(
     `${state.profile.label} attestation`,
     `API version: ${String(report.api_version)}`,
     `Keyset digest: ${identity.workloadKeysetDigest}`,
+    `Compose hash: ${identity.composeHash}`,
+    `Release policy: ${releasePolicy}`,
     `Report binding: verified`,
     `TLS SPKI pins: ${identity.tlsSpkiPins.join(", ")}`,
     `Keyset not_after: ${notAfter !== undefined ? new Date(notAfter * 1000).toISOString() : "unknown"}`,

@@ -12,6 +12,8 @@ pi provider extension:
   verified transport that applications can inject into OpenAI Node, OpenAI
   Agents JS, Vercel AI SDK, LangChain JS and other fetch-aware clients without
   replacing global fetch. Ships an ESM bundle for `<script type="module">`.
+  Both the Node transport and CLI can pin reviewed RTMR3-bound compose hashes;
+  self-declared repository and commit fields are informational labels.
   Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
   check (6) needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a
   pinned channel) — this client ships no E2EE (§6) this round.

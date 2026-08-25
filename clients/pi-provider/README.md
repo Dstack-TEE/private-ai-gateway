@@ -50,6 +50,11 @@ install command is `pi install npm:@phala/pi-provider-aci`.
   `workload_keyset.tls_public_keys` SPKI. This is an invariant of the provider,
   not a setting: an unverified or unpinnable session blocks inference rather
   than silently downgrading to plain CA-TLS.
+- **Optional reviewed-release pinning.** Set
+  `<PREFIX>_ACCEPTED_COMPOSE_HASHES` to a comma-separated list of reviewed
+  `sha256(app_compose)` values, or put them under
+  `trust.acceptedComposeHashes` in the provider config. The measured compose is
+  always verified; an allowlist additionally rejects unreviewed deployments.
 - `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
   The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
   verified) from each response, and the user can show the receipt document or
@@ -67,11 +72,19 @@ The provider creates an instance-scoped connection with `connectAci()` from
 - checks `not_after`,
 - verifies the TDX quote to the Intel root and confirms it binds the same
   `report_data`, and
+- verifies `sha256(app_compose)` is measured into RTMR3 and, when configured,
+  belongs to the reviewed compose allowlist, and
 - opens a normal hostname-validated TLS connection whose peer SPKI must match
   `workload_keyset.tls_public_keys`.
 
 Only a report that passes both binding and hardware verification yields an
 SPKI pin, so the pin is **attested** — not trust-on-first-use.
+
+Hardware verification alone says that some real TDX workload owns the TLS key;
+it does not identify a reviewed gateway release. Branded packages should ship
+their reviewed compose hashes through `acceptedComposeHashes` when their
+release pipeline publishes them. Until then `/attestation` explicitly reports
+`measurement verified, not pinned`.
 
 Pi's `openai-completions` adapter accepts a custom `fetch`, so the provider
 injects the connection's scoped fetch through `StreamOptions.fetch`. It never
@@ -97,6 +110,7 @@ export default createProvider({
   defaultBaseUrl: "https://gateway.example/v1",
   apiKeyEnv: "MY_LLM_API_KEY",
   envPrefix: "MY",
+  acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
   fallbackModels: [...],
 });
 ```

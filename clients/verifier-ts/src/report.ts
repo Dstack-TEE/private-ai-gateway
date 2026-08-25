@@ -121,7 +121,7 @@ function pushEqual(checks: Check[], name: string, actual: string, expected: stri
  */
 export async function verifyComposeMeasurement(
   report: AttestationReport,
-): Promise<{ ok: boolean; checks: Check[] }> {
+): Promise<{ ok: boolean; checks: Check[]; composeHash?: string }> {
   const ev = (report.attestation.evidence ?? {}) as Record<string, unknown>;
   const { event_log: eventLog, app_compose: appCompose, quote } = ev;
   if (typeof eventLog !== 'string' || typeof appCompose !== 'string' || typeof quote !== 'string') {
@@ -148,8 +148,9 @@ export async function verifyComposeMeasurement(
   const recomputed = (await sha256Hex(new TextEncoder().encode(appCompose))).toLowerCase();
   const composeOk = !duplicated && measured?.toLowerCase() === recomputed;
 
+  const ok = rtmrOk && composeOk;
   return {
-    ok: rtmrOk && composeOk,
+    ok,
     checks: [
       { name: 'rtmr3', ok: rtmrOk, ...(rtmrOk ? {} : { detail: 'event log RTMR3 != quote RTMR3' }) },
       {
@@ -164,6 +165,7 @@ export async function verifyComposeMeasurement(
             }),
       },
     ],
+    ...(ok ? { composeHash: recomputed } : {}),
   };
 }
 

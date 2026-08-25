@@ -36,6 +36,8 @@ export interface ProviderProfile {
     contextWindow: number;
     maxTokens: number;
   }>;
+  /** Reviewed compose hashes shipped by this branded release. */
+  acceptedComposeHashes?: readonly string[];
   /** Optional legacy env-var aliases for the base URL / API key (brand
    *  backward-compat). */
   baseUrlAliases?: string[];

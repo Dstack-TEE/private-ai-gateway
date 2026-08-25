@@ -19,7 +19,7 @@ evidence) exactly as observed.
   fresh nonce and runs the transcript — the quote to the Intel vendor root
   (check 1, via `@phala/dcap-qvl`), the binding chain (checks 2–3), and the
   compose measurement (check 4) when the service publishes `app_compose`.
-  Returns `{ verdict, lines, verification }`. `verifyQuote` and
+  Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
 - **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
   require the RTMR3 `os-image-hash` to be in this release's reviewed production
@@ -27,6 +27,10 @@ evidence) exactly as observed.
   step over RTMR3, not a dstack boot verifier. First use a dstack verifier to
   reconstruct MRTD/RTMR0-2 from the same evidence and bind them to
   `os_image_hash`; require the dstack result to report `is_valid: true`.
+- **Reviewed release allowlist (§1.3):** pass `acceptedComposeHashes` to accept
+  only reviewed `sha256(app_compose)` values measured into RTMR3. Without an
+  allowlist the measurement is verified and reported, but the verifier does
+  not claim that the release was reviewed.
 - **Report binding (§9.1 checks 2–3):** `verifyReportBinding(report, nonce)`
   recomputes the keyset digest over the served `workload_keyset` object's
   JCS form, rebuilds the attestation statement for the nonce you
@@ -120,10 +124,7 @@ const aci = await connectAci({
   apiKey,
   policy: {
     requireProductionOs: true,
-    expectedSource: {
-      repoUrl: 'https://github.com/Dstack-TEE/private-ai-gateway',
-      repoCommit: '<reviewed-commit>',
-    },
+    acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
   },
 });
 
@@ -142,10 +143,11 @@ await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
 await aci.close();
 ```
 
-`expectedSource` is optional because deployments choose their own release
-policy, but applications making a reviewed-code claim should set it. Compose
-measurement proves what was measured into RTMR3; it does not independently
-prove that a self-declared repository commit was reviewed.
+`source_provenance.repo_url` and `repo_commit` are published labels, not a
+cryptographic release identity. `acceptedComposeHashes` pins the value that is
+actually measured into RTMR3. Release automation should publish reviewed
+compose hashes alongside each deployment; clients must not learn and trust the
+first hash they observe.
 
 #### OpenAI Agents SDK
 

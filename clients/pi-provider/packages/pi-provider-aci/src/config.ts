@@ -37,6 +37,10 @@ export interface AciModelsConfig {
 export interface AciCloudConfig {
   baseUrl: string;
   models: AciModelsConfig;
+  trust: {
+    /** RTMR3-bound compose hashes reviewed by the operator or brand. */
+    acceptedComposeHashes?: string[];
+  };
   /** Default model id to surface first in /model. */
   defaultModel?: string;
 }
@@ -47,6 +51,9 @@ export type AciCloudConfigPatch = {
     isTeeOnly: unknown;
     thinkingFormat: unknown;
     allowlist: unknown;
+  }>;
+  trust?: Partial<{
+    acceptedComposeHashes: unknown;
   }>;
   defaultModel?: unknown;
 };
@@ -79,6 +86,7 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
     isTeeOnly: true,
     thinkingFormat: "auto",
   },
+  trust: {},
 };
 
 /** Profile default config with the base URL resolved from the supplied env. */
@@ -89,6 +97,10 @@ function defaultAciCloudConfig(
   return {
     ...DEFAULT_ACI_CLOUD_CONFIG,
     baseUrl: getBaseUrl(providerProfile, env) || DEFAULT_ACI_CLOUD_CONFIG.baseUrl,
+    trust:
+      providerProfile.acceptedComposeHashes === undefined
+        ? {}
+        : { acceptedComposeHashes: [...providerProfile.acceptedComposeHashes] },
   };
 }
 
@@ -202,6 +214,16 @@ function envConfigPatch(
   const defaultModel = read(`${prefix}_DEFAULT_MODEL`);
   if (defaultModel) patch.defaultModel = defaultModel;
 
+  const acceptedComposeHashes = read(`${prefix}_ACCEPTED_COMPOSE_HASHES`);
+  if (acceptedComposeHashes) {
+    patch.trust = {
+      acceptedComposeHashes: acceptedComposeHashes
+        .split(",")
+        .map((hash) => hash.trim())
+        .filter(Boolean),
+    };
+  }
+
   return patch;
 }
 
@@ -281,11 +303,37 @@ function validateModelsConfig(raw: unknown, configPath: string, pointer: string)
   };
 }
 
+function validateTrustConfig(
+  raw: unknown,
+  configPath: string,
+  pointer: string,
+): AciCloudConfig["trust"] {
+  const trust = requireRecord(raw, configPath, pointer);
+  const acceptedComposeHashes = requireStringArray(
+    trust.acceptedComposeHashes,
+    configPath,
+    `${pointer}/acceptedComposeHashes`,
+  );
+  for (const [index, hash] of (acceptedComposeHashes ?? []).entries()) {
+    if (!/^[0-9a-f]{64}$/i.test(hash)) {
+      fail(
+        configPath,
+        `${pointer}/acceptedComposeHashes/${index}`,
+        "expected a 64-character SHA-256 hex digest",
+      );
+    }
+  }
+  return acceptedComposeHashes === undefined
+    ? {}
+    : { acceptedComposeHashes: acceptedComposeHashes.map((hash) => hash.toLowerCase()) };
+}
+
 export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"): AciCloudConfig {
   const config = requireRecord(raw, configPath, "");
   return {
     baseUrl: requireString(config.baseUrl, configPath, "/baseUrl"),
     models: validateModelsConfig(config.models, configPath, "/models"),
+    trust: validateTrustConfig(config.trust, configPath, "/trust"),
     defaultModel: requireOptionalString(config.defaultModel, configPath, "/defaultModel"),
   };
 }

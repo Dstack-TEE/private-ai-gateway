@@ -21,11 +21,15 @@ not translate API protocols.
 From this repository:
 
 ```bash
-cargo run --bin aci -- serve https://gateway.example.com
+cargo run --bin aci -- serve https://gateway.example.com \
+  --accept-compose <reviewed-sha256-app-compose>
 ```
 
-The command verifies before listening and fails closed. The agent-facing base
-URLs are:
+The command verifies before listening and fails closed. `--accept-compose` is
+repeatable for a controlled release rotation. Without it, `aci serve` verifies
+and reports the measured compose but does not claim that the deployment is a
+reviewed release. Never populate this value from the first endpoint response.
+The agent-facing base URLs are:
 
 - OpenAI APIs: `http://127.0.0.1:4180/v1`
 - Anthropic Messages: `http://127.0.0.1:4180`
@@ -125,6 +129,11 @@ or an upstream Gemini CLI provider interface. A per-agent verifier would only
 duplicate security code and would not solve the protocol mismatch.
 
 ## Trust boundary
+
+`aci serve` and `connectAci()` share the same trust contract: fresh quote and
+keyset binding, measured compose appraisal, optional reviewed compose
+allowlist, identity expiry, and hostname/SPKI channel binding. Agent adapters
+only select an HTTP protocol and transport; they do not redefine verification.
 
 These configurations protect model HTTP traffic between the local verifier and
 the attested gateway. They do not automatically cover WebSockets, MCP servers,

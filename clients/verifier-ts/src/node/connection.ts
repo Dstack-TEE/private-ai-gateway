@@ -133,6 +133,9 @@ async function establishIdentity(
       ...(options.policy?.requireProductionOs === undefined
         ? {}
         : { requireProductionOs: options.policy.requireProductionOs }),
+      ...(options.policy?.acceptedComposeHashes === undefined
+        ? {}
+        : { acceptedComposeHashes: options.policy.acceptedComposeHashes }),
     });
   } catch (error) {
     throw new AciConnectionError(
@@ -142,8 +145,7 @@ async function establishIdentity(
     );
   }
 
-  const required = ['id-1', 'id-2', 'id-3'];
-  if (options.policy?.requireComposeMeasurement !== false) required.push('id-4');
+  const required = ['id-1', 'id-2', 'id-3', 'id-4'];
   if (options.policy?.requireProductionOs) required.push('policy-os');
   const failed = required
     .map((id) => ({ id, line: transcript.lines.find((line) => line.id === id) }))
@@ -157,14 +159,13 @@ async function establishIdentity(
       `ACI attestation verification failed: ${detail}`,
     );
   }
-  appraiseExpectedSource(report, options);
-
   const keyset = transcript.verification.keyset;
   const digest = transcript.verification.workloadKeysetDigest;
-  if (!keyset || !digest) {
+  const composeHash = transcript.composeHash;
+  if (!keyset || !digest || !composeHash) {
     throw new AciConnectionError(
       'attestation_verification',
-      'ACI attestation did not establish a workload keyset',
+      'ACI attestation did not establish a workload identity',
     );
   }
   const pins = tlsPinsForHost(keyset, hostname);
@@ -175,39 +176,12 @@ async function establishIdentity(
     report,
     keyset,
     workloadKeysetDigest: digest,
+    composeHash,
     tlsSpkiPins: pins,
     verifiedAt,
     expiresAt: keyset.not_after * 1000,
     transcript,
   };
-}
-
-function appraiseExpectedSource(report: AttestationReport, options: ConnectAciOptions): void {
-  const expected = options.policy?.expectedSource;
-  if (!expected) return;
-  if (!expected.repoUrl && !expected.repoCommit && !expected.imageDigest) {
-    throw new AciConnectionError(
-      'attestation_verification',
-      'policy.expectedSource must contain at least one exact source claim',
-    );
-  }
-  const actual = report.attestation.source_provenance;
-  const mismatches: string[] = [];
-  if (expected.repoUrl !== undefined && actual?.repo_url !== expected.repoUrl) {
-    mismatches.push(`repo_url=${String(actual?.repo_url)}`);
-  }
-  if (expected.repoCommit !== undefined && actual?.repo_commit !== expected.repoCommit) {
-    mismatches.push(`repo_commit=${String(actual?.repo_commit)}`);
-  }
-  if (expected.imageDigest !== undefined && actual?.image_digest !== expected.imageDigest) {
-    mismatches.push(`image_digest=${String(actual?.image_digest)}`);
-  }
-  if (mismatches.length > 0) {
-    throw new AciConnectionError(
-      'attestation_verification',
-      `ACI source policy rejected the workload: ${mismatches.join(', ')}`,
-    );
-  }
 }
 
 async function fetchAttestation(

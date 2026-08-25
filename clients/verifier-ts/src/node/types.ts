@@ -26,16 +26,13 @@ export class AciConnectionError extends AciError {
 }
 
 export interface AciPolicy {
-  /** Require source provenance to be backed by a compose measurement. Default: true. */
-  requireComposeMeasurement?: boolean;
   /** Appraise the measured dstack OS hash against the production allowlist. */
   requireProductionOs?: boolean;
-  /** Exact source claims accepted by the caller. Every supplied field must match. */
-  expectedSource?: {
-    repoUrl?: string;
-    repoCommit?: string;
-    imageDigest?: string;
-  };
+  /**
+   * Reviewed RTMR3-bound compose hashes accepted by this client. Empty or
+   * omitted means hardware-bound measurement without release pinning.
+   */
+  acceptedComposeHashes?: readonly string[];
 }
 
 export interface ConnectAciOptions {
@@ -59,6 +56,8 @@ export interface VerifiedAciIdentity {
   report: AttestationReport;
   keyset: WorkloadKeyset;
   workloadKeysetDigest: string;
+  /** RTMR3-bound sha256(app_compose). */
+  composeHash: string;
   tlsSpkiPins: readonly string[];
   verifiedAt: number;
   expiresAt: number;

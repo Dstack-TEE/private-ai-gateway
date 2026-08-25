@@ -4,7 +4,7 @@
 
 Give Node applications one verified ACI connection primitive, then keep Pi and
 other agent frameworks as thin transport adapters. Attestation verification,
-source appraisal, hostname validation and TLS SPKI pinning must have one
+measured-release appraisal, hostname validation and TLS SPKI pinning must have one
 implementation.
 
 ## Current design
@@ -34,9 +34,11 @@ uses `aci serve`; coding-agent CLI compatibility is documented in
    `file:` specifier. Publish the verifier first, then replace the Pi dependency
    with a normal semver range. Do not publish the current packages until both
    can install from a clean directory.
-2. **Expose deployment policy in Pi.** Map reviewed source claims and
-   `requireProductionOs` into `connectAci({ policy })`, with fail-closed config
-   validation and clear UI provenance.
+2. **Publish reviewed deployment identities.** The Pi core accepts reviewed
+   compose hashes from profile, config, or environment and passes them to
+   `connectAci({ policy })`. Redpill and Phala release pipelines still need to
+   publish their reviewed hashes and inject them into branded profiles; do not
+   derive them from a live endpoint.
 3. **Exercise package consumers.** Add one clean-install smoke for the packed
    verifier and one scoped-fetch integration test. Framework-specific example
    packages are unnecessary unless an upstream framework lacks a stable fetch
@@ -51,7 +53,7 @@ uses `aci serve`; coding-agent CLI compatibility is documented in
   repository-relative dependencies.
 - Two branded Pi providers can run in one process without sharing profile,
   config or connection state.
-- Invalid quote, source policy, hostname, SPKI, origin or identity expiry fails
+- Invalid quote, compose policy, hostname, SPKI, origin or identity expiry fails
   closed before model request bytes are sent.
 - OpenAI Node, OpenAI Agents JS, Vercel AI SDK and LangChain JS examples use the
   same `connectAci()` API.

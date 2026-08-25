@@ -45,6 +45,8 @@ export interface ReportTranscript {
   lines: TranscriptLine[];
   verdict: Verdict;
   verification: ReportVerification;
+  /** RTMR3-bound sha256(app_compose), present only when id-4 measured successfully. */
+  composeHash?: string;
 }
 
 export interface TranscriptOptions {
@@ -72,6 +74,12 @@ export interface TranscriptOptions {
    * after a dstack verifier binds the same evidence to the OS-image hash.
    */
   requireProductionOs?: boolean;
+  /**
+   * Reviewed RTMR3-bound compose hashes accepted by this verifier (§1.3).
+   * An empty or omitted list verifies and reports the measurement without
+   * claiming that the release was reviewed.
+   */
+  acceptedComposeHashes?: readonly string[];
 }
 
 const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
@@ -263,6 +271,9 @@ export async function verifyService(
     ...(options.requireProductionOs !== undefined
       ? { requireProductionOs: options.requireProductionOs }
       : {}),
+    ...(options.acceptedComposeHashes !== undefined
+      ? { acceptedComposeHashes: options.acceptedComposeHashes }
+      : {}),
     online: true,
   });
 }
@@ -339,6 +350,7 @@ export async function reportTranscript(
     typeof (report.attestation.evidence as Record<string, unknown> | undefined)?.app_compose ===
     'string';
   let composeVerified = false;
+  let composeHash: string | undefined;
   if (!declared) {
     lines.push(line(ID_TITLES, 'id-4', 'fail', 'the report declares no source provenance (§4.1)'));
   } else if (!publishesCompose) {
@@ -362,12 +374,35 @@ export async function reportTranscript(
     try {
       const compose = await verifyComposeMeasurement(report);
       composeVerified = compose.ok;
+      composeHash = compose.composeHash;
       const bad = compose.checks.find((c) => !c.ok);
-      lines.push(
-        compose.ok
-          ? line(ID_TITLES, 'id-4', 'pass', 'compose measured into RTMR3; sha256(app_compose) matches')
-          : line(ID_TITLES, 'id-4', 'fail', bad?.detail ?? 'compose measurement failed'),
-      );
+      const accepted = options.acceptedComposeHashes ?? [];
+      const releaseAccepted =
+        composeHash !== undefined &&
+        (accepted.length === 0 || accepted.some((hash) => hash.toLowerCase() === composeHash));
+      if (!compose.ok) {
+        lines.push(line(ID_TITLES, 'id-4', 'fail', bad?.detail ?? 'compose measurement failed'));
+      } else if (!releaseAccepted) {
+        lines.push(
+          line(
+            ID_TITLES,
+            'id-4',
+            'fail',
+            `measured compose-hash=${composeHash} is not in the accepted list`,
+          ),
+        );
+      } else {
+        lines.push(
+          line(
+            ID_TITLES,
+            'id-4',
+            'pass',
+            accepted.length > 0
+              ? `compose-hash=${composeHash} measured into RTMR3 and accepted by policy`
+              : `compose-hash=${composeHash} measured into RTMR3 (not pinned by policy)`,
+          ),
+        );
+      }
     } catch (e) {
       lines.push(
         line(
@@ -426,7 +461,12 @@ export async function reportTranscript(
 
   lines.push(channelLine(report, verification.keyset, options));
 
-  return { lines, verdict: computeVerdict(lines), verification };
+  return {
+    lines,
+    verdict: computeVerdict(lines),
+    verification,
+    ...(composeHash === undefined ? {} : { composeHash }),
+  };
 }
 
 /**
