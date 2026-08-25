@@ -52,7 +52,7 @@ futures-util = "0.3"
 # Serving the public entry directly (rather than via axum::serve) is what lets the
 # connection IO be wrapped with a write-idle timeout; axum 0.7 takes a concrete
 # TcpListener and offers no hook for that. Deliberately NOT hyper-util's
-# `server-auto`: it would pull in hyper/http2, and Cargo unifies features
+# `server-auto`: it would enable hyper-util/http2, and Cargo unifies features
 # crate-wide, so every axum::serve here would start negotiating HTTP/2 — where
 # flow control means a stalled reader never blocks the socket write and the
 # timeout below could never arm.

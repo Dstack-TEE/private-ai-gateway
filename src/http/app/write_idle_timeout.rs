@@ -170,12 +170,15 @@ mod tests {
         }
     }
 
-    /// An IO that accepts exactly one write, then stalls — models a downstream
-    /// that consumes for a while and only then stops reading.
-    struct StallsAfterOneWrite {
+    /// An IO that stalls, then accepts exactly one write, then stalls for good
+    /// — models a downstream that pauses reading, resumes briefly, and stops.
+    /// The leading stall matters: it is what arms the timer that the accepted
+    /// write must then reset.
+    struct StallsAroundOneWrite {
+        pending_before_accept: usize,
         accepted: bool,
     }
-    impl AsyncRead for StallsAfterOneWrite {
+    impl AsyncRead for StallsAroundOneWrite {
         fn poll_read(
             self: Pin<&mut Self>,
             _: &mut Context<'_>,
@@ -184,13 +187,16 @@ mod tests {
             Poll::Pending
         }
     }
-    impl AsyncWrite for StallsAfterOneWrite {
+    impl AsyncWrite for StallsAroundOneWrite {
         fn poll_write(
             mut self: Pin<&mut Self>,
             _: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             if self.accepted {
+                Poll::Pending
+            } else if self.pending_before_accept > 0 {
+                self.pending_before_accept -= 1;
                 Poll::Pending
             } else {
                 self.accepted = true;
@@ -212,33 +218,45 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
-    /// The other half of the invariant: progress must *reset* the deadline, not
-    /// merely delay the first arming. Without this, dropping `self.timer = None`
-    /// from the `Poll::Ready` arms would still pass the test above while cutting
-    /// every healthy stream at `idle` in production.
+    /// The other half of the invariant: progress must *reset* an already-armed
+    /// deadline. The timer is armed by a pending write, so the test must first
+    /// stall to arm it, then let the write through, then stall again — without
+    /// that leading stall, dropping `self.timer = None` from the `Poll::Ready`
+    /// arms would go unnoticed while cutting every healthy stream at `idle`.
     #[tokio::test(start_paused = true)]
     async fn accepted_write_resets_the_deadline() {
         let idle = Duration::from_secs(600);
-        let mut io = WriteIdleTimeout::new(StallsAfterOneWrite { accepted: false }, idle);
+        let mut io = WriteIdleTimeout::new(
+            StallsAroundOneWrite {
+                pending_before_accept: 1,
+                accepted: false,
+            },
+            idle,
+        );
 
-        // First write is accepted well into the window; the deadline must restart
-        // from here rather than from the connection's start.
-        tokio::time::advance(Duration::from_secs(500)).await;
-        let written = io
-            .write(b"first")
-            .await
-            .expect("accepted write must succeed");
-        assert_eq!(written, 5, "the stub accepts the whole buffer");
-
-        // A second write now stalls. If the timer had not been reset it would
-        // fire ~100s from now; it must instead take the full idle window.
+        // First poll goes pending and arms the timer at t=0. Wake it well into
+        // the window; the stub then accepts, which must discard that timer.
         let start = tokio::time::Instant::now();
+        let mut first = std::pin::pin!(io.write(b"first"));
+        assert!(
+            futures_util::poll!(first.as_mut()).is_pending(),
+            "the stub must stall the first poll so the timer gets armed"
+        );
+        tokio::time::advance(Duration::from_secs(500)).await;
+        let written = first.await.expect("accepted write must succeed");
+        assert_eq!(written, 5, "the stub accepts the whole buffer");
+        assert_eq!(start.elapsed(), Duration::from_secs(500));
+
+        // A second write now stalls. Had the accepted write not reset the timer
+        // armed at t=0 it would fire at t=600, ~100s from now; it must instead
+        // take the full idle window from here.
+        let resumed = tokio::time::Instant::now();
         let err = io.write(b"second").await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(
-            start.elapsed() >= idle,
+            resumed.elapsed() >= idle,
             "deadline was not reset by the accepted write: fired after {:?}",
-            start.elapsed()
+            resumed.elapsed()
         );
     }
 }
