@@ -8,10 +8,13 @@ pi provider extension:
   report with a fresh nonce and returns a full §9.1 transcript. It also
   covers receipts and body hashes (§9.3) and sessions (§8, §9.2). The
   hardware quote is verified with `@phala/dcap-qvl`; every other check is
-  Web Crypto. Ships an ESM bundle for `<script type="module">`. Key custody
-  (§9.1 check 5) is an honest skip in both verifiers; the channel check (6)
-  needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a pinned
-  channel) — this client ships no E2EE (§6) this round.
+  Web Crypto. Its Node subpath also exposes `connectAci()`, an instance-scoped
+  verified transport that applications can inject into OpenAI Node, OpenAI
+  Agents JS, Vercel AI SDK, LangChain JS and other fetch-aware clients without
+  replacing global fetch. Ships an ESM bundle for `<script type="module">`.
+  Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
+  check (6) needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a
+  pinned channel) — this client ships no E2EE (§6) this round.
 - `aci` — the command-line verifier at [`../src/bin/aci`](../src/bin/aci).
   It reuses the reference implementation's verification code:
   `aci verify` (live attestation), `aci audit` (saved artifacts),
@@ -33,8 +36,8 @@ pi provider extension:
   [`pi-provider-redpill`](pi-provider/packages/pi-provider-redpill) and
   [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
   The core provides live model discovery from `/v1/models`, `is_tee`
-  filtering, and attested TLS pinning — the prompt and reply are readable
-  only by the attested workload. No build step — pi loads `.ts` directly.
+  filtering, and injects the shared Node verified transport through Pi's
+  provider-scoped fetch hook. No build step — pi loads `.ts` directly.
   Per-response receipt verification is intentionally not part of this
   extension (prevention, not audit); use the `verifier-ts` library above if
   you want to audit receipts. On request the plugin can show the latest

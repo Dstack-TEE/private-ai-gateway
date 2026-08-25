@@ -80,6 +80,11 @@ Verification failures are reported as `{ ok: false, checks }` â€” never thrown â
 so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
 for malformed input.
 
+> **Release status:** `@phala/aci-verifier` is not published to npm yet. The
+> imports below describe the package's intended public API and work from this
+> repository after `npm install && npm run build`. Publishing it is a required
+> predecessor to publishing packages that depend on it.
+
 ## Usage
 
 One call runs the ACI checks and OS-hash appraisal. This example assumes a
@@ -95,20 +100,24 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
 
-### Node: verified transport
+### Node SDK and agent frameworks
 
 Node applications can establish an instance-scoped, SPKI-pinned connection
-and inject its `fetch` into an OpenAI-compatible SDK. The connection rejects
-HTTP, cross-origin requests, expired identities, and TLS peers whose SPKI is
-not in the verified workload keyset. It never replaces `globalThis.fetch`.
+and inject its `fetch` into any HTTP-based OpenAI-compatible SDK. The connection
+rejects HTTP, cross-origin requests, expired identities, and TLS peers whose
+SPKI is not in the verified workload keyset. It never replaces
+`globalThis.fetch`.
 
 ```ts
 import OpenAI from 'openai';
 import { connectAci } from '@phala/aci-verifier/node';
 
+const apiKey = process.env.ACI_API_KEY;
+if (!apiKey) throw new Error('ACI_API_KEY is required');
+
 const aci = await connectAci({
   baseURL: 'https://api.example.com/v1',
-  apiKey: process.env.ACI_API_KEY,
+  apiKey,
   policy: {
     requireProductionOs: true,
     expectedSource: {
@@ -120,8 +129,13 @@ const aci = await connectAci({
 
 const openai = new OpenAI({
   baseURL: aci.baseURL,
-  apiKey: process.env.ACI_API_KEY,
+  apiKey,
   fetch: aci.fetch,
+});
+
+const response = await openai.chat.completions.create({
+  model: 'your-model',
+  messages: [{ role: 'user', content: 'Hello' }],
 });
 
 await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
@@ -132,6 +146,81 @@ await aci.close();
 policy, but applications making a reviewed-code claim should set it. Compose
 measurement proves what was measured into RTMR3; it does not independently
 prove that a self-declared repository commit was reviewed.
+
+#### OpenAI Agents SDK
+
+Use a runner-scoped `OpenAIProvider` so one agent stack owns one verified
+connection. `setDefaultOpenAIClient()` also accepts this client, but changes a
+process-wide default and is a worse fit when several gateways coexist.
+
+```ts
+import { Agent, OpenAIProvider, Runner } from '@openai/agents';
+
+const modelProvider = new OpenAIProvider({
+  openAIClient: openai,
+  useResponses: false,
+});
+const runner = new Runner({ modelProvider });
+const agent = new Agent({
+  name: 'Private agent',
+  instructions: 'Be concise.',
+  model: 'your-model',
+});
+
+const result = await runner.run(agent, 'Summarize this document.');
+console.log(result.finalOutput);
+
+await modelProvider.close();
+await aci.close();
+```
+
+`aci.fetch` protects the HTTP model calls only. Agent tools, MCP calls and
+tracing use their own transports and remain separate trust boundaries.
+
+#### Vercel AI SDK
+
+```ts
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { generateText } from 'ai';
+
+const gateway = createOpenAICompatible({
+  name: 'aci',
+  baseURL: aci.baseURL,
+  apiKey,
+  fetch: aci.fetch,
+});
+const result = await generateText({
+  model: gateway('your-model'),
+  prompt: 'Summarize this document.',
+});
+```
+
+#### LangChain JS
+
+```ts
+import { ChatOpenAI } from '@langchain/openai';
+
+const model = new ChatOpenAI({
+  model: 'your-model',
+  apiKey,
+  configuration: {
+    baseURL: aci.baseURL,
+    fetch: aci.fetch,
+  },
+});
+const result = await model.invoke('Summarize this document.');
+```
+
+These integrations use documented transport hooks in
+[OpenAI Node](https://github.com/openai/openai-node/blob/main/src/client.ts),
+[OpenAI Agents JS](https://github.com/openai/openai-agents-js/blob/main/packages/agents-openai/src/openaiProvider.ts),
+[Vercel AI SDK](https://github.com/vercel/ai/blob/main/packages/openai-compatible/src/openai-compatible-provider.ts),
+and [LangChain JS](https://github.com/langchain-ai/langchainjs/blob/main/libs/providers/langchain-openai/src/chat_models/base.ts).
+
+Browsers cannot observe TLS SPKI, and this transport does not cover WebSocket
+model calls. For browser clients, WebSocket-only frameworks, or software that
+cannot inject a custom `fetch`, run `aci serve` and point the framework at its
+local OpenAI-compatible endpoint instead.
 
 Or drive the individual checks:
 
