@@ -18,12 +18,14 @@ implementation.
 Pi injects that fetch through its supported `StreamOptions.fetch` hook. It does
 not replace `globalThis.fetch`. Each `createProvider()` also owns an immutable
 brand profile, so Redpill, Phala Cloud and neutral ACI providers can coexist in
-one process.
+one process. Verified transport is an invariant of the ACI provider; there is
+no configuration that downgrades it to ordinary CA-TLS.
 
 Other Node SDKs should inject the same fetch instead of receiving dedicated ACI
 packages. Documented examples currently cover OpenAI Node, OpenAI Agents JS,
 Vercel AI SDK and LangChain JS. Software without a custom HTTP transport hook
-uses `aci serve`.
+uses `aci serve`; coding-agent CLI compatibility is documented in
+[`../coding-agents.md`](../coding-agents.md).
 
 ## Next steps
 

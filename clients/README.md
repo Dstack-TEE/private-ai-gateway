@@ -29,7 +29,7 @@ pi provider extension:
 - [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
   extension that turns the gateway (or any ACI service) into a first-class
   chat provider in pi's model picker, with **attested TLS (SPKI) pinning** as
-  the security control (fail-closed by default). The npm workspaces monorepo
+  the security control (always fail closed). The npm workspaces monorepo
   ships the vendor-neutral
   [`@phala/pi-provider-aci`](pi-provider/packages/pi-provider-aci) core plus
   thin branded distributions,
@@ -44,6 +44,10 @@ pi provider extension:
   receipt and attested session as an audit trail (`/aci-receipt`, `/aci-session`).
   See [`pi-provider/README.md`](pi-provider/README.md)
   for install and use.
+
+Coding agents that cannot inject a custom HTTP transport use `aci serve` as a
+single local verification boundary. See [`coding-agents.md`](coding-agents.md)
+for Codex, Claude Code, OpenCode, Aider and Gemini CLI compatibility.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded

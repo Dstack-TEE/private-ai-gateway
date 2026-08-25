@@ -59,7 +59,7 @@ export interface VerifiedAciIdentity {
   report: AttestationReport;
   keyset: WorkloadKeyset;
   workloadKeysetDigest: string;
-  tlsSpkiSha256: string;
+  tlsSpkiPins: readonly string[];
   verifiedAt: number;
   expiresAt: number;
   transcript: ReportTranscript;

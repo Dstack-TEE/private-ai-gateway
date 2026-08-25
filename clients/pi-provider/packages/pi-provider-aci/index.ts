@@ -56,14 +56,7 @@ import {
   formatScopeDescription,
   modelRegistrationSummary,
   settingsTitle,
-  verifySummary,
 } from "./src/settings-ui.ts";
-
-/** TLS SPKI pin state for the configured base host, shown in the footer. */
-interface PinningStatus {
-  host: string;
-  status: "pinned" | "unpinned" | "blocked" | "disabled";
-}
 
 interface AciRuntimeState {
   profile: ProviderProfile;
@@ -74,8 +67,6 @@ interface AciRuntimeState {
   connection: AciConnection | undefined;
   connectionError: string | undefined;
   receiptId: string | undefined;
-  /** TLS SPKI pin status for the configured base host (attested, per session). */
-  pinning?: PinningStatus;
   overrides?: AciCloudConfigPatch;
 }
 
@@ -123,36 +114,20 @@ function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackMode
  * the provider stream receives a rejecting fetch implementation.
  */
 async function installAciConnection(state: AciRuntimeState): Promise<void> {
-  const config = state.config;
   await closeAciConnection(state);
-
-  if (!config.pinning.enabled) {
-    state.pinning = { host: config.baseUrl, status: "disabled" };
-    return;
-  }
 
   const apiKey = resolveApiKey(state.profile);
   if (!apiKey) {
     state.connectionError = "API key is not configured";
-    state.pinning = {
-      host: config.baseUrl,
-      status: config.verify.failOpenOnUnpinned ? "unpinned" : "blocked",
-    };
     return;
   }
 
-  const failOpen = config.verify.failOpenOnUnpinned === true;
   try {
-    const connection = await connectAci({ baseURL: config.baseUrl, apiKey });
+    const connection = await connectAci({ baseURL: state.config.baseUrl, apiKey });
     state.connection = connection;
     state.connectionError = undefined;
-    state.pinning = { host: connection.identity.hostname, status: "pinned" };
   } catch (error) {
     state.connectionError = error instanceof Error ? error.message : String(error);
-    state.pinning = {
-      host: config.baseUrl,
-      status: failOpen ? "unpinned" : "blocked",
-    };
     console.error(`${state.profile.logPrefix} ACI connection failed:`, error);
   }
 }
@@ -172,9 +147,6 @@ const openAICompletions = openAICompletionsApi();
 
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   if (state.connection) return state.connection.fetch;
-  if (!state.config.pinning.enabled || state.config.verify.failOpenOnUnpinned) {
-    return globalThis.fetch;
-  }
   return () =>
     Promise.reject(
       new Error(
@@ -219,7 +191,6 @@ function reloadEffectiveConfig(
   state.cwd = cwd;
   state.config = config;
   state.projectTrusted = projectTrusted;
-  state.pinning = undefined;
   return config;
 }
 
@@ -238,26 +209,18 @@ function updateFooter(
   state: AciRuntimeState,
 ): void {
   try {
-    ctx.ui.setStatus(state.profile.footerKey, pinSuffix(state));
+    ctx.ui.setStatus(state.profile.footerKey, connectionSuffix(state));
   } catch {
     // The session may have been replaced/reloaded between an async update and
     // this render; the captured ctx is stale. Nothing to render to.
   }
 }
 
-/** Short footer suffix describing the TLS pin state. */
-function pinSuffix(state: AciRuntimeState): string {
-  if (!state.config.pinning.enabled) return "";
-  switch (state.pinning?.status) {
-    case "pinned":
-      return " | tls-pinned";
-    case "unpinned":
-      return " | UNPINNED";
-    case "blocked":
-      return " | PIN REQUIRED";
-    default:
-      return " | pin: pending";
-  }
+/** Short footer suffix describing the verified transport state. */
+function connectionSuffix(state: AciRuntimeState): string {
+  if (state.connection) return " | aci-verified";
+  if (state.connectionError) return " | ACI BLOCKED";
+  return " | aci: pending";
 }
 
 async function openSettingsMenu(
@@ -282,11 +245,6 @@ async function openSettingsMenu(
       list.updateValue("scope", scope);
       list.updateValue("isTeeOnly", drafts[scope].models.isTeeOnly ? "true" : "false");
       list.updateValue("thinkingFormat", drafts[scope].models.thinkingFormat);
-      list.updateValue(
-        "failOpenOnUnpinned",
-        drafts[scope].verify.failOpenOnUnpinned ? "true" : "false",
-      );
-      list.updateValue("pinning", drafts[scope].pinning.enabled ? "true" : "false");
     };
 
     const save = () => {
@@ -326,18 +284,6 @@ async function openSettingsMenu(
         save();
         return;
       }
-      if (id === "failOpenOnUnpinned") {
-        drafts[scope].verify.failOpenOnUnpinned = newValue === "true";
-        list.updateValue(id, newValue);
-        save();
-        return;
-      }
-      if (id === "pinning") {
-        drafts[scope].pinning.enabled = newValue === "true";
-        list.updateValue(id, newValue);
-        save();
-        return;
-      }
     };
 
     const scopeItem: SettingItem = {
@@ -366,22 +312,6 @@ async function openSettingsMenu(
         currentValue: drafts[scope].models.thinkingFormat,
         values: [...THINKING_FORMAT_VALUES],
       },
-      {
-        id: "failOpenOnUnpinned",
-        label: "Fail open when unpinned",
-        description:
-          "Off (default): block inference until an attested TLS pin is established. On: run unpinned with a footer warning when the attestation is unreachable.",
-        currentValue: drafts[scope].verify.failOpenOnUnpinned ? "true" : "false",
-        values: ["true", "false"],
-      },
-      {
-        id: "pinning",
-        label: "Attested TLS pinning",
-        description:
-          "Require the gateway TLS connection to present the attested SPKI (fails closed on mismatch)",
-        currentValue: drafts[scope].pinning.enabled ? "true" : "false",
-        values: ["true", "false"],
-      },
     ];
 
     list = new SettingsList(items, items.length, settingsTheme, onChange, () => done(), {
@@ -399,7 +329,6 @@ async function openSettingsMenu(
           ),
           "",
           truncateToWidth(modelRegistrationSummary(drafts[scope]), width),
-          truncateToWidth(verifySummary(drafts[scope]), width),
           "",
           ...list.render(width),
         ];
@@ -508,7 +437,7 @@ async function runAttestationCommand(
     `API version: ${String(report.api_version)}`,
     `Keyset digest: ${identity.workloadKeysetDigest}`,
     `Report binding: verified`,
-    `TLS SPKI: ${identity.tlsSpkiSha256}`,
+    `TLS SPKI pins: ${identity.tlsSpkiPins.join(", ")}`,
     `Keyset not_after: ${notAfter !== undefined ? new Date(notAfter * 1000).toISOString() : "unknown"}`,
     `Encryption keys (${e2eeKeys.length}): ${keySummary(e2eeKeys)}`,
     `Receipt signing keys (${receiptKeys.length}): ${keySummary(receiptKeys)}`,
@@ -579,7 +508,7 @@ export function createProvider(
 
     const settingsCommand = `${state.profile.providerId}-settings`;
     pi.registerCommand(settingsCommand, {
-      description: `Configure ${state.profile.label} (models, thinking, TLS pinning, verification)`,
+      description: `Configure ${state.profile.label} models and thinking format`,
       handler: async (_args, ctx) => {
         if (ctx.mode !== "tui") {
           ctx.ui.notify(`${settingsCommand} requires TUI mode`, "error");

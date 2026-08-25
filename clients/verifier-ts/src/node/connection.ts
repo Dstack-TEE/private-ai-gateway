@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { reportTranscript } from '../transcript.js';
-import type { AttestationReport, TlsKeyPin, WorkloadKeyset } from '../types.js';
+import type { AttestationReport, WorkloadKeyset } from '../types.js';
 import { createPinnedTransport, type PinnedTransport } from './transport.js';
 import {
   AciConnectionError,
@@ -80,7 +80,7 @@ class NodeAciConnection implements AciConnection {
     const candidate = createPinnedTransport({
       origin: this.origin,
       hostname: this.hostname,
-      spkiSha256: identity.tlsSpkiSha256,
+      spkiPins: identity.tlsSpkiPins,
       ...(this.options.proxy === undefined ? {} : { proxy: this.options.proxy }),
       ...(this.options.ca === undefined ? {} : { ca: this.options.ca }),
     });
@@ -167,7 +167,7 @@ async function establishIdentity(
       'ACI attestation did not establish a workload keyset',
     );
   }
-  const pin = tlsPinForHost(keyset, hostname);
+  const pins = tlsPinsForHost(keyset, hostname);
   const verifiedAt = Date.now();
   return {
     origin,
@@ -175,7 +175,7 @@ async function establishIdentity(
     report,
     keyset,
     workloadKeysetDigest: digest,
-    tlsSpkiSha256: pin,
+    tlsSpkiPins: pins,
     verifiedAt,
     expiresAt: keyset.not_after * 1000,
     transcript,
@@ -296,21 +296,31 @@ async function timedFetch(
   }
 }
 
-function tlsPinForHost(keyset: WorkloadKeyset, hostname: string): string {
+function tlsPinsForHost(keyset: WorkloadKeyset, hostname: string): string[] {
   const entries = Array.isArray(keyset.tls_public_keys) ? keyset.tls_public_keys : [];
-  const normalizedHost = hostname.toLowerCase().replace(/\.$/, '');
-  const scoped = entries.find(
-    (pin) => pin.domain?.toLowerCase().replace(/\.$/, '') === normalizedHost,
-  );
-  const selected = scoped ?? entries.find((pin: TlsKeyPin) => pin.domain === undefined);
-  const value = selected?.spki_sha256.toLowerCase();
-  if (!value || !/^[0-9a-f]{64}$/.test(value)) {
+  const normalizedHost = normalizeHostname(hostname);
+  const pins = entries
+    .filter(
+      (pin) => pin.domain === undefined || normalizeHostname(pin.domain) === normalizedHost,
+    )
+    .map((pin) => pin.spki_sha256.toLowerCase());
+  if (pins.length === 0) {
     throw new AciConnectionError(
       'invalid_tls_pin',
       `ACI workload keyset has no valid TLS SPKI for ${hostname}`,
     );
   }
-  return value;
+  if (pins.some((pin) => !/^[0-9a-f]{64}$/.test(pin))) {
+    throw new AciConnectionError(
+      'invalid_tls_pin',
+      `ACI workload keyset has an invalid TLS SPKI for ${hostname}`,
+    );
+  }
+  return [...new Set(pins)];
+}
+
+function normalizeHostname(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, '');
 }
 
 function normalizeBaseURL(value: string): {

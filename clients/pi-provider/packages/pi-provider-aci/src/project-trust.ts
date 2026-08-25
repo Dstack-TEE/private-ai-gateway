@@ -13,8 +13,8 @@ export function isAciProjectConfigApproved(ctx: ExtensionContext): boolean {
   } catch {
     // If the current pi runtime does not expose trust state (older versions or
     // unusual contexts), fail CLOSED: an untrusted project must not configure
-    // the extension (an attacker-controlled baseUrl or pinning=false would
-    // silently re-route the attestation). Home-scope config still applies.
+    // the extension (an attacker-controlled baseUrl could silently re-route
+    // the attestation). Home-scope config still applies.
     return false;
   }
 }

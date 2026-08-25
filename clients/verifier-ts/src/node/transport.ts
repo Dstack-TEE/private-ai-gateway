@@ -8,7 +8,7 @@ import { AciConnectionError } from './types.js';
 export interface PinnedTransportOptions {
   origin: string;
   hostname: string;
-  spkiSha256: string;
+  spkiPins: readonly string[];
   proxy?: string;
   ca?: string | Buffer;
 }
@@ -21,7 +21,10 @@ export interface PinnedTransport {
 type PinnedDispatcher = Agent | ProxyAgent;
 
 export function createPinnedTransport(options: PinnedTransportOptions): PinnedTransport {
-  const expectedPin = normalizePin(options.spkiSha256);
+  const expectedPins = options.spkiPins.map(normalizePin);
+  if (expectedPins.length === 0) {
+    throw new AciConnectionError('invalid_tls_pin', 'at least one attested TLS SPKI is required');
+  }
   const tls = {
     ...(options.ca === undefined ? {} : { ca: options.ca }),
     checkServerIdentity: (hostname: string, cert: Parameters<typeof checkTlsServerIdentity>[1]) => {
@@ -38,9 +41,9 @@ export function createPinnedTransport(options: PinnedTransportOptions): PinnedTr
           `could not compute TLS SPKI for ${hostname}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      if (hexEqual(actual, expectedPin)) return undefined;
+      if (expectedPins.some((expected) => hexEqual(actual, expected))) return undefined;
       return new Error(
-        `TLS SPKI pin mismatch for ${hostname}: peer=${actual} expected=${expectedPin}`,
+        `TLS SPKI pin mismatch for ${hostname}: peer=${actual} expected=${expectedPins.join(',')}`,
       );
     },
   };

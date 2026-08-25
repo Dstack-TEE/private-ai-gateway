@@ -152,7 +152,7 @@ test('pinned transport enforces the SPKI and exact origin without global state',
   const transport = createPinnedTransport({
     origin: primary.origin,
     hostname: '127.0.0.1',
-    spkiSha256: spki,
+    spkiPins: ['00'.repeat(32), spki],
     ca,
   });
   try {
@@ -172,7 +172,7 @@ test('pinned transport enforces the SPKI and exact origin without global state',
   const mismatched = createPinnedTransport({
     origin: mismatchServer.origin,
     hostname: '127.0.0.1',
-    spkiSha256: '00'.repeat(32),
+    spkiPins: ['00'.repeat(32)],
     ca,
   });
   try {

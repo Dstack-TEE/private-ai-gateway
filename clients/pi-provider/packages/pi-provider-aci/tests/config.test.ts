@@ -19,21 +19,14 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.baseUrl, "https://gateway.test/v1");
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
-  assert.equal(validated.verify.failOpenOnUnpinned, false); // fail-closed default
-  assert.equal(validated.pinning.enabled, true);
-});
-
-test("validateAciCloudConfig: failOpenOnUnpinned can be enabled", () => {
-  const validated = validateAciCloudConfig({
-    ...BASE,
-    verify: { ...BASE.verify, failOpenOnUnpinned: true },
-  });
-  assert.equal(validated.verify.failOpenOnUnpinned, true);
 });
 
 test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {
   const bad = { ...BASE, models: { ...BASE.models, thinkingFormat: "bogus" } };
-  assert.throws(() => validateAciCloudConfig(bad), /expected "auto" \| "qwen" \| "openai" \| "off"/);
+  assert.throws(
+    () => validateAciCloudConfig(bad),
+    /expected "auto" \| "qwen" \| "openai" \| "off"/,
+  );
 });
 
 test("validateAciCloudConfig: rejects non-boolean isTeeOnly", () => {

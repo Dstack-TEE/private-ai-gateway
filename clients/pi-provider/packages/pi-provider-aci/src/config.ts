@@ -7,9 +7,8 @@
 //            -> env (<PREFIX>_* variables, or brand aliases)
 //            -> runtime (programmatic override via createAciProvider(patch))
 //
-// Each config value records which layer it came from (sources) so the settings
-// UI can show provenance. Validation runs after merge so a malformed layer
-// never produces a partially-applied config.
+// Validation runs after merge so a malformed layer never produces a
+// partially-applied config.
 
 import {
   existsSync,
@@ -24,8 +23,6 @@ import { dirname, join } from "node:path";
 import { getBaseUrl } from "./constants.ts";
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
-export type AciConfigSource = "runtime" | "env" | "project" | "home" | "default";
-
 export type ThinkingFormat = "auto" | "qwen" | "openai" | "off";
 
 export interface AciModelsConfig {
@@ -37,24 +34,9 @@ export interface AciModelsConfig {
   allowlist?: string[];
 }
 
-export interface AciVerifyConfig {
-  /** When true, an unpinnable session runs unpinned with a footer warning
-   *  (fail-open). When false (default) an unpinned session blocks inference
-   *  with a clear error rather than silently downgrading to CA-TLS. */
-  failOpenOnUnpinned: boolean;
-}
-
-export interface AciTlsPinningConfig {
-  /** Require the gateway's TLS connection to present the attested SPKI
-   *  (fetched from a validated attestation report). Fail closed on mismatch. */
-  enabled: boolean;
-}
-
 export interface AciCloudConfig {
   baseUrl: string;
   models: AciModelsConfig;
-  verify: AciVerifyConfig;
-  pinning: AciTlsPinningConfig;
   /** Default model id to surface first in /model. */
   defaultModel?: string;
 }
@@ -66,26 +48,8 @@ export type AciCloudConfigPatch = {
     thinkingFormat: unknown;
     allowlist: unknown;
   }>;
-  verify?: Partial<{
-    failOpenOnUnpinned: unknown;
-  }>;
-  pinning?: Partial<{ enabled: unknown }>;
   defaultModel?: unknown;
 };
-
-export interface AciCloudConfigSources {
-  baseUrl: AciConfigSource;
-  models: {
-    isTeeOnly: AciConfigSource;
-    thinkingFormat: AciConfigSource;
-    allowlist: AciConfigSource;
-  };
-  verify: {
-    failOpenOnUnpinned: AciConfigSource;
-  };
-  pinning: { enabled: AciConfigSource };
-  defaultModel: AciConfigSource;
-}
 
 export interface LoadAciCloudConfigOptions {
   cwd: string;
@@ -114,12 +78,6 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
   models: {
     isTeeOnly: true,
     thinkingFormat: "auto",
-  },
-  verify: {
-    failOpenOnUnpinned: false,
-  },
-  pinning: {
-    enabled: true,
   },
 };
 
@@ -244,9 +202,6 @@ function envConfigPatch(
   const defaultModel = read(`${prefix}_DEFAULT_MODEL`);
   if (defaultModel) patch.defaultModel = defaultModel;
 
-  const tlsPinning = parseBoolean(read(`${prefix}_TLS_PINNING`) ?? undefined);
-  if (tlsPinning !== undefined) patch.pinning = { enabled: tlsPinning };
-
   return patch;
 }
 
@@ -326,102 +281,33 @@ function validateModelsConfig(raw: unknown, configPath: string, pointer: string)
   };
 }
 
-function validateVerifyConfig(raw: unknown, configPath: string, pointer: string): AciVerifyConfig {
-  const verify = requireRecord(raw, configPath, pointer);
-  return {
-    failOpenOnUnpinned: requireBoolean(
-      verify.failOpenOnUnpinned,
-      configPath,
-      `${pointer}/failOpenOnUnpinned`,
-    ),
-  };
-}
-
-function validatePinningConfig(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): AciTlsPinningConfig {
-  const pinning = requireRecord(raw, configPath, pointer);
-  return {
-    enabled: requireBoolean(pinning.enabled, configPath, `${pointer}/enabled`),
-  };
-}
-
 export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"): AciCloudConfig {
   const config = requireRecord(raw, configPath, "");
   return {
     baseUrl: requireString(config.baseUrl, configPath, "/baseUrl"),
     models: validateModelsConfig(config.models, configPath, "/models"),
-    verify: validateVerifyConfig(config.verify, configPath, "/verify"),
-    pinning: validatePinningConfig(config.pinning, configPath, "/pinning"),
     defaultModel: requireOptionalString(config.defaultModel, configPath, "/defaultModel"),
-  };
-}
-
-function hasPath(config: Record<string, unknown>, path: readonly string[]): boolean {
-  let current: unknown = config;
-  for (const key of path) {
-    if (!isRecord(current) || !Object.hasOwn(current, key)) return false;
-    current = current[key];
-  }
-  return true;
-}
-
-function sourceForPath(
-  layers: Array<{ source: AciConfigSource; config: Record<string, unknown> }>,
-  path: readonly string[],
-): AciConfigSource {
-  for (let i = layers.length - 1; i >= 0; i--) {
-    if (hasPath(layers[i].config, path)) return layers[i].source;
-  }
-  return "default";
-}
-
-function buildSources(
-  layers: Array<{ source: AciConfigSource; config: Record<string, unknown> }>,
-): AciCloudConfigSources {
-  return {
-    baseUrl: sourceForPath(layers, ["baseUrl"]),
-    models: {
-      isTeeOnly: sourceForPath(layers, ["models", "isTeeOnly"]),
-      thinkingFormat: sourceForPath(layers, ["models", "thinkingFormat"]),
-      allowlist: sourceForPath(layers, ["models", "allowlist"]),
-    },
-    verify: {
-      failOpenOnUnpinned: sourceForPath(layers, ["verify", "failOpenOnUnpinned"]),
-    },
-    pinning: { enabled: sourceForPath(layers, ["pinning", "enabled"]) },
-    defaultModel: sourceForPath(layers, ["defaultModel"]),
   };
 }
 
 function loadLayers(
   options: LoadAciCloudConfigOptions,
   overrides?: AciCloudConfigPatch,
-): Array<{ source: AciConfigSource; config: Record<string, unknown> }> {
+): Record<string, unknown>[] {
   const providerProfile = options.profile ?? DEFAULT_PROFILE;
-  const layers: Array<{ source: AciConfigSource; config: Record<string, unknown> }> = [
-    {
-      source: "home",
-      config: readConfigFile(getGlobalAciCloudConfigPath(options.home, providerProfile.providerId)),
-    },
+  const layers: Record<string, unknown>[] = [
+    readConfigFile(getGlobalAciCloudConfigPath(options.home, providerProfile.providerId)),
   ];
   if (options.includeProject !== false) {
-    layers.push({
-      source: "project",
-      config: readConfigFile(getProjectAciCloudConfigPath(options.cwd, providerProfile.providerId)),
-    });
+    layers.push(
+      readConfigFile(getProjectAciCloudConfigPath(options.cwd, providerProfile.providerId)),
+    );
   }
-  layers.push({
-    source: "env",
-    config: envConfigPatch(options.env ?? process.env, providerProfile) as Record<string, unknown>,
-  });
+  layers.push(
+    envConfigPatch(options.env ?? process.env, providerProfile) as Record<string, unknown>,
+  );
   if (overrides) {
-    layers.push({
-      source: "runtime",
-      config: overrides as Record<string, unknown>,
-    });
+    layers.push(overrides as Record<string, unknown>);
   }
   return layers;
 }
@@ -435,16 +321,9 @@ export function loadAciCloudConfig(
     defaultAciCloudConfig(providerProfile, options.env ?? process.env),
   ) as unknown as Record<string, unknown>;
   for (const layer of loadLayers(options, overrides)) {
-    merged = mergeConfigPatch(merged, layer.config);
+    merged = mergeConfigPatch(merged, layer);
   }
   return validateAciCloudConfig(merged);
-}
-
-export function loadAciCloudConfigSources(
-  options: LoadAciCloudConfigOptions,
-  overrides?: AciCloudConfigPatch,
-): AciCloudConfigSources {
-  return buildSources(loadLayers(options, overrides));
 }
 
 export function loadProjectAciCloudConfig(

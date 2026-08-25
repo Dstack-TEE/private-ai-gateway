@@ -53,10 +53,6 @@ export function formatScopeDescription(
   return `Writes to the ${scope} config file: ${displayPath}`;
 }
 
-export function formatBoolean(value: boolean): string {
-  return value ? "true" : "false";
-}
-
 export function settingsTitle(label: string): string {
   return `${label} settings (provider v${PROVIDER_VERSION})`;
 }
@@ -67,11 +63,4 @@ export function modelRegistrationSummary(config: AciCloudConfig): string {
     ? `, allowlist: ${config.models.allowlist.length}`
     : "";
   return `Models: ${tee}${allow} | thinking: ${config.models.thinkingFormat}`;
-}
-
-export function verifySummary(config: AciCloudConfig): string {
-  return (
-    `Pin: ${config.pinning.enabled ? "required" : "disabled"}, ` +
-    `fail-open-unpinned ${formatBoolean(config.verify.failOpenOnUnpinned)}`
-  );
 }

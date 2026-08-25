@@ -47,10 +47,9 @@ install command is `pi install npm:@phala/pi-provider-aci`.
 - `is_tee` filtering — only confidentially-served models are registered by default.
 - **Attested TLS (SPKI) pinning.** At session start the gateway attestation is
   fetched and validated, then the TLS connection is pinned to the attested
-  `workload_keyset.tls_public_keys` SPKI. **Fail closed by default**: with
-  `pinning.enabled` (the default) an unpinnable session blocks inference rather
-  than silently downgrading to plain CA-TLS — the `failOpenOnUnpinned` setting
-  opts into the old footer-warning behavior.
+  `workload_keyset.tls_public_keys` SPKI. This is an invariant of the provider,
+  not a setting: an unverified or unpinnable session blocks inference rather
+  than silently downgrading to plain CA-TLS.
 - `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
   The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
   verified) from each response, and the user can show the receipt document or
@@ -78,11 +77,13 @@ Pi's `openai-completions` adapter accepts a custom `fetch`, so the provider
 injects the connection's scoped fetch through `StreamOptions.fetch`. It never
 changes `globalThis.fetch`: unrelated providers, tools, MCP servers and
 telemetry keep their own transports. A failed or expired connection blocks
-model traffic unless the user explicitly enables fail-open behavior. Each Pi
-session gets a fresh connection and closes it on shutdown.
+model traffic. Each Pi session gets a fresh connection and closes it on
+shutdown.
 
 The same `connectAci()` transport works with other Node SDKs and agent
 frameworks; see the [verifier integration examples](../verifier-ts/README.md#node-sdk-and-agent-frameworks).
+Coding-agent CLIs without a custom fetch hook use the local `aci serve` proxy;
+see the [coding agent guide](../coding-agents.md).
 
 ## Branding / profiles
 
