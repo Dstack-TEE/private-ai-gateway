@@ -201,6 +201,7 @@ export function mapAciServerModel(
 export interface DiscoverAciModelsOptions {
   timeoutMs?: number;
   baseUrl?: string;
+  fetch?: typeof globalThis.fetch;
 }
 
 export interface DiscoverAciModelsResult {
@@ -221,7 +222,7 @@ export async function discoverAciModels(
     timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs).unref() : undefined;
 
   try {
-    const response = await fetch(buildModelsUrl(options.baseUrl), {
+    const response = await (options.fetch ?? globalThis.fetch)(buildModelsUrl(options.baseUrl), {
       signal: controller.signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,

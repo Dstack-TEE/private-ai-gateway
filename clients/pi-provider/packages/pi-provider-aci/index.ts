@@ -2,7 +2,7 @@
  * Private AI Gateway (ACI) provider extension
  *
  * Wires an attested private-ai-gateway into pi as an OpenAI-compatible provider
- * with per-response verifiability and attested TLS (SPKI) pinning. This is the
+ * with an instance-scoped, verified ACI transport. This is the
  * vendor-neutral core; branded distributions (pi-provider-redpill,
  * pi-provider-phala-cloud) call createProvider() with their own profile.
  *
@@ -11,15 +11,11 @@
  *   # Set ACI_LLM_API_KEY (+ ACI_BASE_URL) then /model aci/<model-id>
  *
  * Source layout:
- *   src/constants.ts     — module-level consts + env-driven endpoints
+ *   src/constants.ts     — provider identity + env-driven endpoints
  *   src/config.ts        — layered config (default/home/project/env/runtime)
  *   src/project-trust.ts — project-scope config trust gate
- *   src/canonical.ts     — JCS (RFC 8785 subset) for receipt/attestation digests
- *   src/crypto.ts        — ed25519 receipt signatures + hash helpers
- *   src/tls-pinning.ts   — attested TLS SPKI pinning via a narrow fetch wrapper
  *   src/models.ts        — /v1/models discovery + thinkingFormat inference
- *   src/verify.ts        — receipt/attestation/session fetch + full verification
- *   src/receipt-store.ts — last-response receipt cache + footer status source
+ *   src/audit.ts         — receipt/session fetch and concise audit display
  *   src/settings-ui.ts   — SettingsList helpers for the settings command
  */
 
@@ -29,7 +25,12 @@ import {
   type ExtensionFactory,
   readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  connectAci,
+  type AciConnection,
+} from "@phala/aci-verifier/node";
 import os from "node:os";
 
 import {
@@ -58,22 +59,12 @@ import {
   mapAciServerModel,
 } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
-import { AciAttestationStore } from "./src/attestation-store.ts";
 import {
-  attestedSpkiSha256ForHost,
   fetchReceipt,
   fetchSession,
   summarizeReceipt,
   summarizeSession,
-} from "./src/verify.ts";
-import type { WorkloadKeyset } from "./src/verify.ts";
-import {
-  clearPin,
-  installFetchPinning,
-  requirePinForHost,
-  setPin,
-  unrequirePinForHost,
-} from "./src/tls-pinning.ts";
+} from "./src/audit.ts";
 import {
   type AciConfigScope,
   THINKING_FORMAT_VALUES,
@@ -95,19 +86,12 @@ interface AciRuntimeState {
   config: AciCloudConfig;
   projectTrusted: boolean;
   rawModels: AciServerModel[];
-  store: AciAttestationStore;
+  connection: AciConnection | undefined;
+  connectionError: string | undefined;
+  receiptId: string | undefined;
   /** TLS SPKI pin status for the configured base host (attested, per session). */
   pinning?: PinningStatus;
   overrides?: AciCloudConfigPatch;
-}
-
-/** Lowercase hostname of the configured base URL, or undefined when unparseable. */
-function hostOfBaseUrl(baseUrl: string): string | undefined {
-  try {
-    return new URL(baseUrl).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
 }
 
 function resolveApiKey(): string {
@@ -148,72 +132,69 @@ function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackMode
 }
 
 /**
- * Resolve the attested SPKI for the configured base host from a fresh,
- * validated attestation and install the TLS pin. Default posture is fail
- * CLOSED: with `pinning.enabled` (the default) an unpinnable session blocks
- * inference with a clear error rather than silently downgrading to CA-TLS.
- * Users can opt into the old fail-open behavior via
- * `verify.failOpenOnUnpinned` (runs unpinned with a footer warning).
+ * Establish an instance-scoped ACI connection for the configured gateway.
+ * Default posture is fail closed: when verification or channel binding fails,
+ * the provider stream receives a rejecting fetch implementation.
  */
-async function installAttestedTlsPin(state: AciRuntimeState): Promise<void> {
+async function installAciConnection(state: AciRuntimeState): Promise<void> {
   const config = state.config;
-  const host = hostOfBaseUrl(config.baseUrl);
-  const normalized = host ?? "";
+  await closeAciConnection(state);
 
-  // Pinning disabled: no pin, no fail-closed gate (explicit user choice).
   if (!config.pinning.enabled) {
-    if (host) {
-      clearPin(host);
-      unrequirePinForHost(host);
-    }
-    state.pinning = { host: normalized, status: "disabled" };
+    state.pinning = { host: config.baseUrl, status: "disabled" };
     return;
   }
-  if (!host) {
-    state.pinning = { host: config.baseUrl, status: "unpinned" };
-    return;
-  }
-
-  // Drop a stale pin from an earlier session for a different host; ensure this
-  // host is marked required so traffic fails closed until a pin is installed.
-  if (state.pinning?.host && state.pinning.host !== normalized) {
-    clearPin(state.pinning.host);
-    unrequirePinForHost(state.pinning.host);
-  }
-  requirePinForHost(host);
 
   const apiKey = resolveApiKey();
   if (!apiKey) {
-    clearPin(host);
-    state.pinning = { host, status: "unpinned" };
+    state.connectionError = "API key is not configured";
+    state.pinning = {
+      host: config.baseUrl,
+      status: config.verify.failOpenOnUnpinned ? "unpinned" : "blocked",
+    };
     return;
   }
 
   const failOpen = config.verify.failOpenOnUnpinned === true;
-  const unpinned = (): void => {
-    clearPin(host);
-    state.pinning = { host, status: failOpen ? "unpinned" : "blocked" };
-  };
-
   try {
-    const attested = await state.store.getAttestation(apiKey, config);
-    if (!attested) {
-      unpinned();
-      return;
-    }
-    const spki = attestedSpkiSha256ForHost(state.store.establishedKeyset, host);
-    if (!spki) {
-      unpinned();
-      return;
-    }
-    installFetchPinning();
-    setPin(host, spki);
-    requirePinForHost(host);
-    state.pinning = { host, status: "pinned" };
+    const connection = await connectAci({ baseURL: config.baseUrl, apiKey });
+    state.connection = connection;
+    state.connectionError = undefined;
+    state.pinning = { host: connection.identity.hostname, status: "pinned" };
   } catch (error) {
-    console.error(`${LOG_PREFIX} TLS pin install failed:`, error);
-    unpinned();
+    state.connectionError = error instanceof Error ? error.message : String(error);
+    state.pinning = {
+      host: config.baseUrl,
+      status: failOpen ? "unpinned" : "blocked",
+    };
+    console.error(`${LOG_PREFIX} ACI connection failed:`, error);
   }
+}
+
+async function closeAciConnection(state: AciRuntimeState): Promise<void> {
+  const connection = state.connection;
+  state.connection = undefined;
+  if (!connection) return;
+  try {
+    await connection.close();
+  } catch (error) {
+    console.error(`${LOG_PREFIX} ACI connection close failed:`, error);
+  }
+}
+
+const openAICompletions = openAICompletionsApi();
+
+function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
+  if (state.connection) return state.connection.fetch;
+  if (!state.config.pinning.enabled || state.config.verify.failOpenOnUnpinned) {
+    return globalThis.fetch;
+  }
+  return () =>
+    Promise.reject(
+      new Error(
+        `${LOG_PREFIX} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
+      ),
+    );
 }
 
 function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
@@ -225,6 +206,11 @@ function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
     api: "openai-completions",
     authHeader: true,
     models: modelsFromState(state),
+    streamSimple: (model, context, options) =>
+      openAICompletions.streamSimple(model, context, {
+        ...options,
+        fetch: providerFetch(state),
+      }),
     ...(oauth ? { oauth } : {}),
   });
 }
@@ -439,12 +425,15 @@ async function runReceiptCommand(
     ctx.ui.notify(`${API_KEY_ENV} not set`, "error");
     return;
   }
-  const receiptId = args.trim() || state.store.receiptId;
+  const receiptId = args.trim() || state.receiptId;
   if (!receiptId) {
     ctx.ui.notify("No receipt id given and no x-receipt-id seen yet; send a message first or pass an id", "error");
     return;
   }
-  const receipt = await fetchReceipt(apiKey, receiptId, { baseUrl: state.config.baseUrl });
+  const receipt = await fetchReceipt(apiKey, receiptId, {
+    baseUrl: state.config.baseUrl,
+    fetch: providerFetch(state),
+  });
   if (!receipt) {
     ctx.ui.notify(`Receipt ${receiptId} not found or fetch failed`, "error");
     return;
@@ -468,7 +457,10 @@ async function runSessionCommand(
     ctx.ui.notify("Usage: /aci-session <session-id>", "error");
     return;
   }
-  const session = await fetchSession(apiKey, sessionId, { baseUrl: state.config.baseUrl });
+  const session = await fetchSession(apiKey, sessionId, {
+    baseUrl: state.config.baseUrl,
+    fetch: providerFetch(state),
+  });
   if (!session) {
     ctx.ui.notify(`Session ${sessionId} not found or fetch failed`, "error");
     return;
@@ -485,22 +477,19 @@ async function runAttestationCommand(
     ctx.ui.notify(`${API_KEY_ENV} not set`, "error");
     return;
   }
-  const attested = await state.store.getAttestation(apiKey, state.config);
-  if (!attested) {
-    const error = state.store.lastAttestationError ?? "unknown error";
-    ctx.ui.notify(`Attestation validation failed: ${error}`, "error");
+  if (!state.connection) {
+    ctx.ui.notify(
+      `Attestation validation failed: ${state.connectionError ?? "no verified connection"}`,
+      "error",
+    );
     return;
   }
-  const report = attested.report;
-  const verification = attested.verification;
-  const keyset = report.attestation?.workload_keyset as WorkloadKeyset | undefined;
-  const e2eeKeys = Array.isArray(keyset?.e2ee_public_keys)
-    ? (keyset!.e2ee_public_keys as Array<{ key_id?: unknown; algo?: unknown; public_key?: unknown }>)
-    : [];
-  const receiptKeys = Array.isArray(keyset?.receipt_signing_keys)
-    ? (keyset!.receipt_signing_keys as Array<{ key_id?: unknown; algo?: unknown; public_key?: unknown }>)
-    : [];
-  const notAfter = keyset && typeof keyset.not_after === "number" ? keyset.not_after : undefined;
+  const identity = state.connection.identity;
+  const report = identity.report;
+  const keyset = identity.keyset;
+  const e2eeKeys = keyset.e2ee_public_keys;
+  const receiptKeys = keyset.receipt_signing_keys;
+  const notAfter = keyset.not_after;
   const keySummary = (keys: Array<{ key_id?: unknown; algo?: unknown }>) =>
     keys.length === 0
       ? "none"
@@ -508,8 +497,9 @@ async function runAttestationCommand(
   const lines = [
     `Aci Cloud attestation`,
     `API version: ${String(report.api_version)}`,
-    `Keyset digest: ${verification.workloadKeysetDigest ?? "(unestablished)"}`,
-    `Report binding: ${verification.ok ? "verified" : "failed"}`,
+    `Keyset digest: ${identity.workloadKeysetDigest}`,
+    `Report binding: verified`,
+    `TLS SPKI: ${identity.tlsSpkiSha256}`,
     `Keyset not_after: ${notAfter !== undefined ? new Date(notAfter * 1000).toISOString() : "unknown"}`,
     `Encryption keys (${e2eeKeys.length}): ${keySummary(e2eeKeys)}`,
     `Receipt signing keys (${receiptKeys.length}): ${keySummary(receiptKeys)}`,
@@ -533,17 +523,14 @@ export function createProvider(
       { cwd, home: os.homedir(), includeProject: false },
       overrides,
     );
-    const apiKey = resolveApiKey();
-    const discovered = apiKey
-      ? await discoverAciModels(apiKey, config)
-      : { models: fallbackModels(), raw: [] };
-
     const state: AciRuntimeState = {
       cwd,
       config,
       projectTrusted: false,
-      rawModels: discovered.raw,
-      store: new AciAttestationStore(),
+      rawModels: [],
+      connection: undefined,
+      connectionError: undefined,
+      receiptId: undefined,
       overrides,
     };
     registerAciProvider(pi, state);
@@ -551,11 +538,21 @@ export function createProvider(
     pi.on("session_start", async (_event, ctx) => {
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      // Resolve the attested SPKI from a fresh report and pin TLS for this
-      // session (fail-closed; footer shows "PIN REQUIRED" if it cannot be
-      // done, unless the user opted into failOpenOnUnpinned).
-      await installAttestedTlsPin(state);
+      await installAciConnection(state);
+      const sessionApiKey = resolveApiKey();
+      if (sessionApiKey) {
+        const discovered = await discoverAciModels(sessionApiKey, state.config, {
+          baseUrl: state.config.baseUrl,
+          fetch: providerFetch(state),
+        });
+        state.rawModels = discovered.raw;
+        registerAciProvider(pi, state);
+      }
       updateFooter(ctx, state);
+    });
+
+    pi.on("session_shutdown", async () => {
+      await closeAciConnection(state);
     });
 
     // Cheap header capture ONLY: remember the latest x-receipt-id so the
@@ -566,9 +563,7 @@ export function createProvider(
       const lower = Object.fromEntries(
         Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
       );
-      state.store.recordReceiptId(
-        lower[HEADER_RECEIPT_ID] ?? lower["x-receipt-id"],
-      );
+      state.receiptId = lower[HEADER_RECEIPT_ID] ?? lower["x-receipt-id"];
     });
 
     const settingsCommand = `${PROVIDER_ID}-settings`;
@@ -612,17 +607,4 @@ export { PROVIDER_ID, PROVIDER_VERSION };
 export { profile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
 export { discoverAciModels, mapAciServerModel, inferThinkingFormat } from "./src/models.ts";
-// Attestation + pin-source helpers (prevention). Receipt verification is not
-// part of this plugin. Re-export what callers need.
-export {
-  type AttestationReport,
-  type ReportVerification,
-  type WorkloadKeyset,
-  attestedSpkiSha256ForHost,
-  bindAttestation,
-  fetchAttestation,
-  keysetStaleAfterMs,
-  newNonce,
-  receiptSigningKeys,
-} from "./src/verify.ts";
-export { verifyReportBinding } from "@phala/aci-verifier";
+export { connectAci } from "@phala/aci-verifier/node";

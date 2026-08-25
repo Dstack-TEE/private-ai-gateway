@@ -1,7 +1,7 @@
 {
   "name": "@phala/pi-provider-aci",
   "version": "0.2.0",
-  "description": "Vendor-neutral Pi provider for private-ai-gateway (ACI): attested TLS (SPKI) pinning + per-response receipt verification",
+  "description": "Vendor-neutral Pi provider for private-ai-gateway using an instance-scoped verified ACI transport",
   "keywords": [
     "ai-provider",
     "attestation",
@@ -50,7 +50,6 @@
     ]
   },
   "dependencies": {
-    "@phala/aci-verifier": "file:../../../verifier-ts",
-    "undici": "8.5.0"
+    "@phala/aci-verifier": "file:../../../verifier-ts"
   }
 }
