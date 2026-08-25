@@ -55,7 +55,7 @@ export class AciAttestationStore {
   }
 
   /** Fetch + validate the attestation report. Returns the validated artifact,
-   *  or null (with lastAttestationError set) when the fetch or binding fails. */
+   *  or null (with lastAttestationError set) when fetching or verification fails. */
   async getAttestation(apiKey: string, config: AciCloudConfig): Promise<Attested | null> {
     const now = Date.now();
     if (this.cachedAttestation && this.isFresh(this.cachedAttestation, now)) {
@@ -74,11 +74,11 @@ export class AciAttestationStore {
           this.cachedAttestation = { report, verification, fetchedAt: Date.now() };
           return this.cachedAttestation;
         }
-        lastError = "report binding failed (see console)";
+        lastError = "attestation verification failed (see console)";
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
         console.error(
-          `${LOG_PREFIX} attestation report binding failed (attempt ${attempt + 1}):`,
+          `${LOG_PREFIX} attestation verification failed (attempt ${attempt + 1}):`,
           error,
         );
       }

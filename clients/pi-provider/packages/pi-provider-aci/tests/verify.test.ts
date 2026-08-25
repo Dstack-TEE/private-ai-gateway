@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { AttestationReport, WorkloadKeyset } from "../src/verify.ts";
-import { attestedSpkiSha256ForHost, keysetStaleAfterMs } from "../src/verify.ts";
+import {
+  attestedSpkiSha256ForHost,
+  bindAttestation,
+  keysetStaleAfterMs,
+} from "../src/verify.ts";
 
 /** A keyset matching the spec §3.1 shape (flat, with not_after + TLS pins). */
 function makeKeyset(over: Partial<WorkloadKeyset> = {}): WorkloadKeyset {
@@ -64,6 +68,21 @@ test("bindAttestation fails closed on a mismatched report (no throw)", async () 
   const bad = makeReport(keysetValue); // api_version aci/1 but digest not recomputed
   const verification = await verifyReportBinding(bad, nonce);
   assert.equal(verification.ok, false);
+});
+
+test("bindAttestation rejects a self-consistent report without a valid hardware quote", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const { computeKeysetDigest, computeReportData, verifyReportBinding } =
+    await import("@phala/aci-verifier");
+  const keyset = makeKeyset();
+  const nonce = "a".repeat(64);
+  const digest = await computeKeysetDigest(keyset);
+  const report = makeReport(keyset);
+  report.workload_keyset_digest = digest;
+  report.attestation.report_data = await computeReportData(digest, nonce);
+
+  assert.equal((await verifyReportBinding(report, nonce)).ok, true);
+  assert.equal(await bindAttestation(report, nonce), null);
 });
 
 test("attestedSpkiSha256ForHost on a full report-shaped keyset is not required; keyset arg is used", () => {

@@ -48,15 +48,18 @@ export ACI_LLM_API_KEY=...
 
 ## How the pin is established
 
-`src/aci-client.ts` fetches the attestation report and delegates binding to
-`@phala/aci-verifier` (`verifyReportBinding`, the repo's reference verifier):
+`src/aci-client.ts` fetches the attestation report and delegates verification to
+`@phala/aci-verifier` (the repo's reference verifier):
 - recomputes the keyset digest from the served keyset (not trusted from the
   report),
 - checks `report_data` binds our fresh nonce,
-- checks `not_after`.
+- checks `not_after`,
+- verifies the TDX quote to the Intel root and confirms it binds the same
+  `report_data`.
 
-Only a report that passes binding yields an SPKI pin, so the pin is
-**attested** — not trust-on-first-use. `src/tls-pinning.ts` then wraps
+Only a report that passes both binding and hardware verification yields an
+SPKI pin, so the pin is **attested** — not trust-on-first-use.
+`src/tls-pinning.ts` then wraps
 `globalThis.fetch` so hosts with a pin go through a dispatcher whose
 `checkServerIdentity` fails the TLS handshake when the peer SPKI does not
 match. Mismatch refuses the connection; a required-but-unpinned host blocks

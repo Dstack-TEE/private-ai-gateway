@@ -8,9 +8,10 @@
 // workload); receipts would be a post-hoc audit, which this plugin does not
 // ship.
 //
-// The report binding (verifyReportBinding) recomputes the keyset digest,
-// checks report_data against our nonce, and checks not_after — so the SPKI we
-// pin is established from a report that actually passed, not taken on trust.
+// The verifier first checks the report binding, then verifies the TDX quote to
+// the Intel root and confirms that the quote binds the same report_data. The
+// SPKI pin therefore comes from a genuine TEE report, not merely a
+// self-consistent document supplied by the endpoint.
 
 import { randomBytes } from "node:crypto";
 
@@ -19,6 +20,7 @@ import {
   type TlsKeyPin,
   type WorkloadKeyset,
   AciError,
+  verifyQuote,
   verifyReportBinding,
 } from "@phala/aci-verifier";
 
@@ -172,12 +174,12 @@ export function summarizeSession(session: Record<string, unknown>): string[] {
 }
 
 // ----------------------------------------------------------------------------
-// Binding (verifier-ts §9.1 checks 2–3) — the prevention foundation
+// Attestation verification (verifier-ts §9.1 checks 1–3)
 // ----------------------------------------------------------------------------
 
-/** Validate an attestation report against the nonce we sent. Returns null when
- *  the binding fails or the report is malformed — never throws for a failed
- *  check (only for a bad caller nonce, which we always generate). */
+/** Verify an attestation report and bind it to the nonce we sent. Returns null
+ *  when the binding or hardware quote fails, or when the report is malformed.
+ *  A bad caller nonce can still throw; callers always generate it locally. */
 export async function bindAttestation(
   report: AttestationReport,
   nonce: string,
@@ -190,6 +192,13 @@ export async function bindAttestation(
           .filter((c) => !c.ok)
           .map((c) => `${c.name}: ${c.detail ?? "fail"}`)
           .join("; ")}`,
+      );
+      return null;
+    }
+    const quote = await verifyQuote(report);
+    if (!quote.ok) {
+      console.error(
+        `${LOG_PREFIX} attestation quote verification failed: ${quote.detail ?? "unknown failure"}`,
       );
       return null;
     }
