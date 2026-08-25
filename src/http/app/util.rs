@@ -136,6 +136,19 @@ pub(super) fn enforce_admin(state: &AppState, headers: &HeaderMap) -> Option<Res
     }
 }
 
+/// Whether an `accept` error is an ordinary per-connection failure (the peer
+/// went away between the SYN and the accept) rather than a listener-level
+/// problem. Mirrors the same helper in axum: these are skipped silently, while
+/// anything else — EMFILE above all — is logged and backed off.
+pub(super) fn is_connection_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::force_tee_true;

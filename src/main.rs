@@ -529,7 +529,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%bind, "private-ai-gateway listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, app).await?;
+    private_ai_gateway::http::app::serve_with_write_idle_timeout(listener, app).await?;
     Ok(())
 }
 
