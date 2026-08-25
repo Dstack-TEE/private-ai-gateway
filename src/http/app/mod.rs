@@ -67,6 +67,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use hyper::body::Incoming;
+use hyper::server::conn::http1::Builder as HyperHttp1Builder;
+use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
+use tower::ServiceExt as _;
 use tower_http::cors::CorsLayer;
 
 /// Request-body cap for the inference surface. Multimodal chat payloads with
@@ -84,6 +89,7 @@ mod backend;
 mod error_responses;
 mod handlers;
 mod util;
+mod write_idle_timeout;
 
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
@@ -91,6 +97,73 @@ use handlers::{
     embeddings, embeddings_models, health, messages, metrics, models, models_subpath,
     receipt_by_chat_id, responses, root,
 };
+
+/// Serve the public entry, wrapping each connection's IO with a write-idle
+/// timeout.
+///
+/// This is `axum::serve` plus one thing: the accepted stream is wrapped in
+/// [`write_idle_timeout::WriteIdleTimeout`] before hyper sees it. Upgrade
+/// support and the accept-error handling mirror `axum::serve`.
+///
+/// HTTP/1 only, and deliberately so. `axum = "0.7"` with default features
+/// enables `hyper/http1` but not `http2`, so the public listener was already
+/// h1-only before this change; reaching for hyper-util's auto builder to
+/// "match axum" would instead turn HTTP/2 on crate-wide. That would be worse
+/// than a behaviour change: under h2 flow control a downstream that stops
+/// consuming stops hyper from queueing DATA rather than blocking the socket
+/// write, so `poll_write` never goes pending, the timer never arms, and the
+/// leak this function exists to close would stay open on exactly those
+/// connections.
+///
+/// The wrapper cannot live anywhere else. A downstream that stops reading
+/// without closing blocks the serving connection's write, which stops the
+/// response body from being polled, which pins the streaming forward's upstream
+/// connection open forever. Hyper only learns of a *closed* downstream, and a
+/// timeout on the body's poll chain can never fire because that chain is exactly
+/// what is no longer polled — so it has to sit in the IO layer, which hyper
+/// always polls.
+///
+/// axum 0.7 takes a concrete `TcpListener` and exposes no hook for wrapping the
+/// IO (`Listener` arrived in 0.8), hence the explicit accept loop.
+pub async fn serve_with_write_idle_timeout(
+    listener: tokio::net::TcpListener,
+    app: Router,
+) -> std::io::Result<()> {
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                if util::is_connection_error(&err) {
+                    continue;
+                }
+                // Same rationale as axum: a full fd table (EMFILE) must not kill
+                // the accept loop, so log loudly and back off rather than exit.
+                tracing::error!(error = %err, "accept error");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let service = app
+            .clone()
+            .map_request(|request: hyper::Request<Incoming>| request.map(axum::body::Body::new));
+        tokio::spawn(async move {
+            let hyper_service = TowerToHyperService::new(service);
+            let io = TokioIo::new(write_idle_timeout::WriteIdleTimeout::new(
+                stream,
+                write_idle_timeout::DOWNSTREAM_WRITE_IDLE_TIMEOUT,
+            ));
+            if let Err(err) = HyperHttp1Builder::new()
+                .serve_connection(io, hyper_service)
+                .with_upgrades()
+                .await
+            {
+                // Mostly clients that connect and go away without sending a
+                // request; axum swallows these too.
+                tracing::debug!(peer = %peer, error = %err, "connection closed");
+            }
+        });
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {

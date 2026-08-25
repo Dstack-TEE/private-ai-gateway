@@ -49,6 +49,15 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
+# Serving the public entry directly (rather than via axum::serve) is what lets the
+# connection IO be wrapped with a write-idle timeout; axum 0.7 takes a concrete
+# TcpListener and offers no hook for that. Deliberately NOT hyper-util's
+# `server-auto`: it would enable hyper-util/http2, and Cargo unifies features
+# crate-wide, so every axum::serve here would start negotiating HTTP/2 — where
+# flow control means a stalled reader never blocks the socket write and the
+# timeout below could never arm.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 async-stream = "0.3"
 
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
