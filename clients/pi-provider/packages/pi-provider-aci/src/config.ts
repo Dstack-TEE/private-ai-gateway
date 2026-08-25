@@ -11,11 +11,18 @@
 // UI can show provenance. Validation runs after merge so a malformed layer
 // never produces a partially-applied config.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
-import { DEFAULT_BASE_URL, LOG_PREFIX, PROVIDER_ID, getBaseUrl } from "./constants.ts";
-import { profile } from "./profile.ts";
+import { getBaseUrl } from "./constants.ts";
+import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
 export type AciConfigSource = "runtime" | "env" | "project" | "home" | "default";
 
@@ -85,6 +92,7 @@ export interface LoadAciCloudConfigOptions {
   home: string;
   env?: NodeJS.ProcessEnv;
   includeProject?: boolean;
+  profile?: ProviderProfile;
 }
 
 export const PI_CONFIG_DIR_NAME = ".pi";
@@ -102,7 +110,7 @@ export class ConfigError extends Error {
 }
 
 export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
-  baseUrl: DEFAULT_BASE_URL,
+  baseUrl: DEFAULT_PROFILE.defaultBaseUrl,
   models: {
     isTeeOnly: true,
     thinkingFormat: "auto",
@@ -115,25 +123,29 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
   },
 };
 
-
-/** Current-profile default config, with the base URL resolved live from the
- *  profile/env (the neutral default may leave it operator-set). */
-function defaultAciCloudConfig(): AciCloudConfig {
-  return { ...DEFAULT_ACI_CLOUD_CONFIG, baseUrl: getBaseUrl() || DEFAULT_ACI_CLOUD_CONFIG.baseUrl };
+/** Profile default config with the base URL resolved from the supplied env. */
+function defaultAciCloudConfig(
+  providerProfile: ProviderProfile,
+  env: NodeJS.ProcessEnv,
+): AciCloudConfig {
+  return {
+    ...DEFAULT_ACI_CLOUD_CONFIG,
+    baseUrl: getBaseUrl(providerProfile, env) || DEFAULT_ACI_CLOUD_CONFIG.baseUrl,
+  };
 }
 
-let runtimeOverride: AciCloudConfigPatch = {};
-
-export function setRuntimeAciCloudConfigOverride(patch: AciCloudConfigPatch): void {
-  runtimeOverride = mergeConfigPatch(runtimeOverride, patch);
+export function getGlobalAciCloudConfigPath(
+  home: string,
+  providerId = DEFAULT_PROFILE.providerId,
+): string {
+  return join(home, PI_CONFIG_DIR_NAME, "providers", providerId, "config.json");
 }
 
-export function getGlobalAciCloudConfigPath(home: string): string {
-  return join(home, PI_CONFIG_DIR_NAME, "providers", PROVIDER_ID, "config.json");
-}
-
-export function getProjectAciCloudConfigPath(cwd: string): string {
-  return join(cwd, PI_CONFIG_DIR_NAME, "providers", PROVIDER_ID, "config.json");
+export function getProjectAciCloudConfigPath(
+  cwd: string,
+  providerId = DEFAULT_PROFILE.providerId,
+): string {
+  return join(cwd, PI_CONFIG_DIR_NAME, "providers", providerId, "config.json");
 }
 
 function clone<T>(value: T): T {
@@ -185,11 +197,11 @@ function readConfigFile(path: string): Record<string, unknown> {
   }
 }
 
-function readConfigFileQuiet(path: string): Record<string, unknown> {
+function readConfigFileQuiet(path: string, logPrefix: string): Record<string, unknown> {
   try {
     return readConfigFile(path);
   } catch (error) {
-    console.error(`${LOG_PREFIX} failed to read config file ${path}:`, error);
+    console.error(`${logPrefix} failed to read config file ${path}:`, error);
     return {};
   }
 }
@@ -202,10 +214,12 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
-function envConfigPatch(env: NodeJS.ProcessEnv): AciCloudConfigPatch {
+function envConfigPatch(
+  env: NodeJS.ProcessEnv,
+  providerProfile: ProviderProfile,
+): AciCloudConfigPatch {
   const patch: AciCloudConfigPatch = {};
-  const p = profile();
-  const prefix = p.envPrefix;
+  const prefix = providerProfile.envPrefix;
   const read = (...names: string[]) => {
     for (const name of names) {
       const v = env[name]?.trim();
@@ -214,7 +228,11 @@ function envConfigPatch(env: NodeJS.ProcessEnv): AciCloudConfigPatch {
     return undefined;
   };
 
-  const baseUrl = read(`${prefix}_CLOUD_API_PREFIX`, `${prefix}_BASE_URL`, `${prefix}_CLOUD_BASE_URL`);
+  const baseUrl = read(
+    `${prefix}_CLOUD_API_PREFIX`,
+    `${prefix}_BASE_URL`,
+    `${prefix}_CLOUD_BASE_URL`,
+  );
   if (baseUrl) patch.baseUrl = baseUrl;
 
   const isTeeOnly = parseBoolean(read(`${prefix}_IS_TEE_ONLY`, `${prefix}_TEE_ONLY`) ?? undefined);
@@ -265,11 +283,7 @@ function requireBoolean(raw: unknown, configPath: string, pointer: string): bool
   return fail(configPath, pointer, `expected a boolean, got ${JSON.stringify(raw)}`);
 }
 
-function requireThinkingFormat(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): ThinkingFormat {
+function requireThinkingFormat(raw: unknown, configPath: string, pointer: string): ThinkingFormat {
   if (raw === "auto" || raw === "qwen" || raw === "openai" || raw === "off") return raw;
   return fail(
     configPath,
@@ -299,11 +313,7 @@ function requireStringArray(
   });
 }
 
-function validateModelsConfig(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): AciModelsConfig {
+function validateModelsConfig(raw: unknown, configPath: string, pointer: string): AciModelsConfig {
   const model = requireRecord(raw, configPath, pointer);
   return {
     isTeeOnly: requireBoolean(model.isTeeOnly, configPath, `${pointer}/isTeeOnly`),
@@ -316,11 +326,7 @@ function validateModelsConfig(
   };
 }
 
-function validateVerifyConfig(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): AciVerifyConfig {
+function validateVerifyConfig(raw: unknown, configPath: string, pointer: string): AciVerifyConfig {
   const verify = requireRecord(raw, configPath, pointer);
   return {
     failOpenOnUnpinned: requireBoolean(
@@ -342,10 +348,7 @@ function validatePinningConfig(
   };
 }
 
-export function validateAciCloudConfig(
-  raw: unknown,
-  configPath = "<aci-config>",
-): AciCloudConfig {
+export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"): AciCloudConfig {
   const config = requireRecord(raw, configPath, "");
   return {
     baseUrl: requireString(config.baseUrl, configPath, "/baseUrl"),
@@ -395,23 +398,31 @@ function buildSources(
 
 function loadLayers(
   options: LoadAciCloudConfigOptions,
+  overrides?: AciCloudConfigPatch,
 ): Array<{ source: AciConfigSource; config: Record<string, unknown> }> {
+  const providerProfile = options.profile ?? DEFAULT_PROFILE;
   const layers: Array<{ source: AciConfigSource; config: Record<string, unknown> }> = [
-    { source: "home", config: readConfigFile(getGlobalAciCloudConfigPath(options.home)) },
+    {
+      source: "home",
+      config: readConfigFile(getGlobalAciCloudConfigPath(options.home, providerProfile.providerId)),
+    },
   ];
   if (options.includeProject !== false) {
     layers.push({
       source: "project",
-      config: readConfigFile(getProjectAciCloudConfigPath(options.cwd)),
+      config: readConfigFile(getProjectAciCloudConfigPath(options.cwd, providerProfile.providerId)),
     });
   }
-  layers.push(
-    {
-      source: "env",
-      config: envConfigPatch(options.env ?? process.env) as Record<string, unknown>,
-    },
-    { source: "runtime", config: runtimeOverride as Record<string, unknown> },
-  );
+  layers.push({
+    source: "env",
+    config: envConfigPatch(options.env ?? process.env, providerProfile) as Record<string, unknown>,
+  });
+  if (overrides) {
+    layers.push({
+      source: "runtime",
+      config: overrides as Record<string, unknown>,
+    });
+  }
   return layers;
 }
 
@@ -419,46 +430,69 @@ export function loadAciCloudConfig(
   options: LoadAciCloudConfigOptions,
   overrides?: AciCloudConfigPatch,
 ): AciCloudConfig {
-  let merged = clone(defaultAciCloudConfig()) as unknown as Record<string, unknown>;
-  for (const layer of loadLayers(options)) {
+  const providerProfile = options.profile ?? DEFAULT_PROFILE;
+  let merged = clone(
+    defaultAciCloudConfig(providerProfile, options.env ?? process.env),
+  ) as unknown as Record<string, unknown>;
+  for (const layer of loadLayers(options, overrides)) {
     merged = mergeConfigPatch(merged, layer.config);
-  }
-  if (overrides) {
-    merged = mergeConfigPatch(merged, overrides as Record<string, unknown>);
   }
   return validateAciCloudConfig(merged);
 }
 
 export function loadAciCloudConfigSources(
   options: LoadAciCloudConfigOptions,
+  overrides?: AciCloudConfigPatch,
 ): AciCloudConfigSources {
-  return buildSources(loadLayers(options));
+  return buildSources(loadLayers(options, overrides));
 }
 
-export function loadProjectAciCloudConfig(cwd: string): AciCloudConfig {
+export function loadProjectAciCloudConfig(
+  cwd: string,
+  providerProfile: ProviderProfile = DEFAULT_PROFILE,
+  env: NodeJS.ProcessEnv = process.env,
+): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig()) as unknown as Record<string, unknown>,
-      readConfigFileQuiet(getProjectAciCloudConfigPath(cwd)),
+      clone(defaultAciCloudConfig(providerProfile, env)) as unknown as Record<string, unknown>,
+      readConfigFileQuiet(
+        getProjectAciCloudConfigPath(cwd, providerProfile.providerId),
+        providerProfile.logPrefix,
+      ),
     ),
   );
 }
 
-export function loadHomeAciCloudConfig(home: string): AciCloudConfig {
+export function loadHomeAciCloudConfig(
+  home: string,
+  providerProfile: ProviderProfile = DEFAULT_PROFILE,
+  env: NodeJS.ProcessEnv = process.env,
+): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig()) as unknown as Record<string, unknown>,
-      readConfigFileQuiet(getGlobalAciCloudConfigPath(home)),
+      clone(defaultAciCloudConfig(providerProfile, env)) as unknown as Record<string, unknown>,
+      readConfigFileQuiet(
+        getGlobalAciCloudConfigPath(home, providerProfile.providerId),
+        providerProfile.logPrefix,
+      ),
     ),
   );
 }
 
-export function saveProjectAciCloudConfig(cwd: string, config: AciCloudConfig): void {
-  saveAciCloudConfigFile(getProjectAciCloudConfigPath(cwd), config);
+export function saveProjectAciCloudConfig(
+  cwd: string,
+  config: AciCloudConfig,
+  providerId = DEFAULT_PROFILE.providerId,
+): void {
+  saveAciCloudConfigFile(getProjectAciCloudConfigPath(cwd, providerId), config);
 }
 
-export function saveHomeAciCloudConfig(home: string, config: AciCloudConfig): void {
-  saveAciCloudConfigFile(getGlobalAciCloudConfigPath(home), config);
+export function saveHomeAciCloudConfig(
+  home: string,
+  config: AciCloudConfig,
+  providerId = DEFAULT_PROFILE.providerId,
+): void {
+  saveAciCloudConfigFile(getGlobalAciCloudConfigPath(home, providerId), config);
 }
 
 function saveAciCloudConfigFile(path: string, config: AciCloudConfig): void {
@@ -468,7 +502,11 @@ function saveAciCloudConfigFile(path: string, config: AciCloudConfig): void {
   // to defaults on the next read (previously plain writeFileSync).
   const tempPath = `${path}.tmp`;
   try {
-    writeFileSync(tempPath, `${JSON.stringify(validateAciCloudConfig(config, path), null, 2)}\n`, "utf8");
+    writeFileSync(
+      tempPath,
+      `${JSON.stringify(validateAciCloudConfig(config, path), null, 2)}\n`,
+      "utf8",
+    );
     renameSync(tempPath, path);
   } catch (error) {
     try {

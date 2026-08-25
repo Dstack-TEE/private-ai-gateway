@@ -53,8 +53,12 @@ export interface ProviderProfile {
 export interface AciOAuthConfig {
   /** Display name shown in `/login`. */
   name: string;
-  login(callbacks: import("@earendil-works/pi-ai").OAuthLoginCallbacks): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
-  refreshToken(credentials: import("@earendil-works/pi-ai").OAuthCredentials): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
+  login(
+    callbacks: import("@earendil-works/pi-ai").OAuthLoginCallbacks,
+  ): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
+  refreshToken(
+    credentials: import("@earendil-works/pi-ai").OAuthCredentials,
+  ): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
   getApiKey(credentials: import("@earendil-works/pi-ai").OAuthCredentials): string;
 }
 
@@ -69,17 +73,9 @@ export const DEFAULT_PROFILE: ProviderProfile = {
   fallbackModels: [],
 };
 
-let current: ProviderProfile = DEFAULT_PROFILE;
-
 /** Resolve a (possibly partial) profile over the neutral defaults. */
 export function resolveProfile(patch: Partial<ProviderProfile> | undefined): ProviderProfile {
-  current = { ...DEFAULT_PROFILE, ...stripEmpty(patch) };
-  return current;
-}
-
-/** The currently active profile (set by the factory entry point). */
-export function profile(): ProviderProfile {
-  return current;
+  return { ...DEFAULT_PROFILE, ...stripEmpty(patch) };
 }
 
 function stripEmpty<T extends Record<string, unknown>>(patch: T | undefined): T {

@@ -21,7 +21,7 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 import { type AciCloudConfig } from "./config.ts";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, LOG_PREFIX, buildModelsUrl } from "./constants.ts";
-import { profile } from "./profile.ts";
+import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
 export interface AciServerModel {
   id?: unknown;
@@ -91,10 +91,7 @@ export function inferThinkingFormat(modelId: string): InferredThinking {
   };
 }
 
-function resolveThinking(
-  modelId: string,
-  config: AciCloudConfig,
-): InferredThinking {
+function resolveThinking(modelId: string, config: AciCloudConfig): InferredThinking {
   const configured = config.models.thinkingFormat;
   if (configured === "off") {
     return {
@@ -141,7 +138,6 @@ function isEmbeddingModel(model: AciServerModel): boolean {
   const output = model.output_modalities;
   return Array.isArray(output) && output.length === 1 && output[0] === "embeddings";
 }
-
 
 // Pure mapping. Exposed for tests.
 export function mapAciServerModel(
@@ -202,6 +198,7 @@ export interface DiscoverAciModelsOptions {
   timeoutMs?: number;
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
+  logPrefix?: string;
 }
 
 export interface DiscoverAciModelsResult {
@@ -231,7 +228,7 @@ export async function discoverAciModels(
     });
     if (!response.ok) {
       console.error(
-        `${LOG_PREFIX} /v1/models returned ${response.status} ${response.statusText}`,
+        `${options.logPrefix ?? LOG_PREFIX} /v1/models returned ${response.status} ${response.statusText}`,
       );
       return { models: [], raw: [] };
     }
@@ -244,18 +241,19 @@ export async function discoverAciModels(
       .filter((m): m is ProviderModelConfig => m !== null);
     return { models, raw: list };
   } catch (error) {
-    console.error(`${LOG_PREFIX} model discovery failed:`, error);
+    console.error(`${options.logPrefix ?? LOG_PREFIX} model discovery failed:`, error);
     return { models: [], raw: [] };
   } finally {
     if (timeout) clearTimeout(timeout);
   }
 }
 
-/** Fallback model list used when discovery has no API key or fails. Drawn from
- *  the active provider profile (branded shells supply their own catalog); the
- *  live /v1/models catalog is authoritative. */
-export function fallbackModels(): ProviderModelConfig[] {
-  return profile().fallbackModels.map((m) => {
+/** Fallback model list used when discovery has no API key or fails. Branded
+ *  shells supply their own catalog; the live /v1/models catalog is authoritative. */
+export function fallbackModels(
+  providerProfile: ProviderProfile = DEFAULT_PROFILE,
+): ProviderModelConfig[] {
+  return providerProfile.fallbackModels.map((m) => {
     const thinking = inferThinkingFormat(m.id);
     return {
       ...m,

@@ -12,7 +12,6 @@ import {
   getProjectAciCloudConfigPath,
 } from "./config.ts";
 import { PROVIDER_VERSION } from "./constants.ts";
-import { profile } from "./profile.ts";
 
 export type AciConfigScope = "project" | "home";
 
@@ -44,9 +43,12 @@ export function formatScopeDescription(
   scope: AciConfigScope,
   cwd: string,
   home = os.homedir(),
+  providerId?: string,
 ): string {
   const filePath =
-    scope === "project" ? getProjectAciCloudConfigPath(cwd) : getGlobalAciCloudConfigPath(home);
+    scope === "project"
+      ? getProjectAciCloudConfigPath(cwd, providerId)
+      : getGlobalAciCloudConfigPath(home, providerId);
   const displayPath = scope === "home" ? homeRelative(filePath, home) : relative(cwd, filePath);
   return `Writes to the ${scope} config file: ${displayPath}`;
 }
@@ -55,8 +57,8 @@ export function formatBoolean(value: boolean): string {
   return value ? "true" : "false";
 }
 
-export function settingsTitle(): string {
-  return `${profile().label} settings (provider v${PROVIDER_VERSION})`;
+export function settingsTitle(label: string): string {
+  return `${label} settings (provider v${PROVIDER_VERSION})`;
 }
 
 export function modelRegistrationSummary(config: AciCloudConfig): string {
@@ -68,6 +70,8 @@ export function modelRegistrationSummary(config: AciCloudConfig): string {
 }
 
 export function verifySummary(config: AciCloudConfig): string {
-  return `Pin: ${config.pinning.enabled ? "required" : "disabled"}, ` +
-    `fail-open-unpinned ${formatBoolean(config.verify.failOpenOnUnpinned)}`;
+  return (
+    `Pin: ${config.pinning.enabled ? "required" : "disabled"}, ` +
+    `fail-open-unpinned ${formatBoolean(config.verify.failOpenOnUnpinned)}`
+  );
 }

@@ -1,29 +1,9 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { test } from "node:test";
 
-import {
-  API_KEY_ENV,
-  DEFAULT_BASE_URL,
-  FOOTER_STATUS_KEY,
-  LOG_PREFIX,
-  PROVIDER_ID,
-  applyProviderProfile,
-  getBaseUrl,
-} from "../src/constants.ts";
+import { getGlobalAciCloudConfigPath } from "../src/config.ts";
+import { getBaseUrl } from "../src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile } from "../src/profile.ts";
-
-const KEEP = {
-  apiKey: process.env.ACI_LLM_API_KEY,
-  base: process.env.ACI_BASE_URL,
-  alias: process.env.PHALA_BASE_URL,
-};
-
-after(() => {
-  for (const [k, v] of Object.entries(KEEP)) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
-});
 
 test("resolveProfile fills neutral defaults for unset fields", () => {
   const p = resolveProfile({ providerId: "brand", defaultBaseUrl: "https://brand.test/v1" });
@@ -33,23 +13,6 @@ test("resolveProfile fills neutral defaults for unset fields", () => {
   assert.equal(p.envPrefix, DEFAULT_PROFILE.envPrefix);
   assert.equal(p.footerKey, DEFAULT_PROFILE.footerKey);
   assert.equal(p.apiKeyEnv, DEFAULT_PROFILE.apiKeyEnv);
-});
-
-test("applyProviderProfile updates the identity live-bindings", () => {
-  applyProviderProfile({
-    providerId: "brand-x",
-    label: "Brand X",
-    defaultBaseUrl: "https://brand.test/v1",
-    apiKeyEnv: "BRAND_X_KEY",
-    envPrefix: "BRAND_X",
-    footerKey: "brand-x",
-    logPrefix: "[brand-x]",
-  });
-  assert.equal(PROVIDER_ID, "brand-x");
-  assert.equal(API_KEY_ENV, "BRAND_X_KEY");
-  assert.equal(FOOTER_STATUS_KEY, "brand-x");
-  assert.equal(DEFAULT_BASE_URL, "https://brand.test/v1");
-  assert.equal(LOG_PREFIX, "[brand-x]");
 });
 
 test("resolveProfile preserves an oauth block (login/refreshToken/getApiKey)", () => {
@@ -68,23 +31,58 @@ test("resolveProfile preserves an oauth block (login/refreshToken/getApiKey)", (
 });
 
 test("getBaseUrl: profile default wins when no env is set", () => {
-  delete process.env.ACI_BASE_URL;
-  delete process.env.ACI_CLOUD_BASE_URL;
-  delete process.env.PHALA_BASE_URL;
-  resolveProfile({ envPrefix: "ACI", defaultBaseUrl: "https://default.test/v1", baseUrlAliases: ["PHALA_BASE_URL"] });
-  assert.equal(getBaseUrl(), "https://default.test/v1");
+  const profile = resolveProfile({
+    envPrefix: "ACI",
+    defaultBaseUrl: "https://default.test/v1",
+    baseUrlAliases: ["PHALA_BASE_URL"],
+  });
+  assert.equal(getBaseUrl(profile, {}), "https://default.test/v1");
 });
 
 test("getBaseUrl: prefixed env var overrides the profile default", () => {
-  process.env.ACI_BASE_URL = "https://env.test/v1";
-  resolveProfile({ envPrefix: "ACI", defaultBaseUrl: "https://default.test/v1" });
-  assert.equal(getBaseUrl(), "https://env.test/v1");
+  const profile = resolveProfile({
+    envPrefix: "ACI",
+    defaultBaseUrl: "https://default.test/v1",
+  });
+  assert.equal(getBaseUrl(profile, { ACI_BASE_URL: "https://env.test/v1" }), "https://env.test/v1");
 });
 
 test("getBaseUrl: brand alias env var is honored", () => {
-  delete process.env.ACI_BASE_URL;
-  delete process.env.ACI_CLOUD_BASE_URL;
-  process.env.PHALA_BASE_URL = "https://alias.test/v1";
-  resolveProfile({ envPrefix: "ACI", defaultBaseUrl: "https://default.test/v1", baseUrlAliases: ["PHALA_BASE_URL"] });
-  assert.equal(getBaseUrl(), "https://alias.test/v1");
+  const profile = resolveProfile({
+    envPrefix: "ACI",
+    defaultBaseUrl: "https://default.test/v1",
+    baseUrlAliases: ["PHALA_BASE_URL"],
+  });
+  assert.equal(
+    getBaseUrl(profile, { PHALA_BASE_URL: "https://alias.test/v1" }),
+    "https://alias.test/v1",
+  );
+});
+
+test("resolved profiles keep endpoint and config identity instance-scoped", () => {
+  const redpill = resolveProfile({
+    providerId: "redpill",
+    envPrefix: "REDPILL",
+    defaultBaseUrl: "https://api.redpill.test/v1",
+  });
+  const phala = resolveProfile({
+    providerId: "phala",
+    envPrefix: "PHALA",
+    defaultBaseUrl: "https://inference.phala.test/v1",
+  });
+  const env = {
+    REDPILL_BASE_URL: "https://redpill-env.test/v1",
+    PHALA_BASE_URL: "https://phala-env.test/v1",
+  };
+
+  assert.equal(getBaseUrl(redpill, env), "https://redpill-env.test/v1");
+  assert.equal(getBaseUrl(phala, env), "https://phala-env.test/v1");
+  assert.equal(
+    getGlobalAciCloudConfigPath("/home/test", redpill.providerId),
+    "/home/test/.pi/providers/redpill/config.json",
+  );
+  assert.equal(
+    getGlobalAciCloudConfigPath("/home/test", phala.providerId),
+    "/home/test/.pi/providers/phala/config.json",
+  );
 });
