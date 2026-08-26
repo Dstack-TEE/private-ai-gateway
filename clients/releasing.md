@@ -8,6 +8,12 @@ order:
 3. `pi-provider-redpill`
 4. `pi-provider-phala-cloud`
 
+All four packages are managed by the Phala npm organization. The two branded
+provider names intentionally remain unscoped. After their bootstrap publish,
+grant a Phala organization release team read/write access to those packages;
+organization management does not require renaming them into the `@phala`
+scope.
+
 Each package is ESM-only, publishes compiled JavaScript plus declarations,
 source maps and declaration maps, restricts its tarball with `files`, and
 declares public npm access and provenance. The Pi packages support Node
@@ -50,6 +56,10 @@ environment as `NPM_TOKEN`, publish the first `clients-v0.2.0` release through
 the workflow, then immediately remove and revoke it. Because the bootstrap
 publish still runs on a GitHub-hosted runner with `--provenance`, the first
 release also receives npm provenance.
+
+For the two unscoped packages, use the npm organization UI or `npm access grant`
+to grant the chosen Phala release team read/write access before revoking the
+bootstrap token.
 
 After that bootstrap, configure an npm trusted publisher for each package with:
 
