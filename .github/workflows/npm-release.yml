@@ -8,6 +8,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
 jobs:
   publish:
     if: startsWith(github.event.release.tag_name, 'clients-v')
@@ -18,14 +22,11 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
-          cache-dependency-path: |
-            clients/verifier-ts/package-lock.json
-            clients/pi-provider/package-lock.json
+          package-manager-cache: false
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -57,29 +58,30 @@ jobs:
         run: |
           npm --prefix clients/verifier-ts test
           npm --prefix clients/verifier-ts run test:bun
+          npm --prefix clients/verifier-ts run lint:package
           npm --prefix clients/pi-provider run check
           npm --prefix clients/pi-provider run lint
+          npm --prefix clients/pi-provider run format:check
           npm --prefix clients/pi-provider test
-          npm --prefix clients/verifier-ts run lint:package
           npm --prefix clients/pi-provider run lint:packages
           bash clients/package-smoke.sh
 
-      - name: Publish verifier
-        working-directory: clients/verifier-ts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
-
-      - name: Publish Pi core
-        working-directory: clients/pi-provider
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --workspace @phala/pi-provider-aci --access public --provenance
-
-      - name: Publish branded providers
-        working-directory: clients/pi-provider
+      - name: Publish packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm publish --workspace pi-provider-redpill --access public --provenance
-          npm publish --workspace pi-provider-phala-cloud --access public --provenance
+          publish_if_missing() {
+            name="$1"
+            directory="$2"
+            version="$(node -p "require('./$directory/package.json').version")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published; skipping"
+            else
+              npm publish "$directory" --access public --provenance
+            fi
+          }
+
+          publish_if_missing @phala/aci-verifier clients/verifier-ts
+          publish_if_missing @phala/pi-provider-aci clients/pi-provider/packages/pi-provider-aci
+          publish_if_missing pi-provider-redpill clients/pi-provider/packages/pi-provider-redpill
+          publish_if_missing pi-provider-phala-cloud clients/pi-provider/packages/pi-provider-phala-cloud

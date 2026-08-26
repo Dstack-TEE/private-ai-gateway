@@ -6,29 +6,29 @@
     "ai-provider",
     "attestation",
     "confidential-ai",
-    "redpill",
     "pi",
     "pi-provider",
+    "redpill",
     "tee",
     "verifiable"
   ],
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-redpill",
+  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
     "directory": "clients/pi-provider/packages/pi-provider-redpill"
   },
-  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-redpill",
-  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
-  "engines": {
-    "node": ">=22.19.0"
-  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -36,12 +36,21 @@
       "default": "./dist/index.js"
     }
   },
-  "types": "./dist/index.d.ts",
-  "sideEffects": false,
-  "files": [
-    "dist",
-    "README.md"
-  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit -p tsconfig.build.json",
+    "lint": "oxlint .",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run check && npm run lint && npm run format:check"
+  },
   "dependencies": {
     "@phala/pi-provider-aci": "^0.2.0"
   },
@@ -50,15 +59,12 @@
     "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
     "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
   },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "pi": {
     "extensions": [
       "./dist/index.js"
     ]
-  },
-  "scripts": {
-    "clean": "rm -rf dist",
-    "build": "tsc -p tsconfig.build.json",
-    "pack:check": "npm pack --dry-run",
-    "prepack": "npm run clean && npm run build"
   }
 }

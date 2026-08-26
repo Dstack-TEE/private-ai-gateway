@@ -15,6 +15,10 @@ for package in @phala/pi-provider-aci pi-provider-redpill pi-provider-phala-clou
     npm pack --workspace "$package" --pack-destination "$packs")
 done
 
+for archive in "$packs"/*.tgz; do
+  tar -tzf "$archive" package/LICENSE >/dev/null
+done
+
 cd "$consumer"
 npm init --yes --silent >/dev/null
 npm install --ignore-scripts --no-audit --no-fund "$packs"/*.tgz

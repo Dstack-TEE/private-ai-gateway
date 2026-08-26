@@ -25,6 +25,7 @@ import {
   type ExtensionFactory,
   readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
+import type { Credential } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
 import { connectAci, type AciConnection } from "@phala/aci-verifier/node";
@@ -65,9 +66,18 @@ interface AciRuntimeState {
   projectTrusted: boolean;
   rawModels: AciServerModel[];
   connection: AciConnection | undefined;
+  connectionApiKey: string | undefined;
+  connectionConfigKey: string | undefined;
+  connectionSetup: AciConnectionSetup | undefined;
   connectionError: string | undefined;
   receiptId: string | undefined;
   overrides?: AciCloudConfigPatch;
+}
+
+interface AciConnectionSetup {
+  apiKey: string;
+  configKey: string;
+  promise: Promise<void>;
 }
 
 function resolveApiKey(providerProfile: ProviderProfile): string {
@@ -101,6 +111,19 @@ function resolveApiKey(providerProfile: ProviderProfile): string {
   return "";
 }
 
+function resolveCredentialApiKey(
+  providerProfile: ProviderProfile,
+  credential: Credential | undefined,
+): string {
+  if (credential?.type === "oauth") {
+    return (providerProfile.oauth?.getApiKey(credential) ?? credential.access).trim();
+  }
+  if (credential?.type === "api_key" && typeof credential.key === "string") {
+    return credential.key.trim();
+  }
+  return resolveApiKey(providerProfile);
+}
+
 function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackModels> {
   const mapped = state.rawModels
     .map((m) => mapAciServerModel(m, state.config))
@@ -113,39 +136,78 @@ function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackMode
  * Default posture is fail closed: when verification or channel binding fails,
  * the provider stream receives a rejecting fetch implementation.
  */
-async function installAciConnection(state: AciRuntimeState): Promise<void> {
-  await closeAciConnection(state);
+function connectionConfig(config: AciCloudConfig): string {
+  return JSON.stringify({
+    baseUrl: config.baseUrl,
+    acceptedComposeHashes: config.trust.acceptedComposeHashes,
+    acceptedSessionIds: config.trust.acceptedSessionIds,
+  });
+}
 
-  const apiKey = resolveApiKey(state.profile);
+async function ensureAciConnection(state: AciRuntimeState, resolvedApiKey?: string): Promise<void> {
+  const apiKey = resolvedApiKey?.trim() || resolveApiKey(state.profile);
   if (!apiKey) {
+    await state.connectionSetup?.promise;
+    await closeAciConnection(state);
     state.connectionError = "API key is not configured";
     return;
   }
 
+  const config = state.config;
+  const configKey = connectionConfig(config);
+  if (
+    state.connection &&
+    state.connectionApiKey === apiKey &&
+    state.connectionConfigKey === configKey
+  ) {
+    return;
+  }
+
+  const activeSetup = state.connectionSetup;
+  if (activeSetup) {
+    await activeSetup.promise;
+    if (activeSetup.apiKey === apiKey && activeSetup.configKey === configKey) return;
+    return ensureAciConnection(state, resolvedApiKey);
+  }
+
+  const setup = (async () => {
+    await closeAciConnection(state);
+    try {
+      const connection = await connectAci({
+        baseURL: config.baseUrl,
+        apiKey,
+        policy:
+          config.trust.acceptedComposeHashes === undefined
+            ? {}
+            : { acceptedComposeHashes: config.trust.acceptedComposeHashes },
+        serving:
+          config.trust.acceptedSessionIds === undefined
+            ? {}
+            : { acceptedSessionIds: config.trust.acceptedSessionIds },
+      });
+      state.connection = connection;
+      state.connectionApiKey = apiKey;
+      state.connectionConfigKey = configKey;
+      state.connectionError = undefined;
+    } catch (error) {
+      state.connectionError = error instanceof Error ? error.message : String(error);
+      console.error(`${state.profile.logPrefix} ACI connection failed:`, error);
+    }
+  })();
+  const pending = { apiKey, configKey, promise: setup };
+  state.connectionSetup = pending;
   try {
-    const connection = await connectAci({
-      baseURL: state.config.baseUrl,
-      apiKey,
-      policy:
-        state.config.trust.acceptedComposeHashes === undefined
-          ? {}
-          : { acceptedComposeHashes: state.config.trust.acceptedComposeHashes },
-      serving:
-        state.config.trust.acceptedSessionIds === undefined
-          ? {}
-          : { acceptedSessionIds: state.config.trust.acceptedSessionIds },
-    });
-    state.connection = connection;
-    state.connectionError = undefined;
-  } catch (error) {
-    state.connectionError = error instanceof Error ? error.message : String(error);
-    console.error(`${state.profile.logPrefix} ACI connection failed:`, error);
+    await setup;
+  } finally {
+    if (state.connectionSetup === pending) state.connectionSetup = undefined;
   }
 }
 
 async function closeAciConnection(state: AciRuntimeState): Promise<void> {
   const connection = state.connection;
   state.connection = undefined;
+  state.connectionApiKey = undefined;
+  state.connectionConfigKey = undefined;
   if (!connection) return;
   try {
     await connection.close();
@@ -156,14 +218,29 @@ async function closeAciConnection(state: AciRuntimeState): Promise<void> {
 
 const openAICompletions = openAICompletionsApi();
 
-function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
-  if (state.connection) return state.connection.fetch;
-  return () =>
-    Promise.reject(
-      new Error(
-        `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
-      ),
+function providerFetch(state: AciRuntimeState, apiKey?: string): typeof globalThis.fetch {
+  return async (input, init) => {
+    await ensureAciConnection(state, apiKey);
+    if (state.connection) return state.connection.fetch(input, init);
+    throw new Error(
+      `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
     );
+  };
+}
+
+async function refreshAciModels(
+  state: AciRuntimeState,
+  apiKey: string,
+): Promise<ReturnType<typeof fallbackModels>> {
+  await ensureAciConnection(state, apiKey);
+  if (!apiKey || !state.connection) return modelsFromState(state);
+  const discovered = await discoverAciModels(apiKey, state.config, {
+    baseUrl: state.config.baseUrl,
+    fetch: providerFetch(state, apiKey),
+    logPrefix: state.profile.logPrefix,
+  });
+  if (discovered.raw.length > 0) state.rawModels = discovered.raw;
+  return modelsFromState(state);
 }
 
 function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
@@ -176,10 +253,15 @@ function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
     api: "openai-completions",
     authHeader: true,
     models: modelsFromState(state),
+    refreshModels: async ({ credential, allowNetwork }) => {
+      if (!allowNetwork) return modelsFromState(state);
+      const apiKey = resolveCredentialApiKey(providerProfile, credential);
+      return refreshAciModels(state, apiKey);
+    },
     streamSimple: (model, context, options) =>
       openAICompletions.streamSimple(model, context, {
         ...options,
-        fetch: providerFetch(state),
+        fetch: providerFetch(state, options?.apiKey),
       }),
     ...(oauth ? { oauth } : {}),
   });
@@ -437,6 +519,7 @@ async function runAttestationCommand(
     ctx.ui.notify(`${state.profile.apiKeyEnv} not set`, "error");
     return;
   }
+  await ensureAciConnection(state, apiKey);
   if (!state.connection) {
     ctx.ui.notify(
       `Attestation validation failed: ${state.connectionError ?? "no verified connection"}`,
@@ -495,6 +578,9 @@ export function createProvider(
       projectTrusted: false,
       rawModels: [],
       connection: undefined,
+      connectionApiKey: undefined,
+      connectionConfigKey: undefined,
+      connectionSetup: undefined,
       connectionError: undefined,
       receiptId: undefined,
       overrides,
@@ -504,21 +590,14 @@ export function createProvider(
     pi.on("session_start", async (_event, ctx) => {
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      await installAciConnection(state);
       const sessionApiKey = resolveApiKey(state.profile);
-      if (sessionApiKey) {
-        const discovered = await discoverAciModels(sessionApiKey, state.config, {
-          baseUrl: state.config.baseUrl,
-          fetch: providerFetch(state),
-          logPrefix: state.profile.logPrefix,
-        });
-        state.rawModels = discovered.raw;
-        registerAciProvider(pi, state);
-      }
+      await refreshAciModels(state, sessionApiKey);
+      registerAciProvider(pi, state);
       updateFooter(ctx, state);
     });
 
     pi.on("session_shutdown", async () => {
+      await state.connectionSetup?.promise;
       await closeAciConnection(state);
     });
 

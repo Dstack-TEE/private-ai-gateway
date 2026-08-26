@@ -49,6 +49,96 @@ interface PrivateAiSelfResponse {
   credits?: { balance?: string; granted_balance?: string };
 }
 
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} returned an invalid response`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Device authorization response is missing ${field}`);
+  }
+  return value;
+}
+
+function requiredHttpUrl(value: unknown, field: string): string {
+  const text = requiredString(value, field);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error(`Device authorization response has invalid ${field}`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`Device authorization response has invalid ${field}`);
+  }
+  return text;
+}
+
+function positiveNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Device authorization response has invalid ${field}`);
+  }
+  return value;
+}
+
+function parseDeviceCode(value: unknown): DeviceCodeResponse {
+  const data = record(value, "Device authorization endpoint");
+  const verificationUri = requiredHttpUrl(data.verification_uri, "verification_uri");
+  const complete = data.verification_uri_complete;
+  const completeUri =
+    complete === undefined ? undefined : requiredHttpUrl(complete, "verification_uri_complete");
+  return {
+    device_code: requiredString(data.device_code, "device_code"),
+    user_code: requiredString(data.user_code, "user_code"),
+    verification_uri: verificationUri,
+    ...(completeUri === undefined ? {} : { verification_uri_complete: completeUri }),
+    expires_in: positiveNumber(data.expires_in, "expires_in"),
+    interval: positiveNumber(data.interval, "interval"),
+  };
+}
+
+function parseDeviceToken(value: unknown): DeviceTokenResponse {
+  const data = record(value, "Device token endpoint");
+  const expiresIn = data.expires_in;
+  if (
+    expiresIn !== undefined &&
+    expiresIn !== null &&
+    (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0)
+  ) {
+    throw new Error("Device token response has invalid expires_in");
+  }
+  const keyId = data.redpill_key_id;
+  if (
+    keyId !== undefined &&
+    keyId !== null &&
+    (typeof keyId !== "number" || !Number.isInteger(keyId) || keyId < 0)
+  ) {
+    throw new Error("Device token response has invalid redpill_key_id");
+  }
+  return {
+    access_token: requiredString(data.access_token, "access_token"),
+    ...(typeof expiresIn === "number" ? { expires_in: expiresIn } : {}),
+    ...(typeof keyId === "number" ? { redpill_key_id: keyId } : {}),
+  };
+}
+
+function deviceError(value: unknown): { code?: string; description?: string } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  const detail = (value as Record<string, unknown>).detail;
+  if (typeof detail === "string") return { description: detail };
+  if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return {};
+  const fields = detail as Record<string, unknown>;
+  return {
+    ...(typeof fields.error === "string" ? { code: fields.error } : {}),
+    ...(typeof fields.error_description === "string"
+      ? { description: fields.error_description }
+      : {}),
+  };
+}
+
 // RFC 8628 device authorization against Phala Cloud. On approval the consume
 // step (scope "redpill:api-key") issues a Redpill LLM virtual key — no phak_
 // cloud token is created. The key does not expire and cannot be refreshed, so
@@ -64,7 +154,7 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
   if (!codeRes.ok) {
     throw new Error(`Device authorization request failed: ${await codeRes.text()}`);
   }
-  const code = (await codeRes.json()) as DeviceCodeResponse;
+  const code = parseDeviceCode(await codeRes.json());
 
   callbacks.onDeviceCode({
     userCode: code.user_code,
@@ -91,28 +181,21 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
       signal: callbacks.signal,
     });
     if (tokenRes.ok) {
-      token = (await tokenRes.json()) as DeviceTokenResponse;
+      token = parseDeviceToken(await tokenRes.json());
       break;
     }
-    const body = (await tokenRes.json().catch(() => undefined)) as
-      | { detail?: { error?: string; error_description?: string } | string }
-      | undefined;
-    const detail = body?.detail;
-    const errorCode = typeof detail === "object" && detail ? detail.error : undefined;
-    if (errorCode === "authorization_pending") {
+    const error = deviceError(await tokenRes.json().catch(() => undefined));
+    if (error.code === "authorization_pending") {
       await sleep(Math.min(intervalMs, deadline - Date.now()));
       continue;
     }
-    if (errorCode === "slow_down") {
+    if (error.code === "slow_down") {
       // RFC 8628 §3.5: increase the polling interval.
       intervalMs = Math.min(Math.max(intervalMs * 2, 5000), 30000);
       await sleep(intervalMs);
       continue;
     }
-    const description =
-      (typeof detail === "object" && detail ? detail.error_description : undefined) ??
-      (typeof detail === "string" ? detail : undefined) ??
-      `HTTP ${tokenRes.status}`;
+    const description = error.description ?? `HTTP ${tokenRes.status}`;
     throw new Error(`Device authorization failed: ${description}`);
   }
   if (!token) throw new Error("Device authorization expired");

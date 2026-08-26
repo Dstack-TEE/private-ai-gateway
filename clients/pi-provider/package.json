@@ -21,9 +21,9 @@
     "build": "npm run build -w @phala/pi-provider-aci && npm run build -w pi-provider-redpill && npm run build -w pi-provider-phala-cloud",
     "check": "tsc --noEmit",
     "test": "npm run test -w @phala/pi-provider-aci",
-    "lint": "npm run lint -w @phala/pi-provider-aci",
-    "format": "npm run format -w @phala/pi-provider-aci",
-    "format:check": "npm run format:check -w @phala/pi-provider-aci",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "npm run format --workspaces --if-present",
+    "format:check": "npm run format:check --workspaces --if-present",
     "lint:packages": "npm run build && publint packages/pi-provider-aci && publint packages/pi-provider-redpill && publint packages/pi-provider-phala-cloud && attw --pack --profile esm-only packages/pi-provider-aci && attw --pack --profile esm-only packages/pi-provider-redpill && attw --pack --profile esm-only packages/pi-provider-phala-cloud",
     "pre-commit": "npm run pre-commit -w @phala/pi-provider-aci",
     "pack:check": "npm run pack:check -w @phala/pi-provider-aci && npm run pack:check -w pi-provider-redpill && npm run pack:check -w pi-provider-phala-cloud"

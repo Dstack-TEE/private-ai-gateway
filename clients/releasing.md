@@ -8,9 +8,10 @@ order:
 3. `pi-provider-redpill`
 4. `pi-provider-phala-cloud`
 
-Each package is ESM-only, publishes compiled JavaScript plus declarations and
-inline source maps, restricts its tarball with `files`, and declares public npm
-access and provenance. The Pi packages support Node `>=22.19.0`; the standalone
+Each package is ESM-only, publishes compiled JavaScript plus declarations,
+source maps and declaration maps, restricts its tarball with `files`, and
+declares public npm access and provenance. The Pi packages support Node
+`>=22.19.0`; the standalone
 verifier supports Node `>=20.18.1` and Bun `>=1.4.0`, the tested floors for its
 two pinned fetch transports.
 
@@ -27,6 +28,7 @@ npm --prefix clients/verifier-ts run lint:package
 npm --prefix clients/pi-provider ci
 npm --prefix clients/pi-provider run check
 npm --prefix clients/pi-provider run lint
+npm --prefix clients/pi-provider run format:check
 npm --prefix clients/pi-provider test
 npm --prefix clients/pi-provider run lint:packages
 
@@ -41,18 +43,21 @@ temporary directory. It never writes package artifacts into the repository.
 ## Trusted publishing
 
 The package names are new, so the first release must create them before their
-npm settings pages exist. Put a short-lived, least-privilege npm automation
-token in the protected GitHub `npm` environment as `NPM_TOKEN`, publish the
-first `clients-v0.2.0` release through the workflow, then immediately remove the
-secret. Because the bootstrap publish still runs on a GitHub-hosted runner with
-`--provenance`, the first release also receives npm provenance.
+npm settings pages exist. Create a short-lived granular access token with only
+the package/scope write access needed for this bootstrap and the 2FA bypass
+required for unattended publishing. Put it in the protected GitHub `npm`
+environment as `NPM_TOKEN`, publish the first `clients-v0.2.0` release through
+the workflow, then immediately remove and revoke it. Because the bootstrap
+publish still runs on a GitHub-hosted runner with `--provenance`, the first
+release also receives npm provenance.
 
 After that bootstrap, configure an npm trusted publisher for each package with:
 
 - organization/user: the owner of the npm package
 - repository: `Dstack-TEE/private-ai-gateway`
-- workflow: `.github/workflows/npm-release.yml`
+- workflow filename: `npm-release.yml`
 - GitHub environment: `npm`
+- allowed action: `npm publish`
 
 The workflow prefers npm's short-lived OIDC identity when the trusted publisher
 exists and only falls back to `NPM_TOKEN` for the bootstrap. No npm token should
