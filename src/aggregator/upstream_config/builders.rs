@@ -366,7 +366,7 @@ fn build_aci_service_verifier(
     }
 }
 
-fn config_digest(config: &[UpstreamConfig]) -> Result<String, UpstreamConfigError> {
+pub(super) fn config_digest(config: &[UpstreamConfig]) -> Result<String, UpstreamConfigError> {
     // A local version stamp over the serialized config, not a protocol artifact.
     let bytes = serde_json::to_vec(config).map_err(|e| {
         UpstreamConfigError::InvalidConfig(format!("failed to serialize upstream config: {e}"))

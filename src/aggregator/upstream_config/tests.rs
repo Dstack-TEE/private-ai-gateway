@@ -335,6 +335,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
             verifier_request_timeout_seconds: 60,
         },
         state,
+        update_lock: Arc::new(Mutex::new(())),
         session_sink: Arc::new(RwLock::new(None)),
     };
 

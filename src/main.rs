@@ -39,11 +39,13 @@ use private_ai_gateway::aggregator::service::{
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
-    parse_config_text, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
+    parse_config_text, PullRefreshOutcome, UpstreamConfigManager, UpstreamConfigPuller,
+    UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
+use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
@@ -67,6 +69,7 @@ struct GatewayConfigFile {
     bind: Option<String>,
     state_dir: Option<String>,
     upstream_config_seed_path: Option<String>,
+    upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
     /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
     /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
@@ -93,6 +96,7 @@ impl Default for GatewayConfigFile {
             bind: None,
             state_dir: None,
             upstream_config_seed_path: None,
+            upstream_pull: None,
             admin_token: None,
             keyset_not_after_seconds: None,
             subject: None,
@@ -143,6 +147,26 @@ fn upstream_config_path(state_dir: &Path) -> PathBuf {
 
 fn session_log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions.jsonl")
+}
+
+fn validate_pull_token_separation(config: &GatewayConfigFile) -> Result<(), String> {
+    let Some(pull) = &config.upstream_pull else {
+        return Ok(());
+    };
+    if config.admin_token.as_deref() == Some(pull.token.as_str()) {
+        return Err("upstream_pull.token must be distinct from admin_token".to_string());
+    }
+    if config
+        .middleware
+        .as_ref()
+        .and_then(|middleware| middleware.control_token.as_deref())
+        == Some(pull.token.as_str())
+    {
+        return Err(
+            "upstream_pull.token must be distinct from middleware.control_token".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn resolve_source_provenance() -> Result<SourceProvenance, String> {
@@ -368,6 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upstream_config_path = upstream_config_path(&state_dir);
     let session_log_path = session_log_path(&state_dir);
     let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
+    let upstream_pull_config = gateway_config.upstream_pull.clone();
     let admin_token = gateway_config.admin_token.clone();
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
@@ -380,6 +405,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    validate_pull_token_separation(&gateway_config).map_err(invalid_input)?;
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -401,6 +427,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
         },
     )?);
+    let upstream_puller = match upstream_pull_config {
+        Some(config) => {
+            let puller = UpstreamConfigPuller::new(upstream_config.clone(), config)
+                .map_err(invalid_input)?;
+            // Try once before constructing the service so a new replica with an
+            // empty seed can serve the current catalog immediately. Failure is
+            // fail-open only with respect to the last valid local config; the
+            // background task keeps retrying and never replaces it with empty or
+            // invalid data.
+            let initial_pull_succeeded = match puller.refresh().await {
+                Ok(outcome) => {
+                    log_pull_outcome(&outcome);
+                    true
+                }
+                Err(err) => {
+                    if upstream_config.snapshot().upstreams.is_empty() {
+                        return Err(invalid_input(format!(
+                            "initial gateway config pull failed and no local upstream config is available: {err}"
+                        ))
+                        .into());
+                    }
+                    tracing::warn!(error = %err, "initial gateway config pull failed; retaining local config");
+                    false
+                }
+            };
+            Some((puller, initial_pull_succeeded))
+        }
+        None => None,
+    };
     let upstream = upstream_config.backend();
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
@@ -515,6 +570,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the store.
     upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(upstream_config.clone());
+    if let Some((puller, initial_pull_succeeded)) = upstream_puller {
+        spawn_upstream_pull(puller, upstream_config.clone(), initial_pull_succeeded);
+    }
 
     let app = if let Some(middleware_config) = middleware_config {
         let middleware = Arc::new(Middleware::new(&middleware_config).map_err(invalid_input)?);
@@ -531,6 +589,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     private_ai_gateway::http::app::serve_with_write_idle_timeout(listener, app).await?;
     Ok(())
+}
+
+fn log_pull_outcome(outcome: &PullRefreshOutcome) {
+    match outcome {
+        PullRefreshOutcome::Updated {
+            upstream_count: 0,
+            config_digest,
+        } => tracing::warn!(
+            upstreams = 0,
+            config_digest = %config_digest,
+            "gateway config pull installed an empty config; this replica now serves no upstreams"
+        ),
+        PullRefreshOutcome::Updated {
+            upstream_count,
+            config_digest,
+        } => tracing::info!(
+            upstreams = upstream_count,
+            config_digest = %config_digest,
+            "gateway config pull installed an update"
+        ),
+        PullRefreshOutcome::Unchanged {
+            upstream_count,
+            config_digest,
+        } => tracing::info!(
+            upstreams = upstream_count,
+            config_digest = %config_digest,
+            "gateway config pull unchanged"
+        ),
+    }
+}
+
+fn spawn_upstream_pull(
+    puller: UpstreamConfigPuller,
+    upstream_config: Arc<UpstreamConfigManager>,
+    initial_pull_succeeded: bool,
+) {
+    tokio::spawn(async move {
+        let refresh_seconds = puller.refresh_seconds();
+        let initial_failure_delay = 5_u64.min(refresh_seconds);
+        let mut failure_delay_seconds = initial_failure_delay;
+        let mut next_delay_seconds = if initial_pull_succeeded {
+            jittered_refresh_seconds(refresh_seconds)
+        } else {
+            initial_failure_delay
+        };
+        loop {
+            tokio::time::sleep(Duration::from_secs(next_delay_seconds)).await;
+            match puller.refresh().await {
+                Ok(outcome) => {
+                    let updated = matches!(outcome, PullRefreshOutcome::Updated { .. });
+                    log_pull_outcome(&outcome);
+                    failure_delay_seconds = initial_failure_delay;
+                    next_delay_seconds = jittered_refresh_seconds(refresh_seconds);
+                    if updated {
+                        let manager = upstream_config.clone();
+                        tokio::spawn(async move {
+                            log_prewarm_results(manager.prewarm_upstream_verification().await);
+                        });
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        retry_seconds = failure_delay_seconds,
+                        "gateway config pull failed; retaining current config"
+                    );
+                    next_delay_seconds = failure_delay_seconds;
+                    failure_delay_seconds = failure_delay_seconds
+                        .saturating_mul(2)
+                        .min(60)
+                        .min(refresh_seconds);
+                }
+            }
+        }
+    });
+}
+
+fn jittered_refresh_seconds(refresh_seconds: u64) -> u64 {
+    // Stable polls are jittered by ±10% so replicas with the same measured
+    // config do not all ask the control API to build the secret response at once.
+    let jitter_span = (refresh_seconds / 10).max(1);
+    let jitter = rand::thread_rng().gen_range(0..=jitter_span * 2);
+    refresh_seconds
+        .saturating_sub(jitter_span)
+        .saturating_add(jitter)
+        .max(1)
 }
 
 fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
@@ -651,6 +795,7 @@ mod tests {
         load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
         seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
+        validate_pull_token_separation,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -713,6 +858,67 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         assert_eq!(config.state_dir.as_deref(), Some("/gateway/state"));
         let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_parses_upstream_pull_without_debugging_its_token() {
+        let config_path = temp_path("gateway-config-upstream-pull");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "upstream_pull": {
+                    "url": "https://service.example/api/admin/gateway-upstreams/config",
+                    "token": "pull-secret",
+                    "refresh_seconds": 120,
+                    "request_timeout_seconds": 30
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        let pull = config.upstream_pull.expect("upstream_pull must parse");
+        assert_eq!(pull.refresh_seconds, 120);
+        let debug = format!("{pull:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("pull-secret"));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_rejects_reused_pull_credentials() {
+        for (name, body) in [
+            (
+                "admin",
+                r#"{
+                  "admin_token":"0123456789abcdef0123456789abcdef",
+                  "upstream_pull":{
+                    "url":"https://service.example/api/admin/gateway-upstreams/config",
+                    "token":"0123456789abcdef0123456789abcdef"
+                  }
+                }"#,
+            ),
+            (
+                "control",
+                r#"{
+                  "upstream_pull":{
+                    "url":"https://service.example/api/admin/gateway-upstreams/config",
+                    "token":"0123456789abcdef0123456789abcdef"
+                  },
+                  "middleware":{
+                    "control_url":"https://control.example",
+                    "control_token":"0123456789abcdef0123456789abcdef"
+                  }
+                }"#,
+            ),
+        ] {
+            let config_path = temp_path(&format!("reused-pull-{name}"));
+            std::fs::write(&config_path, body).unwrap();
+            let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+            let err = validate_pull_token_separation(&config).unwrap_err();
+            assert!(err.contains("must be distinct"));
+            let _ = std::fs::remove_file(config_path);
+        }
     }
 
     #[test]
