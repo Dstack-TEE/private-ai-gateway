@@ -2,9 +2,13 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { computeVerdict, receiptTranscriptFromDigests, reportTranscript } from '../transcript.js';
 import type { AttestationReport, ReceiptEnvelope, SessionRecord, WorkloadKeyset } from '../types.js';
-import { createPinnedTransport, type PinnedTransport } from './transport.js';
+import type {
+  PinnedTransport,
+  PinnedTransportFactory,
+} from './transport.js';
 import {
   AciConnectionError,
+  type AciFetch,
   type AciConnection,
   type AciReceiptAudit,
   type ConnectAciOptions,
@@ -23,20 +27,24 @@ interface InternalExchange extends RecordedAciExchange {
   pinnedSessions: string[];
 }
 
-export async function connectAci(options: ConnectAciOptions): Promise<AciConnection> {
-  const connection = new NodeAciConnection(options);
+export async function connectAciWithTransport(
+  options: ConnectAciOptions,
+  createPinnedTransport: PinnedTransportFactory,
+): Promise<AciConnection> {
+  const connection = new RuntimeAciConnection(options, createPinnedTransport);
   await connection.refresh();
   return connection;
 }
 
-class NodeAciConnection implements AciConnection {
+class RuntimeAciConnection implements AciConnection {
   readonly baseURL: string;
-  readonly fetch: typeof globalThis.fetch;
+  readonly fetch: AciFetch;
 
   private readonly origin: string;
   private readonly hostname: string;
   private readonly attestationURL: string;
   private readonly options: ConnectAciOptions;
+  private readonly createPinnedTransport: PinnedTransportFactory;
   private currentIdentity?: VerifiedAciIdentity;
   private transport: PinnedTransport | undefined;
   private refreshing: Promise<void> | undefined;
@@ -44,7 +52,7 @@ class NodeAciConnection implements AciConnection {
   private rotationRequired = false;
   private closed = false;
 
-  constructor(options: ConnectAciOptions) {
+  constructor(options: ConnectAciOptions, createPinnedTransport: PinnedTransportFactory) {
     validateOptions(options);
     const target = normalizeBaseURL(options.baseURL);
     this.baseURL = target.baseURL;
@@ -52,6 +60,7 @@ class NodeAciConnection implements AciConnection {
     this.hostname = target.hostname;
     this.attestationURL = target.attestationURL;
     this.options = options;
+    this.createPinnedTransport = createPinnedTransport;
     this.fetch = (input, init) => this.secureFetch(input, init);
   }
 
@@ -158,7 +167,7 @@ class NodeAciConnection implements AciConnection {
 
   private async refreshOnce(): Promise<void> {
     const identity = await establishIdentity(this.attestationURL, this.origin, this.hostname, this.options);
-    const candidate = createPinnedTransport({
+    const candidate = this.createPinnedTransport({
       origin: this.origin,
       hostname: this.hostname,
       spkiPins: identity.tlsSpkiPins,
@@ -619,7 +628,7 @@ async function probePinnedChannel(
 }
 
 async function timedFetch(
-  fetchImpl: typeof globalThis.fetch,
+  fetchImpl: AciFetch,
   input: RequestInfo | URL,
   init: RequestInit,
   timeoutMs: number,

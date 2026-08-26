@@ -28,6 +28,10 @@ jobs:
           cache: npm
           cache-dependency-path: clients/verifier-ts/package-lock.json
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
       - name: Install
         run: npm ci
 
@@ -36,6 +40,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Test Bun transport
+        run: npm run test:bun
 
       - name: Validate package
         run: npm run lint:package

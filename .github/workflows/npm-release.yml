@@ -27,6 +27,10 @@ jobs:
             clients/verifier-ts/package-lock.json
             clients/pi-provider/package-lock.json
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
       - name: Validate coordinated version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -52,6 +56,7 @@ jobs:
       - name: Verify release artifacts
         run: |
           npm --prefix clients/verifier-ts test
+          npm --prefix clients/verifier-ts run test:bun
           npm --prefix clients/pi-provider run check
           npm --prefix clients/pi-provider run lint
           npm --prefix clients/pi-provider test

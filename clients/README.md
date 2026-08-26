@@ -9,15 +9,16 @@ Three client surfaces: a verifier library, a command-line verifier, and a
 pi provider extension:
 
 - [`verifier-ts`](verifier-ts) — `@phala/aci-verifier`, a TypeScript verifier
-  for the browser and Node. One call, `verifyService(url)`, fetches the
+  for the browser, Node, and Bun. One call, `verifyService(url)`, fetches the
   report with a fresh nonce and returns a full §9.1 transcript. It also
   covers receipts and body hashes (§9.3) and sessions (§8, §9.2). The
   hardware quote is verified with `@phala/dcap-qvl`; every other check is
-  Web Crypto. Its Node subpath also exposes `connectAci()`, an instance-scoped
-  verified transport that applications can inject into OpenAI Node, OpenAI
-  Agents JS, Vercel AI SDK, LangChain JS and other fetch-aware clients without
-  replacing global fetch. Ships an ESM bundle for `<script type="module">`.
-  Both the Node transport and CLI can pin reviewed RTMR3-bound compose hashes;
+  Web Crypto. Its runtime subpath also exposes `connectAci()`, an
+  instance-scoped verified transport with tested Node and Bun adapters that
+  applications can inject into OpenAI Node, OpenAI Agents JS, Vercel AI SDK,
+  LangChain JS, OpenCode and other fetch-aware clients without replacing
+  global fetch. Ships an ESM bundle for `<script type="module">`.
+  Both runtime transports and the CLI can pin reviewed RTMR3-bound compose hashes;
   self-declared repository and commit fields are informational labels.
   Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
   check (6) needs an observed SPKI (or the `aci` CLI / `aci serve` proxy for a
@@ -53,9 +54,9 @@ pi provider extension:
   for install and use. The coordinated npm release process is documented in
   [`releasing.md`](releasing.md).
 
-Coding agents that cannot inject the Node verified transport use `aci serve`
-as a single local verification boundary. The coding-agent guide covers Codex,
-Claude Code and OpenCode compatibility.
+Coding agents that can inject a function use `connectAci().fetch`; those that
+only accept a base URL use `aci serve` as a local verification boundary. The
+coding-agent guide covers Codex, Claude Code and OpenCode compatibility.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded

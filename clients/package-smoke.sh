@@ -22,6 +22,13 @@ node --input-type=module <<'NODE'
 await import('@phala/aci-verifier');
 await import('@phala/aci-verifier/browser');
 await import('@phala/aci-verifier/node');
+await import('@phala/aci-verifier/bun');
+await import('@phala/aci-verifier/runtime');
+
+const runtimeEntry = import.meta.resolve('@phala/aci-verifier/runtime');
+if (!runtimeEntry.endsWith('/dist/node/index.js')) {
+  throw new Error(`Node selected the wrong runtime entry: ${runtimeEntry}`);
+}
 
 for (const name of [
   '@phala/pi-provider-aci',
@@ -34,3 +41,12 @@ for (const name of [
   }
 }
 NODE
+
+bun --eval '
+const runtimeEntry = import.meta.resolve("@phala/aci-verifier/runtime");
+if (!runtimeEntry.endsWith("/dist/bun/index.js")) {
+  throw new Error(`Bun selected the wrong runtime entry: ${runtimeEntry}`);
+}
+await import("@phala/aci-verifier/runtime");
+await import("@phala/aci-verifier/bun");
+'

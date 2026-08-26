@@ -11,8 +11,8 @@ order:
 Each package is ESM-only, publishes compiled JavaScript plus declarations and
 inline source maps, restricts its tarball with `files`, and declares public npm
 access and provenance. The Pi packages support Node `>=22.19.0`; the standalone
-verifier supports Node `>=20.18.1` because that is the floor required by its
-transport dependency.
+verifier supports Node `>=20.18.1` and Bun `>=1.4.0`, the tested floors for its
+two pinned fetch transports.
 
 ## Release checks
 
@@ -21,6 +21,7 @@ From the repository root:
 ```bash
 npm --prefix clients/verifier-ts ci
 npm --prefix clients/verifier-ts test
+npm --prefix clients/verifier-ts run test:bun
 npm --prefix clients/verifier-ts run lint:package
 
 npm --prefix clients/pi-provider ci
@@ -33,7 +34,8 @@ bash clients/package-smoke.sh
 ```
 
 The smoke test packs all four packages, installs the tarballs together in a
-temporary clean project, imports every public ESM entry, and removes the
+temporary clean project, proves `/runtime` selects the Node and Bun entries in
+their respective runtimes, imports every public ESM entry, and removes the
 temporary directory. It never writes package artifacts into the repository.
 
 ## Trusted publishing

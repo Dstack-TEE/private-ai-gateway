@@ -1,20 +1,21 @@
 # Coding agents over ACI
 
 Coding-agent integrations have one rule: verification belongs at the transport
-boundary, not in an agent-specific plugin.
+boundary, not in agent-specific verification code. A plugin may wire the
+shared transport into an agent, but it must not reimplement ACI.
 
 ```text
-fetch-aware Node client ---- connectAci() ---- ACI gateway
+fetch-aware Node/Bun client ---- connectAci() ---- ACI gateway
 
-coding-agent CLI ---------- aci serve ------- ACI gateway
-                         127.0.0.1:4180
+base-URL-only CLI ----------- aci serve ------- ACI gateway
+                            127.0.0.1:4180
 ```
 
-`connectAci()` is the smaller integration when an application accepts a custom
-`fetch`. Standalone coding agents generally expose only a base URL, so they use
-`aci serve`: one local process verifies the hardware-backed workload identity,
-pins the remote TLS SPKI, and forwards the agent's native HTTP surface. It does
-not translate API protocols.
+`connectAci()` is the direct integration when an application accepts a custom
+`fetch`; its conditional runtime entry selects the Node or Bun adapter.
+Applications that expose only a base URL use `aci serve`: one local process
+verifies the hardware-backed workload identity, pins the remote TLS SPKI, and
+forwards the agent's native HTTP surface. It does not translate API protocols.
 
 Both paths demand `provider.aci_verified` on JSON inference requests by
 default, record exact request/response digests without buffering streams, and
@@ -50,7 +51,7 @@ authentication through and does not need the key in its command line.
 | Pi | OpenAI Chat Completions | Inject `connectAci().fetch` | Native |
 | Codex CLI | OpenAI Responses | Point a custom model provider at `aci serve` | Supported when the selected gateway route serves `/v1/responses` |
 | Claude Code | Anthropic Messages | Set `ANTHROPIC_BASE_URL` to `aci serve` | Supported; `/v1/messages/count_tokens` is optional |
-| OpenCode | OpenAI Chat Completions or Responses | Configure an AI SDK provider against `aci serve` | Supported |
+| OpenCode | OpenAI Chat Completions or Responses | Plugin injects Bun `connectAci().fetch` | Native |
 
 ### Codex CLI
 
@@ -90,7 +91,20 @@ body fields, so compatibility should be exercised when either side upgrades.
 
 ### OpenCode
 
-Use the OpenAI-compatible provider for Chat Completions:
+OpenCode runs plugins under Bun and its provider factory accepts an
+`options.fetch` function. JSON cannot contain a function, so a small local
+plugin injects the shared ACI client. First add the verifier dependency:
+
+```json
+{
+  "dependencies": {
+    "@phala/aci-verifier": "^0.2.0"
+  }
+}
+```
+
+Save that as `.opencode/package.json`; OpenCode installs local-plugin
+dependencies with Bun. Configure the remote provider normally:
 
 ```jsonc
 {
@@ -100,7 +114,7 @@ Use the OpenAI-compatible provider for Chat Completions:
       "npm": "@ai-sdk/openai-compatible",
       "name": "ACI",
       "options": {
-        "baseURL": "http://127.0.0.1:4180/v1",
+        "baseURL": "{env:ACI_BASE_URL}",
         "apiKey": "{env:ACI_API_KEY}"
       },
       "models": {
@@ -111,16 +125,62 @@ Use the OpenAI-compatible provider for Chat Completions:
 }
 ```
 
+Then place this adapter at `.opencode/plugins/aci.ts`:
+
+```ts
+import type { Plugin } from '@opencode-ai/plugin';
+import {
+  connectAci,
+  type AciConnection,
+} from '@phala/aci-verifier/runtime';
+
+export const AciPlugin: Plugin = async () => {
+  let connection: AciConnection | undefined;
+
+  return {
+    async config(config) {
+      const provider = config.provider?.aci;
+      const options = provider?.options;
+      const baseURL = options?.baseURL;
+      const apiKey = options?.apiKey;
+      if (!provider || typeof baseURL !== 'string' || typeof apiKey !== 'string') {
+        throw new Error('ACI provider requires string baseURL and apiKey options');
+      }
+
+      const next = await connectAci({
+        baseURL,
+        apiKey,
+        policy: {
+          requireProductionOs: true,
+          acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
+        },
+      });
+      provider.options = { ...options, baseURL: next.baseURL, fetch: next.fetch };
+
+      const previous = connection;
+      connection = next;
+      await previous?.close();
+    },
+    async dispose() {
+      await connection?.close();
+    },
+  };
+};
+```
+
+Replace the compose placeholder with a hash published by the reviewed release
+pipeline; never learn it from the endpoint being verified. Importing
+`/runtime` selects the Bun adapter, whose TLS callback is covered by the same
+pinned-channel contract test as the Node adapter. The plugin only performs
+dependency injection and lifecycle cleanup; quote, SPKI, policy, digest,
+receipt, and session verification remain in `connectAci()`.
+
 For a route that specifically implements `/v1/responses`, OpenCode documents
 `@ai-sdk/openai` instead of `@ai-sdk/openai-compatible`.
 
-OpenCode's internal provider factory accepts a JavaScript `options.fetch`, and
-a plugin can mutate provider options. Its JSON configuration cannot express a
-function, however, and the plugin runtime is Bun while the current
-`connectAci()` transport relies on Node's undici dispatcher for the verified
-TLS callback. Until the same channel-binding tests pass in Bun, routing
-OpenCode through `aci serve` is the fail-closed integration rather than a
-nominal direct adapter whose SPKI check may not execute.
+OpenCode can still point at `aci serve` when an operator wants one shared local
+process for several tools. That is an operational choice, not a Bun
+compatibility requirement.
 
 ## Trust boundary
 
@@ -148,3 +208,4 @@ Checked 2026-08-26:
 - [OpenCode providers](https://opencode.ai/docs/providers/) and
   [plugins](https://opencode.ai/docs/plugins/), source commit
   [`fd9bd44`](https://github.com/anomalyco/opencode/commit/fd9bd448a2e68990e7aed3495e5590cecb934bfb)
+- [Bun fetch TLS and proxy options](https://bun.com/docs/runtime/networking/fetch)

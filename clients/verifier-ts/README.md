@@ -1,7 +1,8 @@
 # @phala/aci-verifier
 
 A TypeScript verifier for [Attested Confidential Inference
-(ACI)](../../spec/aci.md), for the browser and Node 20+. `verifyService(url)`
+(ACI)](../../spec/aci.md), for the browser, Node 20.18+, and Bun 1.4+.
+`verifyService(url)`
 fetches a service's report with a fresh nonce and returns a full §9.1
 transcript — **including the hardware quote**, verified with
 [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against the
@@ -11,8 +12,10 @@ SHA-256. A prebuilt ESM bundle (`npm run build:bundle`) drops into a
 
 The npm package is ESM-only. Browser-aware bundlers select the `browser`
 condition automatically; native browser imports can use
-`@phala/aci-verifier/browser`. Node-only pinned transport APIs live under
-`@phala/aci-verifier/node` and are never exposed through the browser entry.
+`@phala/aci-verifier/browser`. Runtime-aware applications import
+`connectAci()` from `@phala/aci-verifier/runtime`; package conditions select
+the tested Node or Bun transport. Explicit `/node` and `/bun` entries are also
+available. Pinned transport APIs are never exposed through the browser entry.
 
 ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
@@ -110,17 +113,17 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
 
-### Node SDK and agent frameworks
+### Runtime SDK and agent frameworks
 
-Node applications can establish an instance-scoped, SPKI-pinned connection
-and inject its `fetch` into any HTTP-based OpenAI-compatible SDK. The connection
-rejects HTTP, cross-origin requests, expired identities, and TLS peers whose
-SPKI is not in the verified workload keyset. It never replaces
-`globalThis.fetch`.
+Node and Bun applications establish the same instance-scoped, SPKI-pinned
+connection and inject its ordinary `fetch` into any HTTP-based
+OpenAI-compatible SDK. The connection rejects HTTP, cross-origin requests,
+expired identities, and TLS peers whose SPKI is not in the verified workload
+keyset. It never replaces `globalThis.fetch`.
 
 ```ts
 import OpenAI from 'openai';
-import { connectAci } from '@phala/aci-verifier/node';
+import { connectAci } from '@phala/aci-verifier/runtime';
 
 const apiKey = process.env.ACI_API_KEY;
 if (!apiKey) throw new Error('ACI_API_KEY is required');
@@ -162,6 +165,13 @@ if (!audit.transcript.verdict.verified) {
 await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
 await aci.close();
 ```
+
+The public API is identical in Node and Bun. Internally, Node passes a scoped
+`undici` dispatcher to `fetch`, while Bun passes its documented
+[`tls` callback and `proxy` options](https://bun.com/docs/runtime/networking/fetch).
+Both adapters use the same hostname/SPKI check and the same quote, policy,
+receipt, session, rotation, and lifecycle implementation. Use `/node` or
+`/bun` only when a bundler cannot select runtime export conditions correctly.
 
 `aci.receipts()` lists the bounded in-memory exchange history. A receipt can
 only receive a complete transport audit while its exchange is retained; an
@@ -291,5 +301,6 @@ operations. Without one, a bound channel needs the caller-observed TLS SPKI
 npm install
 npm test      # tsc + node:test; test/vectors.test.ts pins every
               # construction against the ACI and E2EE v2 vector documents
+npm run test:bun # the same pinned-transport contract on Bun 1.4+
 npm run build # emit dist/ (ESM + .d.ts)
 ```

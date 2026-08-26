@@ -2,14 +2,15 @@
 
 ## Goal
 
-Give Node applications one verified ACI connection primitive, then keep Pi and
-other agent frameworks as thin transport adapters. Attestation verification,
+Give Node and Bun applications one verified ACI connection primitive, then keep
+Pi and other agent frameworks as thin transport adapters. Attestation verification,
 measured-release appraisal, hostname validation and TLS SPKI pinning must have one
 implementation.
 
 ## Current design
 
-`@phala/aci-verifier/node` exposes `connectAci()`. A connection owns:
+`@phala/aci-verifier/runtime` exposes `connectAci()` and selects the tested
+Node or Bun fetch adapter. A connection owns:
 
 - the verified workload identity and its expiry,
 - an exact-origin, hostname-validated, SPKI-pinned `fetch`,
@@ -21,10 +22,10 @@ brand profile, so Redpill, Phala Cloud and neutral ACI providers can coexist in
 one process. Verified transport is an invariant of the ACI provider; there is
 no configuration that downgrades it to ordinary CA-TLS.
 
-Other Node SDKs should inject the same fetch instead of receiving dedicated ACI
+Other SDKs should inject the same fetch instead of receiving dedicated ACI
 packages. Documented examples currently cover OpenAI Node, OpenAI Agents JS,
-Vercel AI SDK and LangChain JS. Software without a custom HTTP transport hook
-uses `aci serve`; coding-agent CLI compatibility is documented in
+Vercel AI SDK, LangChain JS, and OpenCode. Software without a custom HTTP
+transport hook uses `aci serve`; coding-agent CLI compatibility is documented in
 [`../coding-agents.md`](../coding-agents.md).
 
 ## Release status and next steps
@@ -40,11 +41,11 @@ uses `aci serve`; coding-agent CLI compatibility is documented in
    publish their reviewed hashes and inject them into branded profiles; do not
    derive them from a live endpoint.
 3. **Exercise live consumers.** The package and scoped-transport tests are in
-   place. Before promoting the release, run Pi and both transport paths against
-   the same live reviewed deployment and archive the accepted/rejected
+   place. Before promoting the release, run Pi, Node, Bun, and `aci serve`
+   against the same live reviewed deployment and archive the accepted/rejected
    transcripts.
 4. **Keep browser and non-HTTP boundaries explicit.** Browser clients cannot
-   observe TLS SPKI, and the Node fetch transport does not secure WebSockets,
+   observe TLS SPKI, and the verified fetch transports do not secure WebSockets,
    MCP, tools or tracing. Continue using E2EE or `aci serve` for those paths.
 
 ## Release acceptance
@@ -55,7 +56,7 @@ uses `aci serve`; coding-agent CLI compatibility is documented in
   config or connection state.
 - Invalid quote, compose policy, hostname, SPKI, origin or identity expiry fails
   closed before model request bytes are sent.
-- OpenAI Node, OpenAI Agents JS, Vercel AI SDK and LangChain JS examples use the
-  same `connectAci()` API.
+- OpenAI Node, OpenAI Agents JS, Vercel AI SDK, LangChain JS, and OpenCode use
+  the same `connectAci()` API.
 - publint and Are The Types Wrong accept every packed ESM/type surface.
 - A clean project imports all four tarballs without TypeScript runtime loaders.

@@ -50,6 +50,8 @@ export interface AciServingPolicy {
   acceptedSessionIds?: readonly string[];
 }
 
+export type AciFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 export interface ConnectAciOptions {
   baseURL: string;
   apiKey?: string;
@@ -60,7 +62,7 @@ export interface ConnectAciOptions {
   timeoutMs?: number;
   pccsUrl?: string;
   /** Fetch used only to bootstrap attestation over normal CA-validated TLS. */
-  bootstrapFetch?: typeof globalThis.fetch;
+  bootstrapFetch?: AciFetch;
   /** Explicit HTTP CONNECT proxy URL for the pinned inference transport. */
   proxy?: string;
   /** Additional CA certificate for private gateway deployments. */
@@ -103,7 +105,7 @@ export interface AciReceiptAudit {
 export interface AciConnection {
   readonly baseURL: string;
   readonly identity: VerifiedAciIdentity;
-  readonly fetch: typeof globalThis.fetch;
+  readonly fetch: AciFetch;
   receipts(): readonly RecordedAciExchange[];
   /** Verify a recorded exchange's receipt, or the latest one when omitted. */
   verifyReceipt(receiptId?: string): Promise<AciReceiptAudit>;

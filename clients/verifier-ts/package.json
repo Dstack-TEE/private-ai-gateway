@@ -1,7 +1,7 @@
 {
   "name": "@phala/aci-verifier",
   "version": "0.2.0",
-  "description": "TypeScript ACI verifier for browser and node \u2014 one-call verifyService with hardware-quote verification (@phala/dcap-qvl); every other check is Web Crypto.",
+  "description": "TypeScript ACI verifier and verified fetch client for browsers, Node.js, and Bun.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -42,6 +42,17 @@
       "types": "./dist/node/index.d.ts",
       "import": "./dist/node/index.js",
       "default": "./dist/node/index.js"
+    },
+    "./bun": {
+      "types": "./dist/bun/index.d.ts",
+      "import": "./dist/bun/index.js",
+      "default": "./dist/bun/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/node/index.d.ts",
+      "bun": "./dist/bun/index.js",
+      "node": "./dist/node/index.js",
+      "default": "./dist/node/index.js"
     }
   },
   "files": [
@@ -49,13 +60,15 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=20.18.1",
+    "bun": ">=1.4.0"
   },
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:bundle": "esbuild src/index.ts --bundle --format=esm --minify --platform=browser --target=es2022 --inject:./browser-shim.js --outfile=dist/aci-verifier.min.js",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:bun": "bun test ./test/bun-transport.bun.ts",
     "lint:package": "npm run build && npm run build:bundle && publint && attw --pack --profile esm-only .",
     "clean": "rm -rf dist dist-test",
     "prepack": "npm run clean && npm run build && npm run build:bundle",
@@ -63,11 +76,12 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@types/bun": "^1.4.0",
     "@types/node": "^24.0.0",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.6.0",
     "buffer": "^6.0.3",
-    "publint": "^0.3.24"
+    "esbuild": "^0.25.0",
+    "publint": "^0.3.24",
+    "typescript": "^5.6.0"
   },
   "dependencies": {
     "@phala/dcap-qvl": "^0.5.2",

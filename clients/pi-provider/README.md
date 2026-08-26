@@ -102,8 +102,8 @@ telemetry keep their own transports. A failed or expired connection blocks
 model traffic. Each Pi session gets a fresh connection and closes it on
 shutdown.
 
-The same `connectAci()` transport works with other Node SDKs and agent
-frameworks; see the [verifier integration examples](../verifier-ts/README.md#node-sdk-and-agent-frameworks).
+The same `connectAci()` API works with other Node and Bun SDKs and agent
+frameworks; see the [verifier integration examples](../verifier-ts/README.md#runtime-sdk-and-agent-frameworks).
 Coding-agent CLIs without a custom fetch hook use the local `aci serve` proxy;
 see the [coding agent guide](../coding-agents.md).
 

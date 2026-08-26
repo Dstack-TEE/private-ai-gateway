@@ -25,26 +25,31 @@ flowchart LR
   subgraph local[Client machine]
     pi[Pi provider<br/>original PR, refactored]:::pr
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
-    agents[Codex, Claude Code,<br/>OpenCode]:::external
-    connect[connectAci scoped Node transport<br/>current refactor]:::refactor
+    opencode[OpenCode on Bun]:::external
+    agents[Codex and Claude Code]:::external
+    connect[connectAci shared runtime client<br/>current refactor]:::refactor
+    node[Node fetch adapter<br/>current refactor]:::refactor
+    bun[Bun fetch adapter<br/>current refactor]:::refactor
     serve[aci serve local proxy<br/>existing upstream]:::upstream
-    audit[Shared receipt/session audit semantics<br/>current refactor]:::refactor
 
     pi --> connect
     sdk --> connect
+    opencode --> connect
+    connect -->|Node host| node
+    connect -->|Bun host| bun
     agents --> serve
-    connect --> audit
-    serve --> audit
   end
 
   subgraph trust[Shared trust contract]
     identity[Quote, nonce, keyset,<br/>compose and expiry<br/>existing verifier checks]:::upstream
     release[Reviewed compose allowlist<br/>TS/Pi: current refactor<br/>Rust flag: existing upstream]:::refactor
+    audit[Verified serving, wire digests,<br/>receipt and session policy<br/>current refactor]:::refactor
     channel[Hostname and attested<br/>TLS SPKI binding]:::refactor
-    identity --> release --> channel
+    identity --> release --> audit --> channel
   end
 
-  connect --> identity
+  node --> identity
+  bun --> identity
   serve --> identity
 
   subgraph tee[Private AI Gateway inside the TEE - existing upstream]
@@ -81,25 +86,32 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
-| `connectAci()` framework-neutral, instance-scoped Node transport | Current refactor |
+| `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
+| Node adapter using the supported undici dispatcher hook | Current refactor |
+| Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
 | Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Current refactor |
 | TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Current refactor |
 | Streaming wire-digest capture and on-demand receipt/session audit in Node/Pi | Current refactor |
 | Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
+| Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
 
 `aci serve` is not a new protocol translator and was not introduced by the Pi
 integration. It is the existing Rust local verifying proxy. It preserves the
 request path and body, so the gateway must implement the protocol spoken by the
-agent. `connectAci()` is the new Node equivalent for applications that accept a
-custom `fetch`; it never replaces `globalThis.fetch`.
+agent. `connectAci()` is the new runtime client for applications that accept a
+custom `fetch`; it never replaces `globalThis.fetch`. Node and Bun expose the
+same public API and differ only in how their native `fetch` receives the TLS
+identity callback.
 
 ## One trust contract, two integrations
 
-Fetch-aware Node applications inject `connectAci().fetch`. Standalone agents
-that expose only a base URL point at `aci serve` on localhost. Both paths must
-enforce the same security meaning:
+Fetch-aware Node and Bun applications inject `connectAci().fetch`. Software
+that exposes only a base URL points at `aci serve` on localhost. This is a
+capability split, not two competing ACI products: one side receives a function,
+the other can only receive a URL. Both paths must enforce the same security
+meaning:
 
 1. Verify a fresh TDX quote and its nonce-bound workload keyset.
 2. Verify that `sha256(app_compose)` is measured into the quote's RTMR3.
@@ -117,6 +129,12 @@ matching policy semantics and conformance tests. Rust exposes the release
 policy as repeatable `--accept-compose` flags. TypeScript exposes it as
 `acceptedComposeHashes` and Pi passes the same policy through its brand profile
 or deployment configuration.
+
+Within TypeScript, all quote, keyset, policy, rotation, request constraint,
+digest, receipt, and session logic is shared. The Node adapter uses undici's
+scoped dispatcher; the Bun adapter uses Bun's native TLS and proxy fetch
+options. Conditional npm exports select the adapter. No global fetch patch,
+custom proxy protocol, or agent-specific verifier was introduced.
 
 ## Hardware proof versus release acceptance
 

@@ -28,6 +28,10 @@ jobs:
             clients/verifier-ts/package-lock.json
             clients/pi-provider/package-lock.json
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
       - name: Install verifier
         working-directory: clients/verifier-ts
         run: npm ci
