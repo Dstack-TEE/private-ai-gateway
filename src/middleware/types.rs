@@ -201,8 +201,7 @@ impl PreConsult {
     /// Expand the legacy User-only wire shape into the tagged billing identity.
     /// Remove after every control deployment emits `billingOwnerType`.
     pub fn normalize_legacy_user_billing_identity(&mut self) {
-        if !self.allow
-            || self.billing_owner_type.is_some()
+        if self.billing_owner_type.is_some()
             || self.billing_owner_id.is_some()
             || self.organization_id.is_some()
             || self.workspace_id.is_some()
@@ -217,14 +216,9 @@ impl PreConsult {
         }
     }
 
-    /// Validate the complete billing identity before an allowed request leaves
-    /// the gateway. This catches mixed-version control responses early instead
-    /// of serving traffic whose post report the control plane cannot bill.
+    /// Validate the complete billing identity before the response is used. This
+    /// catches mixed-version control responses before forwarding or reporting.
     pub fn has_consistent_billing_identity(&self) -> bool {
-        if !self.allow {
-            return true;
-        }
-
         match self.user_id {
             None => {
                 self.organization_id.is_none()
@@ -371,6 +365,21 @@ mod tests {
             Some(super::BillingOwnerType::User)
         );
         assert_eq!(legacy.billing_owner_id, Some(7));
+
+        let mut denied: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": false,
+            "status": 429,
+            "userId": 7,
+            "virtualKeyId": 3
+        }))
+        .unwrap();
+        denied.normalize_legacy_user_billing_identity();
+        assert!(denied.has_consistent_billing_identity());
+        assert_eq!(
+            denied.billing_owner_type,
+            Some(super::BillingOwnerType::User)
+        );
+        assert_eq!(denied.billing_owner_id, Some(7));
 
         let anonymous: PreConsult =
             serde_json::from_value(serde_json::json!({ "allow": true })).unwrap();
