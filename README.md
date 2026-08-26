@@ -21,6 +21,9 @@ Start here:
 - [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
   `aci` CLI, then use it as a local OpenAI-compatible endpoint.
 - [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
+- [ACI client architecture](clients/architecture.md) — the framework-neutral
+  client product, existing versus new components, release policy, and coding
+  agent integration boundary.
 
 ## Audience
 

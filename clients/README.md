@@ -1,5 +1,10 @@
 # ACI clients
 
+Start with the [client product architecture](architecture.md) for the product
+goal, shared trust contract, component ownership, and remaining release work.
+Framework-specific coding-agent configuration is in
+[`coding-agents.md`](coding-agents.md).
+
 Three client surfaces: a verifier library, a command-line verifier, and a
 pi provider extension:
 
@@ -48,8 +53,8 @@ pi provider extension:
   for install and use.
 
 Coding agents that cannot inject a custom HTTP transport use `aci serve` as a
-single local verification boundary. See [`coding-agents.md`](coding-agents.md)
-for Codex, Claude Code, OpenCode, Aider and Gemini CLI compatibility.
+single local verification boundary. The coding-agent guide covers Codex,
+Claude Code, OpenCode, Aider and Gemini CLI compatibility.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded
