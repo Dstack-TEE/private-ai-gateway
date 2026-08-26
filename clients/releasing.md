@@ -53,8 +53,8 @@ release also receives npm provenance.
 
 After that bootstrap, configure an npm trusted publisher for each package with:
 
-- organization/user: the owner of the npm package
-- repository: `Dstack-TEE/private-ai-gateway`
+- organization/user: `Dstack-TEE`
+- repository: `private-ai-gateway`
 - workflow filename: `npm-release.yml`
 - GitHub environment: `npm`
 - allowed action: `npm publish`
