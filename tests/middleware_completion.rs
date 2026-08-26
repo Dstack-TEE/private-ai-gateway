@@ -610,6 +610,10 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "status": 400,
             "message": "This model does not support image input.",
             "userId": 7,
+            "organizationId": 11,
+            "workspaceId": "018f3e7c-8d2d-7e5a-9f23-31d2a7c48810",
+            "billingOwnerType": "organization",
+            "billingOwnerId": 11,
             "virtualKeyId": 3
         }),
     )
@@ -623,6 +627,13 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(400)).await;
     assert_eq!(report["errorSource"], json!("control"));
     assert_eq!(report["userId"], json!(7));
+    assert_eq!(report["organizationId"], json!(11));
+    assert_eq!(
+        report["workspaceId"],
+        json!("018f3e7c-8d2d-7e5a-9f23-31d2a7c48810")
+    );
+    assert_eq!(report["billingOwnerType"], json!("organization"));
+    assert_eq!(report["billingOwnerId"], json!(11));
     assert_eq!(report["virtualKeyId"], json!(3));
     assert!(report["selectedRouteId"].is_null());
     assert!(report["usage"].is_null());
@@ -632,7 +643,14 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
 async fn empty_candidates_is_reported_as_a_control_failure() {
     let (control_url, posts) = spawn_control_capturing(
         200,
-        json!({ "allow": true, "candidates": [], "userId": 7, "virtualKeyId": 3 }),
+        json!({
+            "allow": true,
+            "candidates": [],
+            "userId": 7,
+            "billingOwnerType": "user",
+            "billingOwnerId": 7,
+            "virtualKeyId": 3
+        }),
     )
     .await;
     let mw = middleware(control_url);
@@ -896,7 +914,10 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
             "allow": true,
             "candidates": [{ "routeId": "anthropic:claude", "format": "anthropic" }],
             "pricing": { "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" },
-            "userId": 7
+            "userId": 7,
+            "billingOwnerType": "user",
+            "billingOwnerId": 7,
+            "virtualKeyId": 3
         }),
     )
     .await;
@@ -957,6 +978,10 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
         spend_mode: None,
         user_id: Some(9),
+        organization_id: None,
+        workspace_id: None,
+        billing_owner_type: None,
+        billing_owner_id: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1631,6 +1656,10 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         pricing: None,
         spend_mode: None,
         user_id: None,
+        organization_id: None,
+        workspace_id: None,
+        billing_owner_type: None,
+        billing_owner_id: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1695,6 +1724,10 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         pricing: None,
         spend_mode: None,
         user_id: None,
+        organization_id: None,
+        workspace_id: None,
+        billing_owner_type: None,
+        billing_owner_id: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,

@@ -98,6 +98,15 @@ pub enum SpendMode {
     SubscriptionOverflow,
 }
 
+/// Ledger owner selected by the control plane. User is the legacy account;
+/// organization is the tenant ledger. The gateway only echoes it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingOwnerType {
+    User,
+    Organization,
+}
+
 /// Deployment-level reasoning policy, read from config by the control plane
 /// and passed to the gateway verbatim. The gateway owns the decision logic —
 /// it has the request context (response_format, tools, max_tokens) needed to
@@ -171,6 +180,14 @@ pub struct PreConsult {
     #[serde(default)]
     pub user_id: Option<i64>,
     #[serde(default)]
+    pub organization_id: Option<i64>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub billing_owner_type: Option<BillingOwnerType>,
+    #[serde(default)]
+    pub billing_owner_id: Option<i64>,
+    #[serde(default)]
     pub virtual_key_id: Option<i64>,
     #[serde(default)]
     pub spend_mode: Option<SpendMode>,
@@ -178,6 +195,49 @@ pub struct PreConsult {
     pub user_tier: Option<String>,
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
+}
+
+impl PreConsult {
+    /// Validate the complete billing identity before an allowed request leaves
+    /// the gateway. This catches mixed-version control responses early instead
+    /// of serving traffic whose post report the control plane cannot bill.
+    pub fn has_consistent_billing_identity(&self) -> bool {
+        if !self.allow {
+            return true;
+        }
+
+        match self.user_id {
+            None => {
+                self.organization_id.is_none()
+                    && self.workspace_id.is_none()
+                    && self.billing_owner_type.is_none()
+                    && self.billing_owner_id.is_none()
+                    && self.virtual_key_id.is_none()
+            }
+            Some(user_id) if user_id > 0 => {
+                if self.virtual_key_id.is_none_or(|id| id <= 0) {
+                    return false;
+                }
+                match (self.billing_owner_type, self.billing_owner_id) {
+                    (Some(BillingOwnerType::User), Some(owner_id)) => {
+                        owner_id == user_id
+                            && self.organization_id.is_none()
+                            && self.workspace_id.is_none()
+                    }
+                    (Some(BillingOwnerType::Organization), Some(owner_id)) => {
+                        owner_id > 0
+                            && self.organization_id == Some(owner_id)
+                            && self
+                                .workspace_id
+                                .as_deref()
+                                .is_some_and(|id| !id.trim().is_empty())
+                    }
+                    _ => false,
+                }
+            }
+            Some(_) => false,
+        }
+    }
 }
 
 /// Which component a gateway-synthesized failure (no real upstream attempt) is
@@ -228,6 +288,14 @@ pub struct PostReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_owner_type: Option<BillingOwnerType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_owner_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_key_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_source: Option<ErrorSource>,
@@ -237,4 +305,52 @@ pub struct PostReport {
     /// record which deployment actually served this prefix (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PreConsult;
+
+    #[test]
+    fn organization_identity_requires_complete_workspace_scope() {
+        let complete: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "workspaceId": "018f3e7c-8d2d-7e5a-9f23-31d2a7c48810",
+            "billingOwnerType": "organization",
+            "billingOwnerId": 11,
+            "virtualKeyId": 3
+        }))
+        .unwrap();
+        assert!(complete.has_consistent_billing_identity());
+
+        let incomplete: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "billingOwnerType": "organization",
+            "billingOwnerId": 11,
+            "virtualKeyId": 3
+        }))
+        .unwrap();
+        assert!(!incomplete.has_consistent_billing_identity());
+    }
+
+    #[test]
+    fn legacy_user_and_anonymous_identities_remain_valid() {
+        let legacy: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "billingOwnerType": "user",
+            "billingOwnerId": 7,
+            "virtualKeyId": 3
+        }))
+        .unwrap();
+        assert!(legacy.has_consistent_billing_identity());
+
+        let anonymous: PreConsult =
+            serde_json::from_value(serde_json::json!({ "allow": true })).unwrap();
+        assert!(anonymous.has_consistent_billing_identity());
+    }
 }

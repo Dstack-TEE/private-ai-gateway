@@ -37,7 +37,9 @@ use super::request_features;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
-use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
+use super::types::{
+    BillingOwnerType, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode,
+};
 use super::{pricing, response_transform, stream_transform};
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -366,6 +368,10 @@ pub async fn run(
         pricing: consult.pricing.clone(),
         spend_mode: consult.spend_mode,
         user_id: consult.user_id,
+        organization_id: consult.organization_id,
+        workspace_id: consult.workspace_id.clone(),
+        billing_owner_type: consult.billing_owner_type,
+        billing_owner_id: consult.billing_owner_id,
         virtual_key_id: consult.virtual_key_id,
         prefix_hash: request_features
             .as_ref()
@@ -1173,6 +1179,10 @@ struct Meter {
     pricing: Option<Value>,
     spend_mode: Option<SpendMode>,
     user_id: Option<i64>,
+    organization_id: Option<i64>,
+    workspace_id: Option<String>,
+    billing_owner_type: Option<BillingOwnerType>,
+    billing_owner_id: Option<i64>,
     virtual_key_id: Option<i64>,
     /// Echoed on every report so billing can key cache affinity; see
     /// `PostReport::prefix_hash`.
@@ -1619,6 +1629,10 @@ impl Meter {
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             user_id: self.user_id,
+            organization_id: self.organization_id,
+            workspace_id: self.workspace_id.clone(),
+            billing_owner_type: self.billing_owner_type,
+            billing_owner_id: self.billing_owner_id,
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,
