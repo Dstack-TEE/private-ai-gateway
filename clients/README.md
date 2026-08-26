@@ -53,9 +53,9 @@ pi provider extension:
   for install and use. The coordinated npm release process is documented in
   [`releasing.md`](releasing.md).
 
-Coding agents that cannot inject a custom HTTP transport use `aci serve` as a
-single local verification boundary. The coding-agent guide covers Codex,
-Claude Code, OpenCode, Aider and Gemini CLI compatibility.
+Coding agents that cannot inject the Node verified transport use `aci serve`
+as a single local verification boundary. The coding-agent guide covers Codex,
+Claude Code and OpenCode compatibility.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded

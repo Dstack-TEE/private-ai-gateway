@@ -25,7 +25,7 @@ flowchart LR
   subgraph local[Client machine]
     pi[Pi provider<br/>original PR, refactored]:::pr
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
-    agents[Codex, Claude Code,<br/>OpenCode, Aider]:::external
+    agents[Codex, Claude Code,<br/>OpenCode]:::external
     connect[connectAci scoped Node transport<br/>current refactor]:::refactor
     serve[aci serve local proxy<br/>existing upstream]:::upstream
     audit[Shared receipt/session audit semantics<br/>current refactor]:::refactor
@@ -61,9 +61,6 @@ flowchart LR
 
   pipeline[Redpill and Phala release pipeline<br/>publish reviewed compose hashes<br/>product work still pending]:::pending
   pipeline -. supplies policy .-> release
-
-  gemini[Gemini generateContent surface<br/>not implemented by the gateway]:::pending
-  gemini -. protocol work .-> api
 ```
 
 Legend:
@@ -160,10 +157,6 @@ The repository can publish all four npm packages in dependency order from a
 signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.
-
-Gemini CLI remains a separate protocol-compatibility task. A per-agent verifier
-would duplicate security logic but would not make the gateway understand
-Gemini `generateContent`, streaming, tool calls, or error semantics.
 
 The local agent and `aci serve` necessarily see plaintext prompts and
 responses. This architecture protects the remote model HTTP path. It does not

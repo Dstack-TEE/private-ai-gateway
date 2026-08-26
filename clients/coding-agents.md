@@ -51,8 +51,6 @@ authentication through and does not need the key in its command line.
 | Codex CLI | OpenAI Responses | Point a custom model provider at `aci serve` | Supported when the selected gateway route serves `/v1/responses` |
 | Claude Code | Anthropic Messages | Set `ANTHROPIC_BASE_URL` to `aci serve` | Supported; `/v1/messages/count_tokens` is optional |
 | OpenCode | OpenAI Chat Completions or Responses | Configure an AI SDK provider against `aci serve` | Supported |
-| Aider | OpenAI Chat Completions | Set its OpenAI-compatible API base to `aci serve` | Supported |
-| Gemini CLI | Gemini `generateContent` | No compatible ACI gateway surface today | Not yet supported |
 
 ### Codex CLI
 
@@ -116,23 +114,13 @@ Use the OpenAI-compatible provider for Chat Completions:
 For a route that specifically implements `/v1/responses`, OpenCode documents
 `@ai-sdk/openai` instead of `@ai-sdk/openai-compatible`.
 
-### Aider
-
-```bash
-export OPENAI_API_BASE=http://127.0.0.1:4180/v1
-export OPENAI_API_KEY="$ACI_API_KEY"
-aider --model openai/<model-id>
-```
-
-### Gemini CLI
-
-Gemini CLI can override `GOOGLE_GEMINI_BASE_URL`, including with a localhost
-URL, but it still sends the Gemini API shape such as `models/*:generateContent`.
-`aci serve` preserves paths and bodies; it does not translate that protocol to
-OpenAI or Anthropic. Supporting Gemini CLI therefore needs a real Gemini API
-surface in private-ai-gateway (including streaming, tools and error semantics),
-or an upstream Gemini CLI provider interface. A per-agent verifier would only
-duplicate security code and would not solve the protocol mismatch.
+OpenCode's internal provider factory accepts a JavaScript `options.fetch`, and
+a plugin can mutate provider options. Its JSON configuration cannot express a
+function, however, and the plugin runtime is Bun while the current
+`connectAci()` transport relies on Node's undici dispatcher for the verified
+TLS callback. Until the same channel-binding tests pass in Bun, routing
+OpenCode through `aci serve` is the fail-closed integration rather than a
+nominal direct adapter whose SPKI check may not execute.
 
 ## Trust boundary
 
@@ -151,14 +139,12 @@ identity.
 
 ## Sources
 
-Checked 2026-08-25:
+Checked 2026-08-26:
 
 - [Codex custom model providers](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers)
   and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)
 - [Claude Code gateway connection](https://code.claude.com/docs/en/llm-gateway-connect)
   and [protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol)
-- [OpenCode providers](https://opencode.ai/docs/providers/), source commit
-  [`a7444bf`](https://github.com/anomalyco/opencode/commit/a7444bf944c219b9eaba2f794847b3001237795f)
-- [Aider OpenAI-compatible APIs](https://aider.chat/docs/llms/openai-compat.html),
-  source commit [`5dc9490`](https://github.com/Aider-AI/aider/commit/5dc9490bb35f9729ef2c95d00a19ccd30c26339c)
-- [Gemini CLI configuration](https://github.com/google-gemini/gemini-cli/blob/812f7a2bcf20b6e80e2e50c3c8fa8e26567bc1e8/docs/reference/configuration.md)
+- [OpenCode providers](https://opencode.ai/docs/providers/) and
+  [plugins](https://opencode.ai/docs/plugins/), source commit
+  [`fd9bd44`](https://github.com/anomalyco/opencode/commit/fd9bd448a2e68990e7aed3495e5590cecb934bfb)
