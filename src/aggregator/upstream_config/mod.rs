@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,13 +18,15 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
 mod dynamic;
+mod pull;
 #[cfg(test)]
 mod tests;
 mod validation;
 
+pub use pull::{PullRefreshOutcome, UpstreamConfigPuller, UpstreamPullConfig};
 pub use validation::parse_config_text;
 
-use builders::{build_chutes_provider_backend, build_state};
+use builders::{build_chutes_provider_backend, build_state, config_digest};
 use dynamic::{DynamicUpstreamBackend, DynamicUpstreamVerifier};
 use validation::{
     read_config_file, session_refresh_seconds, snapshot_for, unique_upstream_models,
@@ -340,6 +342,7 @@ pub struct UpstreamConfigManager {
     path: PathBuf,
     options: UpstreamRuntimeOptions,
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
+    update_lock: Arc<Mutex<()>>,
     session_sink: Arc<RwLock<Option<Arc<dyn UpstreamSessionSink>>>>,
 }
 
@@ -355,6 +358,7 @@ impl UpstreamConfigManager {
             path,
             options,
             state: Arc::new(RwLock::new(state)),
+            update_lock: Arc::new(Mutex::new(())),
             session_sink: Arc::new(RwLock::new(None)),
         })
     }
@@ -436,14 +440,49 @@ impl UpstreamConfigManager {
         &self,
         config: Vec<UpstreamConfig>,
     ) -> Result<UpstreamConfigSnapshot, UpstreamConfigError> {
+        self.replace_inner(config, false).map(Option::unwrap)
+    }
+
+    /// Validate and atomically install a config only when its digest differs.
+    /// Pull polling uses this to avoid rewriting the secret-bearing state file
+    /// on every unchanged response. The update lock also serializes an admin PUT
+    /// racing a pull so an older build cannot overwrite a newer one after it.
+    pub fn replace_if_changed(
+        &self,
+        config: Vec<UpstreamConfig>,
+    ) -> Result<Option<UpstreamConfigSnapshot>, UpstreamConfigError> {
+        self.replace_inner(config, true)
+    }
+
+    fn replace_inner(
+        &self,
+        config: Vec<UpstreamConfig>,
+        skip_unchanged: bool,
+    ) -> Result<Option<UpstreamConfigSnapshot>, UpstreamConfigError> {
+        let _update = self
+            .update_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         validate_config(&config)?;
+        if skip_unchanged {
+            // The digest depends only on the config, so compare before paying
+            // for a full router/verifier build on every unchanged poll.
+            let next_digest = config_digest(&config)?;
+            let current = self
+                .state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if current.config_digest == next_digest {
+                return Ok(None);
+            }
+        }
         let next = Arc::new(build_state(&config, &self.options)?);
         write_config_file(&self.path, &config)?;
         *self
             .state
             .write()
-            .expect("upstream config manager state poisoned") = next.clone();
-        Ok(snapshot_for(&self.path, &next))
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+        Ok(Some(snapshot_for(&self.path, &next)))
     }
 
     pub async fn prewarm_upstream_verification(&self) -> Vec<UpstreamPrewarmResult> {

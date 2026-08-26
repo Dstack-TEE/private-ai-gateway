@@ -16,7 +16,8 @@ directory. Operators must choose the config file with
 Operators configure `state_dir`, not the individual writable files inside it.
 The gateway creates `state_dir` on startup, seeds `upstreams.json` from the
 read-only upstream seed only when the active file is missing or empty, and
-updates `upstreams.json` through `PUT /v1/admin/upstreams`.
+updates `upstreams.json` through `PUT /v1/admin/upstreams` or an authenticated
+`upstream_pull` source.
 
 Unknown fields in the static gateway config are rejected at startup.
 
@@ -29,6 +30,12 @@ This is the smallest practical container config.
   "bind": "0.0.0.0:8086",
   "state_dir": "/var/lib/private-ai-gateway",
   "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+  "upstream_pull": {
+    "url": "https://control.example/api/admin/gateway-upstreams/config",
+    "token": "<dedicated-machine-pull-token>",
+    "refresh_seconds": 300,
+    "request_timeout_seconds": 90
+  },
   "admin_token": "<long-random-admin-token>",
   "dstack_endpoint": "unix:/var/run/dstack.sock"
 }
@@ -41,10 +48,32 @@ This is the smallest practical container config.
 | `bind` | `127.0.0.1:8086` | Public HTTP listener address. Use `0.0.0.0:8086` in containers that expose the gateway port. |
 | `state_dir` | `/var/lib/private-ai-gateway` | Gateway-owned writable state directory. The active upstream config and attested-session log are derived from this directory. |
 | `upstream_config_seed_path` | unset | Read-only JSON seed copied to `<state_dir>/upstreams.json` only when the active upstream config is missing or empty. |
+| `upstream_pull` | unset | Optional authenticated HTTPS source for the complete runtime upstream config. See [Upstream Pull](#upstream-pull). |
 | `admin_token` | unset | Bearer token for `GET` and `PUT /v1/admin/upstreams`. When unset, the admin API is not exposed. |
 | `dstack_endpoint` | dstack SDK default | dstack SDK endpoint, such as `unix:/var/run/dstack.sock`. |
 | `enable_e2ee` | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). Set to `false` only for an explicit TLS-only deployment; the attestation then reports `supported_e2ee_versions: []` and v2 requests fail with `e2ee_invalid_version`. |
 | `middleware` | unset | Optional middleware section. When present, the gateway consults a control plane to route and authorize each request and applies request/response transforms; when unset it serves directly. See [Middleware](#middleware). |
+
+## Upstream Pull
+
+`upstream_pull` lets every replica fetch the same complete runtime config from
+the control API without requiring the control API to reach replica-private
+addresses. It is intended for a secret-bearing endpoint: the dedicated token is
+sent only in an `Authorization: Bearer` header over HTTPS. Redirects are refused
+so the credential cannot be forwarded to another origin.
+
+| Field | Default | Use |
+| --- | --- | --- |
+| `upstream_pull.url` | required | HTTPS URL returning schema version 1 with an `upstreams` array. URLs containing credentials or a fragment are rejected. |
+| `upstream_pull.token` | required | Dedicated 32–256 byte machine credential. It must differ from the gateway admin token and middleware control token; do not reuse a user/admin API key. Newlines are rejected. |
+| `upstream_pull.refresh_seconds` | `300` | Successful polling cadence. Replicas apply ±10% jitter; failures retry with bounded exponential backoff. |
+| `upstream_pull.request_timeout_seconds` | `90` | Whole-request timeout, including response transfer. Responses larger than 4 MiB are rejected. |
+
+A pulled config is parsed, validated, and built completely before the active
+file and in-memory router are atomically replaced. Invalid responses and HTTP or
+TLS failures retain the last valid local config. An unchanged digest is not
+rewritten. On a new replica whose local config is empty, failure of the initial
+pull aborts startup so an empty router cannot enter the load-balancer pool.
 
 ## Middleware
 
