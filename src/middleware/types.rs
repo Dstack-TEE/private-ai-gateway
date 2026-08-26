@@ -198,6 +198,25 @@ pub struct PreConsult {
 }
 
 impl PreConsult {
+    /// Expand the legacy User-only wire shape into the tagged billing identity.
+    /// Remove after every control deployment emits `billingOwnerType`.
+    pub fn normalize_legacy_user_billing_identity(&mut self) {
+        if !self.allow
+            || self.billing_owner_type.is_some()
+            || self.billing_owner_id.is_some()
+            || self.organization_id.is_some()
+            || self.workspace_id.is_some()
+        {
+            return;
+        }
+        if let (Some(user_id), Some(virtual_key_id)) = (self.user_id, self.virtual_key_id) {
+            if user_id > 0 && virtual_key_id > 0 {
+                self.billing_owner_type = Some(BillingOwnerType::User);
+                self.billing_owner_id = Some(user_id);
+            }
+        }
+    }
+
     /// Validate the complete billing identity before an allowed request leaves
     /// the gateway. This catches mixed-version control responses early instead
     /// of serving traffic whose post report the control plane cannot bill.
@@ -339,18 +358,37 @@ mod tests {
 
     #[test]
     fn legacy_user_and_anonymous_identities_remain_valid() {
-        let legacy: PreConsult = serde_json::from_value(serde_json::json!({
+        let mut legacy: PreConsult = serde_json::from_value(serde_json::json!({
             "allow": true,
             "userId": 7,
-            "billingOwnerType": "user",
-            "billingOwnerId": 7,
             "virtualKeyId": 3
         }))
         .unwrap();
+        legacy.normalize_legacy_user_billing_identity();
         assert!(legacy.has_consistent_billing_identity());
+        assert_eq!(
+            legacy.billing_owner_type,
+            Some(super::BillingOwnerType::User)
+        );
+        assert_eq!(legacy.billing_owner_id, Some(7));
 
         let anonymous: PreConsult =
             serde_json::from_value(serde_json::json!({ "allow": true })).unwrap();
         assert!(anonymous.has_consistent_billing_identity());
+    }
+
+    #[test]
+    fn partial_organization_identity_is_never_normalized_as_a_user() {
+        let mut partial: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "virtualKeyId": 3
+        }))
+        .unwrap();
+
+        partial.normalize_legacy_user_billing_identity();
+
+        assert!(!partial.has_consistent_billing_identity());
     }
 }
