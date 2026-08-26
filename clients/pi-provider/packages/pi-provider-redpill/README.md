@@ -22,7 +22,8 @@ and accept the same key.
 /model redpill/deepseek/deepseek-v4-flash
 ```
 
-Config: `/redpill-settings` · Attestation status: `/attestation`
+Config: `/redpill-settings` · Attestation status: `/attestation` · Verified
+receipt audit: `/aci-receipt`
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

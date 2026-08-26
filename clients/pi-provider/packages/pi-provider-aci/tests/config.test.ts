@@ -35,6 +35,26 @@ test("validateAciCloudConfig: rejects malformed compose hashes", () => {
   assert.throws(() => validateAciCloudConfig(bad), /64-character SHA-256 hex digest/);
 });
 
+test("validateAciCloudConfig: rejects empty trust policies", () => {
+  for (const trust of [{ acceptedComposeHashes: [] }, { acceptedSessionIds: [] }]) {
+    assert.throws(
+      () => validateAciCloudConfig({ ...BASE, trust }),
+      /expected a non-empty array when supplied/,
+    );
+  }
+});
+
+test("validateAciCloudConfig: accepts only canonical attested-session ids", () => {
+  const validated = validateAciCloudConfig({
+    ...BASE,
+    trust: { acceptedSessionIds: ["ab".repeat(32)] },
+  });
+  assert.deepEqual(validated.trust.acceptedSessionIds, ["ab".repeat(32)]);
+
+  const bad = { ...BASE, trust: { acceptedSessionIds: ["AB".repeat(32)] } };
+  assert.throws(() => validateAciCloudConfig(bad), /lowercase session id/);
+});
+
 test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {
   const bad = { ...BASE, models: { ...BASE.models, thinkingFormat: "bogus" } };
   assert.throws(

@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-redpill",
   "version": "0.2.0",
-  "description": "Redpill AI for Pi — attested TLS (SPKI) pinning + per-response receipt verification on private-ai-gateway",
+  "description": "Redpill AI for Pi with verified ACI transport and on-demand signed receipt auditing",
   "keywords": [
     "ai-provider",
     "attestation",
@@ -13,23 +13,52 @@
     "verifiable"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
+    "directory": "clients/pi-provider/packages/pi-provider-redpill"
+  },
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-redpill",
+  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "files": [
-    "index.ts",
-    "package.json",
+    "dist",
     "README.md"
   ],
   "dependencies": {
     "@phala/pi-provider-aci": "^0.2.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
+    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build"
   }
 }

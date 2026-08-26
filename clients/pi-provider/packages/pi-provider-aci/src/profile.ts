@@ -38,6 +38,8 @@ export interface ProviderProfile {
   }>;
   /** Reviewed compose hashes shipped by this branded release. */
   acceptedComposeHashes?: readonly string[];
+  /** Fixed attested-session ids accepted by this branded release. */
+  acceptedSessionIds?: readonly string[];
   /** Optional legacy env-var aliases for the base URL / API key (brand
    *  backward-compat). */
   baseUrlAliases?: string[];

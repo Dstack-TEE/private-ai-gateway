@@ -283,8 +283,10 @@ pub struct ServeArgs {
         value_name = "SESSION_ID",
         value_parser = session_id,
         conflicts_with_all = ["require_claims", "allow_unverified"],
-        help = "Session id (spec 5.3) to pin into every POST that does not pin \
-                its own; repeatable. Implies verified serving."
+        help = "Session id (spec 5.3) accepted by the local policy; repeatable. \
+                Each POST uses the intersection with its own pins, or this set \
+                when it supplies none. A disjoint request is rejected locally. \
+                Implies verified serving."
     )]
     pub sessions: Vec<String>,
     #[arg(

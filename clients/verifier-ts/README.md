@@ -9,6 +9,11 @@ Phala PCCS. Every other check is Web Crypto — Ed25519, X25519, HKDF, AES-GCM,
 SHA-256. A prebuilt ESM bundle (`npm run build:bundle`) drops into a
 `<script type="module">`.
 
+The npm package is ESM-only. Browser-aware bundlers select the `browser`
+condition automatically; native browser imports can use
+`@phala/aci-verifier/browser`. Node-only pinned transport APIs live under
+`@phala/aci-verifier/node` and are never exposed through the browser entry.
+
 ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
 evidence) exactly as observed.
@@ -84,10 +89,11 @@ Verification failures are reported as `{ ok: false, checks }` — never thrown �
 so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
 for malformed input.
 
-> **Release status:** `@phala/aci-verifier` is not published to npm yet. The
-> imports below describe the package's intended public API and work from this
-> repository after `npm install && npm run build`. Publishing it is a required
-> predecessor to publishing packages that depend on it.
+> **Release status:** `0.2.0` is the first public-package release candidate.
+> The repository builds an ESM package with declarations, validates it with
+> publint and Are The Types Wrong, and publishes it with npm provenance from a
+> `clients-v<version>` GitHub Release. Until that release is created, use the
+> source checkout rather than assuming the npm name already exists.
 
 ## Usage
 
@@ -126,6 +132,12 @@ const aci = await connectAci({
     requireProductionOs: true,
     acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
   },
+  serving: {
+    // Every JSON POST demands verified serving. When session ids are supplied,
+    // request pins are intersected with this locally accepted set.
+    requireVerified: true,
+    acceptedSessionIds: ['<reviewed-attested-session-id>'],
+  },
 });
 
 const openai = new OpenAI({
@@ -139,9 +151,22 @@ const response = await openai.chat.completions.create({
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
+// The transport hashes the exact request/response wire bodies while streaming.
+// Verification is on demand, so normal inference latency does not include a
+// receipt/session fetch.
+const audit = await aci.verifyReceipt();
+if (!audit.transcript.verdict.verified) {
+  throw new Error(audit.transcript.verdict.line);
+}
+
 await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
 await aci.close();
 ```
+
+`aci.receipts()` lists the bounded in-memory exchange history. A receipt can
+only receive a complete transport audit while its exchange is retained; an
+unknown id fails instead of returning a misleading verdict with skipped body
+hashes.
 
 `source_provenance.repo_url` and `repo_commit` are published labels, not a
 cryptographic release identity. `acceptedComposeHashes` pins the value that is

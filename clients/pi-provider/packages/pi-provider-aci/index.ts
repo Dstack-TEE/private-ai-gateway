@@ -48,7 +48,7 @@ import {
   mapAciServerModel,
 } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
-import { fetchReceipt, fetchSession, summarizeReceipt, summarizeSession } from "./src/audit.ts";
+import { fetchSession, summarizeReceipt, summarizeSession } from "./src/audit.ts";
 import {
   type AciConfigScope,
   THINKING_FORMAT_VALUES,
@@ -130,6 +130,10 @@ async function installAciConnection(state: AciRuntimeState): Promise<void> {
         state.config.trust.acceptedComposeHashes === undefined
           ? {}
           : { acceptedComposeHashes: state.config.trust.acceptedComposeHashes },
+      serving:
+        state.config.trust.acceptedSessionIds === undefined
+          ? {}
+          : { acceptedSessionIds: state.config.trust.acceptedSessionIds },
     });
     state.connection = connection;
     state.connectionError = undefined;
@@ -353,19 +357,20 @@ async function openSettingsMenu(
   if (dirty) await ctx.reload();
 }
 
-/** On-request audit: fetch and show the latest (or a given) receipt. Raw
- *  document display — no signature verification (prevention is pinning). */
+/** Verify and show the latest recorded receipt, or a given receipt id. */
 async function runReceiptCommand(
   ctx: ExtensionCommandContext,
   state: AciRuntimeState,
   args: string,
 ): Promise<void> {
-  const apiKey = resolveApiKey(state.profile);
-  if (!apiKey) {
-    ctx.ui.notify(`${state.profile.apiKeyEnv} not set`, "error");
+  if (!state.connection) {
+    ctx.ui.notify(
+      `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
+      "error",
+    );
     return;
   }
-  const receiptId = args.trim() || state.receiptId;
+  const receiptId = args.trim() || state.receiptId || state.connection.receipts()[0]?.receiptId;
   if (!receiptId) {
     ctx.ui.notify(
       "No receipt id given and no x-receipt-id seen yet; send a message first or pass an id",
@@ -373,16 +378,26 @@ async function runReceiptCommand(
     );
     return;
   }
-  const receipt = await fetchReceipt(apiKey, receiptId, {
-    baseUrl: state.config.baseUrl,
-    fetch: providerFetch(state),
-    logPrefix: state.profile.logPrefix,
-  });
-  if (!receipt) {
-    ctx.ui.notify(`Receipt ${receiptId} not found or fetch failed`, "error");
-    return;
+  try {
+    const audit = await state.connection.verifyReceipt(receiptId);
+    const checks = audit.transcript.lines.map((line) => {
+      const detail = line.detail ? `: ${line.detail}` : "";
+      return `${line.status.toUpperCase()} ${line.id}${detail}`;
+    });
+    ctx.ui.notify(
+      [
+        ...summarizeReceipt(audit.receipt),
+        `Verdict: ${audit.transcript.verdict.line}`,
+        ...checks,
+      ].join("\n"),
+      audit.transcript.verdict.verified ? "info" : "error",
+    );
+  } catch (error) {
+    ctx.ui.notify(
+      `Receipt ${receiptId} verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
   }
-  ctx.ui.notify(summarizeReceipt(receipt).join("\n"), "info");
 }
 
 /** On-request audit: fetch and show an attested session document (raw). */
@@ -507,9 +522,8 @@ export function createProvider(
       await closeAciConnection(state);
     });
 
-    // Cheap header capture ONLY: remember the latest x-receipt-id so the
-    // on-request /aci-receipt audit command knows what to fetch. No receipt is
-    // downloaded or verified here (prevention is pinning; audit is opt-in).
+    // Remember the latest id for the on-demand verifier. connectAci records
+    // exact request/response digests without buffering the SSE response.
     pi.on("after_provider_response", (event, ctx) => {
       if (ctx.model?.provider !== state.profile.providerId) return;
       const lower = Object.fromEntries(
@@ -538,7 +552,7 @@ export function createProvider(
     });
 
     pi.registerCommand("aci-receipt", {
-      description: "Show the latest (or a given) receipt as an audit trail (no verification)",
+      description: "Verify the latest (or a given) signed ACI receipt",
       handler: async (args, ctx) => {
         await runReceiptCommand(ctx, state, args ?? "");
       },

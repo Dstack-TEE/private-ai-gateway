@@ -48,7 +48,10 @@ test("mapAciServerModel: drops non-TEE models when isTeeOnly is true", () => {
 });
 
 test("mapAciServerModel: keeps non-TEE models when isTeeOnly is false", () => {
-  const config = { ...DEFAULT_ACI_CLOUD_CONFIG, models: { ...DEFAULT_ACI_CLOUD_CONFIG.models, isTeeOnly: false } };
+  const config = {
+    ...DEFAULT_ACI_CLOUD_CONFIG,
+    models: { ...DEFAULT_ACI_CLOUD_CONFIG.models, isTeeOnly: false },
+  };
   const model: AciServerModel = {
     id: "some/plain-model",
     name: "Plain",
@@ -148,5 +151,8 @@ test("mapAciServerModel: qwen model gets qwen thinkingFormat compat", () => {
   assert.ok(mapped);
   assert.equal(mapped.reasoning, true);
   assert.equal((mapped.compat as { thinkingFormat?: string } | undefined)?.thinkingFormat, "qwen");
-  assert.equal((mapped.compat as { maxTokensField?: string } | undefined)?.maxTokensField, "max_tokens");
+  assert.equal(
+    (mapped.compat as { maxTokensField?: string } | undefined)?.maxTokensField,
+    "max_tokens",
+  );
 });

@@ -28,10 +28,13 @@ jobs:
             clients/verifier-ts/package-lock.json
             clients/pi-provider/package-lock.json
 
-      # file:../../../verifier-ts runs prepare→tsc; verifier deps must exist first.
       - name: Install verifier
         working-directory: clients/verifier-ts
         run: npm ci
+
+      - name: Build verifier
+        working-directory: clients/verifier-ts
+        run: npm run build
 
       - name: Install pi-provider
         working-directory: clients/pi-provider
@@ -48,3 +51,10 @@ jobs:
       - name: Test
         working-directory: clients/pi-provider
         run: npm test
+
+      - name: Validate packages
+        working-directory: clients/pi-provider
+        run: npm run lint:packages
+
+      - name: Package smoke test
+        run: bash clients/package-smoke.sh

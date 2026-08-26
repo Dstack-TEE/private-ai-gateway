@@ -44,13 +44,14 @@ pi provider extension:
   [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
   The core provides live model discovery from `/v1/models`, `is_tee`
   filtering, and injects the shared Node verified transport through Pi's
-  provider-scoped fetch hook. No build step — pi loads `.ts` directly.
-  Per-response receipt verification is intentionally not part of this
-  extension (prevention, not audit); use the `verifier-ts` library above if
-  you want to audit receipts. On request the plugin can show the latest
-  receipt and attested session as an audit trail (`/aci-receipt`, `/aci-session`).
+  provider-scoped fetch hook. Published packages contain ESM JavaScript and
+  declarations; TypeScript source is never used as the npm runtime entry.
+  The transport records bounded wire digests while streaming, and
+  `/aci-receipt` verifies the signed receipt plus cited session on demand.
+  `/aci-session` remains available for direct session inspection.
   See [`pi-provider/README.md`](pi-provider/README.md)
-  for install and use.
+  for install and use. The coordinated npm release process is documented in
+  [`releasing.md`](releasing.md).
 
 Coding agents that cannot inject a custom HTTP transport use `aci serve` as a
 single local verification boundary. The coding-agent guide covers Codex,
@@ -59,5 +60,5 @@ Claude Code, OpenCode, Aider and Gemini CLI compatibility.
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded
 with pi's `-e` flag pointing at one of the package directories (e.g.
-`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed as a
-pi package once published; see its README for the precise invocation.
+`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed from npm
+after the first `clients-v0.2.0` release; see its README for the invocation.

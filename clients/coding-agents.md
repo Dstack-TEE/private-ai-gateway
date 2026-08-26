@@ -16,6 +16,12 @@ coding-agent CLI ---------- aci serve ------- ACI gateway
 pins the remote TLS SPKI, and forwards the agent's native HTTP surface. It does
 not translate API protocols.
 
+Both paths demand `provider.aci_verified` on JSON inference requests by
+default, record exact request/response digests without buffering streams, and
+verify signed receipts plus cited sessions on demand. A configured session set
+is a local acceptance policy: request pins are intersected with it, and a
+disjoint request fails before reaching the gateway.
+
 ## Start the local verifier
 
 From this repository:
@@ -132,8 +138,9 @@ duplicate security code and would not solve the protocol mismatch.
 
 `aci serve` and `connectAci()` share the same trust contract: fresh quote and
 keyset binding, measured compose appraisal, optional reviewed compose
-allowlist, identity expiry, and hostname/SPKI channel binding. Agent adapters
-only select an HTTP protocol and transport; they do not redefine verification.
+allowlist, identity expiry, hostname/SPKI channel binding, verified-serving
+constraints, and receipt/session auditing. Agent adapters only select an HTTP
+protocol and transport; they do not redefine verification.
 
 These configurations protect model HTTP traffic between the local verifier and
 the attested gateway. They do not automatically cover WebSockets, MCP servers,

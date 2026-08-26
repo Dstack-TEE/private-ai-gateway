@@ -14,31 +14,37 @@ brand profile). Multiple branded providers can coexist in one process without
 sharing provider ids, environment names, config paths, fallback models or
 connection state.
 
-## Threat model: prevention, not audit
+## Threat model: prevention plus on-demand audit
 
-This plugin's job is **prevention**: make sure the request and response are
-readable only by the attested workload. It does NOT do per-response receipt
-verification. The gateway still stamps `x-receipt-id` on every reply and serves
-signed receipts — those are a post-hoc audit trail, and this plugin deliberately
-does not consume them. If you want audit, verify receipts with the repo's
-reference verifier ([`@phala/aci-verifier`](../verifier-ts)) directly.
+Every model request first passes through the verified, SPKI-pinned transport.
+That is the prevention boundary. The same transport records bounded request and
+response wire digests without buffering the SSE stream. `/aci-receipt [id]`
+then fetches the signed receipt and cited session on demand and verifies the
+signature, keyset binding, both body hashes, serving mode, session integrity,
+validity window, evidence digest, and configured session pins.
 
-## Use from this repository
+Receipt verification is deliberately on demand rather than an extra network
+round trip on every inference. An exchange that is no longer in the bounded
+history cannot receive a complete body-hash audit and fails explicitly.
 
-`@phala/pi-provider-aci` and `@phala/aci-verifier` are not published to npm
-yet. From a source checkout, install both client workspaces and load the Pi
-extension directly:
+## Install
+
+After the `0.2.0` npm release:
+
+```bash
+pi install npm:@phala/pi-provider-aci
+```
+
+Before the first npm release, use the source checkout:
 
 ```bash
 npm --prefix clients/verifier-ts ci
+npm --prefix clients/verifier-ts run build
 npm --prefix clients/pi-provider ci
 export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
 export ACI_LLM_API_KEY=...
 pi -e clients/pi-provider/packages/pi-provider-aci
 ```
-
-After the release boundary in [PLAN.md](PLAN.md) is complete, the intended
-install command is `pi install npm:@phala/pi-provider-aci`.
 
 ## What it adds
 
@@ -55,11 +61,14 @@ install command is `pi install npm:@phala/pi-provider-aci`.
   `sha256(app_compose)` values, or put them under
   `trust.acceptedComposeHashes` in the provider config. The measured compose is
   always verified; an allowlist additionally rejects unreviewed deployments.
+- **Optional attested-session policy.** Set
+  `<PREFIX>_ACCEPTED_SESSION_IDS` or `trust.acceptedSessionIds` to a non-empty
+  list of audited session ids. Request-supplied pins are intersected with this
+  local set; a disjoint request fails before network access.
 - `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
-  The latter two are an opt-in audit trail: `x-receipt-id` is captured (not
-  verified) from each response, and the user can show the receipt document or
-  an attested session on demand with `/aci-receipt [id]` / `/aci-session <id>`
-  (`/attestation` shows the pinned report: keyset digest, binding, keys, expiry).
+  `/aci-receipt [id]` runs the complete recorded-exchange audit described
+  above; `/aci-session <id>` can inspect a session directly. `/attestation`
+  shows the pinned report, keyset digest, binding, keys, and expiry.
 
 ## How the verified connection is established
 

@@ -1,0 +1,80 @@
+name: npm release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'clients-v')
+    runs-on: ubuntu-24.04
+    environment: npm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: |
+            clients/verifier-ts/package-lock.json
+            clients/pi-provider/package-lock.json
+
+      - name: Validate coordinated version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#clients-v}"
+          for manifest in \
+            clients/verifier-ts/package.json \
+            clients/pi-provider/packages/pi-provider-aci/package.json \
+            clients/pi-provider/packages/pi-provider-redpill/package.json \
+            clients/pi-provider/packages/pi-provider-phala-cloud/package.json
+          do
+            test "$(node -p "require('./$manifest').version")" = "$version"
+          done
+
+      - name: Install verifier
+        working-directory: clients/verifier-ts
+        run: npm ci
+
+      - name: Install Pi providers
+        working-directory: clients/pi-provider
+        run: npm ci
+
+      - name: Verify release artifacts
+        run: |
+          npm --prefix clients/verifier-ts test
+          npm --prefix clients/pi-provider run check
+          npm --prefix clients/pi-provider run lint
+          npm --prefix clients/pi-provider test
+          npm --prefix clients/verifier-ts run lint:package
+          npm --prefix clients/pi-provider run lint:packages
+          bash clients/package-smoke.sh
+
+      - name: Publish verifier
+        working-directory: clients/verifier-ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Publish Pi core
+        working-directory: clients/pi-provider
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --workspace @phala/pi-provider-aci --access public --provenance
+
+      - name: Publish branded providers
+        working-directory: clients/pi-provider
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --workspace pi-provider-redpill --access public --provenance
+          npm publish --workspace pi-provider-phala-cloud --access public --provenance

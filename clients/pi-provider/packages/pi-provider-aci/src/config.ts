@@ -40,6 +40,8 @@ export interface AciCloudConfig {
   trust: {
     /** RTMR3-bound compose hashes reviewed by the operator or brand. */
     acceptedComposeHashes?: string[];
+    /** Attested upstream session ids accepted by the operator or brand. */
+    acceptedSessionIds?: string[];
   };
   /** Default model id to surface first in /model. */
   defaultModel?: string;
@@ -54,6 +56,7 @@ export type AciCloudConfigPatch = {
   }>;
   trust?: Partial<{
     acceptedComposeHashes: unknown;
+    acceptedSessionIds: unknown;
   }>;
   defaultModel?: unknown;
 };
@@ -97,10 +100,14 @@ function defaultAciCloudConfig(
   return {
     ...DEFAULT_ACI_CLOUD_CONFIG,
     baseUrl: getBaseUrl(providerProfile, env) || DEFAULT_ACI_CLOUD_CONFIG.baseUrl,
-    trust:
-      providerProfile.acceptedComposeHashes === undefined
+    trust: {
+      ...(providerProfile.acceptedComposeHashes === undefined
         ? {}
-        : { acceptedComposeHashes: [...providerProfile.acceptedComposeHashes] },
+        : { acceptedComposeHashes: [...providerProfile.acceptedComposeHashes] }),
+      ...(providerProfile.acceptedSessionIds === undefined
+        ? {}
+        : { acceptedSessionIds: [...providerProfile.acceptedSessionIds] }),
+    },
   };
 }
 
@@ -224,6 +231,17 @@ function envConfigPatch(
     };
   }
 
+  const acceptedSessionIds = read(`${prefix}_ACCEPTED_SESSION_IDS`);
+  if (acceptedSessionIds) {
+    patch.trust = {
+      ...patch.trust,
+      acceptedSessionIds: acceptedSessionIds
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    };
+  }
+
   return patch;
 }
 
@@ -314,6 +332,19 @@ function validateTrustConfig(
     configPath,
     `${pointer}/acceptedComposeHashes`,
   );
+  const acceptedSessionIds = requireStringArray(
+    trust.acceptedSessionIds,
+    configPath,
+    `${pointer}/acceptedSessionIds`,
+  );
+  for (const [name, values] of [
+    ["acceptedComposeHashes", acceptedComposeHashes],
+    ["acceptedSessionIds", acceptedSessionIds],
+  ] as const) {
+    if (values !== undefined && values.length === 0) {
+      fail(configPath, `${pointer}/${name}`, "expected a non-empty array when supplied");
+    }
+  }
   for (const [index, hash] of (acceptedComposeHashes ?? []).entries()) {
     if (!/^[0-9a-f]{64}$/i.test(hash)) {
       fail(
@@ -323,9 +354,21 @@ function validateTrustConfig(
       );
     }
   }
-  return acceptedComposeHashes === undefined
-    ? {}
-    : { acceptedComposeHashes: acceptedComposeHashes.map((hash) => hash.toLowerCase()) };
+  for (const [index, id] of (acceptedSessionIds ?? []).entries()) {
+    if (!/^[0-9a-f]{64}$/.test(id)) {
+      fail(
+        configPath,
+        `${pointer}/acceptedSessionIds/${index}`,
+        "expected a 64-character lowercase session id",
+      );
+    }
+  }
+  return {
+    ...(acceptedComposeHashes === undefined
+      ? {}
+      : { acceptedComposeHashes: acceptedComposeHashes.map((hash) => hash.toLowerCase()) }),
+    ...(acceptedSessionIds === undefined ? {} : { acceptedSessionIds }),
+  };
 }
 
 export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"): AciCloudConfig {

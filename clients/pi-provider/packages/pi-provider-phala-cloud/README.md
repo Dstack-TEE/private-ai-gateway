@@ -25,7 +25,8 @@ export PHALA_LLM_API_KEY=...
 /model phala/openai/gpt-oss-20b
 ```
 
-Config: `/phala-settings` · Attestation status: `/attestation`
+Config: `/phala-settings` · Attestation status: `/attestation` · Verified
+receipt audit: `/aci-receipt`
 
 Interchangeable with `pi-provider-redpill` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

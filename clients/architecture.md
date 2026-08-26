@@ -28,10 +28,13 @@ flowchart LR
     agents[Codex, Claude Code,<br/>OpenCode, Aider]:::external
     connect[connectAci scoped Node transport<br/>current refactor]:::refactor
     serve[aci serve local proxy<br/>existing upstream]:::upstream
+    audit[Shared receipt/session audit semantics<br/>current refactor]:::refactor
 
     pi --> connect
     sdk --> connect
     agents --> serve
+    connect --> audit
+    serve --> audit
   end
 
   subgraph trust[Shared trust contract]
@@ -84,6 +87,8 @@ were hardened in place:
 | `connectAci()` framework-neutral, instance-scoped Node transport | Current refactor |
 | Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Current refactor |
 | TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Current refactor |
+| Streaming wire-digest capture and on-demand receipt/session audit in Node/Pi | Current refactor |
+| Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
 
@@ -106,7 +111,9 @@ enforce the same security meaning:
 4. Reject expired identities.
 5. Send inference traffic only over hostname-validated TLS whose observed SPKI
    is in the attested keyset.
-6. Fail closed on any required check.
+6. Apply verified-serving and session constraints before forwarding.
+7. Retain exact wire digests and verify signed receipts/sessions on demand.
+8. Fail closed on any required check.
 
 The implementations do not need to share a programming language. They do need
 matching policy semantics and conformance tests. Rust exposes the release
@@ -138,8 +145,8 @@ mode by default.
 
 ## Remaining product work
 
-The transport abstraction is no longer the main blocker. The production
-release process must now close the trust loop:
+The transport and npm release mechanics are no longer the main blockers. The
+deployment release process must still close the trust loop:
 
 1. Review the gateway source and complete deployment compose.
 2. Produce the deterministic compose hash for the approved release.
@@ -148,6 +155,11 @@ release process must now close the trust loop:
    during controlled release rotation.
 5. Exercise both Rust and TypeScript clients against the same accepted and
    rejected measurements.
+
+The repository can publish all four npm packages in dependency order from a
+signed GitHub Release. Publishing alone does not create a reviewed-release
+claim: the Redpill and Phala deployment pipelines still need to supply the
+independently reviewed compose hashes consumed by the branded policies.
 
 Gemini CLI remains a separate protocol-compatibility task. A per-agent verifier
 would duplicate security logic but would not make the gateway understand

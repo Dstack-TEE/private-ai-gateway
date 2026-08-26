@@ -526,6 +526,12 @@ export interface ReceiptTranscript {
   verdict: Verdict;
 }
 
+/** Precomputed ACI wire-body digests for streaming clients (§9.3(3)-(4)). */
+export interface ReceiptBodyDigests {
+  request?: string;
+  response?: string;
+}
+
 /** Aggregator inputs for the §9.3(5)-(6) checks. */
 export interface UpstreamAuditInput {
   /** The session record the receipt cites, as served (§9.2). */
@@ -559,6 +565,49 @@ export async function receiptTranscript(
   responseBytes?: Uint8Array | string,
   upstream?: UpstreamAuditInput,
 ): Promise<ReceiptTranscript> {
+  return receiptTranscriptWithEvidence(
+    envelope,
+    keyset,
+    establishedDigest,
+    requestBytes,
+    responseBytes,
+    {},
+    upstream,
+  );
+}
+
+/**
+ * Run the same §9.3 transcript from wire digests captured incrementally by a
+ * streaming transport. This avoids buffering an entire SSE response while
+ * preserving the exact body-hash checks.
+ */
+export async function receiptTranscriptFromDigests(
+  envelope: ReceiptEnvelope,
+  keyset: WorkloadKeyset,
+  establishedDigest: string,
+  digests: ReceiptBodyDigests,
+  upstream?: UpstreamAuditInput,
+): Promise<ReceiptTranscript> {
+  return receiptTranscriptWithEvidence(
+    envelope,
+    keyset,
+    establishedDigest,
+    undefined,
+    undefined,
+    digests,
+    upstream,
+  );
+}
+
+async function receiptTranscriptWithEvidence(
+  envelope: ReceiptEnvelope,
+  keyset: WorkloadKeyset,
+  establishedDigest: string,
+  requestBytes: Uint8Array | string | undefined,
+  responseBytes: Uint8Array | string | undefined,
+  digests: ReceiptBodyDigests,
+  upstream: UpstreamAuditInput | undefined,
+): Promise<ReceiptTranscript> {
   const result = await verifyReceipt(envelope, keyset, establishedDigest);
   const lines: TranscriptLine[] = [];
 
@@ -581,10 +630,14 @@ export async function receiptTranscript(
         : line(RECEIPT_TITLES, 'receipt-2', 'fail', digest?.detail ?? 'binding mismatch'),
   );
 
-  if (result.payload === undefined || requestBytes === undefined) {
-    lines.push(line(RECEIPT_TITLES, 'receipt-3', 'skip', 'request bytes not supplied', 'request bytes not supplied'));
+  const requestDigest = digests.request;
+  if (result.payload === undefined || (requestBytes === undefined && requestDigest === undefined)) {
+    lines.push(line(RECEIPT_TITLES, 'receipt-3', 'skip', 'request body evidence not supplied', 'request body evidence not supplied'));
   } else {
-    const ok = await checkRequestBodyHash(result.payload, requestBytes);
+    const ok =
+      requestDigest === undefined
+        ? await checkRequestBodyHash(result.payload, requestBytes as Uint8Array | string)
+        : findEvent(result.payload, 'request.received')?.body_hash === requestDigest;
     lines.push(
       line(RECEIPT_TITLES, 'receipt-3', ok ? 'pass' : 'fail', ok ? undefined : 'request.received.body_hash does not match the supplied bytes'),
     );
@@ -611,10 +664,14 @@ export async function receiptTranscript(
     }
   }
 
-  if (result.payload === undefined || responseBytes === undefined) {
-    lines.push(line(RECEIPT_TITLES, 'receipt-4', 'skip', 'response bytes not supplied', 'response bytes not supplied'));
+  const responseDigest = digests.response;
+  if (result.payload === undefined || (responseBytes === undefined && responseDigest === undefined)) {
+    lines.push(line(RECEIPT_TITLES, 'receipt-4', 'skip', 'response body evidence not supplied', 'response body evidence not supplied'));
   } else {
-    const ok = await checkResponseBodyHash(result.payload, responseBytes);
+    const ok =
+      responseDigest === undefined
+        ? await checkResponseBodyHash(result.payload, responseBytes as Uint8Array | string)
+        : findEvent(result.payload, 'response.returned')?.body_hash === responseDigest;
     lines.push(
       line(RECEIPT_TITLES, 'receipt-4', ok ? 'pass' : 'fail', ok ? undefined : 'response.returned.body_hash does not match the supplied bytes'),
     );

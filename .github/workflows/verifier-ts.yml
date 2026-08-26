@@ -36,3 +36,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Validate package
+        run: npm run lint:package

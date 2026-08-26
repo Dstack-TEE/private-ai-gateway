@@ -14,6 +14,7 @@ import {
   verifyReportBinding,
   reportTranscript,
   receiptTranscript,
+  receiptTranscriptFromDigests,
   toHex,
   fromHex,
   toBase64,
@@ -142,6 +143,22 @@ test('receipt transcript: envelope verifies; a tampered payload fails receipt-1'
     assert.equal(receipt.lines.find((l) => l.id === id)?.status, 'pass', id);
   }
   assert.equal(receipt.verdict.verified, true);
+
+  const streamed = await receiptTranscriptFromDigests(
+    document,
+    keyset,
+    digest,
+    { request: await hashBody(requestBody), response: await hashBody(responseBody) },
+  );
+  for (const id of ['receipt-1', 'receipt-2', 'receipt-3', 'receipt-4']) {
+    assert.equal(streamed.lines.find((line) => line.id === id)?.status, 'pass', id);
+  }
+
+  const wrongWireHash = await receiptTranscriptFromDigests(document, keyset, digest, {
+    request: await hashBody(requestBody),
+    response: 'sha256:' + '00'.repeat(32),
+  });
+  assert.equal(wrongWireHash.lines.find((line) => line.id === 'receipt-4')?.status, 'fail');
 
   const tampered = { ...document, served_at: FIXED_NOW + 1 } as unknown as ReceiptEnvelope;
   const bad = await receiptTranscript(tampered, keyset, digest);

@@ -27,22 +27,22 @@ Vercel AI SDK and LangChain JS. Software without a custom HTTP transport hook
 uses `aci serve`; coding-agent CLI compatibility is documented in
 [`../coding-agents.md`](../coding-agents.md).
 
-## Next steps
+## Release status and next steps
 
-1. **Define the npm release boundary.** `@phala/aci-verifier` is still private
-   and `@phala/pi-provider-aci` still depends on it through a repository-local
-   `file:` specifier. Publish the verifier first, then replace the Pi dependency
-   with a normal semver range. Do not publish the current packages until both
-   can install from a clean directory.
+1. **npm release boundary: complete in the repository.** All four packages are
+   coordinated at `0.2.0`, publish compiled ESM plus declarations, use normal
+   semver dependencies, pass package/type lint, and install together from
+   tarballs in a clean project. The OIDC workflow publishes verifier, core,
+   Redpill, then Phala Cloud from a `clients-v<version>` GitHub Release.
 2. **Publish reviewed deployment identities.** The Pi core accepts reviewed
    compose hashes from profile, config, or environment and passes them to
    `connectAci({ policy })`. Redpill and Phala release pipelines still need to
    publish their reviewed hashes and inject them into branded profiles; do not
    derive them from a live endpoint.
-3. **Exercise package consumers.** Add one clean-install smoke for the packed
-   verifier and one scoped-fetch integration test. Framework-specific example
-   packages are unnecessary unless an upstream framework lacks a stable fetch
-   hook.
+3. **Exercise live consumers.** The package and scoped-transport tests are in
+   place. Before promoting the release, run Pi and both transport paths against
+   the same live reviewed deployment and archive the accepted/rejected
+   transcripts.
 4. **Keep browser and non-HTTP boundaries explicit.** Browser clients cannot
    observe TLS SPKI, and the Node fetch transport does not secure WebSockets,
    MCP, tools or tracing. Continue using E2EE or `aci serve` for those paths.
@@ -57,3 +57,5 @@ uses `aci serve`; coding-agent CLI compatibility is documented in
   closed before model request bytes are sent.
 - OpenAI Node, OpenAI Agents JS, Vercel AI SDK and LangChain JS examples use the
   same `connectAci()` API.
+- publint and Are The Types Wrong accept every packed ESM/type surface.
+- A clean project imports all four tarballs without TypeScript runtime loaders.

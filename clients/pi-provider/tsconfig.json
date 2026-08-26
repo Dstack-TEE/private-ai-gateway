@@ -9,7 +9,10 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@phala/pi-provider-aci": ["./packages/pi-provider-aci/index.ts"]
+    }
   },
   "include": [
     "packages/*/index.ts",

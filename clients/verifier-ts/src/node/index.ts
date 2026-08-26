@@ -4,6 +4,9 @@ export type {
   AciConnection,
   AciConnectionErrorCode,
   AciPolicy,
+  AciReceiptAudit,
+  AciServingPolicy,
   ConnectAciOptions,
+  RecordedAciExchange,
   VerifiedAciIdentity,
 } from './types.js';
