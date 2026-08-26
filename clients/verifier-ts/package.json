@@ -56,7 +56,7 @@
     "build": "tsc -p tsconfig.json",
     "build:bundle": "esbuild src/index.ts --bundle --format=esm --minify --platform=browser --target=es2022 --inject:./browser-shim.js --outfile=dist/aci-verifier.min.js",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "lint:package": "publint && attw --pack --profile esm-only .",
+    "lint:package": "npm run build && npm run build:bundle && publint && attw --pack --profile esm-only .",
     "clean": "rm -rf dist dist-test",
     "prepack": "npm run clean && npm run build && npm run build:bundle",
     "prepublishOnly": "npm test"

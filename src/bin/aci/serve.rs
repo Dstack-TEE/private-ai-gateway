@@ -517,19 +517,17 @@ async fn proxy_inference(
                     pins.len()
                 );
                 *state.policy_pins.lock().expect("policy pins poisoned") = pins.clone();
-                request_body =
-                    match apply_constraints(body.to_vec(), state.enforce_verified, &pins) {
-                        Ok(body) => body,
-                        Err(reason) => {
-                            eprintln!(
-                                "aci serve: refreshed session policy rejected request: {reason}"
-                            );
-                            return text_response(
-                                StatusCode::BAD_REQUEST,
-                                "request session ids are not accepted by the refreshed ACI policy\n",
-                            );
-                        }
-                    };
+                request_body = match apply_constraints(body.to_vec(), state.enforce_verified, &pins)
+                {
+                    Ok(body) => body,
+                    Err(reason) => {
+                        eprintln!("aci serve: refreshed session policy rejected request: {reason}");
+                        return text_response(
+                            StatusCode::BAD_REQUEST,
+                            "request session ids are not accepted by the refreshed ACI policy\n",
+                        );
+                    }
+                };
                 match send(request_body.clone()).await {
                     Ok(retried) => resp = retried,
                     Err(e) => return send_error(&state, Method::POST, path, e),
@@ -1102,9 +1100,7 @@ mod tests {
     #[test]
     fn apply_constraints_tightens_plaintext_body() {
         // Plain body: the member is added.
-        let out =
-            apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[])
-                .unwrap();
+        let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[]).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_verified"], true);
         assert_eq!(v["provider"].get("aci_session_ids"), None);
@@ -1141,12 +1137,7 @@ mod tests {
         let disjoint = json!({
             "provider": { "aci_session_ids": ["b".repeat(64)] }
         });
-        assert!(apply_constraints(
-            serde_json::to_vec(&disjoint).unwrap(),
-            true,
-            &pins,
-        )
-        .is_err());
+        assert!(apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,).is_err());
 
         // Non-JSON bodies pass through untouched.
         assert_eq!(
