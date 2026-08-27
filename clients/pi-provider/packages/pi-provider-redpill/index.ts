@@ -17,7 +17,7 @@ import { createProvider } from "@phala/pi-provider-aci";
 export default createProvider({
   providerId: "redpill",
   label: "Redpill AI",
-  defaultBaseUrl: "https://api.redpill.ai/v1",
+  defaultBaseUrl: "https://tee.redpill.ai/v1",
   apiKeyEnv: "REDPILL_LLM_API_KEY",
   envPrefix: "REDPILL",
   footerKey: "redpill",

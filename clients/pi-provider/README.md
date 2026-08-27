@@ -29,13 +29,13 @@ history cannot receive a complete body-hash audit and fails explicitly.
 
 ## Install
 
-After the `0.2.0` npm release:
+Install the published package:
 
 ```bash
 pi install npm:@phala/pi-provider-aci
 ```
 
-Before the first npm release, use the source checkout:
+For a source checkout:
 
 ```bash
 npm --prefix clients/verifier-ts ci

@@ -61,5 +61,4 @@ coding-agent guide covers Codex, Claude Code and OpenCode compatibility.
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded
 with pi's `-e` flag pointing at one of the package directories (e.g.
-`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed from npm
-after the first `clients-v0.2.0` release; see its README for the invocation.
+`pi -e clients/pi-provider/packages/pi-provider-aci`), or installed from npm; see its README for the invocation.

@@ -92,11 +92,10 @@ Verification failures are reported as `{ ok: false, checks }` â€” never thrown â
 so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
 for malformed input.
 
-> **Release status:** `0.2.0` is the first public-package release candidate.
-> The repository builds an ESM package with declarations, validates it with
-> publint and Are The Types Wrong, and publishes it with npm provenance from a
-> `clients-v<version>` GitHub Release. Until that release is created, use the
-> source checkout rather than assuming the npm name already exists.
+> **Release status:** Public releases are available from npm. The repository
+> builds an ESM package with declarations, validates it with publint and Are The
+> Types Wrong, and publishes it with npm provenance from a `clients-v<version>`
+> GitHub Release.
 
 ## Usage
 
