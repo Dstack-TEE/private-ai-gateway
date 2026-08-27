@@ -53,6 +53,10 @@ from the agent request; the `aci serve` command line contains no key.
 | Claude Code | Anthropic Messages | Set `ANTHROPIC_BASE_URL` to `aci serve` | Supported; `/v1/messages/count_tokens` is optional |
 | OpenCode | OpenAI Chat Completions or Responses | Plugin injects Bun `connectAci().fetch` | Native |
 
+The native Pi and OpenCode providers additionally hold each inference stream
+open until its signed receipt and cited session verify. The bounded receipt
+history remains available for later inspection.
+
 ### Codex CLI
 
 Codex custom providers use the Responses API. Put the provider in the
@@ -95,7 +99,7 @@ For RedPill, add one plugin entry to `opencode.json`:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-provider-redpill"]
+  "plugin": ["opencode-provider-redpill"],
 }
 ```
 
@@ -120,11 +124,11 @@ For another ACI gateway, use the neutral plugin:
       {
         "baseURL": "https://gateway.example.com/v1",
         "trust": {
-          "acceptedComposeHashes": ["<reviewed-compose-sha256>"]
-        }
-      }
-    ]
-  ]
+          "acceptedComposeHashes": ["<reviewed-compose-sha256>"],
+        },
+      },
+    ],
+  ],
 }
 ```
 

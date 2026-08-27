@@ -20,6 +20,8 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+import type { AciProviderConfig } from "@phala/aci-provider";
+
 import { getBaseUrl } from "./constants.ts";
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
@@ -42,6 +44,15 @@ export interface AciCloudConfig {
     acceptedComposeHashes?: string[];
     /** Attested upstream session ids accepted by the operator or brand. */
     acceptedSessionIds?: string[];
+  };
+}
+
+export function toAciProviderConfig(config: AciCloudConfig): AciProviderConfig {
+  return {
+    baseURL: config.baseUrl,
+    models: config.models,
+    trust: config.trust,
+    receipts: { verification: "response", historySize: 32 },
   };
 }
 

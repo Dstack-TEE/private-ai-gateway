@@ -9,10 +9,6 @@ import {
   type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import {
-  fetchPhalaCloudAccount,
-  startPhalaCloudDeviceAuthorization,
-} from "@phala/aci-provider/phala-cloud";
 import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
@@ -47,20 +43,17 @@ export interface OpenCodeModelConfig {
   variants?: Record<string, Record<string, unknown>>;
 }
 
-export type OpenCodeAciPluginOptions = AciProviderConfigInput;
+type AciReceiptOptions = NonNullable<AciProviderConfigInput["receipts"]>;
+
+export type OpenCodeAciPluginOptions = Omit<AciProviderConfigInput, "receipts"> & {
+  receipts?: Omit<AciReceiptOptions, "verification">;
+};
 export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
 
 export interface CreateOpenCodeAciPluginOptions {
   profile?: Partial<AciProviderProfile>;
-  defaults?: AciProviderConfigInput;
+  defaults?: OpenCodeAciPluginOptions;
   authMethods?: readonly OpenCodeAciAuthMethod[];
-}
-
-export interface CreatePhalaCloudAuthMethodOptions {
-  label?: string;
-  baseURL: string;
-  clientId: string;
-  fetch?: AciFetch;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,52 +67,6 @@ function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOpti
     ...(isRecord(options.models) ? { models: options.models } : {}),
     ...(isRecord(options.trust) ? { trust: options.trust } : {}),
     ...(isRecord(options.receipts) ? { receipts: options.receipts } : {}),
-  };
-}
-
-export function createPhalaCloudAuthMethod({
-  label = "Phala Cloud account",
-  baseURL,
-  clientId,
-  fetch,
-}: CreatePhalaCloudAuthMethodOptions): OpenCodeAciAuthMethod {
-  return {
-    type: "oauth",
-    label,
-    async authorize() {
-      const authorization = await startPhalaCloudDeviceAuthorization({
-        baseURL,
-        clientId,
-        ...(fetch ? { fetch } : {}),
-      });
-      return {
-        url: authorization.verificationURI,
-        instructions: `Approve the device login with code ${authorization.userCode}`,
-        method: "auto",
-        async callback() {
-          const token = await authorization.poll();
-          const metadata: Record<string, string> = {};
-          if (token.keyId !== undefined) metadata.keyId = String(token.keyId);
-          try {
-            const account = await fetchPhalaCloudAccount({
-              baseURL,
-              apiKey: token.accessToken,
-              ...(fetch ? { fetch } : {}),
-            });
-            if (account.username) metadata.username = account.username;
-            if (account.workspaceName) metadata.workspaceName = account.workspaceName;
-            if (account.workspaceSlug) metadata.workspaceSlug = account.workspaceSlug;
-          } catch {
-            // Account metadata is optional; the issued inference key remains valid.
-          }
-          return {
-            type: "success",
-            key: token.accessToken,
-            ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-          };
-        },
-      };
-    },
   };
 }
 
@@ -221,9 +168,9 @@ export function createOpenCodeAciPlugin({
             models: { ...defaults.models, ...options.models },
             trust: { ...defaults.trust, ...options.trust },
             receipts: {
-              verification: "response",
               ...defaults.receipts,
               ...options.receipts,
+              verification: "response",
             },
           });
           candidate = createAciProvider({ profile, config: resolved });

@@ -4,80 +4,53 @@
  *
  * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
  * registers it with the Phala Cloud identity (provider id, endpoint, env vars,
- * fallback catalog, OAuth login). All protocol logic — attestation, TLS SPKI
+ * fallback catalog, device login). All protocol logic — attestation, TLS SPKI
  * pinning, model discovery — lives in the core.
  *
  * Usage:
  *   pi install npm:pi-provider-phala-cloud
  *   # /login phala (or set PHALA_LLM_API_KEY), then /model phala/<model-id>
  */
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type { ApiKeyCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import {
-  fetchPhalaCloudAccount,
   resolvePhalaCloudApiBaseURL,
   startPhalaCloudDeviceAuthorization,
 } from "@phala/aci-provider/phala-cloud";
 import { PHALA_CLOUD_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createProvider } from "@phala/pi-provider-aci";
 
-// RFC 8628 device authorization against Phala Cloud issues a Confidential AI
-// key rather than a general cloud token. The key does not expire and cannot be
-// refreshed, so `expires` is set far in the future and refreshToken() throws.
-async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+// Phala Cloud device authorization issues a Confidential AI API key, so Pi
+// stores the result as an API-key credential instead of inventing an OAuth
+// token lifecycle.
+async function loginPhalaDeviceFlow(
+  interaction: ProviderAuthInteraction,
+): Promise<ApiKeyCredential> {
   const cloudApi = resolvePhalaCloudApiBaseURL();
   const authorization = await startPhalaCloudDeviceAuthorization({
     baseURL: cloudApi,
     clientId: "pi",
-    signal: callbacks.signal,
+    signal: interaction.signal,
   });
-  callbacks.onDeviceCode({
+  interaction.notify({
+    type: "device_code",
     userCode: authorization.userCode,
     verificationUri: authorization.verificationURI,
     intervalSeconds: authorization.interval,
     expiresInSeconds: authorization.expiresIn,
   });
   const token = await authorization.poll({
-    signal: callbacks.signal,
-    onProgress: callbacks.onProgress,
+    signal: interaction.signal,
+    onProgress: (message) => interaction.notify({ type: "progress", message }),
   });
-
-  const credentials: OAuthCredentials = {
-    refresh: "",
-    access: token.accessToken,
-    expires: Date.now() + 100 * 365 * 24 * 60 * 60 * 1000,
-  };
-  if (token.keyId !== undefined) {
-    credentials.redpill_key_id = token.keyId;
-  }
-
-  // Best-effort display metadata from the LLM-key self endpoint.
-  try {
-    const account = await fetchPhalaCloudAccount({
-      baseURL: cloudApi,
-      apiKey: token.accessToken,
-      signal: callbacks.signal,
-    });
-    if (account.username) credentials.username = account.username;
-    if (account.workspaceSlug) credentials.workspace_slug = account.workspaceSlug;
-    if (account.workspaceName) credentials.workspace_name = account.workspaceName;
-  } catch {
-    // Metadata is display-only; login still succeeds without it.
-  }
-  return credentials;
+  return { type: "api_key", key: token.accessToken };
 }
 
 export default createProvider({
   ...PHALA_CLOUD_ACI_PROFILE,
   footerKey: "phala",
-  oauth: {
-    name: "Phala Cloud",
+  apiKeyAuth: {
+    name: "Phala Cloud account",
     login: loginPhalaDeviceFlow,
-    // Redpill LLM keys do not expire and have no rotation endpoint; a dead
-    // key surfaces as a 401 and the user re-runs /login to mint a new one.
-    refreshToken: () => {
-      throw new Error("Phala LLM keys cannot be refreshed; run /login phala again");
-    },
-    getApiKey: (credentials) => credentials.access,
   },
 });
 

@@ -57,9 +57,9 @@
     "@phala/pi-provider-aci": "^0.4.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
+    "@earendil-works/pi-ai": ">=0.84.3 <0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.3 <0.85.0",
+    "@earendil-works/pi-tui": ">=0.84.3 <0.85.0"
   },
   "engines": {
     "node": ">=22.19.0"

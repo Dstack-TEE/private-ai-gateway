@@ -14,18 +14,19 @@ brand profile). Multiple branded providers can coexist in one process without
 sharing provider ids, environment names, config paths, fallback models or
 connection state.
 
-## Threat model: prevention plus on-demand audit
+## Threat model: verified transport and verified responses
 
 Every model request first passes through the verified, SPKI-pinned transport.
-That is the prevention boundary. The same transport records bounded request and
-response wire digests without buffering the SSE stream. `/aci-receipt [id]`
-then fetches the signed receipt and cited session on demand and verifies the
-signature, keyset binding, both body hashes, serving mode, session integrity,
-validity window, evidence digest, and configured session pins.
+That proves the client is connected to the attested workload before prompt
+bytes are sent. For every inference, Pi then holds stream completion until the
+signed receipt and cited session verify: signature, keyset binding, both body
+hashes, serving mode, session integrity, validity window, evidence digest, and
+configured session pins. A failed audit terminates the model stream before Pi
+can continue its tool loop.
 
-Receipt verification is deliberately on demand rather than an extra network
-round trip on every inference. An exchange that is no longer in the bounded
-history cannot receive a complete body-hash audit and fails explicitly.
+The transport also retains a bounded history of exact wire digests.
+`/aci-receipt [id]` displays or re-verifies a recorded exchange on demand; an
+exchange outside that history cannot receive a complete body-hash audit.
 
 ## Install
 
@@ -65,9 +66,9 @@ pi -e clients/pi-provider/packages/pi-provider-aci
   list of audited session ids. Request-supplied pins are intersected with this
   local set; a disjoint request fails before network access.
 - `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
-  `/aci-receipt [id]` runs the complete recorded-exchange audit described
-  above; `/aci-session <id>` can inspect a session directly. `/attestation`
-  shows the pinned report, keyset digest, binding, keys, and expiry.
+  `/aci-receipt [id]` displays or re-runs the complete recorded-exchange audit;
+  `/aci-session <id>` can inspect a session directly. `/attestation` shows the
+  pinned report, keyset digest, binding, keys, and expiry.
 
 ## How the verified connection is established
 
@@ -94,9 +95,12 @@ their reviewed compose hashes through `acceptedComposeHashes` when their
 release pipeline publishes them. Until then `/attestation` explicitly reports
 `measurement verified, not pinned`.
 
-Pi's `openai-completions` adapter receives the connection's scoped fetch through
-`StreamOptions.fetch`. A failed or expired connection blocks model traffic.
-Each Pi session gets a fresh connection and closes it on shutdown.
+The extension registers Pi's native `Provider` and `ApiKeyAuth` interfaces.
+Pi owns credential storage and environment resolution; the
+`openai-completions` adapter receives the connection's scoped fetch through
+`StreamOptions.fetch`. A failed or expired connection blocks model traffic,
+and a failed receipt audit fails the response stream. Each Pi session gets a
+fresh connection and closes it on shutdown.
 
 The same `connectAci()` API works with other Node and Bun SDKs and agent
 frameworks; see the [verifier integration examples](../verifier-ts/README.md#runtime-sdk-and-agent-frameworks).

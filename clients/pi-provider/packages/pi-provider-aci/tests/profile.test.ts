@@ -16,19 +16,16 @@ test("resolveProfile fills neutral defaults for unset fields", () => {
   assert.deepEqual(resolveProfile(undefined).apiKeyAliases, ["ACI_LLM_API_KEY"]);
 });
 
-test("resolveProfile preserves an oauth block (login/refreshToken/getApiKey)", () => {
-  const full = { refresh: "", access: "tok", expires: 1 };
-  const login = async () => full;
-  const refreshToken = async (c: typeof full) => c;
-  const getApiKey = (c: typeof full) => c.access;
+test("resolveProfile preserves a branded API-key login", () => {
+  const login = async () => ({ type: "api_key" as const, key: "token" });
   const p = resolveProfile({
-    providerId: "brand-oauth",
+    providerId: "brand-login",
     defaultBaseURL: "https://brand.test/v1",
-    oauth: { name: "Brand", login, refreshToken, getApiKey },
+    apiKeyAuth: { name: "Brand account", login },
   });
-  assert.equal(p.providerId, "brand-oauth");
-  assert.equal(p.oauth?.name, "Brand");
-  assert.equal(p.oauth?.getApiKey(full), "tok");
+  assert.equal(p.providerId, "brand-login");
+  assert.equal(p.apiKeyAuth?.name, "Brand account");
+  assert.equal(p.apiKeyAuth?.login, login);
 });
 
 test("getBaseUrl: profile default wins when no env is set", () => {

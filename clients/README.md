@@ -50,9 +50,10 @@ and native coding-agent integrations:
   [`pi-provider-phala-cloud`](pi-provider/packages/pi-provider-phala-cloud).
   It adds Pi configuration, model types, settings, commands, credentials, and
   footer state around the shared provider.
-  The transport records bounded wire digests while streaming, and
-  `/aci-receipt` verifies the signed receipt plus cited session on demand.
-  `/aci-session` remains available for direct session inspection.
+  Pi uses its native Provider/Auth API and verifies the signed receipt plus
+  cited session before every response stream completes. The transport retains
+  bounded wire digests, `/aci-receipt` displays or re-runs a recorded audit,
+  and `/aci-session` remains available for direct session inspection.
   See [`pi-provider/README.md`](pi-provider/README.md)
   for install and use. The coordinated npm release process is documented in
   [`releasing.md`](releasing.md).

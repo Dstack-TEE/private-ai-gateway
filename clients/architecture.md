@@ -96,7 +96,7 @@ were hardened in place:
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
 | Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Current refactor |
 | TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Current refactor |
-| Streaming wire-digest capture and on-demand receipt/session audit in Node/Pi | Current refactor |
+| Streaming wire-digest capture, Pi response verification and on-demand receipt/session audit | Current refactor |
 | Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
 | Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
 | Fail-closed OpenCode provider ownership, live model discovery and end-of-stream receipt audit | Current OpenCode work |

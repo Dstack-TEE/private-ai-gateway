@@ -15,30 +15,20 @@ import {
   resolveAciProviderProfile,
   type AciProviderProfile,
 } from "@phala/aci-provider";
+import type { ApiKeyAuth } from "@earendil-works/pi-ai";
+
+export interface AciApiKeyAuthConfig {
+  /** Login option shown by Pi. Defaults to `<label> API key`. */
+  name?: string;
+  /** Optional branded login flow. The neutral default prompts for an API key. */
+  login?: ApiKeyAuth["login"];
+}
 
 export interface ProviderProfile extends AciProviderProfile {
   /** Footer/status bar key. */
   footerKey: string;
-  /** Optional OAuth login block (device flow or otherwise). Branded shells
-   *  that support /login register this; the core passes it through to pi's
-   *  registerProvider `oauth` config and, when set, `resolveApiKey()` first
-   *  reads the stored credential (auth.json) before falling back to the env
-   *  var. The shell owns the flow implementation; the core only transports
-   *  the config. */
-  oauth?: AciOAuthConfig;
-}
-
-/** OAuth config the core forwards to pi's registerProvider `oauth` block. */
-export interface AciOAuthConfig {
-  /** Display name shown in `/login`. */
-  name: string;
-  login(
-    callbacks: import("@earendil-works/pi-ai").OAuthLoginCallbacks,
-  ): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
-  refreshToken(
-    credentials: import("@earendil-works/pi-ai").OAuthCredentials,
-  ): Promise<import("@earendil-works/pi-ai").OAuthCredentials>;
-  getApiKey(credentials: import("@earendil-works/pi-ai").OAuthCredentials): string;
+  /** Optional branded API-key login flow, such as Phala Cloud device authorization. */
+  apiKeyAuth?: AciApiKeyAuthConfig;
 }
 
 export const DEFAULT_PROFILE: ProviderProfile = {
@@ -49,7 +39,7 @@ export const DEFAULT_PROFILE: ProviderProfile = {
 
 /** Resolve a (possibly partial) profile over the neutral defaults. */
 export function resolveProfile(patch: Partial<ProviderProfile> | undefined): ProviderProfile {
-  const { footerKey = DEFAULT_PROFILE.footerKey, oauth, ...shared } = patch ?? {};
+  const { footerKey = DEFAULT_PROFILE.footerKey, apiKeyAuth, ...shared } = patch ?? {};
   const profile = resolveAciProviderProfile(shared);
   return {
     ...profile,
@@ -57,6 +47,6 @@ export function resolveProfile(patch: Partial<ProviderProfile> | undefined): Pro
       ? { apiKeyAliases: DEFAULT_PROFILE.apiKeyAliases }
       : {}),
     footerKey,
-    ...(oauth ? { oauth } : {}),
+    ...(apiKeyAuth ? { apiKeyAuth } : {}),
   };
 }

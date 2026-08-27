@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   DEFAULT_ACI_CLOUD_CONFIG,
+  toAciProviderConfig,
   validateAciCloudConfig,
   type AciCloudConfig,
 } from "../src/config.ts";
@@ -20,6 +21,7 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
   assert.deepEqual(validated.trust, {});
+  assert.equal(toAciProviderConfig(validated).receipts.verification, "response");
 });
 
 test("validateAciCloudConfig: normalizes accepted compose hashes", () => {

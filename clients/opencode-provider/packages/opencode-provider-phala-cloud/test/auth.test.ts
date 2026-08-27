@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { createPhalaCloudAuthMethod } from "../src/index.ts";
+import { createPhalaCloudDeviceAuthMethod } from "../index.ts";
 
 test("maps a device authorization grant into an OpenCode API credential", async () => {
   const responses = [
@@ -18,7 +18,7 @@ test("maps a device authorization grant into an OpenCode API credential", async 
       workspace: { name: "Confidential AI", slug: "confidential-ai" },
     }),
   ];
-  const method = createPhalaCloudAuthMethod({
+  const method = createPhalaCloudDeviceAuthMethod({
     baseURL: "https://cloud.example",
     clientId: "opencode",
     fetch: async () => {

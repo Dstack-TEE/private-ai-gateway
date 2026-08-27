@@ -19,16 +19,15 @@
  *   src/settings-ui.ts   — SettingsList helpers for the settings command
  */
 
-import {
-  type ExtensionAPI,
-  type ExtensionCommandContext,
-  type ExtensionFactory,
-  readStoredCredential,
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import type { Credential } from "@earendil-works/pi-ai";
+import type { Model, Provider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import { createAciProvider, type AciProvider, type AciProviderConfig } from "@phala/aci-provider";
+import { createAciProvider, type AciProvider } from "@phala/aci-provider";
 import os from "node:os";
 
 import {
@@ -39,7 +38,9 @@ import {
   loadProjectAciCloudConfig,
   saveHomeAciCloudConfig,
   saveProjectAciCloudConfig,
+  toAciProviderConfig,
 } from "./src/config.ts";
+import { createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
 import {
@@ -77,58 +78,6 @@ interface AciConnectionSetup {
   promise: Promise<void>;
 }
 
-function resolveApiKey(providerProfile: ProviderProfile): string {
-  // Prefer the credential stored by /login (auth.json) to match pi's own
-  // auth resolution; fall back to the env var.
-  try {
-    const stored = readStoredCredential(providerProfile.providerId);
-    if (stored?.type === "oauth") {
-      // An expired OAuth token must not be sent to the gateway as a live
-      // bearer (it fails as a silent 401 that degrades to UNPINNED).
-      if (typeof stored.access === "string" && stored.access) {
-        const expires = stored.expires;
-        if (typeof expires === "number" && Number.isFinite(expires) && expires <= Date.now()) {
-          console.error(
-            `${providerProfile.logPrefix} stored OAuth credential is expired; run /login ${providerProfile.providerId} again`,
-          );
-        } else {
-          return stored.access;
-        }
-      }
-    } else if (stored?.type === "api_key" && typeof stored.key === "string" && stored.key) {
-      return stored.key;
-    }
-  } catch {
-    // auth.json unreadable; fall through to env.
-  }
-  for (const name of [providerProfile.apiKeyEnv, ...(providerProfile.apiKeyAliases ?? [])]) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return "";
-}
-
-function configuredApiKeyEnv(providerProfile: ProviderProfile): string {
-  return (
-    [providerProfile.apiKeyEnv, ...(providerProfile.apiKeyAliases ?? [])].find((name) =>
-      process.env[name]?.trim(),
-    ) ?? providerProfile.apiKeyEnv
-  );
-}
-
-function resolveCredentialApiKey(
-  providerProfile: ProviderProfile,
-  credential: Credential | undefined,
-): string {
-  if (credential?.type === "oauth") {
-    return (providerProfile.oauth?.getApiKey(credential) ?? credential.access).trim();
-  }
-  if (credential?.type === "api_key" && typeof credential.key === "string") {
-    return credential.key.trim();
-  }
-  return resolveApiKey(providerProfile);
-}
-
 function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackModels> {
   const mapped = state.rawModels
     .map((m) => mapAciServerModel(m, state.config))
@@ -147,15 +96,6 @@ function connectionConfig(config: AciCloudConfig): string {
     acceptedComposeHashes: config.trust.acceptedComposeHashes,
     acceptedSessionIds: config.trust.acceptedSessionIds,
   });
-}
-
-function coreConfig(config: AciCloudConfig): AciProviderConfig {
-  return {
-    baseURL: config.baseUrl,
-    models: config.models,
-    trust: config.trust,
-    receipts: { verification: "on-demand", historySize: 32 },
-  };
 }
 
 async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
@@ -177,7 +117,7 @@ async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
     try {
       const provider = createAciProvider({
         profile: state.profile,
-        config: coreConfig(config),
+        config: toAciProviderConfig(config),
       });
       await provider.connect();
       state.provider = provider;
@@ -209,8 +149,6 @@ async function closeAciProvider(state: AciRuntimeState): Promise<void> {
   }
 }
 
-const openAICompletions = openAICompletionsApi();
-
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   return async (input, init) => {
     await ensureAciConnection(state);
@@ -221,43 +159,53 @@ function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   };
 }
 
-async function refreshAciModels(
-  state: AciRuntimeState,
-  apiKey: string,
-): Promise<ReturnType<typeof fallbackModels>> {
+async function refreshAciModels(state: AciRuntimeState, apiKey: string): Promise<AciServerModel[]> {
   await ensureAciConnection(state);
-  if (!state.provider) return modelsFromState(state);
+  if (!state.provider) return [];
   const discovered = await discoverAciModels(apiKey, state.config, {
     baseUrl: state.config.baseUrl,
     fetch: providerFetch(state),
     logPrefix: state.profile.logPrefix,
   });
-  if (discovered.raw.length > 0) state.rawModels = discovered.raw;
-  return modelsFromState(state);
+  return discovered.raw;
+}
+
+function piModelsFromState(state: AciRuntimeState): Model<"openai-completions">[] {
+  return modelsFromState(state).map((model) => ({
+    ...model,
+    api: "openai-completions",
+    provider: state.profile.providerId,
+    baseUrl: state.config.baseUrl,
+  }));
+}
+
+function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
+  const streams = openAICompletionsApi();
+  const fetch = providerFetch(state);
+  return {
+    id: state.profile.providerId,
+    name: state.profile.label,
+    baseUrl: state.config.baseUrl,
+    auth: { apiKey: createApiKeyAuth(state.profile) },
+    getModels: () => piModelsFromState(state),
+    async refreshModels(context) {
+      if (!context.allowNetwork || context.credential?.type !== "api_key") return;
+      const rawModels = await refreshAciModels(state, context.credential.key ?? "");
+      if (rawModels.length === 0) return;
+      await context.publish({
+        update: () => {
+          state.rawModels = rawModels;
+        },
+      });
+    },
+    stream: (model, context, options) => streams.stream(model, context, { ...options, fetch }),
+    streamSimple: (model, context, options) =>
+      streams.streamSimple(model, context, { ...options, fetch }),
+  };
 }
 
 function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
-  const config = state.config;
-  const providerProfile = state.profile;
-  const oauth = providerProfile.oauth;
-  pi.registerProvider(providerProfile.providerId, {
-    baseUrl: config.baseUrl,
-    apiKey: `$${configuredApiKeyEnv(providerProfile)}`,
-    api: "openai-completions",
-    authHeader: true,
-    models: modelsFromState(state),
-    refreshModels: async ({ credential, allowNetwork }) => {
-      if (!allowNetwork) return modelsFromState(state);
-      const apiKey = resolveCredentialApiKey(providerProfile, credential);
-      return refreshAciModels(state, apiKey);
-    },
-    streamSimple: (model, context, options) =>
-      openAICompletions.streamSimple(model, context, {
-        ...options,
-        fetch: providerFetch(state),
-      }),
-    ...(oauth ? { oauth } : {}),
-  });
+  pi.registerProvider(nativeAciProvider(state));
 }
 
 function reloadEffectiveConfig(
@@ -481,9 +429,12 @@ async function runSessionCommand(
   state: AciRuntimeState,
   args: string,
 ): Promise<void> {
-  const apiKey = resolveApiKey(state.profile);
+  const apiKey = await ctx.modelRegistry.getApiKeyForProvider(state.profile.providerId);
   if (!apiKey) {
-    ctx.ui.notify(`${state.profile.apiKeyEnv} not set`, "error");
+    ctx.ui.notify(
+      `No ${state.profile.label} API key; run /login ${state.profile.providerId} or set ${state.profile.apiKeyEnv}`,
+      "error",
+    );
     return;
   }
   const sessionId = args.trim();
@@ -580,9 +531,10 @@ export function createProvider(
     pi.on("session_start", async (_event, ctx) => {
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      const sessionApiKey = resolveApiKey(state.profile);
-      await refreshAciModels(state, sessionApiKey);
-      registerAciProvider(pi, state);
+      await ctx.modelRegistry.refresh({
+        allowNetwork: true,
+        providers: [state.profile.providerId],
+      });
       updateFooter(ctx, state);
     });
 

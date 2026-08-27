@@ -1,7 +1,7 @@
 {
   "name": "opencode-provider-phala-cloud",
   "version": "0.4.0",
-  "description": "Phala Cloud ACI provider for OpenCode",
+  "description": "Phala Cloud provider for OpenCode with verified ACI transport and per-response receipt verification",
   "keywords": [
     "aci",
     "coding-agent",
@@ -44,12 +44,13 @@
     "clean": "rm -rf dist",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit -p tsconfig.build.json",
+    "test": "bun test test/*.test.ts",
     "lint": "oxlint .",
     "format": "oxfmt . --write",
     "format:check": "oxfmt . --check",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run check && npm run lint && npm run format:check"
+    "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
     "@phala/aci-provider": "^0.4.0",

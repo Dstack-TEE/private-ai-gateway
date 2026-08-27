@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { startPhalaCloudDeviceAuthorization } from "../src/device-auth.ts";
 
-test("completes a validated RFC 8628 device flow", async () => {
+test("completes Phala device authorization and returns the issued API key", async () => {
   const requests: Request[] = [];
   const responses = [
     Response.json({

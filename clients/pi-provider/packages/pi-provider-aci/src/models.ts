@@ -1,32 +1,23 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import {
   discoverAciModelCatalog,
   inferThinkingFormat as inferAciThinkingFormat,
   mapAciModel,
   type AciModel,
-  type AciProviderConfig,
   type AciServerModel,
 } from "@phala/aci-provider";
 
-import type { AciCloudConfig } from "./config.ts";
+import { toAciProviderConfig, type AciCloudConfig } from "./config.ts";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, LOG_PREFIX } from "./constants.ts";
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
+
+export type AciPiModel = Omit<Model<"openai-completions">, "api" | "provider" | "baseUrl">;
 
 interface InferredThinking {
   reasoning: boolean;
   format: "qwen" | "openai" | "off";
   maxTokensField: "max_tokens" | "max_completion_tokens";
   supportsReasoningEffort: boolean;
-}
-
-function providerConfig(config: AciCloudConfig): AciProviderConfig {
-  return {
-    baseURL: config.baseUrl,
-    models: config.models,
-    trust: config.trust,
-    receipts: { verification: "on-demand", historySize: 32 },
-  };
 }
 
 export function inferThinkingFormat(modelId: string): InferredThinking {
@@ -60,7 +51,7 @@ export function inferThinkingFormat(modelId: string): InferredThinking {
 function toPiModel(
   model: AciModel,
   configuredFormat: AciCloudConfig["models"]["thinkingFormat"],
-): ProviderModelConfig {
+): AciPiModel {
   const inferred = inferThinkingFormat(model.id);
   const thinking: InferredThinking =
     configuredFormat === "auto"
@@ -93,8 +84,8 @@ function toPiModel(
 export function mapAciServerModel(
   model: AciServerModel,
   config: AciCloudConfig,
-): ProviderModelConfig | null {
-  const mapped = mapAciModel(model, providerConfig(config));
+): AciPiModel | null {
+  const mapped = mapAciModel(model, toAciProviderConfig(config));
   return mapped ? toPiModel(mapped, config.models.thinkingFormat) : null;
 }
 
@@ -106,7 +97,7 @@ export interface DiscoverAciModelsOptions {
 }
 
 export interface DiscoverAciModelsResult {
-  models: ProviderModelConfig[];
+  models: AciPiModel[];
   raw: AciServerModel[];
 }
 
@@ -118,7 +109,7 @@ export async function discoverAciModels(
   try {
     const catalog = await discoverAciModelCatalog({
       ...(apiKey ? { apiKey } : {}),
-      config: providerConfig({ ...config, baseUrl: options.baseUrl ?? config.baseUrl }),
+      config: toAciProviderConfig({ ...config, baseUrl: options.baseUrl ?? config.baseUrl }),
       fetch: options.fetch ?? globalThis.fetch,
       timeoutMs: options.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
     });
@@ -132,9 +123,7 @@ export async function discoverAciModels(
   }
 }
 
-export function fallbackModels(
-  providerProfile: ProviderProfile = DEFAULT_PROFILE,
-): ProviderModelConfig[] {
+export function fallbackModels(providerProfile: ProviderProfile = DEFAULT_PROFILE): AciPiModel[] {
   return providerProfile.catalog.map((model) => toPiModel(model, "auto"));
 }
 
