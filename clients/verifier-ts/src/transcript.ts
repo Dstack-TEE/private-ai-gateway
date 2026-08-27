@@ -45,6 +45,8 @@ export interface ReportTranscript {
   lines: TranscriptLine[];
   verdict: Verdict;
   verification: ReportVerification;
+  /** RTMR3-bound sha256(app_compose), present only when id-4 measured successfully. */
+  composeHash?: string;
 }
 
 export interface TranscriptOptions {
@@ -72,6 +74,12 @@ export interface TranscriptOptions {
    * after a dstack verifier binds the same evidence to the OS-image hash.
    */
   requireProductionOs?: boolean;
+  /**
+   * Reviewed RTMR3-bound compose hashes accepted by this verifier (§1.3).
+   * An empty or omitted list verifies and reports the measurement without
+   * claiming that the release was reviewed.
+   */
+  acceptedComposeHashes?: readonly string[];
 }
 
 const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
@@ -263,6 +271,9 @@ export async function verifyService(
     ...(options.requireProductionOs !== undefined
       ? { requireProductionOs: options.requireProductionOs }
       : {}),
+    ...(options.acceptedComposeHashes !== undefined
+      ? { acceptedComposeHashes: options.acceptedComposeHashes }
+      : {}),
     online: true,
   });
 }
@@ -339,6 +350,7 @@ export async function reportTranscript(
     typeof (report.attestation.evidence as Record<string, unknown> | undefined)?.app_compose ===
     'string';
   let composeVerified = false;
+  let composeHash: string | undefined;
   if (!declared) {
     lines.push(line(ID_TITLES, 'id-4', 'fail', 'the report declares no source provenance (§4.1)'));
   } else if (!publishesCompose) {
@@ -362,12 +374,35 @@ export async function reportTranscript(
     try {
       const compose = await verifyComposeMeasurement(report);
       composeVerified = compose.ok;
+      composeHash = compose.composeHash;
       const bad = compose.checks.find((c) => !c.ok);
-      lines.push(
-        compose.ok
-          ? line(ID_TITLES, 'id-4', 'pass', 'compose measured into RTMR3; sha256(app_compose) matches')
-          : line(ID_TITLES, 'id-4', 'fail', bad?.detail ?? 'compose measurement failed'),
-      );
+      const accepted = options.acceptedComposeHashes ?? [];
+      const releaseAccepted =
+        composeHash !== undefined &&
+        (accepted.length === 0 || accepted.some((hash) => hash.toLowerCase() === composeHash));
+      if (!compose.ok) {
+        lines.push(line(ID_TITLES, 'id-4', 'fail', bad?.detail ?? 'compose measurement failed'));
+      } else if (!releaseAccepted) {
+        lines.push(
+          line(
+            ID_TITLES,
+            'id-4',
+            'fail',
+            `measured compose-hash=${composeHash} is not in the accepted list`,
+          ),
+        );
+      } else {
+        lines.push(
+          line(
+            ID_TITLES,
+            'id-4',
+            'pass',
+            accepted.length > 0
+              ? `compose-hash=${composeHash} measured into RTMR3 and accepted by policy`
+              : `compose-hash=${composeHash} measured into RTMR3 (not pinned by policy)`,
+          ),
+        );
+      }
     } catch (e) {
       lines.push(
         line(
@@ -426,7 +461,12 @@ export async function reportTranscript(
 
   lines.push(channelLine(report, verification.keyset, options));
 
-  return { lines, verdict: computeVerdict(lines), verification };
+  return {
+    lines,
+    verdict: computeVerdict(lines),
+    verification,
+    ...(composeHash === undefined ? {} : { composeHash }),
+  };
 }
 
 /**
@@ -486,6 +526,12 @@ export interface ReceiptTranscript {
   verdict: Verdict;
 }
 
+/** Precomputed ACI wire-body digests for streaming clients (§9.3(3)-(4)). */
+export interface ReceiptBodyDigests {
+  request?: string;
+  response?: string;
+}
+
 /** Aggregator inputs for the §9.3(5)-(6) checks. */
 export interface UpstreamAuditInput {
   /** The session record the receipt cites, as served (§9.2). */
@@ -519,6 +565,49 @@ export async function receiptTranscript(
   responseBytes?: Uint8Array | string,
   upstream?: UpstreamAuditInput,
 ): Promise<ReceiptTranscript> {
+  return receiptTranscriptWithEvidence(
+    envelope,
+    keyset,
+    establishedDigest,
+    requestBytes,
+    responseBytes,
+    {},
+    upstream,
+  );
+}
+
+/**
+ * Run the same §9.3 transcript from wire digests captured incrementally by a
+ * streaming transport. This avoids buffering an entire SSE response while
+ * preserving the exact body-hash checks.
+ */
+export async function receiptTranscriptFromDigests(
+  envelope: ReceiptEnvelope,
+  keyset: WorkloadKeyset,
+  establishedDigest: string,
+  digests: ReceiptBodyDigests,
+  upstream?: UpstreamAuditInput,
+): Promise<ReceiptTranscript> {
+  return receiptTranscriptWithEvidence(
+    envelope,
+    keyset,
+    establishedDigest,
+    undefined,
+    undefined,
+    digests,
+    upstream,
+  );
+}
+
+async function receiptTranscriptWithEvidence(
+  envelope: ReceiptEnvelope,
+  keyset: WorkloadKeyset,
+  establishedDigest: string,
+  requestBytes: Uint8Array | string | undefined,
+  responseBytes: Uint8Array | string | undefined,
+  digests: ReceiptBodyDigests,
+  upstream: UpstreamAuditInput | undefined,
+): Promise<ReceiptTranscript> {
   const result = await verifyReceipt(envelope, keyset, establishedDigest);
   const lines: TranscriptLine[] = [];
 
@@ -541,10 +630,14 @@ export async function receiptTranscript(
         : line(RECEIPT_TITLES, 'receipt-2', 'fail', digest?.detail ?? 'binding mismatch'),
   );
 
-  if (result.payload === undefined || requestBytes === undefined) {
-    lines.push(line(RECEIPT_TITLES, 'receipt-3', 'skip', 'request bytes not supplied', 'request bytes not supplied'));
+  const requestDigest = digests.request;
+  if (result.payload === undefined || (requestBytes === undefined && requestDigest === undefined)) {
+    lines.push(line(RECEIPT_TITLES, 'receipt-3', 'skip', 'request body evidence not supplied', 'request body evidence not supplied'));
   } else {
-    const ok = await checkRequestBodyHash(result.payload, requestBytes);
+    const ok =
+      requestDigest === undefined
+        ? await checkRequestBodyHash(result.payload, requestBytes as Uint8Array | string)
+        : findEvent(result.payload, 'request.received')?.body_hash === requestDigest;
     lines.push(
       line(RECEIPT_TITLES, 'receipt-3', ok ? 'pass' : 'fail', ok ? undefined : 'request.received.body_hash does not match the supplied bytes'),
     );
@@ -571,10 +664,14 @@ export async function receiptTranscript(
     }
   }
 
-  if (result.payload === undefined || responseBytes === undefined) {
-    lines.push(line(RECEIPT_TITLES, 'receipt-4', 'skip', 'response bytes not supplied', 'response bytes not supplied'));
+  const responseDigest = digests.response;
+  if (result.payload === undefined || (responseBytes === undefined && responseDigest === undefined)) {
+    lines.push(line(RECEIPT_TITLES, 'receipt-4', 'skip', 'response body evidence not supplied', 'response body evidence not supplied'));
   } else {
-    const ok = await checkResponseBodyHash(result.payload, responseBytes);
+    const ok =
+      responseDigest === undefined
+        ? await checkResponseBodyHash(result.payload, responseBytes as Uint8Array | string)
+        : findEvent(result.payload, 'response.returned')?.body_hash === responseDigest;
     lines.push(
       line(RECEIPT_TITLES, 'receipt-4', ok ? 'pass' : 'fail', ok ? undefined : 'response.returned.body_hash does not match the supplied bytes'),
     );

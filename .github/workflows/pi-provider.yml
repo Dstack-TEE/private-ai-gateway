@@ -1,0 +1,64 @@
+name: pi-provider
+
+on:
+  pull_request:
+    paths:
+      - 'clients/pi-provider/**'
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/pi-provider.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'clients/pi-provider/**'
+      - 'clients/verifier-ts/**'
+      - '.github/workflows/pi-provider.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            clients/verifier-ts/package-lock.json
+            clients/pi-provider/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install verifier
+        working-directory: clients/verifier-ts
+        run: npm ci
+
+      - name: Build verifier
+        working-directory: clients/verifier-ts
+        run: npm run build
+
+      - name: Install pi-provider
+        working-directory: clients/pi-provider
+        run: npm ci
+
+      - name: Type-check
+        working-directory: clients/pi-provider
+        run: npm run check
+
+      - name: Lint
+        working-directory: clients/pi-provider
+        run: npm run lint && npm run format:check
+
+      - name: Test
+        working-directory: clients/pi-provider
+        run: npm test
+
+      - name: Validate packages
+        working-directory: clients/pi-provider
+        run: npm run lint:packages
+
+      - name: Package smoke test
+        run: bash clients/package-smoke.sh

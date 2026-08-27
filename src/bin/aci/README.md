@@ -16,8 +16,8 @@ cargo run --bin aci -- <command> --help
 | `send <url>` | One verified chat completion end to end: verify, send over the pinned channel, then verify the receipt and its cited session. |
 | `serve <url>` | Local verifying proxy. Forwards every method and path over the pinned channel, records each POST exchange's digests, and verifies receipts on demand from a control endpoint (default `127.0.0.1:4181`). |
 
-`serve` pins sessions two ways, both opt-in: `--session <id>` injects a
-fixed pin list into every request that does not pin its own, and
+`serve` pins sessions two ways, both opt-in: `--session <id>` defines a
+fixed accepted set, composed with request pins by intersection, and
 `--require-claim <name[=source]>` derives the pin set from the audited
 current sessions, refreshing it when the service refuses a superseded pin.
 

@@ -1,38 +1,91 @@
 {
   "name": "@phala/aci-verifier",
-  "version": "0.1.0",
-  "private": true,
-  "description": "TypeScript ACI verifier for browser and node \u2014 one-call verifyService with hardware-quote verification (@phala/dcap-qvl); every other check is Web Crypto.",
+  "version": "0.2.0",
+  "description": "TypeScript ACI verifier and verified fetch client for browsers, Node.js, and Bun.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
+    "directory": "clients/verifier-ts"
+  },
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/verifier-ts",
+  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "aci",
+    "attestation",
+    "confidential-ai",
+    "confidential-computing",
+    "dstack",
+    "tdx",
+    "tee",
+    "verifier"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "browser": "./dist/aci-verifier.min.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/aci-verifier.min.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "import": "./dist/node/index.js",
+      "default": "./dist/node/index.js"
+    },
+    "./bun": {
+      "types": "./dist/bun/index.d.ts",
+      "import": "./dist/bun/index.js",
+      "default": "./dist/bun/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/node/index.d.ts",
+      "bun": "./dist/bun/index.js",
+      "node": "./dist/node/index.js",
+      "default": "./dist/node/index.js"
     }
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.1",
+    "bun": ">=1.4.0"
   },
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:bundle": "esbuild src/index.ts --bundle --format=esm --minify --platform=browser --target=es2022 --inject:./browser-shim.js --outfile=dist/aci-verifier.min.js",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "clean": "rm -rf dist dist-test"
+    "test:bun": "bun test ./test/bun-transport.bun.ts",
+    "lint:package": "npm run build && npm run build:bundle && publint && attw --pack --profile esm-only .",
+    "clean": "rm -rf dist dist-test",
+    "prepack": "npm run clean && npm run build && npm run build:bundle",
+    "prepublishOnly": "npm test"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^24.0.0",
+    "buffer": "^6.0.3",
     "esbuild": "^0.25.0",
-    "typescript": "^5.6.0",
-    "buffer": "^6.0.3"
+    "publint": "^0.3.24",
+    "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@phala/dcap-qvl": "^0.5.2"
+    "@phala/dcap-qvl": "^0.6.2",
+    "undici": "7.29.0"
   }
 }

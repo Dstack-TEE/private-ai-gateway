@@ -1,0 +1,81 @@
+{
+  "name": "@phala/pi-provider-aci",
+  "version": "0.2.0",
+  "description": "Vendor-neutral Pi provider for private-ai-gateway using an instance-scoped verified ACI transport",
+  "keywords": [
+    "aci",
+    "ai-provider",
+    "attestation",
+    "confidential-ai",
+    "confidential-computing",
+    "gateway",
+    "llm",
+    "llm-provider",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "pi-package",
+    "pi-provider",
+    "private-ai",
+    "private-ai-gateway",
+    "tee",
+    "verifiable"
+  ],
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider",
+  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
+    "directory": "clients/pi-provider/packages/pi-provider-aci"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "lint": "oxlint .",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check",
+    "pre-commit": "prek run",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
+  },
+  "dependencies": {
+    "@phala/aci-verifier": "^0.2.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
+    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

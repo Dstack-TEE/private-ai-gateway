@@ -14,6 +14,7 @@ import {
   verifyReportBinding,
   reportTranscript,
   receiptTranscript,
+  receiptTranscriptFromDigests,
   toHex,
   fromHex,
   toBase64,
@@ -22,6 +23,7 @@ import {
   type ReceiptEnvelope,
   type WorkloadKeyset,
 } from '../src/index.js';
+import { makeMeasuredComposeReport } from './fixtures.js';
 
 const report = JSON.parse(
   readFileSync(new URL('../../test/fixtures/aci_report.json', import.meta.url), 'utf8'),
@@ -75,6 +77,24 @@ test('transcript: a wrong nonce fails the binding chain (id-2)', async () => {
   assert.equal(lines.find((l) => l.id === 'id-2')?.status, 'fail');
 });
 
+test('transcript: compose policy accepts reviewed releases and rejects other measurements', async () => {
+  const measured = await makeMeasuredComposeReport();
+  const accepted = await reportTranscript(measured.report, FIXTURE_NONCE, {
+    now: FIXED_NOW,
+    acceptedComposeHashes: [measured.composeHash.toUpperCase()],
+  });
+  assert.equal(accepted.composeHash, measured.composeHash);
+  assert.equal(accepted.lines.find((line) => line.id === 'id-4')?.status, 'pass');
+
+  const rejected = await reportTranscript(measured.report, FIXTURE_NONCE, {
+    now: FIXED_NOW,
+    acceptedComposeHashes: ['00'.repeat(32)],
+  });
+  const provenance = rejected.lines.find((line) => line.id === 'id-4');
+  assert.equal(provenance?.status, 'fail');
+  assert.ok(provenance?.detail?.includes(measured.composeHash));
+});
+
 test('receipt transcript: envelope verifies; a tampered payload fails receipt-1', async () => {
   const verification = await verifyReportBinding(report, FIXTURE_NONCE, { now: FIXED_NOW });
   const keyset = verification.keyset as WorkloadKeyset;
@@ -123,6 +143,22 @@ test('receipt transcript: envelope verifies; a tampered payload fails receipt-1'
     assert.equal(receipt.lines.find((l) => l.id === id)?.status, 'pass', id);
   }
   assert.equal(receipt.verdict.verified, true);
+
+  const streamed = await receiptTranscriptFromDigests(
+    document,
+    keyset,
+    digest,
+    { request: await hashBody(requestBody), response: await hashBody(responseBody) },
+  );
+  for (const id of ['receipt-1', 'receipt-2', 'receipt-3', 'receipt-4']) {
+    assert.equal(streamed.lines.find((line) => line.id === id)?.status, 'pass', id);
+  }
+
+  const wrongWireHash = await receiptTranscriptFromDigests(document, keyset, digest, {
+    request: await hashBody(requestBody),
+    response: 'sha256:' + '00'.repeat(32),
+  });
+  assert.equal(wrongWireHash.lines.find((line) => line.id === 'receipt-4')?.status, 'fail');
 
   const tampered = { ...document, served_at: FIXED_NOW + 1 } as unknown as ReceiptEnvelope;
   const bad = await receiptTranscript(tampered, keyset, digest);

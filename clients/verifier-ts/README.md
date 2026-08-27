@@ -1,13 +1,21 @@
 # @phala/aci-verifier
 
 A TypeScript verifier for [Attested Confidential Inference
-(ACI)](../../spec/aci.md), for the browser and Node 20+. `verifyService(url)`
+(ACI)](../../spec/aci.md), for the browser, Node 20.18+, and Bun 1.4+.
+`verifyService(url)`
 fetches a service's report with a fresh nonce and returns a full §9.1
 transcript — **including the hardware quote**, verified with
 [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against the
 Phala PCCS. Every other check is Web Crypto — Ed25519, X25519, HKDF, AES-GCM,
 SHA-256. A prebuilt ESM bundle (`npm run build:bundle`) drops into a
 `<script type="module">`.
+
+The npm package is ESM-only. Browser-aware bundlers select the `browser`
+condition automatically; native browser imports can use
+`@phala/aci-verifier/browser`. Runtime-aware applications import
+`connectAci()` from `@phala/aci-verifier/runtime`; package conditions select
+the tested Node or Bun transport. Explicit `/node` and `/bun` entries are also
+available. Pinned transport APIs are never exposed through the browser entry.
 
 ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
@@ -19,7 +27,7 @@ evidence) exactly as observed.
   fresh nonce and runs the transcript — the quote to the Intel vendor root
   (check 1, via `@phala/dcap-qvl`), the binding chain (checks 2–3), and the
   compose measurement (check 4) when the service publishes `app_compose`.
-  Returns `{ verdict, lines, verification }`. `verifyQuote` and
+  Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
 - **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
   require the RTMR3 `os-image-hash` to be in this release's reviewed production
@@ -27,6 +35,10 @@ evidence) exactly as observed.
   step over RTMR3, not a dstack boot verifier. First use a dstack verifier to
   reconstruct MRTD/RTMR0-2 from the same evidence and bind them to
   `os_image_hash`; require the dstack result to report `is_valid: true`.
+- **Reviewed release allowlist (§1.3):** pass `acceptedComposeHashes` to accept
+  only reviewed `sha256(app_compose)` values measured into RTMR3. Without an
+  allowlist the measurement is verified and reported, but the verifier does
+  not claim that the release was reviewed.
 - **Report binding (§9.1 checks 2–3):** `verifyReportBinding(report, nonce)`
   recomputes the keyset digest over the served `workload_keyset` object's
   JCS form, rebuilds the attestation statement for the nonce you
@@ -80,6 +92,12 @@ Verification failures are reported as `{ ok: false, checks }` — never thrown �
 so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
 for malformed input.
 
+> **Release status:** `0.2.0` is the first public-package release candidate.
+> The repository builds an ESM package with declarations, validates it with
+> publint and Are The Types Wrong, and publishes it with npm provenance from a
+> `clients-v<version>` GitHub Release. Until that release is created, use the
+> source checkout rather than assuming the npm name already exists.
+
 ## Usage
 
 One call runs the ACI checks and OS-hash appraisal. This example assumes a
@@ -94,6 +112,152 @@ const { verdict, lines } = await verifyService('https://tee.redpill.ai', {
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
+
+### Runtime SDK and agent frameworks
+
+Node and Bun applications establish the same instance-scoped, SPKI-pinned
+connection and inject its ordinary `fetch` into any HTTP-based
+OpenAI-compatible SDK. The connection rejects HTTP, cross-origin requests,
+expired identities, and TLS peers whose SPKI is not in the verified workload
+keyset. It never replaces `globalThis.fetch`.
+
+```ts
+import OpenAI from 'openai';
+import { connectAci } from '@phala/aci-verifier/runtime';
+
+const apiKey = process.env.ACI_API_KEY;
+if (!apiKey) throw new Error('ACI_API_KEY is required');
+
+const aci = await connectAci({
+  baseURL: 'https://api.example.com/v1',
+  apiKey,
+  policy: {
+    requireProductionOs: true,
+    acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
+  },
+  serving: {
+    // Every JSON POST demands verified serving. When session ids are supplied,
+    // request pins are intersected with this locally accepted set.
+    requireVerified: true,
+    acceptedSessionIds: ['<reviewed-attested-session-id>'],
+  },
+});
+
+const openai = new OpenAI({
+  baseURL: aci.baseURL,
+  apiKey,
+  fetch: aci.fetch,
+});
+
+const response = await openai.chat.completions.create({
+  model: 'your-model',
+  messages: [{ role: 'user', content: 'Hello' }],
+});
+
+// The transport hashes the exact request/response wire bodies while streaming.
+// Verification is on demand, so normal inference latency does not include a
+// receipt/session fetch.
+const audit = await aci.verifyReceipt();
+if (!audit.transcript.verdict.verified) {
+  throw new Error(audit.transcript.verdict.line);
+}
+
+await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
+await aci.close();
+```
+
+The public API is identical in Node and Bun. Internally, Node passes a scoped
+`undici` dispatcher to `fetch`, while Bun passes its documented
+[`tls` callback and `proxy` options](https://bun.com/docs/runtime/networking/fetch).
+Both adapters use the same hostname/SPKI check and the same quote, policy,
+receipt, session, rotation, and lifecycle implementation. Use `/node` or
+`/bun` only when a bundler cannot select runtime export conditions correctly.
+
+`aci.receipts()` lists the bounded in-memory exchange history. A receipt can
+only receive a complete transport audit while its exchange is retained; an
+unknown id fails instead of returning a misleading verdict with skipped body
+hashes.
+
+`source_provenance.repo_url` and `repo_commit` are published labels, not a
+cryptographic release identity. `acceptedComposeHashes` pins the value that is
+actually measured into RTMR3. Release automation should publish reviewed
+compose hashes alongside each deployment; clients must not learn and trust the
+first hash they observe.
+
+#### OpenAI Agents SDK
+
+Use a runner-scoped `OpenAIProvider` so one agent stack owns one verified
+connection. `setDefaultOpenAIClient()` also accepts this client, but changes a
+process-wide default and is a worse fit when several gateways coexist.
+
+```ts
+import { Agent, OpenAIProvider, Runner } from '@openai/agents';
+
+const modelProvider = new OpenAIProvider({
+  openAIClient: openai,
+  useResponses: false,
+});
+const runner = new Runner({ modelProvider });
+const agent = new Agent({
+  name: 'Private agent',
+  instructions: 'Be concise.',
+  model: 'your-model',
+});
+
+const result = await runner.run(agent, 'Summarize this document.');
+console.log(result.finalOutput);
+
+await modelProvider.close();
+await aci.close();
+```
+
+`aci.fetch` protects the HTTP model calls only. Agent tools, MCP calls and
+tracing use their own transports and remain separate trust boundaries.
+
+#### Vercel AI SDK
+
+```ts
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { generateText } from 'ai';
+
+const gateway = createOpenAICompatible({
+  name: 'aci',
+  baseURL: aci.baseURL,
+  apiKey,
+  fetch: aci.fetch,
+});
+const result = await generateText({
+  model: gateway('your-model'),
+  prompt: 'Summarize this document.',
+});
+```
+
+#### LangChain JS
+
+```ts
+import { ChatOpenAI } from '@langchain/openai';
+
+const model = new ChatOpenAI({
+  model: 'your-model',
+  apiKey,
+  configuration: {
+    baseURL: aci.baseURL,
+    fetch: aci.fetch,
+  },
+});
+const result = await model.invoke('Summarize this document.');
+```
+
+These integrations use documented transport hooks in
+[OpenAI Node](https://github.com/openai/openai-node/blob/main/src/client.ts),
+[OpenAI Agents JS](https://github.com/openai/openai-agents-js/blob/main/packages/agents-openai/src/openaiProvider.ts),
+[Vercel AI SDK](https://github.com/vercel/ai/blob/main/packages/openai-compatible/src/openai-compatible-provider.ts),
+and [LangChain JS](https://github.com/langchain-ai/langchainjs/blob/main/libs/providers/langchain-openai/src/chat_models/base.ts).
+
+Browsers cannot observe TLS SPKI, and this transport does not cover WebSocket
+model calls. For browser clients, WebSocket-only frameworks, or software that
+cannot inject a custom `fetch`, run `aci serve` and point the framework at its
+local OpenAI-compatible endpoint instead.
 
 Or drive the individual checks:
 
@@ -137,5 +301,6 @@ operations. Without one, a bound channel needs the caller-observed TLS SPKI
 npm install
 npm test      # tsc + node:test; test/vectors.test.ts pins every
               # construction against the ACI and E2EE v2 vector documents
+npm run test:bun # the same pinned-transport contract on Bun 1.4+
 npm run build # emit dist/ (ESM + .d.ts)
 ```

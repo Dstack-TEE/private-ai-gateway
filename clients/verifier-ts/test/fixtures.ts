@@ -14,12 +14,14 @@ import {
   computeReportData,
   computeSessionId,
   hashBody,
+  sha256Hex,
   type AttestationReport,
   type ReceiptEnvelope,
   type ReceiptPayload,
   type SessionRecord,
   type WorkloadKeyset,
 } from '../src/index.js';
+import { sha384 } from '../src/crypto.js';
 
 const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
@@ -119,6 +121,32 @@ export function makeReport(reportData: string): AttestationReport {
 }
 
 export const REPORT = makeReport(await computeReportData(KEYSET_DIGEST, NONCE));
+
+export async function makeMeasuredComposeReport(
+  appCompose = 'services:\n  gateway:\n    image: demo\n',
+): Promise<{ report: AttestationReport; composeHash: string }> {
+  const composeHash = await sha256Hex(enc.encode(appCompose));
+  const digests = ['11'.repeat(48), '22'.repeat(48)];
+  let rtmr3: Uint8Array = new Uint8Array(48);
+  for (const digest of digests) {
+    const input = new Uint8Array(96);
+    input.set(rtmr3);
+    input.set(fromHex(digest), 48);
+    rtmr3 = await sha384(input);
+  }
+  const quote = new Uint8Array(568);
+  quote.set(rtmr3, 520);
+  const report = structuredClone(REPORT) as AttestationReport;
+  report.attestation.evidence = {
+    event_log: JSON.stringify([
+      { imr: 3, digest: digests[0], event: 'compose-hash', event_payload: composeHash },
+      { imr: 3, digest: digests[1], event: 'system-ready', event_payload: '' },
+    ]),
+    app_compose: appCompose,
+    quote: toHex(quote),
+  };
+  return { report, composeHash };
+}
 
 // --- Attested session (§8.2) --------------------------------------------------------
 

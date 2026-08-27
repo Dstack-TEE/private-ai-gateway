@@ -148,9 +148,8 @@ pub struct ProxyState {
     /// Serializes the re-verify so a burst of blocked requests reverifies once.
     reverify: tokio::sync::Mutex<()>,
     recorded: Mutex<VecDeque<RecordedExchange>>,
-    /// `--session`: a fixed §5.3 pin set injected into every POST that does
-    /// not pin its own. Never refreshed — it is the user's own
-    /// statement, so a 412 refusal surfaces as-is.
+    /// `--session`: a fixed §5.3 accepted set composed with every request's
+    /// own pins. Never refreshed, so a 412 refusal surfaces as-is.
     fixed_pins: Vec<String>,
     /// `--require-claim`: the §9.2(3) policy that derives the pin set from
     /// the service's current attested sessions.
@@ -200,8 +199,8 @@ impl ProxyState {
         }
     }
 
-    /// The pin set to inject right now: the user's fixed list, or the
-    /// current policy-derived one.
+    /// The active accepted set: the user's fixed list, or the current
+    /// policy-derived one.
     fn active_pins(&self) -> Vec<String> {
         if !self.fixed_pins.is_empty() {
             return self.fixed_pins.clone();
@@ -479,11 +478,22 @@ async fn proxy_inference(
     let trusted = state.snapshot();
     let url = join_url(&state.base_url, &uri);
     let active_pins = state.active_pins();
-    // Policy pins are injected only when the client stated none of its own.
+    // A policy-derived set is refreshed only when it actually constrained this
+    // request. Requests without a local policy keep their own pins unchanged.
     let injected_policy_pins = !state.required_claims.is_empty()
         && !active_pins.is_empty()
         && pinned_session_ids(&body).is_empty();
-    let mut request_body = apply_constraints(body.to_vec(), state.enforce_verified, &active_pins);
+    let mut request_body =
+        match apply_constraints(body.to_vec(), state.enforce_verified, &active_pins) {
+            Ok(body) => body,
+            Err(reason) => {
+                eprintln!("!! POST {path} -> 400: {reason}");
+                return text_response(
+                    StatusCode::BAD_REQUEST,
+                    "request session ids are not accepted by the local ACI policy\n",
+                );
+            }
+        };
     let send = |body: Vec<u8>| {
         forward_headers(state.client.request(Method::POST, &url), &headers)
             .body(body)
@@ -507,7 +517,17 @@ async fn proxy_inference(
                     pins.len()
                 );
                 *state.policy_pins.lock().expect("policy pins poisoned") = pins.clone();
-                request_body = apply_constraints(body.to_vec(), state.enforce_verified, &pins);
+                request_body = match apply_constraints(body.to_vec(), state.enforce_verified, &pins)
+                {
+                    Ok(body) => body,
+                    Err(reason) => {
+                        eprintln!("aci serve: refreshed session policy rejected request: {reason}");
+                        return text_response(
+                            StatusCode::BAD_REQUEST,
+                            "request session ids are not accepted by the refreshed ACI policy\n",
+                        );
+                    }
+                };
                 match send(request_body.clone()).await {
                     Ok(retried) => resp = retried,
                     Err(e) => return send_error(&state, Method::POST, path, e),
@@ -886,30 +906,48 @@ fn pinned_session_ids(body: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Tighten an inference body (§5.3): demand verified serving and,
-/// when the proxy holds a pin set and the client stated none, pin those
-/// session ids. A client's own members always win; anything that is not a JSON
-/// object is forwarded untouched for the service to reject.
-fn apply_constraints(body: Vec<u8>, enforce_verified: bool, pins: &[String]) -> Vec<u8> {
+/// Tighten an inference body (§5.3): demand verified serving and compose the
+/// client's own pins with the local accepted set. A narrower client set is
+/// preserved; disjoint policies fail locally instead of bypassing either one.
+fn apply_constraints(
+    body: Vec<u8>,
+    enforce_verified: bool,
+    pins: &[String],
+) -> Result<Vec<u8>, String> {
     if !enforce_verified && pins.is_empty() {
-        return body;
+        return Ok(body);
     }
     let Ok(mut parsed) = serde_json::from_slice::<Value>(&body) else {
-        return body;
+        return Ok(body);
     };
     let Some(provider) = parsed
         .as_object_mut()
         .map(|members| members.entry("provider").or_insert_with(|| json!({})))
         .and_then(Value::as_object_mut)
     else {
-        return body;
+        return Ok(body);
     };
     // Pinning implies verified serving (§5.3).
     provider.insert(PROVIDER_ACI_VERIFIED.to_string(), Value::Bool(true));
-    if !pins.is_empty() && !provider.contains_key(PROVIDER_ACI_SESSION_IDS) {
-        provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(pins));
+    if !pins.is_empty() {
+        let supplied = provider
+            .get(PROVIDER_ACI_SESSION_IDS)
+            .and_then(Value::as_array)
+            .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_string));
+        let accepted: Vec<&String> = match supplied {
+            Some(ids) => ids
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|id| pins.iter().find(|pin| pin.as_str() == id))
+                .collect(),
+            None => pins.iter().collect(),
+        };
+        if supplied.is_some() && accepted.is_empty() {
+            return Err("request pins and local accepted session set are disjoint".to_string());
+        }
+        provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(accepted));
     }
-    serde_json::to_vec(&parsed).unwrap_or(body)
+    Ok(serde_json::to_vec(&parsed).unwrap_or(body))
 }
 
 /// Derive the §5.3 pin set from the service's current attested sessions:
@@ -1062,7 +1100,7 @@ mod tests {
     #[test]
     fn apply_constraints_tightens_plaintext_body() {
         // Plain body: the member is added.
-        let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[]);
+        let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[]).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_verified"], true);
         assert_eq!(v["provider"].get("aci_session_ids"), None);
@@ -1072,30 +1110,38 @@ mod tests {
             br#"{"model":"m","provider":{"order":["x"],"aci_verified":false}}"#.to_vec(),
             true,
             &[],
-        );
+        )
+        .unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_verified"], true);
         assert_eq!(v["provider"]["order"][0], "x");
 
         // A pin set is injected — and implies verified serving.
         let pins = vec!["a".repeat(64)];
-        let out = apply_constraints(br#"{"model":"m"}"#.to_vec(), false, &pins);
+        let out = apply_constraints(br#"{"model":"m"}"#.to_vec(), false, &pins).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["provider"]["aci_session_ids"][0], pins[0]);
         assert_eq!(v["provider"]["aci_verified"], true);
 
-        // The client's own pin list always wins.
+        // The client's own narrower set survives when local policy accepts it.
         let out = apply_constraints(
-            br#"{"provider":{"aci_session_ids":["b"]}}"#.to_vec(),
+            format!(r#"{{"provider":{{"aci_session_ids":["{}"]}}}}"#, pins[0]).into_bytes(),
             true,
             &pins,
-        );
+        )
+        .unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(v["provider"]["aci_session_ids"], json!(["b"]));
+        assert_eq!(v["provider"]["aci_session_ids"], json!(pins));
+
+        // Disjoint client and local policies fail before network access.
+        let disjoint = json!({
+            "provider": { "aci_session_ids": ["b".repeat(64)] }
+        });
+        assert!(apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,).is_err());
 
         // Non-JSON bodies pass through untouched.
         assert_eq!(
-            apply_constraints(b"not json".to_vec(), true, &[]),
+            apply_constraints(b"not json".to_vec(), true, &[]).unwrap(),
             b"not json"
         );
     }

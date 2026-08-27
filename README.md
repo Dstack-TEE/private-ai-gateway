@@ -21,6 +21,9 @@ Start here:
 - [ACI quickstart](docs/quickstart.md) — verify a live deployment with the
   `aci` CLI, then use it as a local OpenAI-compatible endpoint.
 - [ACI spec](spec/aci.md) — the protocol: trust model, artifacts, checks.
+- [ACI client architecture](clients/architecture.md) — the framework-neutral
+  client product, existing versus new components, release policy, and coding
+  agent integration boundary.
 
 ## Audience
 
@@ -571,7 +574,7 @@ src/aggregator/service.rs      report, forwarding, E2EE, receipt finalization
 src/aggregator/upstream_config.rs runtime upstream config and provider adapters
 src/http/app.rs                Axum HTTP routers and middleware/backend wiring
 src/bin/aci/                   `aci` verifier CLI: verify, audit, sessions, send, serve
-clients/                       verifier-ts verifier library (browser + node)
+clients/                       verifier-ts verifier library (browser + node); pi-provider pi provider extension
 docs/                          design notes, configuration reference, provider reviews
 deploy/                        git-launcher and dstack compose examples
 examples/                      cargo example binaries + a reference control plane (control-plane/)
@@ -583,6 +586,7 @@ tests/                         unit and integration coverage
 
 - [ACI spec, quickstart, and test vectors](spec/README.md)
 - [Client verifiers](clients/README.md)
+- [PI provider extension (use the gateway from pi)](clients/pi-provider/README.md)
 - [Deployment guide](deploy/README.md)
 - [Configuration reference](docs/configuration-reference.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)

@@ -1,0 +1,87 @@
+name: npm release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'clients-v')
+    runs-on: ubuntu-24.04
+    environment: npm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Validate coordinated version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#clients-v}"
+          for manifest in \
+            clients/verifier-ts/package.json \
+            clients/pi-provider/packages/pi-provider-aci/package.json \
+            clients/pi-provider/packages/pi-provider-redpill/package.json \
+            clients/pi-provider/packages/pi-provider-phala-cloud/package.json
+          do
+            test "$(node -p "require('./$manifest').version")" = "$version"
+          done
+
+      - name: Install verifier
+        working-directory: clients/verifier-ts
+        run: npm ci
+
+      - name: Install Pi providers
+        working-directory: clients/pi-provider
+        run: npm ci
+
+      - name: Verify release artifacts
+        run: |
+          npm --prefix clients/verifier-ts test
+          npm --prefix clients/verifier-ts run test:bun
+          npm --prefix clients/verifier-ts run lint:package
+          npm --prefix clients/pi-provider run check
+          npm --prefix clients/pi-provider run lint
+          npm --prefix clients/pi-provider run format:check
+          npm --prefix clients/pi-provider test
+          npm --prefix clients/pi-provider run lint:packages
+          bash clients/package-smoke.sh
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          publish_if_missing() {
+            name="$1"
+            directory="$2"
+            version="$(node -p "require('./$directory/package.json').version")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published; skipping"
+            else
+              npm publish "$directory" --access public --provenance
+            fi
+          }
+
+          publish_if_missing @phala/aci-verifier clients/verifier-ts
+          publish_if_missing @phala/pi-provider-aci clients/pi-provider/packages/pi-provider-aci
+          publish_if_missing pi-provider-redpill clients/pi-provider/packages/pi-provider-redpill
+          publish_if_missing pi-provider-phala-cloud clients/pi-provider/packages/pi-provider-phala-cloud

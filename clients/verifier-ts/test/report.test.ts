@@ -5,17 +5,11 @@ import {
   verifyComposeMeasurement,
   computeKeysetDigest,
   computeReportData,
-  sha256Hex,
-  fromHex,
-  toHex,
   toBase64,
   type AttestationReport,
   type Check,
 } from '../src/index.js';
-import { sha384 } from '../src/crypto.js';
 import * as fx from './fixtures.js';
-
-const enc = new TextEncoder();
 
 function check(checks: Check[], name: string): Check {
   const found = checks.find((c) => c.name === name);
@@ -90,36 +84,11 @@ test('a non-object workload_keyset fails everything and establishes nothing', as
 });
 
 test('§9.1 check 4: app_compose measured into the quote RTMR3 passes; a tampered compose fails', async () => {
-  const appCompose = 'services:\n  gateway:\n    image: demo\n';
-  const composeHash = await sha256Hex(enc.encode(appCompose));
-  const digests = ['11'.repeat(48), '22'.repeat(48)];
-  // Replay the imr==3 digests to RTMR3, then plant it at the v4 TDX offset so
-  // the event log verifies against the (unauthenticated) quote body.
-  let mr: Uint8Array = new Uint8Array(48);
-  for (const d of digests) {
-    const buf = new Uint8Array(mr.length + 48);
-    buf.set(mr);
-    buf.set(fromHex(d), mr.length);
-    mr = await sha384(buf);
-  }
-  const quote = new Uint8Array(568);
-  quote.set(mr, 520);
-  const events = [
-    { imr: 3, digest: digests[0], event: 'compose-hash', event_payload: composeHash },
-    { imr: 3, digest: digests[1], event: 'system-ready', event_payload: '' },
-  ];
-  const report = {
-    api_version: 'aci/1',
-    workload_keyset_digest: 'sha256:' + '00'.repeat(32),
-    attestation: {
-      tee_type: 'tdx',
-      workload_keyset: {},
-      report_data: '',
-      evidence: { event_log: JSON.stringify(events), app_compose: appCompose, quote: toHex(quote) },
-    },
-  } as AttestationReport;
+  const { report, composeHash } = await fx.makeMeasuredComposeReport();
 
-  assert.equal((await verifyComposeMeasurement(report)).ok, true);
+  const verified = await verifyComposeMeasurement(report);
+  assert.equal(verified.ok, true);
+  assert.equal(verified.composeHash, composeHash);
 
   // Tamper the running compose: sha256(app_compose) no longer matches, but the
   // RTMR3 replay (over the untouched event digests) still does.

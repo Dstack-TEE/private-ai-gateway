@@ -200,7 +200,8 @@ Each current session record is fetched and audited
 claims policy print as `ACCEPTED`. Then pin, either way:
 
 ```bash
-# Fixed pins: these exact ids ride in every request that does not pin its own.
+# Fixed accepted set: requests use its intersection with their own pins, or
+# this set when they supply none. A disjoint request fails locally.
 cargo run --bin aci -- serve "$ACI_URL" --session <session-id>
 
 # Policy pins: derive the set from the required claims. Refuses to start if
@@ -209,8 +210,8 @@ cargo run --bin aci -- serve "$ACI_URL" --session <session-id>
 cargo run --bin aci -- serve "$ACI_URL" --require-claim tee_attested=hardware_proven
 ```
 
-A request that already carries `provider.aci_session_ids` keeps its own
-list. On-demand receipt verification then also checks the cited session
+A request that already carries `provider.aci_session_ids` is narrowed to its
+intersection with the local accepted set. On-demand receipt verification also checks the cited session
 against the pins (§9.3(6)) and the required claims (§9.2(3)).
 
 ## 4. Verify one inference end to end

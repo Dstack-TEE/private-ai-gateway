@@ -45,8 +45,14 @@ export { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 export type { ReportBindingOptions } from './report.js';
 
 // High-level transcript + one-call service verification
-export { verifyService, reportTranscript, receiptTranscript, computeVerdict } from './transcript.js';
-export type { UpstreamAuditInput } from './transcript.js';
+export {
+  verifyService,
+  reportTranscript,
+  receiptTranscript,
+  receiptTranscriptFromDigests,
+  computeVerdict,
+} from './transcript.js';
+export type { ReceiptBodyDigests, UpstreamAuditInput } from './transcript.js';
 export type {
   CheckStatus,
   TranscriptLine,

@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noEmit": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "paths": {
+      "@phala/pi-provider-aci": ["./packages/pi-provider-aci/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/index.ts",
+    "packages/*/src/**/*.ts",
+    "packages/*/tests/**/*.ts"
+  ]
+}
