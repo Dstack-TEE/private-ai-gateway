@@ -17,7 +17,8 @@ For an inference request, the gateway:
 2. Calls `POST /consult/pre` before any provider request.
 3. Shapes one upstream request per returned candidate.
 4. Tries the candidates in order and finalizes the client response.
-5. Calls `POST /consult/post` for usage and failure records.
+5. Calls `POST /consult/post` for admitted attempts and reportable request
+   outcomes, including failures and client cancellation.
 
 The pre-consult fails closed. The post-consult is best effort because the client
 response may already have been served.
@@ -188,7 +189,7 @@ The stable fields are:
 | --- | --- | --- |
 | `requestId` | Always | Groups every attempt and summary record for one client request. |
 | `endpoint` | Always | Public inference path. |
-| `status` | Always | Status attributed to this attempt or summary. |
+| `status` | Always | Status attributed to this attempt or summary. It can differ from the already-committed downstream HTTP status for a streaming failure. |
 | `durationMs` | Always | Elapsed request time when the report was produced. |
 | `selectedRouteId` | Always, nullable | Route for an attempt. `null` identifies a request-level summary. |
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
@@ -206,6 +207,22 @@ A request can produce multiple reports. Count attempts only when
 `selectedRouteId` is non-null. A record with a null route and a non-empty
 `errorSource` is a request-level failure, such as a reported consult denial, a
 no-route result, or the summary after the candidate chain failed.
+
+Streaming and cancellation do not erase accounting:
+
+- a client disconnect before the first upstream byte produces status `499`,
+  names the route in flight, and omits `ttftMs`;
+- a gateway-enforced connect or read deadline produces status `504` for the
+  attempt and request outcome;
+- attempts already completed during failover are reported even if the client
+  disconnects while a later candidate is in flight; and
+- an unconstrained stream can already be HTTP `200` because the gateway emitted
+  a keepalive before the upstream answered. If forwarding later fails, the
+  in-band error and post-consult record carry the real failure status.
+
+`errorMessage` is bounded operational detail, not a safe public label. It can
+contain provider text or request fragments; restrict access and retention as
+you would for other sensitive logs.
 
 The gateway may retry a broken pooled connection once. A control plane must
 ingest post-consult reports idempotently. At minimum, deduplicate by the stable

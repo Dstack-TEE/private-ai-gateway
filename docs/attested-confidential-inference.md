@@ -75,13 +75,19 @@ Save these response values:
 
 `x-receipt-id` is the stable lookup key for verification. The JSON response
 `id` can also work when the response body contains a chat completion ID.
+This example is ACI-constrained, so the gateway will not commit the stream
+before it can name the receipt. An unconstrained, non-E2EE middleware stream
+may instead start with a keepalive before an upstream is selected and omit the
+header. After a successful stream its receipt is available by response `id`;
+if forwarding fails after that early commit, no receipt is drafted. A verifier
+that requires a receipt should constrain the request.
 
 ## Verification Flow
 
 Generate a fresh nonce before fetching the attestation report.
 
 ```bash
-NONCE="$(openssl rand -hex 16)"
+NONCE="$(openssl rand -hex 32)"
 
 curl "$API_BASE_URL/v1/aci/attestation?nonce=$NONCE" \
   -o attestation-report.json

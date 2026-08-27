@@ -17,9 +17,9 @@ All responses, including errors, carry:
 | `X-ACI-Version` | `aci/1` |
 | `X-ACI-Keyset-Digest` | digest of the active workload keyset |
 
-The router permits cross-origin browser requests. Axum limits request bodies to
-32 MiB. JSON inference requests that exceed the limit receive `413` before the
-inference handler runs.
+The router permits cross-origin browser requests. Inference handlers read JSON
+bodies under a 32 MiB limit. A larger body receives the surface's JSON `413`
+envelope and emits a `request_outcome` record with `phase=body_too_large`.
 
 ## Inference endpoints
 
@@ -31,7 +31,7 @@ inference handler runs.
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. |
 | `POST /v1/messages` | Anthropic Messages | Yes | No supported field profile | Middleware can translate between Anthropic and OpenAI provider formats. |
 
-Every completed provider-backed response includes:
+The normal provider-backed response path adds:
 
 | Header | Meaning |
 | --- | --- |
@@ -40,10 +40,20 @@ Every completed provider-backed response includes:
 | `X-E2EE-Version` | E2EE wire version when encryption was applied. |
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
-For streaming calls, the gateway sends `X-Receipt-Id` before the stream is
-complete and stores the receipt after the stream finalizer observes the terminal
+For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
+is complete and stores the receipt after the finalizer observes the terminal
 body. An upstream non-2xx returned before streaming begins is buffered and does
 not receive a receipt.
+
+Middleware has one exception. An unconstrained, non-E2EE stream can be committed
+as HTTP `200` after `middleware.sse_keepalive_ms` elapses without upstream
+response headers. The gateway emits `: PROCESSING` comments while it waits. It
+cannot name a receipt when it commits, so the response omits `X-Receipt-Id`. If
+the upstream later succeeds and the stream finalizes, fetch the receipt by the
+response `id`; if forwarding fails after the early commit, no receipt is
+drafted and the real failure arrives as an in-band error event. Requests with
+`provider.aci_verified` or pinned session IDs are never committed early, so
+ACI-constrained clients always receive the receipt header.
 
 ### Require ACI verification
 
@@ -163,5 +173,9 @@ upstream authentication failures to gateway errors, and maps a recognized
 provider capacity-exhaustion response to `429`.
 
 Streaming failures that occur after response headers are sent are represented
-inside the stream where the protocol permits it. Receipt or E2EE finalization
-errors end the body without forcing a TCP reset.
+inside the stream where the protocol permits it. This includes failures after
+an early HTTP `200`; the stream's error event carries the status the response
+would otherwise have used, and middleware reports that real status to the
+control plane. A client disconnect before the first upstream byte is reported
+as `499`, and a gateway-enforced connect or read deadline is reported as `504`.
+Receipt or E2EE finalization errors end the body without forcing a TCP reset.

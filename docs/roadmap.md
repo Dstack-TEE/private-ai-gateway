@@ -2,7 +2,7 @@
 
 This page records current implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-08-15.
+Last reviewed: 2026-08-31.
 
 ## Implemented
 
@@ -11,6 +11,8 @@ The current gateway includes:
 - OpenAI-compatible chat, text completion, embeddings, and Responses endpoints;
 - Anthropic Messages compatibility;
 - direct-upstream routing and an in-process middleware path backed by an HTTP control plane;
+- pre-first-byte SSE keepalives for unconstrained middleware streams, with
+  explicit cancellation, timeout, and post-commit failure accounting;
 - runtime upstream replacement with validation, redaction, atomic persistence, prewarm, and background refresh;
 - provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct deployments;
 - request-level fail-closed verification constraints and current-session allowlists;
@@ -22,7 +24,19 @@ The current gateway includes:
 - the `aci` CLI for live verification, offline audit, session inspection,
   arbitrary curl requests over an attested SPKI-pinned channel, one verified
   chat request with receipt checks, and a local verifying proxy;
-- unit and integration tests, ACI test vectors, a TypeScript verifier, provider-verifier tooling, and a live provider suite.
+- unit and integration tests, ACI test vectors, provider-verifier tooling, and
+  a live provider suite;
+- the public `@phala/aci-verifier` ESM package, with browser verification and
+  instance-scoped Node and Bun transports that verify identity, pin TLS,
+  enforce serving policy, capture wire digests, and audit receipts and cited
+  sessions;
+- the public `@phala/aci-provider` shared provider and native Pi and OpenCode
+  adapters for generic ACI, RedPill, and Phala Cloud, for eight published npm
+  packages in total;
+- host-native authentication, credential and model persistence, and provider
+  lifecycle in Pi and OpenCode, with gateway-authoritative model capabilities;
+- automatic signed-receipt and cited-session verification before a Pi or
+  OpenCode response stream completes, including consumer cancellation.
 
 Implementation does not imply that every provider proves the same claims. Review [Provider verification](providers/README.md) and treat unproven claims as unknown.
 

@@ -38,7 +38,7 @@ Use `aci curl` when you already know the API and want native curl behavior,
 including streaming, uploads, output flags, and authentication:
 
 ```bash
-cargo run --bin aci -- curl https://api.redpill.ai/v1/chat/completions -- \
+cargo run --bin aci -- curl https://tee.redpill.ai/v1/chat/completions -- \
   --header "Authorization: Bearer $API_KEY" \
   --header "content-type: application/json" \
   --data-binary '{
@@ -48,7 +48,7 @@ cargo run --bin aci -- curl https://api.redpill.ai/v1/chat/completions -- \
   }'
 ```
 
-The CLI verifies `https://api.redpill.ai`, prints the verification transcript
+The CLI verifies `https://tee.redpill.ai`, prints the verification transcript
 to stderr, converts the observed SPKI digest to curl's `sha256//...` pin
 format, and starts the installed `curl`. The response stays on stdout, so
 curl output and streaming work normally. If verification or pinning fails,
@@ -71,6 +71,11 @@ inspect or buffer the response.
 fixed accepted set, composed with request pins by intersection, and
 `--require-claim <name[=source]>` derives the pin set from the audited
 current sessions, refreshing it when the service refuses a superseded pin.
+
+`send` requires `X-Receipt-Id` under its default verified-serving constraint.
+With `send --allow-unverified`, an unconstrained stream may start before the
+gateway can name a receipt; the command then uses the response `id` to fetch
+and verify the finalized receipt.
 
 All six commands accept `--require-production-os`. Under that strict policy,
 the client reads the RTMR3-bound `os-image-hash` and requires it to be in the

@@ -3,9 +3,9 @@
 Private inference you can verify.
 
 Private AI Gateway sits between your app and AI providers. Keep the OpenAI or
-Anthropic API shape you already use. The gateway verifies confidential
-workloads and binds each network hop to their attested keys before your prompt
-leaves the protected path.
+Anthropic API shape you already use. An ACI client verifies the gateway before
+sending your prompt; a request constraint makes that gateway verify the model
+backend before forwarding it.
 
 This repo contains the Rust reference implementation of
 [Attested Confidential Inference (ACI)](spec/aci.md). Use it to test ACI or
@@ -25,7 +25,7 @@ Then use the Chat Completions API you already know. Replace `YOUR_API_KEY` and
 `MODEL_ID` with values from your provider:
 
 ```bash
-~/.local/bin/aci curl https://api.redpill.ai/v1/chat/completions -- \
+~/.local/bin/aci curl https://tee.redpill.ai/v1/chat/completions -- \
   --fail-with-body \
   --no-buffer \
   --header "Authorization: Bearer YOUR_API_KEY" \
@@ -65,7 +65,7 @@ or [`aci serve`](docs/quickstart.md#use-it-as-a-local-endpoint) for receipt
 verification, and read the [verification guide](docs/attested-confidential-inference.md)
 before sending sensitive data.
 
-This repo contains the implementation and verifier. It does not issue Redpill
+This repo contains the implementation and verifier. It does not issue RedPill
 API credentials or operate the example service. Continue with the
 [ACI quickstart](docs/quickstart.md) for the full verification path, or read the
 [ACI specification](spec/aci.md) for the trust model and wire protocol.
@@ -87,8 +87,8 @@ infrastructure between your app and the gateway workload.
 
 ## Add one field
 
-Your app doesn't need a new SDK. Add `provider.aci_verified` to any supported
-request that must use a verified provider:
+Keep your existing request shape and add `provider.aci_verified` when the
+request must use a verified provider:
 
 ```json
 {
@@ -295,9 +295,11 @@ Browser clients can use
 [`@phala/aci-verifier`](clients/verifier-ts/README.md) for service, quote,
 report-binding, receipt, body-hash, and session verification. Node and Bun apps
 can import `connectAci()` from `@phala/aci-verifier/runtime` to get an
-instance-scoped, attested SPKI-pinned fetch transport. See the
-[client architecture](clients/architecture.md) and
-[coding-agent guide](clients/coding-agents.md) for framework integrations.
+instance-scoped, attested SPKI-pinned fetch transport. Applications that also
+need live model discovery, capability mapping, receipt history, and automatic
+response-completion verification can use
+[`@phala/aci-provider`](clients/provider/README.md). Native adapters are
+available for [Pi and OpenCode](clients/coding-agents.md).
 
 ## Docs
 
@@ -309,8 +311,8 @@ Start at the [documentation index](docs/README.md). The main paths are:
 | Run the gateway locally | [Local development](docs/getting-started.md) |
 | Configure the gateway, middleware, or an upstream | [Configuration reference](docs/configuration-reference.md) |
 | Integrate an HTTP client | [HTTP API reference](docs/api-reference.md) |
-| Use the verified TypeScript transport | [ACI client architecture](clients/architecture.md) |
-| Use ACI from Pi | [Pi provider extension](clients/pi-provider/README.md) |
+| Use the verified TypeScript transport or shared provider | [ACI clients](clients/README.md) |
+| Use ACI from Pi or OpenCode | [Coding-agent integrations](clients/coding-agents.md) |
 | Implement a control plane | [Control-plane contract](docs/control-plane-contract.md) |
 | Deploy with dstack git-launcher | [Deployment guide](deploy/README.md) |
 | Review provider verification | [Provider index](docs/providers/README.md) |
@@ -348,7 +350,9 @@ same one-hour retention window unless the binary configuration changes in code.
 | `src/http/` | Axum routes and HTTP response handling |
 | `src/middleware/` | in-process control-plane client, transforms, failover, pricing, and SSE handling |
 | `clients/verifier-ts/` | browser verifier plus Node and Bun verified transports |
-| `clients/pi-provider/` | Pi provider extension and branded packages |
+| `clients/provider/` | framework-neutral provider lifecycle, model catalog, receipts, and inspection |
+| `clients/pi-provider/` | native Pi provider and branded packages |
+| `clients/opencode-provider/` | native OpenCode plugin and branded packages |
 | `deploy/` | dstack git-launcher deployment example |
 | `docs/` | operator guides, references, security notes, and review records |
 | `examples/` | Rust verification examples and the sample control plane |

@@ -13,6 +13,7 @@ Install:
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
 - `curl`, `jq`, and `openssl`
+- Node.js 24, npm, and Bun 1.4 when changing the TypeScript clients
 - the Phala CLI and SSH access to a dev OS CVM when running outside dstack
 
 You also need a dstack SDK endpoint. A dstack CVM exposes the SDK on
@@ -91,13 +92,20 @@ cargo test --all-targets
 python3 -m compileall scripts
 ```
 
-The TypeScript verifier has a separate workflow:
+The TypeScript verifier, shared provider, and Pi and OpenCode adapters use one
+workspace. Run these commands from the repository root after changing anything
+under `clients/` or a shared ACI construction:
 
 ```bash
-cd clients/verifier-ts
-npm ci
-npm run build
-npm test
+npm --prefix clients ci
+npm --prefix clients run build
+npm --prefix clients run check
+npm --prefix clients test
+npm --prefix clients run test:bun
+npm --prefix clients run lint
+npm --prefix clients run format:check
+npm --prefix clients run lint:packages
+bash clients/package-smoke.sh
 ```
 
 ## Start the gateway without inference routes

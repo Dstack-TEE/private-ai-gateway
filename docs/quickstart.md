@@ -1,8 +1,9 @@
 # ACI Quickstart
 
 Verify a live ACI deployment yourself. The commands below run against
-`https://api.redpill.ai`, a live deployment of the reference implementation;
-point `ACI_URL` at any ACI service to verify that instead.
+`https://tee.redpill.ai`, a live deployment of the reference implementation
+that enforces TEE-only routing. Point `ACI_URL` at any ACI service to verify
+that instead.
 
 You need `curl`. The evidence-inspection steps also use `jq` and `openssl`.
 Install the latest `aci` CLI release on Linux or macOS:
@@ -11,7 +12,7 @@ Install the latest `aci` CLI release on Linux or macOS:
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/install-aci.sh \
   | sh
-export ACI_URL=https://api.redpill.ai
+export ACI_URL=https://tee.redpill.ai
 ```
 
 The installer verifies the release SHA-256 and writes `aci` to
@@ -34,7 +35,7 @@ PASS  id-2         binding chain: keyset JCS -> digest -> statement for our nonc
 PASS  id-3         keyset not expired (now < not_after) [9.1(3)] — now 1783899770 < not_after 1786491770
 PASS  id-4         source provenance connects workload to public code [9.1(4)] — booted compose measured into RTMR3: compose-hash=7c1e…40db; repo=https://github.com/Dstack-TEE/private-ai-gateway.git commit=58b027d… (published, not independently rebuilt)
 SKIP  id-5         private-key custody and subject per policy [9.1(5)] — custody policy not implemented in this CLI yet (see src/aci/verifier/dstack.rs); subject: null (no policy constraints applied)
-PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for api.redpill.ai is in the attested keyset
+PASS  id-6         the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI 6ff3…9d21 for tee.redpill.ai is in the attested keyset
 
 VERIFIED (5 pass, 1 skipped: custody policy not implemented)
 ```
@@ -209,9 +210,12 @@ What the proxy does:
   hostname and fails closed on a mismatch.
 - Responses stream through byte-exact while the proxy digests the raw wire
   bytes — bodies are never buffered or stored. Each POST response's receipt
-  id and body digests are recorded (the last 256 exchanges), and a 2xx
-  inference response with no receipt header is flagged immediately
-  ([aci.md](../spec/aci.md) §5.2).
+  id and body digests are recorded (the last 256 exchanges). Under the default
+  verified-serving constraint, a 2xx inference response with no receipt header
+  is flagged immediately ([aci.md](../spec/aci.md) §5.2). With
+  `--allow-unverified`, an early-committed stream may legitimately omit the
+  header; the current proxy reports that it has nothing to record. Use
+  `aci send --allow-unverified` when that response-id fallback is required.
 - Verification runs on demand from the control endpoint on
   `127.0.0.1:4181`, not per request:
 
@@ -289,14 +293,24 @@ structured data. Verified serving is demanded by default (the §5.3
 serve through anything else, and the transcript checks that the receipt
 cites one of yours.
 
-## 6. Verify from a browser or any web app
+With the default constraint, a missing `X-Receipt-Id` is a failure. With
+`--allow-unverified`, an unconstrained stream may have been committed before an
+upstream was selected; in that case `aci send` reads the response `id` and uses
+it to fetch the finalized receipt.
 
-The [`@phala/aci-verifier`](../clients/verifier-ts) library verifies a service
-from a browser tab or any web project in one call:
+## 6. Verify from TypeScript
+
+Install the public ESM package:
+
+```bash
+npm install @phala/aci-verifier
+```
+
+The browser entry verifies a service in one call:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
-const { verdict, lines } = await verifyService('https://api.redpill.ai');
+const { verdict, lines } = await verifyService('https://tee.redpill.ai');
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 ```
 
@@ -304,9 +318,15 @@ It fetches the report with a fresh nonce and verifies the hardware quote
 (via [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against
 the Phala PCCS), the binding chain, and the compose measurement — the same
 §9.1 checks the CLI runs, except key custody (check 5) and the TLS-certificate
-pin (check 6), which a plain browser cannot reach. A prebuilt ESM bundle
-(`npm run build:bundle`) drops into a `<script type="module">` with no build
-step.
+pin (check 6), which a plain browser cannot reach.
+
+Node 20.18.1+ and Bun 1.4+ applications can import `connectAci()` from
+`@phala/aci-verifier/runtime` for an instance-scoped, SPKI-pinned fetch
+transport. Authentication remains with your SDK: inject `aci.fetch` into the
+SDK and configure the API key there. The transport retains each request's
+authorization only for that request's private receipt lookup. See the
+[TypeScript client guide](../clients/verifier-ts/README.md) for runnable SDK
+examples and receipt verification.
 
 ## 7. Going deeper
 

@@ -17,20 +17,20 @@ bound to those keys.
 ```mermaid
 flowchart LR
   classDef upstream fill:#e8f3ff,stroke:#2878b5,color:#102a43
-  classDef pr fill:#fff4d6,stroke:#b7791f,color:#4a2c0a
-  classDef refactor fill:#e8f8ee,stroke:#25855a,color:#123c2b
+  classDef host fill:#fff4d6,stroke:#b7791f,color:#4a2c0a
+  classDef client fill:#e8f8ee,stroke:#25855a,color:#123c2b
   classDef pending fill:#ffe9e7,stroke:#c4473a,color:#541e18
   classDef external fill:#f3f4f6,stroke:#6b7280,color:#1f2937
 
   subgraph local[Client machine]
-    pi[Pi provider<br/>original PR, refactored]:::pr
-    ocadapter[OpenCode provider<br/>new]:::refactor
-    core[ACI provider core<br/>new]:::refactor
+    pi[Native Pi provider<br/>packages]:::host
+    ocadapter[Native OpenCode<br/>provider plugin]:::client
+    core[Shared @phala/aci-provider<br/>kernel]:::client
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
     opencode[OpenCode on Bun]:::external
-    connect[connectAci shared runtime client<br/>current refactor]:::refactor
-    node[Node fetch adapter<br/>current refactor]:::refactor
-    bun[Bun fetch adapter<br/>current refactor]:::refactor
+    connect[connectAci shared<br/>runtime client]:::client
+    node[Node fetch adapter]:::client
+    bun[Bun fetch adapter]:::client
 
     pi --> core
     opencode --> ocadapter --> core
@@ -41,17 +41,17 @@ flowchart LR
   end
 
   subgraph trust[Shared trust contract]
-    identity[Quote, nonce, keyset,<br/>compose and expiry<br/>existing verifier checks]:::upstream
-    release[Reviewed compose allowlist<br/>TS/Pi: current refactor<br/>Rust flag: existing upstream]:::refactor
-    audit[Verified serving, wire digests,<br/>receipt and session policy<br/>current refactor]:::refactor
-    channel[Hostname and attested<br/>TLS SPKI binding]:::refactor
+    identity[Quote, nonce, keyset,<br/>compose and expiry]:::upstream
+    release[Reviewed compose allowlist<br/>shared client policy]:::client
+    audit[Verified serving, wire digests,<br/>automatic receipt/session checks]:::client
+    channel[Hostname and attested<br/>TLS SPKI binding]:::client
     identity --> release --> audit --> channel
   end
 
   node --> identity
   bun --> identity
 
-  subgraph tee[Private AI Gateway inside the TEE - existing upstream]
+  subgraph tee[Private AI Gateway inside the TEE]
     api[OpenAI, Responses and<br/>Anthropic API surfaces]:::upstream
     frontend[ACI frontend<br/>attestation and receipts]:::upstream
     routing[Optional control-plane<br/>auth and routing]:::upstream
@@ -69,34 +69,33 @@ flowchart LR
 
 Legend:
 
-- Blue: capability that already existed upstream before the Pi integration.
-- Yellow: Pi-specific product surface introduced by the original PR.
-- Green: framework-neutral transport and trust-policy work added while the PR
-  was refactored.
+- Blue: gateway protocol and Rust verification capabilities.
+- Yellow: released Pi-specific product surface.
+- Green: released framework-neutral transport, provider, and trust-policy
+  capabilities.
 - Red: work still required to complete the production product.
 - Gray: external client or provider software.
 
-The history is more precise than a single color can show for components that
-were hardened in place:
+Component ownership and release status:
 
-| Component or behavior | Origin |
+| Component or behavior | Owner or status |
 | --- | --- |
-| ACI protocol, gateway surfaces, attestation, receipts and sessions | Existing upstream |
-| Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
-| TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
-| Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
-| Framework-neutral model, lifecycle, policy, account-to-key contract, and structured inspection core | Current OpenCode work |
-| Native OpenCode v1 plugin, provider-scoped inspection commands, plus RedPill and Phala Cloud distributions | Current OpenCode work |
-| `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
-| Node adapter using the supported undici dispatcher hook | Current refactor |
-| Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
-| Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Current refactor |
-| TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Current refactor |
-| Streaming wire-digest capture, Pi response verification and on-demand receipt/session audit | Current refactor |
-| Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
-| Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
-| Fail-closed OpenCode provider ownership, live model discovery, end-of-stream receipt audit and read-only inspection tool | Current OpenCode work |
-| Coding-agent integration guide around the shared transport boundary | Current refactor |
+| ACI protocol, gateway surfaces, attestation, receipts and sessions | Gateway implementation |
+| Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Rust client |
+| TypeScript quote, nonce/keyset, compose and expiry checks | TypeScript verifier |
+| Pi provider, branded packages, model discovery and Pi TLS pinning | Released Pi adapter |
+| Framework-neutral model, lifecycle, policy, account-to-key contract, and structured inspection core | Released client stack |
+| Native OpenCode v1 plugin, provider-scoped inspection commands, plus RedPill and Phala Cloud distributions | Released client stack |
+| `connectAci()` framework-neutral, instance-scoped runtime client | Released client stack |
+| Node adapter using the supported undici dispatcher hook | Released client stack |
+| Bun adapter using the supported `fetch({ tls, proxy })` hooks | Released client stack |
+| Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Released client stack |
+| TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Released client stack |
+| Streaming wire-digest capture and automatic response-completion receipt/session verification in Pi and OpenCode | Released client stack |
+| Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Released client stack |
+| Direct OpenCode integration through its provider `options.fetch` hook | Released client stack |
+| Fail-closed OpenCode provider ownership, live model discovery, cancellation-safe receipt audit, and read-only inspection tool | Released client stack |
+| Coding-agent integration guide around the shared transport boundary | Released client stack |
 | Reviewed compose publication from RedPill and Phala release pipelines | Pending product work |
 
 Account authentication is outside the ACI trust protocol. RedPill adapters
@@ -212,8 +211,8 @@ deployment release process must still close the trust loop:
 5. Exercise both Rust and TypeScript clients against the same accepted and
    rejected measurements.
 
-The repository can publish all eight npm packages in dependency order from a
-signed GitHub Release. Publishing alone does not create a reviewed-release
+The release workflow publishes all eight npm packages in dependency order from
+a signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the RedPill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.
 

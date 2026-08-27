@@ -36,7 +36,14 @@ item.
    silently. Sessions do better: the JSONL store survives restarts and
    extends retention per citing receipt (§8 retention rule).
 
-4. **Chutes per-instance sessions carry no §8.2 evidence.** The Chutes
+4. **Superseded 2026-08-27: Chutes per-instance sessions carried no §8.2
+   evidence.** Commit `8dd8c1d` changed the implementation so every
+   per-instance session retains the shared nonce-bound verification evidence
+   bundle. Current clients can therefore verify the evidence digest and data;
+   the remaining evidence-appraisal limitation is tracked in item 17.
+
+   The rest of this item preserves the original finding and design analysis.
+   The Chutes
    verifier's raw evidence is fleet-wide and nonce-bound, so sealing it into
    each per-instance session would mint a new session id for every
    verification round and every fleet change. The implementation instead
@@ -201,9 +208,10 @@ item.
    remaining live lifecycle cases need the same pass.
 
 19. **Client CI triggers are path-scoped.** `verifier-ts` tests pin the spec
-   test vectors byte-for-byte, but the workflow triggers only on
-   `clients/verifier-ts/**`, so an edit to `spec/test-vectors.md` alone does
-   not rerun them (Rust CI catches drift via `tests/spec_vectors.rs`).
+   test vectors byte-for-byte, and the unified TypeScript workflow runs for
+   changes anywhere under `clients/**`. It still does not trigger for an edit
+   to `spec/test-vectors.md` alone; Rust CI catches that drift through
+   `tests/spec_vectors.rs`.
 
 ## Beyond-spec surfaces (intentional, keep honest)
 

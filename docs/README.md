@@ -10,7 +10,8 @@ reference gateway, its deployment, and its provider integrations.
 | --- | --- | --- | --- |
 | Evaluator | Verify a live ACI deployment | [ACI quickstart](quickstart.md) | Tutorial |
 | Evaluator | Understand the security claim and its limits | [ACI verification and security model](attested-confidential-inference.md) | Explanation and verification guide |
-| Client implementer | Use the Rust CLI or TypeScript verifier | [ACI clients](../clients/README.md) | How-to and reference |
+| Client implementer | Use the Rust CLI, TypeScript transport, or shared provider | [ACI clients](../clients/README.md) | How-to and reference |
+| Coding-agent user | Use ACI natively from Pi or OpenCode | [Coding-agent integrations](../clients/coding-agents.md) | How-to |
 | Developer | Run and change the gateway locally | [Local development](getting-started.md) | Tutorial |
 | Operator | Configure runtime policy and upstreams | [Configuration reference](configuration-reference.md) | Reference |
 | Client implementer | Call inference and artifact endpoints | [HTTP API reference](api-reference.md) | Reference |

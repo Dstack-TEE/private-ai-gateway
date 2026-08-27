@@ -156,7 +156,7 @@ control plane over HTTP or HTTPS and then calls the ACI service in-process.
 | `middleware.control_token` | string | unset | Optional bearer token sent to the control plane. Blank strings are treated as unset. |
 | `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
 | `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
-| `middleware.sse_keepalive_ms` | integer | `10000` | Idle SSE comment interval. Zero disables keep-alive comments. |
+| `middleware.sse_keepalive_ms` | integer | `5000` | SSE interval measured from the start of the upstream forward. If an unconstrained, non-E2EE streaming request has no upstream response headers after one interval, the gateway commits `200 text/event-stream` and emits `: PROCESSING` comments until the upstream answers. A later failure is sent as the surface's in-band error event, while the usage report keeps the real status. The early response has no `X-Receipt-Id`; after a successful stream the receipt is available by response `id`, while a forward failure drafts no receipt. Requests with `provider.aci_verified`, pinned session IDs, E2EE, or a candidate already failed in the same request are never committed early. After the stream opens, the same interval drives idle heartbeats. Zero disables both early commit and heartbeats. |
 | `middleware.prefix_hash_secret` | string | unset | HMAC key for the consult prefix hash. After trimming, it must contain at least 32 bytes. Every replica must share the same value. When unset, the gateway uses plain SHA-256, which leaves prefix equality linkable. |
 | `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash. No prompt text is sent. Set false to restore the featureless consult body. |
 | `middleware.tee_only_domains` | string array | `[]` | Hostnames whose catalog queries force `tee=true` and whose inference requests require an ACI-verified route. Matching uses the normalized HTTP `Host`. |
@@ -176,12 +176,20 @@ statuses, route, phase, timing, and sanitized identifiers. Raw upstream detail
 is blank unless `RUST_LOG` enables `request_outcome=debug`; that detail can
 contain provider error text and fragments of client input.
 
-Malformed JSON, body-limit rejections, and E2EE setup failures occur before the
-middleware completion path and do not emit a `request_outcome` record. Use the
-control-plane usage pipeline when complete accounting is required. Consult
-denials carrying `userId`, every `429` or `5xx` consult denial, and the no-route
-`404` are also reported to that pipeline with `errorSource: "control"` and no
-route. Unauthenticated `401`, `402`, and `403` denials remain trace-only.
+Malformed JSON and E2EE setup failures occur before the middleware completion
+path and do not emit a `request_outcome` record. An oversized inference body is
+handled explicitly: it emits `phase=body_too_large` with the request ID and
+returns the surface's JSON `413` envelope. The Anthropic envelope includes the
+request ID; the OpenAI envelope does not.
+
+The control-plane usage pipeline carries the fuller accounting record. A client
+disconnect before the upstream's first byte is reported as `499` against the
+route in flight, without TTFT. A gateway-enforced connect or read deadline is
+reported as `504`. When a streaming response was committed early as HTTP `200`,
+a later in-band failure is still reported with its real status. Consult denials
+carrying `userId`, every `429` or `5xx` consult denial, and the no-route `404`
+are reported with `errorSource: "control"` and no route. Unauthenticated `401`,
+`402`, and `403` denials remain trace-only.
 
 A request emits at most one primary outcome. A late receipt or E2EE
 finalization error adds one `phase=finalize_error` record with the same

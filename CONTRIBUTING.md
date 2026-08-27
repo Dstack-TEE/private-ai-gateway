@@ -9,7 +9,7 @@ Install:
 - Rust stable with `rustfmt` and `clippy`;
 - Python 3.12;
 - [uv](https://docs.astral.sh/uv/);
-- Node.js 20 when changing the TypeScript verifier.
+- Node.js 24, npm, and Bun 1.4 when changing the TypeScript clients.
 
 From the repository root:
 
@@ -31,13 +31,19 @@ cargo test --all-targets
 python3 -m compileall scripts
 ```
 
-When `clients/verifier-ts/` or an ACI construction changes:
+When anything under `clients/` changes, or when a shared ACI construction
+changes, run the unified client workspace checks from the repository root:
 
 ```sh
-cd clients/verifier-ts
-npm ci
-npm run build
-npm test
+npm --prefix clients ci
+npm --prefix clients run build
+npm --prefix clients run check
+npm --prefix clients test
+npm --prefix clients run test:bun
+npm --prefix clients run lint
+npm --prefix clients run format:check
+npm --prefix clients run lint:packages
+bash clients/package-smoke.sh
 ```
 
 Live-provider tests consume credentials and quota, so they are not part of credential-free CI. Use [Run the live end-to-end suite](docs/live-e2e-test-suite.md) for provider adapter, attestation, and forwarding changes.
