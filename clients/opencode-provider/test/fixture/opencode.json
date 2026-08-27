@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["../../packages/opencode-provider-redpill/dist/index.js"],
+  "enabled_providers": ["redpill"]
+}

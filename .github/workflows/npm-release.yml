@@ -39,31 +39,29 @@ jobs:
           version="${RELEASE_TAG#clients-v}"
           for manifest in \
             clients/verifier-ts/package.json \
+            clients/provider/package.json \
             clients/pi-provider/packages/pi-provider-aci/package.json \
             clients/pi-provider/packages/pi-provider-redpill/package.json \
-            clients/pi-provider/packages/pi-provider-phala-cloud/package.json
+            clients/pi-provider/packages/pi-provider-phala-cloud/package.json \
+            clients/opencode-provider/packages/opencode-provider-aci/package.json \
+            clients/opencode-provider/packages/opencode-provider-redpill/package.json
           do
             test "$(node -p "require('./$manifest').version")" = "$version"
           done
 
-      - name: Install verifier
-        working-directory: clients/verifier-ts
-        run: npm ci
-
-      - name: Install Pi providers
-        working-directory: clients/pi-provider
+      - name: Install clients
+        working-directory: clients
         run: npm ci
 
       - name: Verify release artifacts
         run: |
-          npm --prefix clients/verifier-ts test
-          npm --prefix clients/verifier-ts run test:bun
-          npm --prefix clients/verifier-ts run lint:package
-          npm --prefix clients/pi-provider run check
-          npm --prefix clients/pi-provider run lint
-          npm --prefix clients/pi-provider run format:check
-          npm --prefix clients/pi-provider test
-          npm --prefix clients/pi-provider run lint:packages
+          npm --prefix clients run build
+          npm --prefix clients run check
+          npm --prefix clients test
+          npm --prefix clients run test:bun
+          npm --prefix clients run lint
+          npm --prefix clients run format:check
+          npm --prefix clients run lint:packages
           bash clients/package-smoke.sh
 
       - name: Publish packages
@@ -80,6 +78,9 @@ jobs:
           }
 
           publish_if_missing @phala/aci-verifier clients/verifier-ts
+          publish_if_missing @phala/aci-provider clients/provider
           publish_if_missing @phala/pi-provider-aci clients/pi-provider/packages/pi-provider-aci
           publish_if_missing pi-provider-redpill clients/pi-provider/packages/pi-provider-redpill
           publish_if_missing pi-provider-phala-cloud clients/pi-provider/packages/pi-provider-phala-cloud
+          publish_if_missing @phala/opencode-provider-aci clients/opencode-provider/packages/opencode-provider-aci
+          publish_if_missing opencode-provider-redpill clients/opencode-provider/packages/opencode-provider-redpill

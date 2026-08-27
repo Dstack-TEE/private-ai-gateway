@@ -9,9 +9,16 @@ packs="$scratch/packs"
 consumer="$scratch/consumer"
 mkdir -p "$packs" "$consumer"
 
-(cd "$repo_root/clients/verifier-ts" && npm pack --pack-destination "$packs")
-for package in @phala/pi-provider-aci pi-provider-redpill pi-provider-phala-cloud; do
-  (cd "$repo_root/clients/pi-provider" && \
+for package in \
+  @phala/aci-verifier \
+  @phala/aci-provider \
+  @phala/pi-provider-aci \
+  pi-provider-redpill \
+  pi-provider-phala-cloud \
+  @phala/opencode-provider-aci \
+  opencode-provider-redpill
+do
+  (cd "$repo_root/clients" && \
     npm pack --workspace "$package" --pack-destination "$packs")
 done
 
@@ -28,6 +35,7 @@ await import('@phala/aci-verifier/browser');
 await import('@phala/aci-verifier/node');
 await import('@phala/aci-verifier/bun');
 await import('@phala/aci-verifier/runtime');
+await import('@phala/aci-provider');
 
 const runtimeEntry = import.meta.resolve('@phala/aci-verifier/runtime');
 if (!runtimeEntry.endsWith('/dist/node/index.js')) {
@@ -44,6 +52,16 @@ for (const name of [
     throw new Error(`${name} does not export a Pi extension factory`);
   }
 }
+
+for (const name of [
+  '@phala/opencode-provider-aci',
+  'opencode-provider-redpill',
+]) {
+  const entry = await import(name);
+  if (typeof entry.default?.server !== 'function') {
+    throw new Error(`${name} does not export an OpenCode v1 server plugin`);
+  }
+}
 NODE
 
 bun --eval '
@@ -53,4 +71,11 @@ if (!runtimeEntry.endsWith("/dist/bun/index.js")) {
 }
 await import("@phala/aci-verifier/runtime");
 await import("@phala/aci-verifier/bun");
+await import("@phala/aci-provider");
+for (const name of ["@phala/opencode-provider-aci", "opencode-provider-redpill"]) {
+  const entry = await import(name);
+  if (typeof entry.default?.server !== "function") {
+    throw new Error(`${name} does not export an OpenCode v1 server plugin`);
+  }
+}
 '

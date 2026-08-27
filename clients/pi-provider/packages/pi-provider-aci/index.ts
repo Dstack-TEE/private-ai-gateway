@@ -28,7 +28,12 @@ import {
 import type { Credential } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import { connectAci, type AciConnection } from "@phala/aci-verifier/node";
+import {
+  createAciProvider,
+  type AciProvider,
+  type AciProviderConfig,
+  type AciProviderProfile,
+} from "@phala/aci-provider";
 import os from "node:os";
 
 import {
@@ -40,7 +45,7 @@ import {
   saveHomeAciCloudConfig,
   saveProjectAciCloudConfig,
 } from "./src/config.ts";
-import { HEADER_RECEIPT_ID, PROVIDER_VERSION } from "./src/constants.ts";
+import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
 import {
   type AciServerModel,
@@ -65,11 +70,10 @@ interface AciRuntimeState {
   config: AciCloudConfig;
   projectTrusted: boolean;
   rawModels: AciServerModel[];
-  connection: AciConnection | undefined;
-  connectionConfigKey: string | undefined;
+  provider: AciProvider | undefined;
+  providerConfigKey: string | undefined;
   connectionSetup: AciConnectionSetup | undefined;
   connectionError: string | undefined;
-  receiptId: string | undefined;
   overrides?: AciCloudConfigPatch;
 }
 
@@ -142,10 +146,37 @@ function connectionConfig(config: AciCloudConfig): string {
   });
 }
 
+function coreProfile(profile: ProviderProfile): AciProviderProfile {
+  return {
+    providerId: profile.providerId,
+    label: profile.label,
+    defaultBaseURL: profile.defaultBaseUrl,
+    apiKeyEnv: profile.apiKeyEnv,
+    envPrefix: profile.envPrefix,
+    logPrefix: profile.logPrefix,
+    catalog: [],
+    ...(profile.acceptedComposeHashes
+      ? { acceptedComposeHashes: profile.acceptedComposeHashes }
+      : {}),
+    ...(profile.acceptedSessionIds ? { acceptedSessionIds: profile.acceptedSessionIds } : {}),
+    ...(profile.baseUrlAliases ? { baseURLAliases: profile.baseUrlAliases } : {}),
+    ...(profile.apiKeyAliases ? { apiKeyAliases: profile.apiKeyAliases } : {}),
+  };
+}
+
+function coreConfig(config: AciCloudConfig): AciProviderConfig {
+  return {
+    baseURL: config.baseUrl,
+    models: config.models,
+    trust: config.trust,
+    receipts: { verification: "on-demand", historySize: 32 },
+  };
+}
+
 async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
   const config = state.config;
   const configKey = connectionConfig(config);
-  if (state.connection && state.connectionConfigKey === configKey) {
+  if (state.provider && state.providerConfigKey === configKey) {
     return;
   }
 
@@ -157,21 +188,15 @@ async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
   }
 
   const setup = (async () => {
-    await closeAciConnection(state);
+    await closeAciProvider(state);
     try {
-      const connection = await connectAci({
-        baseURL: config.baseUrl,
-        policy:
-          config.trust.acceptedComposeHashes === undefined
-            ? {}
-            : { acceptedComposeHashes: config.trust.acceptedComposeHashes },
-        serving:
-          config.trust.acceptedSessionIds === undefined
-            ? {}
-            : { acceptedSessionIds: config.trust.acceptedSessionIds },
+      const provider = createAciProvider({
+        profile: coreProfile(state.profile),
+        config: coreConfig(config),
       });
-      state.connection = connection;
-      state.connectionConfigKey = configKey;
+      await provider.connect();
+      state.provider = provider;
+      state.providerConfigKey = configKey;
       state.connectionError = undefined;
     } catch (error) {
       state.connectionError = error instanceof Error ? error.message : String(error);
@@ -187,13 +212,13 @@ async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
   }
 }
 
-async function closeAciConnection(state: AciRuntimeState): Promise<void> {
-  const connection = state.connection;
-  state.connection = undefined;
-  state.connectionConfigKey = undefined;
-  if (!connection) return;
+async function closeAciProvider(state: AciRuntimeState): Promise<void> {
+  const provider = state.provider;
+  state.provider = undefined;
+  state.providerConfigKey = undefined;
+  if (!provider) return;
   try {
-    await connection.close();
+    await provider.close();
   } catch (error) {
     console.error(`${state.profile.logPrefix} ACI connection close failed:`, error);
   }
@@ -204,7 +229,7 @@ const openAICompletions = openAICompletionsApi();
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   return async (input, init) => {
     await ensureAciConnection(state);
-    if (state.connection) return state.connection.fetch(input, init);
+    if (state.provider) return state.provider.fetch(input, init);
     throw new Error(
       `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
     );
@@ -216,7 +241,7 @@ async function refreshAciModels(
   apiKey: string,
 ): Promise<ReturnType<typeof fallbackModels>> {
   await ensureAciConnection(state);
-  if (!apiKey || !state.connection) return modelsFromState(state);
+  if (!state.provider) return modelsFromState(state);
   const discovered = await discoverAciModels(apiKey, state.config, {
     baseUrl: state.config.baseUrl,
     fetch: providerFetch(state),
@@ -294,7 +319,7 @@ function updateFooter(
 
 /** Short footer suffix describing the verified transport state. */
 function connectionSuffix(state: AciRuntimeState): string {
-  if (state.connection) return " | aci-verified";
+  if (state.provider?.status().phase === "verified") return " | aci-verified";
   if (state.connectionError) return " | ACI BLOCKED";
   return " | aci: pending";
 }
@@ -428,14 +453,14 @@ async function runReceiptCommand(
   state: AciRuntimeState,
   args: string,
 ): Promise<void> {
-  if (!state.connection) {
+  if (!state.provider) {
     ctx.ui.notify(
       `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
       "error",
     );
     return;
   }
-  const receiptId = args.trim() || state.receiptId || state.connection.receipts()[0]?.receiptId;
+  const receiptId = args.trim() || state.provider.receipts()[0]?.receiptId;
   if (!receiptId) {
     ctx.ui.notify(
       "No receipt id given and no x-receipt-id seen yet; send a message first or pass an id",
@@ -444,7 +469,7 @@ async function runReceiptCommand(
     return;
   }
   try {
-    const audit = await state.connection.verifyReceipt(receiptId);
+    const audit = await state.provider.verifyReceipt(receiptId);
     const checks = audit.transcript.lines.map((line) => {
       const detail = line.detail ? `: ${line.detail}` : "";
       return `${line.status.toUpperCase()} ${line.id}${detail}`;
@@ -498,14 +523,18 @@ async function runAttestationCommand(
   state: AciRuntimeState,
 ): Promise<void> {
   await ensureAciConnection(state);
-  if (!state.connection) {
+  if (!state.provider) {
     ctx.ui.notify(
       `Attestation validation failed: ${state.connectionError ?? "no verified connection"}`,
       "error",
     );
     return;
   }
-  const identity = state.connection.identity;
+  const identity = state.provider.status().identity;
+  if (!identity) {
+    ctx.ui.notify("Attestation validation failed: verified identity unavailable", "error");
+    return;
+  }
   const report = identity.report;
   const keyset = identity.keyset;
   const e2eeKeys = keyset.e2ee_public_keys;
@@ -555,11 +584,10 @@ export function createProvider(
       config,
       projectTrusted: false,
       rawModels: [],
-      connection: undefined,
-      connectionConfigKey: undefined,
+      provider: undefined,
+      providerConfigKey: undefined,
       connectionSetup: undefined,
       connectionError: undefined,
-      receiptId: undefined,
       overrides,
     };
     registerAciProvider(pi, state);
@@ -575,17 +603,7 @@ export function createProvider(
 
     pi.on("session_shutdown", async () => {
       await state.connectionSetup?.promise;
-      await closeAciConnection(state);
-    });
-
-    // Remember the latest id for the on-demand verifier. connectAci records
-    // exact request/response digests without buffering the SSE response.
-    pi.on("after_provider_response", (event, ctx) => {
-      if (ctx.model?.provider !== state.profile.providerId) return;
-      const lower = Object.fromEntries(
-        Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
-      );
-      state.receiptId = lower[HEADER_RECEIPT_ID] ?? lower["x-receipt-id"];
+      await closeAciProvider(state);
     });
 
     const settingsCommand = `${state.profile.providerId}-settings`;
@@ -630,4 +648,4 @@ export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
 export { discoverAciModels, mapAciServerModel, inferThinkingFormat } from "./src/models.ts";
-export { connectAci } from "@phala/aci-verifier/node";
+export { createAciProvider } from "@phala/aci-provider";

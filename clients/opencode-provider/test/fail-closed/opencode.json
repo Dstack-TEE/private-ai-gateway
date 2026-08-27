@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "../../packages/opencode-provider-aci/dist/index.js",
+      { "baseURL": "http://127.0.0.1:9/v1" }
+    ]
+  ],
+  "enabled_providers": ["aci"],
+  "model": "aci/test-model",
+  "provider": {
+    "aci": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:9/v1",
+        "apiKey": "test-only"
+      },
+      "models": {
+        "test-model": { "name": "Fail-closed fixture" }
+      }
+    }
+  }
+}

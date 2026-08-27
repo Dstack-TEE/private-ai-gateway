@@ -3,7 +3,7 @@
 Vendor-neutral **Pi** provider for [private-ai-gateway] (the ACI protocol),
 with **attested TLS (SPKI) pinning** as the security control.
 
-This is the neutral core. Branded distributions add their identity on top and
+This is the neutral Pi adapter. Branded distributions add their identity on top and
 publish their own npm packages:
 
 - [`pi-provider-redpill`](https://www.npmjs.com/package/pi-provider-redpill) — Redpill AI
@@ -38,9 +38,8 @@ pi install npm:@phala/pi-provider-aci
 For a source checkout:
 
 ```bash
-npm --prefix clients/verifier-ts ci
-npm --prefix clients/verifier-ts run build
-npm --prefix clients/pi-provider ci
+npm --prefix clients ci
+npm --prefix clients run build
 export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
 export ACI_LLM_API_KEY=...
 pi -e clients/pi-provider/packages/pi-provider-aci
@@ -72,8 +71,8 @@ pi -e clients/pi-provider/packages/pi-provider-aci
 
 ## How the verified connection is established
 
-The provider creates an instance-scoped connection with `connectAci()` from
-`@phala/aci-verifier/node`. The shared client:
+The adapter creates an instance-scoped `@phala/aci-provider`. That shared
+provider uses the Node ACI transport to:
 
 - recomputes the keyset digest from the served keyset (not trusted from the
   report),

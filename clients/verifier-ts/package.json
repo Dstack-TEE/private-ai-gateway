@@ -1,6 +1,6 @@
 {
   "name": "@phala/aci-verifier",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript ACI verifier and verified fetch client for browsers, Node.js, and Bun.",
   "license": "Apache-2.0",
   "repository": {

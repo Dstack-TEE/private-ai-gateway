@@ -24,6 +24,8 @@ flowchart LR
 
   subgraph local[Client machine]
     pi[Pi provider<br/>original PR, refactored]:::pr
+    ocadapter[OpenCode provider<br/>new]:::refactor
+    core[ACI provider core<br/>new]:::refactor
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
     opencode[OpenCode on Bun]:::external
     agents[Codex and Claude Code]:::external
@@ -32,9 +34,10 @@ flowchart LR
     bun[Bun fetch adapter<br/>current refactor]:::refactor
     serve[aci serve local proxy<br/>existing upstream]:::upstream
 
-    pi --> connect
+    pi --> core
+    opencode --> ocadapter --> core
+    core --> connect
     sdk --> connect
-    opencode --> connect
     connect -->|Node host| node
     connect -->|Bun host| bun
     agents --> serve
@@ -86,6 +89,8 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
+| Framework-neutral model, lifecycle, policy, status and receipt provider core | Current OpenCode work |
+| Native OpenCode v1 plugin and RedPill distribution | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
@@ -94,6 +99,7 @@ were hardened in place:
 | Streaming wire-digest capture and on-demand receipt/session audit in Node/Pi | Current refactor |
 | Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
 | Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
+| Fail-closed OpenCode provider ownership, live model discovery and end-of-stream receipt audit | Current OpenCode work |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
 
@@ -168,7 +174,7 @@ deployment release process must still close the trust loop:
 5. Exercise both Rust and TypeScript clients against the same accepted and
    rejected measurements.
 
-The repository can publish all four npm packages in dependency order from a
+The repository can publish all seven npm packages in dependency order from a
 signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.

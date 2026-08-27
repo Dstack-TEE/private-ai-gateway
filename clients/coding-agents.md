@@ -1,7 +1,7 @@
 # Coding agents over ACI
 
-Coding-agent integrations keep verification at the transport boundary. Agent
-plugins only inject the shared transport and manage its lifecycle.
+Coding-agent integrations keep verification at the transport boundary. Native
+providers also own model discovery and host-specific lifecycle integration.
 
 ```text
 fetch-aware Node/Bun client ---- connectAci() ---- ACI gateway
@@ -90,92 +90,46 @@ body fields, so compatibility should be exercised when either side upgrades.
 
 ### OpenCode
 
-OpenCode runs plugins under Bun and its provider factory accepts an
-`options.fetch` function. JSON cannot contain a function, so a small local
-plugin injects the shared ACI client. First add the verifier dependency:
-
-```json
-{
-  "dependencies": {
-    "@phala/aci-verifier": "^0.3.0"
-  }
-}
-```
-
-Save that as `.opencode/package.json`; OpenCode installs local-plugin
-dependencies with Bun. Configure the remote provider normally:
+For RedPill, add one plugin entry to `opencode.json`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "aci": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "ACI",
-      "options": {
-        "baseURL": "{env:ACI_BASE_URL}",
-        "apiKey": "{env:ACI_API_KEY}"
-      },
-      "models": {
-        "<model-id>": { "name": "<model-id>" }
-      }
-    }
-  }
+  "plugin": ["opencode-provider-redpill"]
 }
 ```
 
-Then place this adapter at `.opencode/plugins/aci.ts`:
+Set `REDPILL_LLM_API_KEY` or run `opencode providers login`, then choose
+`redpill/<model-id>`. The plugin creates the provider itself; do not add a
+separate `provider.redpill` block.
 
-```ts
-import type { Plugin } from '@opencode-ai/plugin';
-import {
-  connectAci,
-  type AciConnection,
-} from '@phala/aci-verifier/runtime';
+For another ACI gateway, use the neutral plugin:
 
-export const AciPlugin: Plugin = async () => {
-  let connection: AciConnection | undefined;
-
-  return {
-    async config(config) {
-      const provider = config.provider?.aci;
-      const options = provider?.options;
-      const baseURL = options?.baseURL;
-      const apiKey = options?.apiKey;
-      if (!provider || typeof baseURL !== 'string' || typeof apiKey !== 'string') {
-        throw new Error('ACI provider requires string baseURL and apiKey options');
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "@phala/opencode-provider-aci",
+      {
+        "baseURL": "https://gateway.example.com/v1",
+        "trust": {
+          "acceptedComposeHashes": ["<reviewed-compose-sha256>"]
+        }
       }
-
-      const next = await connectAci({
-        baseURL,
-        policy: {
-          requireProductionOs: true,
-          acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
-        },
-      });
-      if (!next.identity.transcript.verdict.verified) {
-        await next.close();
-        throw new Error(next.identity.transcript.verdict.line);
-      }
-      provider.options = { ...options, baseURL: next.baseURL, fetch: next.fetch };
-
-      const previous = connection;
-      connection = next;
-      await previous?.close();
-    },
-    async dispose() {
-      await connection?.close();
-    },
-  };
-};
+    ]
+  ]
+}
 ```
 
-Replace the compose placeholder with a hash published by the reviewed release
-pipeline. Importing
-`/runtime` selects the Bun adapter, whose TLS callback is covered by the same
-pinned-channel contract test as the Node adapter. The plugin only performs
-dependency injection and lifecycle cleanup; quote, SPKI, policy, digest,
-receipt, and session verification remain in `connectAci()`.
+The plugin discovers `/v1/models` over the verified connection, defaults to
+`is_tee: true`, excludes embedding-only entries, maps model limits, prices,
+modalities, tools and reasoning controls, and accepts an optional model
+allowlist. The provider is installed with a rejecting fetch before any async
+verification starts. OpenCode currently ignores `config()` hook errors, so
+this ordering is required to prevent an ordinary HTTPS downgrade. Each
+inference response is held open until its signed receipt and cited session
+verify.
 
 For a route that specifically implements `/v1/responses`, OpenCode documents
 `@ai-sdk/openai` instead of `@ai-sdk/openai-compatible`.
@@ -200,7 +154,7 @@ path to the attested TLS identity.
 
 ## Sources
 
-Checked 2026-08-26:
+Checked 2026-08-27:
 
 - [Codex custom model providers](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers)
   and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)
@@ -208,5 +162,5 @@ Checked 2026-08-26:
   and [protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol)
 - [OpenCode providers](https://opencode.ai/docs/providers/) and
   [plugins](https://opencode.ai/docs/plugins/), source commit
-  [`fd9bd44`](https://github.com/anomalyco/opencode/commit/fd9bd448a2e68990e7aed3495e5590cecb934bfb)
+  tag [`v1.18.23`](https://github.com/anomalyco/opencode/tree/v1.18.23)
 - [Bun fetch TLS and proxy options](https://bun.com/docs/runtime/networking/fetch)

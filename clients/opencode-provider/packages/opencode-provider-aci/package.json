@@ -1,24 +1,23 @@
 {
-  "name": "pi-provider-redpill",
+  "name": "@phala/opencode-provider-aci",
   "version": "0.4.0",
-  "description": "Redpill AI for Pi with verified ACI transport and on-demand signed receipt auditing",
+  "description": "Native OpenCode provider for Attested Confidential Inference gateways",
   "keywords": [
-    "ai-provider",
+    "aci",
     "attestation",
+    "coding-agent",
     "confidential-ai",
-    "pi",
-    "pi-provider",
-    "redpill",
-    "tee",
-    "verifiable"
+    "opencode",
+    "opencode-plugin",
+    "tee"
   ],
-  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-redpill",
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/opencode-provider",
   "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
-    "directory": "clients/pi-provider/packages/pi-provider-redpill"
+    "directory": "clients/opencode-provider/packages/opencode-provider-aci"
   },
   "files": [
     "dist",
@@ -43,28 +42,29 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "bun test test/*.test.ts",
     "lint": "oxlint .",
     "format": "oxfmt . --write",
     "format:check": "oxfmt . --check",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run check && npm run lint && npm run format:check"
+    "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/pi-provider-aci": "^0.4.0"
+    "@phala/aci-provider": "^0.4.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.23",
+    "@opencode-ai/sdk": "1.18.23"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
+    "@opencode-ai/plugin": ">=1.18.23 <2"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "bun": ">=1.4.0"
   },
-  "pi": {
-    "extensions": [
-      "./dist/index.js"
-    ]
+  "opencode": {
+    "type": "plugin"
   }
 }

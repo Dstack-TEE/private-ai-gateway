@@ -1,24 +1,23 @@
 {
-  "name": "pi-provider-redpill",
+  "name": "@phala/aci-provider",
   "version": "0.4.0",
-  "description": "Redpill AI for Pi with verified ACI transport and on-demand signed receipt auditing",
+  "description": "Framework-neutral model provider for Attested Confidential Inference gateways",
   "keywords": [
+    "aci",
     "ai-provider",
     "attestation",
+    "coding-agent",
     "confidential-ai",
-    "pi",
-    "pi-provider",
-    "redpill",
-    "tee",
-    "verifiable"
+    "llm",
+    "tee"
   ],
-  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-redpill",
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/provider",
   "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
-    "directory": "clients/pi-provider/packages/pi-provider-redpill"
+    "directory": "clients/provider"
   },
   "files": [
     "dist",
@@ -43,28 +42,26 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
     "lint": "oxlint .",
     "format": "oxfmt . --write",
     "format:check": "oxfmt . --check",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run check && npm run lint && npm run format:check"
+    "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/pi-provider-aci": "^0.4.0"
+    "@phala/aci-verifier": "^0.4.0"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.80.0",
+    "typescript": "^5.9.0"
   },
   "engines": {
-    "node": ">=22.19.0"
-  },
-  "pi": {
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "bun": ">=1.4.0",
+    "node": ">=20.18.1"
   }
 }

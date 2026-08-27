@@ -4,7 +4,7 @@ import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
 export const LOG_PREFIX = DEFAULT_PROFILE.logPrefix;
 
-export const PROVIDER_VERSION = "0.2.0";
+export const PROVIDER_VERSION = "0.4.0";
 
 function firstEnv(env: NodeJS.ProcessEnv, ...names: (string | undefined)[]): string | undefined {
   for (const name of names) {

@@ -6,18 +6,12 @@
     "allowImportingTsExtensions": true,
     "strict": true,
     "noEmit": true,
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["node"],
     "paths": {
       "@phala/aci-provider": ["../provider/src/index.ts"],
-      "@phala/pi-provider-aci": ["./packages/pi-provider-aci/index.ts"]
+      "@phala/opencode-provider-aci": ["./packages/opencode-provider-aci/src/index.ts"]
     }
   },
-  "include": [
-    "packages/*/index.ts",
-    "packages/*/src/**/*.ts",
-    "packages/*/tests/**/*.ts"
-  ]
+  "include": ["packages/*/src/**/*.ts", "packages/*/index.ts", "packages/*/test/**/*.ts"]
 }
