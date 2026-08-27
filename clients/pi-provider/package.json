@@ -1,6 +1,6 @@
 {
   "name": "private-ai-gateway-pi-providers",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "Vendor-neutral Pi provider for private-ai-gateway (ACI) + thin branded distributions (redpill, phala-cloud)",
   "license": "MIT",

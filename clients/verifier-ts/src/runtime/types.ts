@@ -54,7 +54,6 @@ export type AciFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise
 
 export interface ConnectAciOptions {
   baseURL: string;
-  apiKey?: string;
   policy?: AciPolicy;
   /** Gateway serving constraints applied to JSON POST bodies. */
   serving?: AciServingPolicy;

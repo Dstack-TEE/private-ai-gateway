@@ -101,9 +101,8 @@ were hardened in place:
 integration. It is the existing Rust local verifying proxy. It preserves the
 request path and body, so the gateway must implement the protocol spoken by the
 agent. `connectAci()` is the new runtime client for applications that accept a
-custom `fetch`; it never replaces `globalThis.fetch`. Node and Bun expose the
-same public API and differ only in how their native `fetch` receives the TLS
-identity callback.
+custom `fetch`. Node and Bun expose the same public API and differ only in how
+their native `fetch` receives the TLS identity callback.
 
 ## One trust contract, two integrations
 
@@ -124,17 +123,16 @@ meaning:
 7. Retain exact wire digests and verify signed receipts/sessions on demand.
 8. Fail closed on any required check.
 
-The implementations do not need to share a programming language. They do need
-matching policy semantics and conformance tests. Rust exposes the release
-policy as repeatable `--accept-compose` flags. TypeScript exposes it as
+Implementations may use different languages while sharing policy semantics and
+conformance tests. Rust exposes the release policy as repeatable
+`--accept-compose` flags. TypeScript exposes it as
 `acceptedComposeHashes` and Pi passes the same policy through its brand profile
 or deployment configuration.
 
 Within TypeScript, all quote, keyset, policy, rotation, request constraint,
 digest, receipt, and session logic is shared. The Node adapter uses undici's
 scoped dispatcher; the Bun adapter uses Bun's native TLS and proxy fetch
-options. Conditional npm exports select the adapter. No global fetch patch,
-custom proxy protocol, or agent-specific verifier was introduced.
+options. Conditional npm exports select the adapter.
 
 ## Hardware proof versus release acceptance
 
@@ -150,8 +148,7 @@ These are deliberately separate claims:
 `source_provenance.repo_url` and `repo_commit` are useful labels, but they are
 self-declared by the report. They are not the release trust anchor. The compose
 hash is the value bound into RTMR3 and is therefore the value a verifier pins.
-Clients must not learn and automatically trust the first hash returned by an
-endpoint; that would reduce the design to trust on first use.
+Clients obtain accepted compose hashes from authenticated release metadata.
 
 The neutral SDK may intentionally use hardware-bound mode for self-hosted and
 development deployments. A production Redpill or Phala branded client should
@@ -176,7 +173,7 @@ signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.
 
-The local agent and `aci serve` necessarily see plaintext prompts and
-responses. This architecture protects the remote model HTTP path. It does not
-automatically cover MCP servers, tools, browser automation, shell commands,
-WebSockets, extension traffic, or agent telemetry.
+The local agent and `aci serve` see plaintext prompts and responses. This
+architecture covers the remote model HTTP path; MCP servers, tools, browser
+automation, shell commands, WebSockets, extensions, and telemetry have separate
+trust boundaries.

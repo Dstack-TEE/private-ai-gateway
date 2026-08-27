@@ -4,7 +4,7 @@ import { after, test } from 'node:test';
 import { install } from 'undici';
 
 import { computeKeysetDigest, computeReportData } from '../src/index.js';
-import { constrainJsonBody } from '../src/runtime/connection.js';
+import { constrainJsonBody, prepareRequest } from '../src/runtime/connection.js';
 import { connectAci, AciConnectionError } from '../src/node/index.js';
 import { createPinnedTransport } from '../src/node/transport.js';
 import type { AttestationReport, WorkloadKeyset } from '../src/types.js';
@@ -68,6 +68,23 @@ test('serving policy composes request pins with the locally accepted set', () =>
     (error: unknown) =>
       error instanceof AciConnectionError && error.code === 'invalid_serving_constraints',
   );
+});
+
+test('prepared requests retain authorization for receipt lookup', async () => {
+  const prepared = await prepareRequest(
+    'https://gateway.example/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer request-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'model', messages: [] }),
+    },
+    { baseURL: 'https://gateway.example/v1' },
+  );
+
+  assert.equal(prepared.authorization, 'Bearer request-token');
 });
 
 test('connectAci rejects a self-consistent report without a hardware quote', async () => {

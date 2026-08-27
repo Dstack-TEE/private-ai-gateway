@@ -15,7 +15,8 @@ condition automatically; native browser imports can use
 `@phala/aci-verifier/browser`. Runtime-aware applications import
 `connectAci()` from `@phala/aci-verifier/runtime`; package conditions select
 the tested Node or Bun transport. Explicit `/node` and `/bun` entries are also
-available. Pinned transport APIs are never exposed through the browser entry.
+available. Use the browser entry for document verification and the Node or Bun
+entries for a pinned transport.
 
 ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
@@ -66,7 +67,7 @@ evidence) exactly as observed.
   not yet encrypt or decrypt content fields. Callers can implement that
   field-level wire contract or use a separate v2 client.
 
-## What it does not do
+## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3. It
@@ -88,9 +89,7 @@ evidence) exactly as observed.
 - **Ed25519 receipts only.** A receipt keyed to any other algorithm is
   reported as a failed signature check, not verified.
 
-Verification failures are reported as `{ ok: false, checks }` — never thrown —
-so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
-for malformed input.
+Verification failures return `{ ok: false, checks }`; malformed input throws.
 
 > **Release status:** Public releases are available from npm. The repository
 > builds an ESM package with declarations, validates it with publint and Are The
@@ -118,7 +117,7 @@ Node and Bun applications establish the same instance-scoped, SPKI-pinned
 connection and inject its ordinary `fetch` into any HTTP-based
 OpenAI-compatible SDK. The connection rejects HTTP, cross-origin requests,
 expired identities, and TLS peers whose SPKI is not in the verified workload
-keyset. It never replaces `globalThis.fetch`.
+keyset.
 
 ```ts
 import OpenAI from 'openai';
@@ -129,7 +128,6 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
-  apiKey,
   policy: { requireProductionOs: true },
   serving: {
     // Every successful JSON POST must carry a receipt and cite verified serving.
@@ -152,7 +150,8 @@ const response = await openai.chat.completions.create({
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
-// The transport hashes the exact request/response wire bodies while streaming.
+// The transport hashes the exact request/response wire bodies while streaming
+// and reuses this request's authorization only to fetch its private receipt.
 // Verification is on demand, so normal inference latency does not include a
 // receipt/session fetch.
 const audit = await aci.verifyReceipt();
@@ -167,6 +166,10 @@ await aci.close();
 Install the two ESM packages with `npm install openai @phala/aci-verifier`.
 Run the same source under Node 20.18.1+ or Bun 1.4.0+; the `/runtime` export
 selects the matching pinned transport. Set `ACI_API_KEY` to the Redpill key.
+The SDK adds it to the inference request; `aci.fetch` retains that request's
+authorization in its bounded exchange history and reuses it only for the
+matching private receipt lookup.
+
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`; do not copy a hash from the endpoint and trust
 it on first use.
@@ -186,8 +189,8 @@ hashes.
 `source_provenance.repo_url` and `repo_commit` are published labels, not a
 cryptographic release identity. `acceptedComposeHashes` pins the value that is
 actually measured into RTMR3. Release automation should publish reviewed
-compose hashes alongside each deployment; clients must not learn and trust the
-first hash they observe.
+compose hashes alongside each deployment, and clients should load them from
+that authenticated release metadata.
 
 #### OpenAI Agents SDK
 
