@@ -103,6 +103,13 @@ were hardened in place:
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
 
+Account authentication is outside the ACI trust protocol. Redpill adapters
+currently accept API keys only. Phala Cloud's device authorization and account
+metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
+attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
+should be added when that product endpoint exists, without changing the
+verifier.
+
 `aci serve` is not a new protocol translator and was not introduced by the Pi
 integration. It is the existing Rust local verifying proxy. It preserves the
 request path and body, so the gateway must implement the protocol spoken by the

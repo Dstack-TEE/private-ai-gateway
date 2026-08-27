@@ -28,32 +28,32 @@ export function getBaseUrl(
     `${p.envPrefix}_BASE_URL`,
     `${p.envPrefix}_CLOUD_BASE_URL`,
   );
-  const aliased = firstEnv(env, ...(p.baseUrlAliases ?? []));
-  return prefixed || aliased || p.defaultBaseUrl;
+  const aliased = firstEnv(env, ...(p.baseURLAliases ?? []));
+  return prefixed || aliased || p.defaultBaseURL;
 }
 
 // Build a gateway-root URL (no trailing /v1) for ACI endpoints
 // (/aci/receipts, /aci/attestation, /aci/sessions). The inference base URL is
 // `<root>/v1`; ACI endpoints hang off the same host.
-export function getGatewayRoot(baseUrl: string = DEFAULT_PROFILE.defaultBaseUrl): string {
+export function getGatewayRoot(baseUrl: string = DEFAULT_PROFILE.defaultBaseURL): string {
   return baseUrl.replace(/\/v\d+\/?$/, "").replace(/\/+$/, "");
 }
 
-export function buildModelsUrl(baseUrl: string = DEFAULT_PROFILE.defaultBaseUrl): string {
+export function buildModelsUrl(baseUrl: string = DEFAULT_PROFILE.defaultBaseURL): string {
   const base = baseUrl.replace(/\/+$/, "");
   return base.endsWith("/v1") ? `${base}/models` : `${base}/v1/models`;
 }
 
 export function buildReceiptUrl(
   receiptId: string,
-  baseUrl: string = DEFAULT_PROFILE.defaultBaseUrl,
+  baseUrl: string = DEFAULT_PROFILE.defaultBaseURL,
 ): string {
   return `${getGatewayRoot(baseUrl)}/v1/aci/receipts/${encodeURIComponent(receiptId)}`;
 }
 
 export function buildSessionUrl(
   sessionId: string,
-  baseUrl: string = DEFAULT_PROFILE.defaultBaseUrl,
+  baseUrl: string = DEFAULT_PROFILE.defaultBaseURL,
 ): string {
   return `${getGatewayRoot(baseUrl)}/v1/aci/sessions/${encodeURIComponent(sessionId)}`;
 }

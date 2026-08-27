@@ -99,12 +99,15 @@ For RedPill, add one plugin entry to `opencode.json`:
 }
 ```
 
-Run `opencode providers login` or set `REDPILL_LLM_API_KEY`, then choose
-`redpill/<model-id>`. For the Phala Cloud identity, install
-`opencode-provider-phala-cloud` instead and choose `phala/<model-id>`. Both
-branded plugins use the same Phala Cloud device flow to issue a Confidential
-AI key. The plugin creates the provider itself; do not add a separate provider
-block for the same id.
+Run `opencode providers login`, paste a Redpill API key, or set
+`REDPILL_LLM_API_KEY`, then choose `redpill/<model-id>`. Redpill does not
+currently expose account OAuth; a future Clerk OAuth integration is outside
+this release.
+
+For Phala Cloud, install `opencode-provider-phala-cloud`, then use its device
+login or set `PHALA_LLM_API_KEY` and choose `phala/<model-id>`. The plugin
+creates the provider itself; do not add a separate provider block for the same
+id.
 
 For another ACI gateway, use the neutral plugin:
 

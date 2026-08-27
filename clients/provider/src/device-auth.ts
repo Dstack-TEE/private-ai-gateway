@@ -2,31 +2,30 @@ import type { AciFetch } from "@phala/aci-verifier/runtime";
 
 const DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 
-export interface DeviceAuthorizationOptions {
+export interface PhalaCloudDeviceAuthorizationOptions {
   baseURL: string;
   clientId: string;
-  scope: string;
   fetch?: AciFetch;
   signal?: AbortSignal;
 }
 
-export interface DeviceAuthorizationPollOptions {
+export interface PhalaCloudDeviceAuthorizationPollOptions {
   signal?: AbortSignal;
   onProgress?: (message: string) => void;
 }
 
-export interface DeviceAuthorizationToken {
+export interface PhalaCloudApiKey {
   accessToken: string;
   expiresIn?: number;
   keyId?: number;
 }
 
-export interface DeviceAuthorization {
+export interface PhalaCloudDeviceAuthorization {
   userCode: string;
   verificationURI: string;
   expiresIn: number;
   interval: number;
-  poll(options?: DeviceAuthorizationPollOptions): Promise<DeviceAuthorizationToken>;
+  poll(options?: PhalaCloudDeviceAuthorizationPollOptions): Promise<PhalaCloudApiKey>;
 }
 
 interface DeviceCodeResponse {
@@ -77,7 +76,7 @@ function httpURL(value: unknown, field: string): URL {
   return url;
 }
 
-function endpoint(baseURL: string, path: string): URL {
+export function phalaCloudEndpoint(baseURL: string, path: string): URL {
   const root = httpURL(baseURL, "baseURL");
   root.pathname = `${root.pathname.replace(/\/$/, "")}${path}`;
   root.search = "";
@@ -104,7 +103,7 @@ function parseDeviceCode(value: unknown): DeviceCodeResponse {
   };
 }
 
-function parseDeviceToken(value: unknown): DeviceAuthorizationToken {
+function parseDeviceToken(value: unknown): PhalaCloudApiKey {
   const data = record(value, "Device token endpoint");
   const expiresIn = data.expires_in;
   if (
@@ -166,19 +165,18 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export async function startDeviceAuthorization({
+export async function startPhalaCloudDeviceAuthorization({
   baseURL,
   clientId,
-  scope,
   fetch = globalThis.fetch,
   signal,
-}: DeviceAuthorizationOptions): Promise<DeviceAuthorization> {
-  const codeURL = endpoint(baseURL, "/api/v1/auth/device/code");
-  const tokenURL = endpoint(baseURL, "/api/v1/auth/device/token");
+}: PhalaCloudDeviceAuthorizationOptions): Promise<PhalaCloudDeviceAuthorization> {
+  const codeURL = phalaCloudEndpoint(baseURL, "/api/v1/auth/device/code");
+  const tokenURL = phalaCloudEndpoint(baseURL, "/api/v1/auth/device/token");
   const response = await fetch(codeURL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: clientId, scope }),
+    body: JSON.stringify({ client_id: clientId, scope: "redpill:api-key" }),
     signal,
   });
   if (!response.ok) {

@@ -32,13 +32,6 @@ export {
   resolveAciProviderProfile,
   type AciProviderProfile,
 } from "./profile.ts";
-export {
-  startDeviceAuthorization,
-  type DeviceAuthorization,
-  type DeviceAuthorizationOptions,
-  type DeviceAuthorizationPollOptions,
-  type DeviceAuthorizationToken,
-} from "./device-auth.ts";
 export type {
   AciFetch,
   AciReceiptAudit,

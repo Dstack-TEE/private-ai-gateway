@@ -41,7 +41,7 @@ For a source checkout:
 npm --prefix clients ci
 npm --prefix clients run build
 export ACI_BASE_URL=https://<your-gateway>/v1   # your private-ai-gateway endpoint
-export ACI_LLM_API_KEY=...
+export ACI_API_KEY=...
 pi -e clients/pi-provider/packages/pi-provider-aci
 ```
 
@@ -112,11 +112,13 @@ import { createProvider } from "@phala/pi-provider-aci";
 export default createProvider({
   providerId: "my-brand",
   label: "My Brand",
-  defaultBaseUrl: "https://gateway.example/v1",
+  defaultBaseURL: "https://gateway.example/v1",
   apiKeyEnv: "MY_LLM_API_KEY",
   envPrefix: "MY",
+  logPrefix: "[my-brand]",
   acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
-  fallbackModels: [...],
+  catalog: [...],
+  footerKey: "my-brand",
 });
 ```
 

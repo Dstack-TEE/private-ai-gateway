@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { createDeviceAuthMethod } from "../src/index.ts";
+import { createPhalaCloudAuthMethod } from "../src/index.ts";
 
 test("maps a device authorization grant into an OpenCode API credential", async () => {
   const responses = [
@@ -13,12 +13,14 @@ test("maps a device authorization grant into an OpenCode API credential", async 
       interval: 0.001,
     }),
     Response.json({ access_token: "llm-key", expires_in: null, redpill_key_id: 42 }),
+    Response.json({
+      user: { username: "alice" },
+      workspace: { name: "Confidential AI", slug: "confidential-ai" },
+    }),
   ];
-  const method = createDeviceAuthMethod({
-    label: "Cloud account",
+  const method = createPhalaCloudAuthMethod({
     baseURL: "https://cloud.example",
     clientId: "opencode",
-    scope: "redpill:api-key",
     fetch: async () => {
       const response = responses.shift();
       if (!response) throw new Error("unexpected request");
@@ -33,6 +35,11 @@ test("maps a device authorization grant into an OpenCode API credential", async 
   expect(await authorization.callback()).toEqual({
     type: "success",
     key: "llm-key",
-    metadata: { keyId: "42" },
+    metadata: {
+      keyId: "42",
+      username: "alice",
+      workspaceName: "Confidential AI",
+      workspaceSlug: "confidential-ai",
+    },
   });
 });

@@ -6,44 +6,19 @@
 // `createProvider(profile)` with their own identity. The core never enumerates
 // vendors.
 //
-// profile.ts owns the *identity* values (provider id, env names, default
-// endpoint, footer key, fallback catalog). Everything protocol-y (attestation,
-// TLS SPKI pinning, model discovery, config layering) lives elsewhere and is
-// identity-agnostic.
+// profile.ts adds Pi-specific fields to the shared provider profile. Everything
+// protocol-y (attestation, TLS SPKI pinning, model discovery, config layering)
+// lives elsewhere and is identity-agnostic.
 
-export interface ProviderProfile {
-  /** Provider id registered in pi. */
-  providerId: string;
-  /** Human-facing label for the settings UI / status. */
-  label: string;
-  /** Default gateway base URL (branded shells set this; core is operator-set). */
-  defaultBaseUrl: string;
-  /** Env var for the LLM/inference API key. */
-  apiKeyEnv: string;
-  /** Prefix for config env vars: {PREFIX}_BASE_URL, {PREFIX}_IS_TEE_ONLY, ... */
-  envPrefix: string;
+import {
+  DEFAULT_ACI_PROVIDER_PROFILE,
+  resolveAciProviderProfile,
+  type AciProviderProfile,
+} from "@phala/aci-provider";
+
+export interface ProviderProfile extends AciProviderProfile {
   /** Footer/status bar key. */
   footerKey: string;
-  /** Log prefix, e.g. "[aci]". */
-  logPrefix: string;
-  /** Fallback model catalog used when discovery has no API key. */
-  fallbackModels: Array<{
-    id: string;
-    name: string;
-    reasoning: boolean;
-    input: ("text" | "image")[];
-    cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-    contextWindow: number;
-    maxTokens: number;
-  }>;
-  /** Reviewed compose hashes shipped by this branded release. */
-  acceptedComposeHashes?: readonly string[];
-  /** Fixed attested-session ids accepted by this branded release. */
-  acceptedSessionIds?: readonly string[];
-  /** Optional legacy env-var aliases for the base URL / API key (brand
-   *  backward-compat). */
-  baseUrlAliases?: string[];
-  apiKeyAliases?: string[];
   /** Optional OAuth login block (device flow or otherwise). Branded shells
    *  that support /login register this; the core passes it through to pi's
    *  registerProvider `oauth` config and, when set, `resolveApiKey()` first
@@ -67,27 +42,21 @@ export interface AciOAuthConfig {
 }
 
 export const DEFAULT_PROFILE: ProviderProfile = {
-  providerId: "aci",
-  label: "Private AI Gateway",
-  defaultBaseUrl: "",
-  apiKeyEnv: "ACI_LLM_API_KEY",
-  envPrefix: "ACI",
+  ...DEFAULT_ACI_PROVIDER_PROFILE,
+  apiKeyAliases: ["ACI_LLM_API_KEY"],
   footerKey: "aci",
-  logPrefix: "[aci]",
-  fallbackModels: [],
 };
 
 /** Resolve a (possibly partial) profile over the neutral defaults. */
 export function resolveProfile(patch: Partial<ProviderProfile> | undefined): ProviderProfile {
-  return { ...DEFAULT_PROFILE, ...stripEmpty(patch) };
-}
-
-function stripEmpty<T extends Record<string, unknown>>(patch: T | undefined): T {
-  if (!patch) return {} as T;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined) continue;
-    out[k] = v;
-  }
-  return out as T;
+  const { footerKey = DEFAULT_PROFILE.footerKey, oauth, ...shared } = patch ?? {};
+  const profile = resolveAciProviderProfile(shared);
+  return {
+    ...profile,
+    ...(profile.providerId === DEFAULT_PROFILE.providerId && profile.apiKeyAliases === undefined
+      ? { apiKeyAliases: DEFAULT_PROFILE.apiKeyAliases }
+      : {}),
+    footerKey,
+    ...(oauth ? { oauth } : {}),
+  };
 }

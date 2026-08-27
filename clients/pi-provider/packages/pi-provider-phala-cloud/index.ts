@@ -12,35 +12,22 @@
  *   # /login phala (or set PHALA_LLM_API_KEY), then /model phala/<model-id>
  */
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { startDeviceAuthorization } from "@phala/aci-provider";
+import {
+  fetchPhalaCloudAccount,
+  resolvePhalaCloudApiBaseURL,
+  startPhalaCloudDeviceAuthorization,
+} from "@phala/aci-provider/phala-cloud";
+import { PHALA_CLOUD_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createProvider } from "@phala/pi-provider-aci";
 
-// Phala Cloud (teahouse) API base for account-level endpoints: the OAuth
-// device authorization flow and the LLM-key self lookup live here, not on
-// the inference gateway.
-const DEFAULT_CLOUD_API_URL = "https://cloud-api.phala.com";
-
-export function getCloudApiBase(): string {
-  const value = process.env.PHALA_CLOUD_API_BASE_URL || DEFAULT_CLOUD_API_URL;
-  return value.trim().replace(/\/+$/, "") || DEFAULT_CLOUD_API_URL;
-}
-
-interface PrivateAiSelfResponse {
-  user?: { username?: string };
-  workspace?: { name?: string; slug?: string | null };
-  credits?: { balance?: string; granted_balance?: string };
-}
-
-// RFC 8628 device authorization against Phala Cloud. On approval the consume
-// step (scope "redpill:api-key") issues a Redpill LLM virtual key — no phak_
-// cloud token is created. The key does not expire and cannot be refreshed, so
-// `expires` is set far in the future and refreshToken() always throws.
+// RFC 8628 device authorization against Phala Cloud issues a Confidential AI
+// key rather than a general cloud token. The key does not expire and cannot be
+// refreshed, so `expires` is set far in the future and refreshToken() throws.
 async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-  const cloudApi = getCloudApiBase();
-  const authorization = await startDeviceAuthorization({
+  const cloudApi = resolvePhalaCloudApiBaseURL();
+  const authorization = await startPhalaCloudDeviceAuthorization({
     baseURL: cloudApi,
     clientId: "pi",
-    scope: "redpill:api-key",
     signal: callbacks.signal,
   });
   callbacks.onDeviceCode({
@@ -65,15 +52,14 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
 
   // Best-effort display metadata from the LLM-key self endpoint.
   try {
-    const selfRes = await fetch(`${cloudApi}/api/v1/private_ai/self`, {
-      headers: { Authorization: `Bearer ${token.accessToken}` },
+    const account = await fetchPhalaCloudAccount({
+      baseURL: cloudApi,
+      apiKey: token.accessToken,
+      signal: callbacks.signal,
     });
-    if (selfRes.ok) {
-      const self = (await selfRes.json()) as PrivateAiSelfResponse;
-      if (self.user?.username) credentials.username = self.user.username;
-      if (self.workspace?.slug) credentials.workspace_slug = self.workspace.slug;
-      if (self.workspace?.name) credentials.workspace_name = self.workspace.name;
-    }
+    if (account.username) credentials.username = account.username;
+    if (account.workspaceSlug) credentials.workspace_slug = account.workspaceSlug;
+    if (account.workspaceName) credentials.workspace_name = account.workspaceName;
   } catch {
     // Metadata is display-only; login still succeeds without it.
   }
@@ -81,25 +67,8 @@ async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAu
 }
 
 export default createProvider({
-  providerId: "phala",
-  label: "Phala Cloud",
-  defaultBaseUrl: "https://inference.phala.com/v1",
-  apiKeyEnv: "PHALA_LLM_API_KEY",
-  envPrefix: "PHALA",
+  ...PHALA_CLOUD_ACI_PROFILE,
   footerKey: "phala",
-  logPrefix: "[phala]",
-  baseUrlAliases: ["PHALA_CLOUD_API_PREFIX", "PHALA_BASE_URL", "PHALA_CLOUD_BASE_URL"],
-  fallbackModels: [
-    {
-      id: "phala/qwen3.5-27b",
-      name: "Phala Qwen3.5 27B",
-      reasoning: true,
-      input: ["text"],
-      cost: { input: 0.3, output: 2.4, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 262000,
-      maxTokens: 8192,
-    },
-  ],
   oauth: {
     name: "Phala Cloud",
     login: loginPhalaDeviceFlow,

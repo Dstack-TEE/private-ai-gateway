@@ -89,11 +89,3 @@ test("validateAciCloudConfig: allowlist with empty string is rejected", () => {
   };
   assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty string/);
 });
-
-test("validateAciCloudConfig: defaultModel is optional", () => {
-  const validated = validateAciCloudConfig({
-    ...BASE,
-    defaultModel: "aci/test-model",
-  });
-  assert.equal(validated.defaultModel, "aci/test-model");
-});

@@ -135,19 +135,7 @@ export async function discoverAciModels(
 export function fallbackModels(
   providerProfile: ProviderProfile = DEFAULT_PROFILE,
 ): ProviderModelConfig[] {
-  return providerProfile.fallbackModels.map((model) => {
-    const thinking = inferThinkingFormat(model.id);
-    return {
-      ...model,
-      compat: {
-        thinkingFormat: thinking.format === "off" ? "openai" : thinking.format,
-        maxTokensField: thinking.maxTokensField,
-        supportsReasoningEffort: thinking.supportsReasoningEffort,
-        supportsStrictMode: false,
-        supportsUsageInStreaming: true,
-      },
-    } as ProviderModelConfig;
-  });
+  return providerProfile.catalog.map((model) => toPiModel(model, "auto"));
 }
 
 export type { AciServerModel };

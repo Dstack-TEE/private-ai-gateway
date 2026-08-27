@@ -8,7 +8,7 @@ and exposes attestation, receipt, and session audit commands.
 ```bash
 pi install npm:@phala/pi-provider-aci
 export ACI_BASE_URL=https://gateway.example/v1
-export ACI_LLM_API_KEY=...
+export ACI_API_KEY=...
 pi
 ```
 

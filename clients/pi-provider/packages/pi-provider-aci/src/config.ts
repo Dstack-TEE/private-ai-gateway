@@ -43,8 +43,6 @@ export interface AciCloudConfig {
     /** Attested upstream session ids accepted by the operator or brand. */
     acceptedSessionIds?: string[];
   };
-  /** Default model id to surface first in /model. */
-  defaultModel?: string;
 }
 
 export type AciCloudConfigPatch = {
@@ -58,7 +56,6 @@ export type AciCloudConfigPatch = {
     acceptedComposeHashes: unknown;
     acceptedSessionIds: unknown;
   }>;
-  defaultModel?: unknown;
 };
 
 export interface LoadAciCloudConfigOptions {
@@ -84,7 +81,7 @@ export class ConfigError extends Error {
 }
 
 export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
-  baseUrl: DEFAULT_PROFILE.defaultBaseUrl,
+  baseUrl: DEFAULT_PROFILE.defaultBaseURL,
   models: {
     isTeeOnly: true,
     thinkingFormat: "auto",
@@ -218,9 +215,6 @@ function envConfigPatch(
   const thinkingFormat = read(`${prefix}_THINKING_FORMAT`);
   if (thinkingFormat) patch.models = { ...patch.models, thinkingFormat };
 
-  const defaultModel = read(`${prefix}_DEFAULT_MODEL`);
-  if (defaultModel) patch.defaultModel = defaultModel;
-
   const acceptedComposeHashes = read(`${prefix}_ACCEPTED_COMPOSE_HASHES`);
   if (acceptedComposeHashes) {
     patch.trust = {
@@ -259,16 +253,6 @@ function requireRecord(raw: unknown, configPath: string, pointer: string): Recor
 }
 
 function requireString(raw: unknown, configPath: string, pointer: string): string {
-  if (typeof raw === "string" && raw.length > 0) return raw;
-  return fail(configPath, pointer, `expected a non-empty string, got ${JSON.stringify(raw)}`);
-}
-
-function requireOptionalString(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): string | undefined {
-  if (raw === undefined || raw === null) return undefined;
   if (typeof raw === "string" && raw.length > 0) return raw;
   return fail(configPath, pointer, `expected a non-empty string, got ${JSON.stringify(raw)}`);
 }
@@ -377,7 +361,6 @@ export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"
     baseUrl: requireString(config.baseUrl, configPath, "/baseUrl"),
     models: validateModelsConfig(config.models, configPath, "/models"),
     trust: validateTrustConfig(config.trust, configPath, "/trust"),
-    defaultModel: requireOptionalString(config.defaultModel, configPath, "/defaultModel"),
   };
 }
 

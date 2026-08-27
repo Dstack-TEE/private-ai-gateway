@@ -8,7 +8,7 @@
  *
  * Usage:
  *   pi install npm:@phala/pi-provider-aci
- *   # Set ACI_LLM_API_KEY (+ ACI_BASE_URL) then /model aci/<model-id>
+ *   # Set ACI_API_KEY (+ ACI_BASE_URL) then /model aci/<model-id>
  *
  * Source layout:
  *   src/constants.ts     — provider identity + env-driven endpoints
@@ -28,12 +28,7 @@ import {
 import type { Credential } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import {
-  createAciProvider,
-  type AciProvider,
-  type AciProviderConfig,
-  type AciProviderProfile,
-} from "@phala/aci-provider";
+import { createAciProvider, type AciProvider, type AciProviderConfig } from "@phala/aci-provider";
 import os from "node:os";
 
 import {
@@ -113,6 +108,14 @@ function resolveApiKey(providerProfile: ProviderProfile): string {
   return "";
 }
 
+function configuredApiKeyEnv(providerProfile: ProviderProfile): string {
+  return (
+    [providerProfile.apiKeyEnv, ...(providerProfile.apiKeyAliases ?? [])].find((name) =>
+      process.env[name]?.trim(),
+    ) ?? providerProfile.apiKeyEnv
+  );
+}
+
 function resolveCredentialApiKey(
   providerProfile: ProviderProfile,
   credential: Credential | undefined,
@@ -146,24 +149,6 @@ function connectionConfig(config: AciCloudConfig): string {
   });
 }
 
-function coreProfile(profile: ProviderProfile): AciProviderProfile {
-  return {
-    providerId: profile.providerId,
-    label: profile.label,
-    defaultBaseURL: profile.defaultBaseUrl,
-    apiKeyEnv: profile.apiKeyEnv,
-    envPrefix: profile.envPrefix,
-    logPrefix: profile.logPrefix,
-    catalog: [],
-    ...(profile.acceptedComposeHashes
-      ? { acceptedComposeHashes: profile.acceptedComposeHashes }
-      : {}),
-    ...(profile.acceptedSessionIds ? { acceptedSessionIds: profile.acceptedSessionIds } : {}),
-    ...(profile.baseUrlAliases ? { baseURLAliases: profile.baseUrlAliases } : {}),
-    ...(profile.apiKeyAliases ? { apiKeyAliases: profile.apiKeyAliases } : {}),
-  };
-}
-
 function coreConfig(config: AciCloudConfig): AciProviderConfig {
   return {
     baseURL: config.baseUrl,
@@ -191,7 +176,7 @@ async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
     await closeAciProvider(state);
     try {
       const provider = createAciProvider({
-        profile: coreProfile(state.profile),
+        profile: state.profile,
         config: coreConfig(config),
       });
       await provider.connect();
@@ -257,7 +242,7 @@ function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
   const oauth = providerProfile.oauth;
   pi.registerProvider(providerProfile.providerId, {
     baseUrl: config.baseUrl,
-    apiKey: `$${providerProfile.apiKeyEnv}`,
+    apiKey: `$${configuredApiKeyEnv(providerProfile)}`,
     api: "openai-completions",
     authHeader: true,
     models: modelsFromState(state),

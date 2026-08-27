@@ -3,11 +3,13 @@
 Framework-neutral provider kernel for ACI gateways. It owns verified connection
 lifecycle, live model discovery, TEE-only filtering, model capability mapping,
 bounded receipt history, and optional response-completion receipt verification.
-It also exposes a validated RFC 8628 device authorization helper, allowing
-branded adapters to share account login without coupling it to a host SDK.
 
 Host adapters such as Pi and OpenCode supply their native configuration and UI.
 Applications normally install a host adapter rather than this package directly.
+Shared Redpill and Phala Cloud profiles are exported from
+`@phala/aci-provider/profiles`. Phala Cloud's account API and RFC 8628 device
+flow are isolated under `@phala/aci-provider/phala-cloud`; they are not part of
+the ACI protocol or verifier.
 
 ```ts
 import {

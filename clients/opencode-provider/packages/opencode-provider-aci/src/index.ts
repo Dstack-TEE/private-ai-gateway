@@ -3,13 +3,16 @@ import {
   resolveAciApiKey,
   resolveAciProviderConfig,
   resolveAciProviderProfile,
-  startDeviceAuthorization,
   type AciModel,
   type AciFetch,
   type AciProvider,
   type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
+import {
+  fetchPhalaCloudAccount,
+  startPhalaCloudDeviceAuthorization,
+} from "@phala/aci-provider/phala-cloud";
 import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
@@ -53,11 +56,10 @@ export interface CreateOpenCodeAciPluginOptions {
   authMethods?: readonly OpenCodeAciAuthMethod[];
 }
 
-export interface CreateDeviceAuthMethodOptions {
-  label: string;
+export interface CreatePhalaCloudAuthMethodOptions {
+  label?: string;
   baseURL: string;
   clientId: string;
-  scope: string;
   fetch?: AciFetch;
 }
 
@@ -75,21 +77,19 @@ function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOpti
   };
 }
 
-export function createDeviceAuthMethod({
-  label,
+export function createPhalaCloudAuthMethod({
+  label = "Phala Cloud account",
   baseURL,
   clientId,
-  scope,
   fetch,
-}: CreateDeviceAuthMethodOptions): OpenCodeAciAuthMethod {
+}: CreatePhalaCloudAuthMethodOptions): OpenCodeAciAuthMethod {
   return {
     type: "oauth",
     label,
     async authorize() {
-      const authorization = await startDeviceAuthorization({
+      const authorization = await startPhalaCloudDeviceAuthorization({
         baseURL,
         clientId,
-        scope,
         ...(fetch ? { fetch } : {}),
       });
       return {
@@ -98,10 +98,24 @@ export function createDeviceAuthMethod({
         method: "auto",
         async callback() {
           const token = await authorization.poll();
+          const metadata: Record<string, string> = {};
+          if (token.keyId !== undefined) metadata.keyId = String(token.keyId);
+          try {
+            const account = await fetchPhalaCloudAccount({
+              baseURL,
+              apiKey: token.accessToken,
+              ...(fetch ? { fetch } : {}),
+            });
+            if (account.username) metadata.username = account.username;
+            if (account.workspaceName) metadata.workspaceName = account.workspaceName;
+            if (account.workspaceSlug) metadata.workspaceSlug = account.workspaceSlug;
+          } catch {
+            // Account metadata is optional; the issued inference key remains valid.
+          }
           return {
             type: "success",
             key: token.accessToken,
-            ...(token.keyId === undefined ? {} : { metadata: { keyId: String(token.keyId) } }),
+            ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
           };
         },
       };

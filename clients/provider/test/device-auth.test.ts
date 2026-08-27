@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startDeviceAuthorization } from "../src/device-auth.ts";
+import { startPhalaCloudDeviceAuthorization } from "../src/device-auth.ts";
 
 test("completes a validated RFC 8628 device flow", async () => {
   const requests: Request[] = [];
@@ -39,10 +39,9 @@ test("completes a validated RFC 8628 device flow", async () => {
     return response;
   };
 
-  const authorization = await startDeviceAuthorization({
+  const authorization = await startPhalaCloudDeviceAuthorization({
     baseURL: "https://cloud.example",
     clientId: "coding-agent",
-    scope: "redpill:api-key",
     fetch,
   });
   const token = await authorization.poll();
