@@ -14,9 +14,10 @@ pi install npm:pi-provider-redpill
 export REDPILL_LLM_API_KEY=...
 ```
 
-The default gateway is `https://api.redpill.ai/v1`; override with `REDPILL_BASE_URL`.
-`api.redpill.ai`, `tee.redpill.ai`, and `inference.phala.com` are the same backend
-and accept the same key.
+The default ACI gateway is `https://tee.redpill.ai/v1`; override with
+`REDPILL_BASE_URL`. `tee.redpill.ai` and `inference.phala.com` enforce TEE-only
+routing and accept the same key. `api.redpill.ai` is the general API endpoint,
+not the default verified transport.
 
 ```text
 /model redpill/deepseek/deepseek-v4-flash
