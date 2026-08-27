@@ -49,13 +49,15 @@ temporary directory. It never writes package artifacts into the repository.
 ## Trusted publishing
 
 The package names are new, so the first release must create them before their
-npm settings pages exist. Create a short-lived granular access token with only
-the package/scope write access needed for this bootstrap and the 2FA bypass
-required for unattended publishing. Put it in the protected GitHub `npm`
-environment as `NPM_TOKEN`, publish the first `clients-v0.2.0` release through
-the workflow, then immediately remove and revoke it. Because the bootstrap
-publish still runs on a GitHub-hosted runner with `--provenance`, the first
-release also receives npm provenance.
+npm settings pages exist. Create a one-day granular access token from an npm
+user who can publish in the `@phala` scope. Because none of the packages exist
+yet, the token cannot select them individually: temporarily grant **All
+Packages** read/write access and enable **Bypass 2FA**. Organization permission
+alone does not grant package publishing permission. Put the token in the
+protected GitHub `npm` environment as `NPM_TOKEN`, publish the first
+`clients-v0.2.0` release through the workflow, then immediately remove and
+revoke it. Because the bootstrap publish still runs on a GitHub-hosted runner
+with `--provenance`, the first release also receives npm provenance.
 
 For the two unscoped packages, use the npm organization UI or `npm access grant`
 to grant the chosen Phala release team read/write access before revoking the
