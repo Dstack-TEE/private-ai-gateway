@@ -77,7 +77,7 @@ jobs:
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version is already published; skipping"
             else
-              npm publish "$directory" --access public --provenance
+              npm publish "./$directory" --access public --provenance
             fi
           }
 
