@@ -1,0 +1,46 @@
+{
+  "name": "private-ai-gateway-clients",
+  "version": "0.4.0",
+  "private": true,
+  "description": "ACI TypeScript clients and coding-agent providers",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "verifier-ts",
+    "provider",
+    "pi-provider/packages/*",
+    "opencode-provider/packages/*"
+  ],
+  "scripts": {
+    "clean": "npm run clean --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "test:bun": "npm run test:bun -w @phala/aci-verifier",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "npm run format --workspaces --if-present",
+    "format:check": "npm run format:check --workspaces --if-present",
+    "pack:check": "npm run pack:check --workspaces --if-present",
+    "lint:packages": "bash package-lint.sh"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@earendil-works/pi-tui": "^0.84.3",
+    "@j178/prek": "^0.4.14",
+    "@opencode-ai/plugin": "1.18.23",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.80.0",
+    "publint": "^0.3.24",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "bun": ">=1.4.0"
+  },
+  "packageManager": "npm@11.16.0"
+}

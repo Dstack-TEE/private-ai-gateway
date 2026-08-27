@@ -156,3 +156,13 @@ test("mapAciServerModel: qwen model gets qwen thinkingFormat compat", () => {
     "max_tokens",
   );
 });
+
+test("explicit openai thinking keeps the model-specific max-token field", () => {
+  const config = {
+    ...DEFAULT_ACI_CLOUD_CONFIG,
+    models: { ...DEFAULT_ACI_CLOUD_CONFIG.models, thinkingFormat: "openai" as const },
+  };
+  const mapped = mapAciServerModel({ id: "deepseek/deepseek-r1", is_tee: true }, config);
+  assert.ok(mapped);
+  assert.equal(mapped.compat?.maxTokensField, "max_tokens");
+});

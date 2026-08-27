@@ -11,6 +11,7 @@
     "skipLibCheck": true,
     "types": ["node"],
     "paths": {
+      "@phala/aci-provider": ["../provider/src/index.ts"],
       "@phala/pi-provider-aci": ["./packages/pi-provider-aci/index.ts"]
     }
   },

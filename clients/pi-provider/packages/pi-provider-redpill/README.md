@@ -5,7 +5,8 @@ Attested AI for Pi, powered by [private-ai-gateway].
 A thin, Redpill-branded distribution of the vendor-neutral
 [`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci): standard
 chat plus **attested TLS (SPKI) pinning** — the prompt and reply are readable
-only by the attested workload.
+only by the attested workload. Every response receipt is verified before Pi
+can finish the model turn or continue its tool loop.
 
 ## Install
 
@@ -23,8 +24,8 @@ not the default verified transport.
 /model redpill/deepseek/deepseek-v4-flash
 ```
 
-Config: `/redpill-settings` · Attestation status: `/attestation` · Verified
-receipt audit: `/aci-receipt`
+Config: `/redpill-settings` · Attestation status: `/redpill-attestation` · Receipt
+history and audit: `/redpill-receipt` · Session inspection: `/redpill-session`
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

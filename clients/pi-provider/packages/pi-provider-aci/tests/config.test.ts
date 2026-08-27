@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   DEFAULT_ACI_CLOUD_CONFIG,
+  toAciProviderConfig,
   validateAciCloudConfig,
   type AciCloudConfig,
 } from "../src/config.ts";
@@ -20,6 +21,7 @@ test("validating a concrete config passes and preserves values", () => {
   assert.equal(validated.models.isTeeOnly, true);
   assert.equal(validated.models.thinkingFormat, "auto");
   assert.deepEqual(validated.trust, {});
+  assert.equal(toAciProviderConfig(validated).receipts.verification, "response");
 });
 
 test("validateAciCloudConfig: normalizes accepted compose hashes", () => {
@@ -32,14 +34,14 @@ test("validateAciCloudConfig: normalizes accepted compose hashes", () => {
 
 test("validateAciCloudConfig: rejects malformed compose hashes", () => {
   const bad = { ...BASE, trust: { acceptedComposeHashes: ["not-a-hash"] } };
-  assert.throws(() => validateAciCloudConfig(bad), /64-character SHA-256 hex digest/);
+  assert.throws(() => validateAciCloudConfig(bad), /64-character SHA-256 digest/);
 });
 
 test("validateAciCloudConfig: rejects empty trust policies", () => {
   for (const trust of [{ acceptedComposeHashes: [] }, { acceptedSessionIds: [] }]) {
     assert.throws(
       () => validateAciCloudConfig({ ...BASE, trust }),
-      /expected a non-empty array when supplied/,
+      /expected a non-empty string array/,
     );
   }
 });
@@ -57,10 +59,7 @@ test("validateAciCloudConfig: accepts only canonical attested-session ids", () =
 
 test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {
   const bad = { ...BASE, models: { ...BASE.models, thinkingFormat: "bogus" } };
-  assert.throws(
-    () => validateAciCloudConfig(bad),
-    /expected "auto" \| "qwen" \| "openai" \| "off"/,
-  );
+  assert.throws(() => validateAciCloudConfig(bad), /expected "auto", "qwen", "openai", or "off"/);
 });
 
 test("validateAciCloudConfig: rejects non-boolean isTeeOnly", () => {
@@ -70,7 +69,14 @@ test("validateAciCloudConfig: rejects non-boolean isTeeOnly", () => {
 
 test("validateAciCloudConfig: rejects empty baseUrl", () => {
   const bad = { ...BASE, baseUrl: "" };
-  assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty string/);
+  assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty URL/);
+});
+
+test("validateAciCloudConfig: requires the concrete persisted shape", () => {
+  assert.throws(
+    () => validateAciCloudConfig({ models: BASE.models, trust: {} }),
+    /baseUrl.*required field is missing/,
+  );
 });
 
 test("validateAciCloudConfig: accepts optional allowlist of non-empty strings", () => {
@@ -88,12 +94,4 @@ test("validateAciCloudConfig: allowlist with empty string is rejected", () => {
     models: { ...BASE.models, allowlist: [""] },
   };
   assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty string/);
-});
-
-test("validateAciCloudConfig: defaultModel is optional", () => {
-  const validated = validateAciCloudConfig({
-    ...BASE,
-    defaultModel: "aci/test-model",
-  });
-  assert.equal(validated.defaultModel, "aci/test-model");
 });

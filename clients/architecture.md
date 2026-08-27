@@ -24,6 +24,8 @@ flowchart LR
 
   subgraph local[Client machine]
     pi[Pi provider<br/>original PR, refactored]:::pr
+    ocadapter[OpenCode provider<br/>new]:::refactor
+    core[ACI provider core<br/>new]:::refactor
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
     opencode[OpenCode on Bun]:::external
     agents[Codex and Claude Code]:::external
@@ -32,9 +34,10 @@ flowchart LR
     bun[Bun fetch adapter<br/>current refactor]:::refactor
     serve[aci serve local proxy<br/>existing upstream]:::upstream
 
-    pi --> connect
+    pi --> core
+    opencode --> ocadapter --> core
+    core --> connect
     sdk --> connect
-    opencode --> connect
     connect -->|Node host| node
     connect -->|Bun host| bun
     agents --> serve
@@ -86,16 +89,26 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
+| Framework-neutral model, lifecycle, policy, status, receipt and session provider core | Current OpenCode work |
+| Native OpenCode v1 plugin plus RedPill and Phala Cloud distributions | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
 | Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Current refactor |
 | TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Current refactor |
-| Streaming wire-digest capture and on-demand receipt/session audit in Node/Pi | Current refactor |
+| Streaming wire-digest capture, Pi response verification and on-demand receipt/session audit | Current refactor |
 | Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
 | Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
+| Fail-closed OpenCode provider ownership, live model discovery, end-of-stream receipt audit and read-only inspection tool | Current OpenCode work |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
+
+Account authentication is outside the ACI trust protocol. Redpill adapters
+currently accept API keys only. Phala Cloud's device authorization and account
+metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
+attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
+should be added when that product endpoint exists, without changing the
+verifier.
 
 `aci serve` is not a new protocol translator and was not introduced by the Pi
 integration. It is the existing Rust local verifying proxy. It preserves the
@@ -168,7 +181,7 @@ deployment release process must still close the trust loop:
 5. Exercise both Rust and TypeScript clients against the same accepted and
    rejected measurements.
 
-The repository can publish all four npm packages in dependency order from a
+The repository can publish all eight npm packages in dependency order from a
 signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.

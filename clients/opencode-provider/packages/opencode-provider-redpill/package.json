@@ -1,0 +1,66 @@
+{
+  "name": "opencode-provider-redpill",
+  "version": "0.4.0",
+  "description": "RedPill ACI provider for OpenCode",
+  "keywords": [
+    "aci",
+    "coding-agent",
+    "confidential-ai",
+    "opencode",
+    "opencode-plugin",
+    "redpill",
+    "tee"
+  ],
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/opencode-provider",
+  "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
+    "directory": "clients/opencode-provider/packages/opencode-provider-redpill"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "lint": "oxlint .",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run check && npm run lint && npm run format:check"
+  },
+  "dependencies": {
+    "@phala/aci-provider": "^0.4.0",
+    "@phala/opencode-provider-aci": "^0.4.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.23 <2"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "opencode": {
+    "type": "plugin"
+  }
+}

@@ -1,14 +1,18 @@
 # npm client releases
 
-The four client packages use one coordinated version and publish in dependency
+The eight client packages use one coordinated version and publish in dependency
 order:
 
 1. `@phala/aci-verifier`
-2. `@phala/pi-provider-aci`
-3. `pi-provider-redpill`
-4. `pi-provider-phala-cloud`
+2. `@phala/aci-provider`
+3. `@phala/pi-provider-aci`
+4. `pi-provider-redpill`
+5. `pi-provider-phala-cloud`
+6. `@phala/opencode-provider-aci`
+7. `opencode-provider-redpill`
+8. `opencode-provider-phala-cloud`
 
-All four packages are managed by the Phala npm organization. The two branded
+All eight packages are managed by the Phala npm organization. The four branded
 provider names intentionally remain unscoped. After their bootstrap publish,
 grant a Phala organization release team read/write access to those packages;
 organization management does not require renaming them into the `@phala`
@@ -26,29 +30,34 @@ two pinned fetch transports.
 From the repository root:
 
 ```bash
-npm --prefix clients/verifier-ts ci
-npm --prefix clients/verifier-ts test
-npm --prefix clients/verifier-ts run test:bun
-npm --prefix clients/verifier-ts run lint:package
-
-npm --prefix clients/pi-provider ci
-npm --prefix clients/pi-provider run check
-npm --prefix clients/pi-provider run lint
-npm --prefix clients/pi-provider run format:check
-npm --prefix clients/pi-provider test
-npm --prefix clients/pi-provider run lint:packages
+npm --prefix clients ci
+npm --prefix clients run build
+npm --prefix clients run check
+npm --prefix clients test
+npm --prefix clients run test:bun
+npm --prefix clients run lint
+npm --prefix clients run format:check
+npm --prefix clients run lint:packages
 
 bash clients/package-smoke.sh
 ```
 
-The smoke test packs all four packages, installs the tarballs together in a
+The smoke test packs all eight packages, installs the tarballs together in a
 temporary clean project, proves `/runtime` selects the Node and Bun entries in
 their respective runtimes, and imports every public ESM entry.
 
 ## Trusted publishing
 
-All four packages publish through npm trusted publishing. Each package's
-trusted publisher is configured with:
+The four existing packages already publish through npm trusted publishing. The
+four new `0.4.0` packages require the same trusted-publisher configuration
+after their bootstrap publish:
+
+- `@phala/aci-provider`
+- `@phala/opencode-provider-aci`
+- `opencode-provider-redpill`
+- `opencode-provider-phala-cloud`
+
+Use these settings for each package:
 
 - organization/user: `Dstack-TEE`
 - repository: `private-ai-gateway`
@@ -59,7 +68,7 @@ trusted publisher is configured with:
 The workflow authenticates with npm through a short-lived OIDC identity.
 
 Create and publish a GitHub Release whose tag is `clients-v<version>`, for
-example `clients-v0.3.0`. The workflow checks that the tag matches every package
+example `clients-v0.4.0`. The workflow checks that the tag matches every package
 manifest, runs all release gates, then publishes in dependency order. Do not
 move or reuse a release tag after publication; npm versions are immutable.
 

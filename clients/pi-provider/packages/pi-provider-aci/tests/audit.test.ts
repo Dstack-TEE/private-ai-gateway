@@ -33,15 +33,17 @@ test("summarizeReceipt keeps the signed routing fields relevant to an audit", ()
 });
 
 test("summarizeSession renders the attested session identity and lifetime", () => {
-  const text = summarizeSession({
-    session_id: "as_123",
-    api_version: "aci/1",
-    upstream_name: "phala",
-    endpoint: "https://inference.phala.com/v1",
-    verifier_id: "v1",
-    established_at: 1700000000,
-    expires_at: 1700600000,
-  }).join("\n");
+  const text = summarizeSession(
+    {
+      api_version: "aci/1",
+      upstream_name: "phala",
+      endpoint: "https://inference.phala.com/v1",
+      verifier_id: "v1",
+      established_at: 1700000000,
+      expires_at: 1700600000,
+    },
+    "as_123",
+  ).join("\n");
   assert.match(text, /Session: as_123/);
   assert.match(text, /Upstream: phala/);
   assert.match(text, /Expires:/);

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["../../packages/opencode-provider-phala-cloud/dist/index.js"],
+  "enabled_providers": ["phala"]
+}

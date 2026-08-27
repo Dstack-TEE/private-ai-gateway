@@ -3,20 +3,23 @@
 Vendor-neutral Pi provider for an Attested Confidential Inference (ACI)
 gateway. It establishes an instance-scoped verified connection with
 `@phala/aci-verifier`, injects the scoped transport into Pi, discovers models,
-and exposes attestation, receipt, and session audit commands.
+verifies every inference receipt before stream completion, and exposes
+attestation, receipt, and session audit commands.
 
 ```bash
 pi install npm:@phala/pi-provider-aci
 export ACI_BASE_URL=https://gateway.example/v1
-export ACI_LLM_API_KEY=...
+export ACI_API_KEY=...
 pi
 ```
 
 The provider fails closed when workload or channel verification fails. For a
 production reviewed-release claim, configure `ACI_ACCEPTED_COMPOSE_HASHES` with
 the comma-separated compose hashes published by the deployment operator.
-`/aci-receipt [id]` verifies a recorded exchange's signed receipt, exact wire
-body hashes, and cited attested session on demand.
+`/aci-receipt [id]` displays or re-verifies a recorded exchange's signed
+receipt, exact wire body hashes, and cited attested session. `/aci-session <id>`
+fetches the public session artifact over the pinned connection and validates it
+locally; it does not require an inference API key.
 
 See the [full client documentation](https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider)
 for configuration, trust boundaries, and branded packages.
