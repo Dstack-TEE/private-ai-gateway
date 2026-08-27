@@ -48,22 +48,8 @@ temporary directory. It never writes package artifacts into the repository.
 
 ## Trusted publishing
 
-The package names are new, so the first release must create them before their
-npm settings pages exist. Create a one-day granular access token from an npm
-user who can publish in the `@phala` scope. Because none of the packages exist
-yet, the token cannot select them individually: temporarily grant **All
-Packages** read/write access and enable **Bypass 2FA**. Organization permission
-alone does not grant package publishing permission. Put the token in the
-protected GitHub `npm` environment as `NPM_TOKEN`, publish the first
-`clients-v0.2.0` release through the workflow, then immediately remove and
-revoke it. Because the bootstrap publish still runs on a GitHub-hosted runner
-with `--provenance`, the first release also receives npm provenance.
-
-For the two unscoped packages, use the npm organization UI or `npm access grant`
-to grant the chosen Phala release team read/write access before revoking the
-bootstrap token.
-
-After that bootstrap, configure an npm trusted publisher for each package with:
+All four packages publish through npm trusted publishing. Each package's
+trusted publisher is configured with:
 
 - organization/user: `Dstack-TEE`
 - repository: `private-ai-gateway`
@@ -71,9 +57,8 @@ After that bootstrap, configure an npm trusted publisher for each package with:
 - GitHub environment: `npm`
 - allowed action: `npm publish`
 
-The workflow prefers npm's short-lived OIDC identity when the trusted publisher
-exists and only falls back to `NPM_TOKEN` for the bootstrap. No npm token should
-remain in repository or environment secrets after the first release.
+The workflow uses npm's short-lived OIDC identity. It does not require an npm
+token, and no npm token should be stored in repository or environment secrets.
 
 Create and publish a GitHub Release whose tag is `clients-v<version>`, for
 example `clients-v0.2.0`. The workflow checks that the tag matches every package

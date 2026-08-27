@@ -6,6 +6,7 @@ import { AciConnectionError } from './types.js';
 export function createPinnedServerIdentityCheck(
   expectedHostname: string,
   spkiPins: readonly string[],
+  onVerified?: (spkiSha256: string) => void,
 ): NonNullable<import('node:tls').ConnectionOptions['checkServerIdentity']> {
   const expectedPins = spkiPins.map(normalizePin);
   if (expectedPins.length === 0) {
@@ -26,7 +27,10 @@ export function createPinnedServerIdentityCheck(
         `could not compute TLS SPKI for ${hostname}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (expectedPins.some((expected) => hexEqual(actual, expected))) return undefined;
+    if (expectedPins.some((expected) => hexEqual(actual, expected))) {
+      onVerified?.(actual);
+      return undefined;
+    }
     return new Error(
       `TLS SPKI pin mismatch for ${hostname}: peer=${actual} expected=${expectedPins.join(',')}`,
     );

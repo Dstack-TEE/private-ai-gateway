@@ -98,7 +98,7 @@ plugin injects the shared ACI client. First add the verifier dependency:
 ```json
 {
   "dependencies": {
-    "@phala/aci-verifier": "^0.2.0"
+    "@phala/aci-verifier": "^0.2.2"
   }
 }
 ```

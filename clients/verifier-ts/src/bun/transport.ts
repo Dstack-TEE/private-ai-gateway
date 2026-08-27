@@ -6,7 +6,14 @@ import type {
 } from '../runtime/transport.js';
 
 export function createPinnedTransport(options: PinnedTransportOptions): PinnedTransport {
-  const checkServerIdentity = createPinnedServerIdentityCheck(options.hostname, options.spkiPins);
+  let observedSpkiSha256: string | undefined;
+  const checkServerIdentity = createPinnedServerIdentityCheck(
+    options.hostname,
+    options.spkiPins,
+    (value) => {
+      observedSpkiSha256 = value;
+    },
+  );
   let closed = false;
 
   return {
@@ -42,6 +49,9 @@ export function createPinnedTransport(options: PinnedTransportOptions): PinnedTr
             { cause: error },
           );
         });
+    },
+    observedSpkiSha256() {
+      return observedSpkiSha256;
     },
     async close() {
       closed = true;

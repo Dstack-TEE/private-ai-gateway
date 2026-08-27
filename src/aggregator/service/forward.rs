@@ -699,18 +699,15 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // A per-instance (Chutes) binding excludes the shared, nonce-bound raw
-            // evidence so re-verifying the same instance is a no-op; a single
-            // channel keeps the event's evidence.
-            let evidence = if instance.is_some() {
-                EvidenceRef::default()
-            } else {
-                event
-                    .evidence
-                    .as_ref()
-                    .map(EvidenceRef::from_value)
-                    .unwrap_or_default()
-            };
+            // Chutes verifies a fleet in one nonce-bound evidence bundle, then
+            // exposes one channel binding per instance. Each per-instance
+            // session must retain that bundle so a receipt citation remains
+            // independently auditable under ACI section 9.2.
+            let evidence = event
+                .evidence
+                .as_ref()
+                .map(EvidenceRef::from_value)
+                .unwrap_or_default();
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),

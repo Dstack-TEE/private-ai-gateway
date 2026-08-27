@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   jcsBytes,
+  computeKeysetDigest,
+  computeReportData,
   verifyReportBinding,
   reportTranscript,
   receiptTranscript,
@@ -24,6 +26,7 @@ import {
   type WorkloadKeyset,
 } from '../src/index.js';
 import { makeMeasuredComposeReport } from './fixtures.js';
+import { bindReportTranscriptChannel } from '../src/transcript.js';
 
 const report = JSON.parse(
   readFileSync(new URL('../../test/fixtures/aci_report.json', import.meta.url), 'utf8'),
@@ -75,6 +78,33 @@ test('transcript: a wrong nonce fails the binding chain (id-2)', async () => {
   const { lines, verdict } = await reportTranscript(report, 'a'.repeat(64), { now: FIXED_NOW });
   assert.equal(verdict.verified, false);
   assert.equal(lines.find((l) => l.id === 'id-2')?.status, 'fail');
+});
+
+test('transcript: a runtime-observed TLS peer satisfies id-6', async () => {
+  const observedSpkiSha256 = 'ab'.repeat(32);
+  const channelReport = structuredClone(report);
+  const workloadKeyset: WorkloadKeyset = {
+    not_after: FIXED_NOW + 300,
+    receipt_signing_keys: [],
+    e2ee_public_keys: [],
+    tls_public_keys: [{ domain: 'gateway.example', spki_sha256: observedSpkiSha256 }],
+  };
+  channelReport.attestation.workload_keyset = workloadKeyset;
+  const digest = await computeKeysetDigest(workloadKeyset);
+  channelReport.workload_keyset_digest = digest;
+  channelReport.attestation.report_data = await computeReportData(digest, FIXTURE_NONCE);
+
+  const unbound = await reportTranscript(channelReport, FIXTURE_NONCE, {
+    now: FIXED_NOW,
+    online: true,
+  });
+  assert.equal(unbound.lines.find((line) => line.id === 'id-6')?.status, 'fail');
+
+  const bound = bindReportTranscriptChannel(unbound, {
+    observedSpkiSha256,
+    host: 'gateway.example',
+  });
+  assert.equal(bound.lines.find((line) => line.id === 'id-6')?.status, 'pass');
 });
 
 test('transcript: compose policy accepts reviewed releases and rejects other measurements', async () => {

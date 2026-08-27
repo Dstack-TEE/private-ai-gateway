@@ -16,9 +16,16 @@ type NodeFetch = (
 const nodeFetch: NodeFetch = globalThis.fetch;
 
 export function createPinnedTransport(options: PinnedTransportOptions): PinnedTransport {
+  let observedSpkiSha256: string | undefined;
   const tls = {
     ...(options.ca === undefined ? {} : { ca: options.ca }),
-    checkServerIdentity: createPinnedServerIdentityCheck(options.hostname, options.spkiPins),
+    checkServerIdentity: createPinnedServerIdentityCheck(
+      options.hostname,
+      options.spkiPins,
+      (value) => {
+        observedSpkiSha256 = value;
+      },
+    ),
   };
   const dispatcher: PinnedDispatcher = options.proxy
     ? new ProxyAgent({ uri: options.proxy, allowH2: false, requestTls: tls })
@@ -49,6 +56,9 @@ export function createPinnedTransport(options: PinnedTransportOptions): PinnedTr
             { cause: error },
           );
         });
+    },
+    observedSpkiSha256() {
+      return observedSpkiSha256;
     },
     async close() {
       if (closed) return;

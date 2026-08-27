@@ -459,7 +459,7 @@ export async function reportTranscript(
     ),
   );
 
-  lines.push(channelLine(report, verification.keyset, options));
+  lines.push(channelLine(verification.keyset, options));
 
   return {
     lines,
@@ -469,13 +469,22 @@ export async function reportTranscript(
   };
 }
 
+/** @internal Re-appraise id-6 after a runtime transport observes the TLS peer. */
+export function bindReportTranscriptChannel(
+  transcript: ReportTranscript,
+  channel: NonNullable<TranscriptOptions['channel']>,
+): ReportTranscript {
+  const channelCheck = channelLine(transcript.verification.keyset, { online: true, channel });
+  const lines = transcript.lines.map((entry) => (entry.id === 'id-6' ? channelCheck : entry));
+  return { ...transcript, lines, verdict: computeVerdict(lines) };
+}
+
 /**
  * id-6 — the channel actually used (§9.1(6)): a TLS SPKI the caller's own
  * stack observed, matched against the attested keyset. Online with none,
  * the channel is unbound (§1.1) and the check fails; offline it is a skip.
  */
 function channelLine(
-  report: AttestationReport,
   keyset: WorkloadKeyset | undefined,
   options: TranscriptOptions,
 ): TranscriptLine {
