@@ -6,6 +6,7 @@ export {
   type AciProviderStatus,
 } from "./provider.ts";
 export {
+  aciProviderConfigInputFromEnv,
   AciProviderConfigError,
   resolveAciProviderConfig,
   type AciProviderConfig,
@@ -25,6 +26,12 @@ export {
   type AciServerModel,
   type DiscoverAciModelsOptions,
 } from "./models.ts";
+export {
+  auditAciSession,
+  isAciSessionId,
+  type AciSessionAudit,
+  type AciSessionCheck,
+} from "./session.ts";
 export {
   DEFAULT_ACI_PROVIDER_PROFILE,
   resolveAciProviderProfile,

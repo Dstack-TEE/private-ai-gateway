@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { getGlobalAciCloudConfigPath } from "../src/config.ts";
-import { getBaseUrl } from "../src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile } from "../src/profile.ts";
 
 test("resolveProfile fills neutral defaults for unset fields", () => {
@@ -28,35 +27,6 @@ test("resolveProfile preserves a branded API-key login", () => {
   assert.equal(p.apiKeyAuth?.login, login);
 });
 
-test("getBaseUrl: profile default wins when no env is set", () => {
-  const profile = resolveProfile({
-    envPrefix: "ACI",
-    defaultBaseURL: "https://default.test/v1",
-    baseURLAliases: ["PHALA_BASE_URL"],
-  });
-  assert.equal(getBaseUrl(profile, {}), "https://default.test/v1");
-});
-
-test("getBaseUrl: prefixed env var overrides the profile default", () => {
-  const profile = resolveProfile({
-    envPrefix: "ACI",
-    defaultBaseURL: "https://default.test/v1",
-  });
-  assert.equal(getBaseUrl(profile, { ACI_BASE_URL: "https://env.test/v1" }), "https://env.test/v1");
-});
-
-test("getBaseUrl: brand alias env var is honored", () => {
-  const profile = resolveProfile({
-    envPrefix: "ACI",
-    defaultBaseURL: "https://default.test/v1",
-    baseURLAliases: ["PHALA_BASE_URL"],
-  });
-  assert.equal(
-    getBaseUrl(profile, { PHALA_BASE_URL: "https://alias.test/v1" }),
-    "https://alias.test/v1",
-  );
-});
-
 test("resolved profiles keep endpoint and config identity instance-scoped", () => {
   const redpill = resolveProfile({
     providerId: "redpill",
@@ -68,13 +38,8 @@ test("resolved profiles keep endpoint and config identity instance-scoped", () =
     envPrefix: "PHALA",
     defaultBaseURL: "https://inference.phala.test/v1",
   });
-  const env = {
-    REDPILL_BASE_URL: "https://redpill-env.test/v1",
-    PHALA_BASE_URL: "https://phala-env.test/v1",
-  };
-
-  assert.equal(getBaseUrl(redpill, env), "https://redpill-env.test/v1");
-  assert.equal(getBaseUrl(phala, env), "https://phala-env.test/v1");
+  assert.equal(redpill.defaultBaseURL, "https://api.redpill.test/v1");
+  assert.equal(phala.defaultBaseURL, "https://inference.phala.test/v1");
   assert.equal(
     getGlobalAciCloudConfigPath("/home/test", redpill.providerId),
     "/home/test/.pi/providers/redpill/config.json",

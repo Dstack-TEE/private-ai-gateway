@@ -8,7 +8,6 @@ import {
 } from "@phala/aci-provider";
 
 import { toAciProviderConfig, type AciCloudConfig } from "./config.ts";
-import { DEFAULT_DISCOVERY_TIMEOUT_MS } from "./constants.ts";
 
 export type AciPiModel = Omit<Model<"openai-completions">, "api" | "provider" | "baseUrl">;
 
@@ -19,8 +18,7 @@ interface InferredThinking {
   supportsReasoningEffort: boolean;
 }
 
-export function inferThinkingFormat(modelId: string): InferredThinking {
-  const format = inferAciThinkingFormat(modelId);
+function piThinking(modelId: string, format: InferredThinking["format"]): InferredThinking {
   if (format === "qwen") {
     return {
       reasoning: true,
@@ -47,21 +45,12 @@ export function inferThinkingFormat(modelId: string): InferredThinking {
   };
 }
 
-function toPiModel(
-  model: AciModel,
-  configuredFormat: AciCloudConfig["models"]["thinkingFormat"],
-): AciPiModel {
-  const inferred = inferThinkingFormat(model.id);
-  const thinking: InferredThinking =
-    configuredFormat === "auto"
-      ? inferred
-      : {
-          reasoning: model.reasoning,
-          format: model.thinkingFormat,
-          maxTokensField:
-            model.thinkingFormat === "openai" ? "max_completion_tokens" : "max_tokens",
-          supportsReasoningEffort: model.thinkingFormat === "openai",
-        };
+export function inferThinkingFormat(modelId: string): InferredThinking {
+  return piThinking(modelId, inferAciThinkingFormat(modelId));
+}
+
+function toPiModel(model: AciModel): AciPiModel {
+  const thinking = piThinking(model.id, model.thinkingFormat);
   return {
     id: model.id,
     name: model.name,
@@ -85,7 +74,7 @@ export function mapAciServerModel(
   config: AciCloudConfig,
 ): AciPiModel | null {
   const mapped = mapAciModel(model, toAciProviderConfig(config));
-  return mapped ? toPiModel(mapped, config.models.thinkingFormat) : null;
+  return mapped ? toPiModel(mapped) : null;
 }
 
 export interface DiscoverAciModelsOptions {
@@ -108,11 +97,11 @@ export async function discoverAciModels(
     config: toAciProviderConfig({ ...config, baseUrl: options.baseUrl ?? config.baseUrl }),
     fetch: options.fetch ?? globalThis.fetch,
     ...(options.signal ? { signal: options.signal } : {}),
-    timeoutMs: options.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
   return {
     raw: [...catalog.raw],
-    models: catalog.models.map((model) => toPiModel(model, config.models.thinkingFormat)),
+    models: catalog.models.map(toPiModel),
   };
 }
 

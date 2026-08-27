@@ -37,8 +37,9 @@ and native coding-agent integrations:
 - [`provider`](provider) — `@phala/aci-provider`, the framework-neutral ACI
   provider. It owns verified connection lifecycle, live model discovery,
   TEE-only and allowlist filtering, model capability mapping, bounded receipt
-  history, and response-completion receipt verification. Pi and OpenCode use
-  this package rather than implementing those behaviors separately.
+  history, response-completion receipt verification, and content-addressed
+  session inspection. Pi and OpenCode use this package rather than implementing
+  those behaviors separately.
 - [`pi-provider`](pi-provider) — a [pi](https://pi.dev/) provider
   extension that turns the gateway (or any ACI service) into a first-class
   chat provider in pi's model picker, with **attested TLS (SPKI) pinning** as
@@ -63,9 +64,10 @@ and native coding-agent integrations:
   OpenCode's config, auth, model, reasoning, and lifecycle hooks;
   `opencode-provider-redpill` supplies API-key authentication, while
   `opencode-provider-phala-cloud` also adds Phala Cloud device login. Both use
-  shared branded profiles. It verifies every receipt
-  before the response stream completes, so a failed audit stops the
-  generation/tool loop.
+  shared branded profiles. It verifies every receipt before the response stream
+  completes, so a failed audit stops the generation/tool loop, and adds a
+  provider-scoped read-only inspection tool for connection, attestation,
+  receipt, and session status.
 
 SDKs that accept a function can use `connectAci().fetch` directly. Native Pi
 and OpenCode integrations use the provider packages above. Agents that only

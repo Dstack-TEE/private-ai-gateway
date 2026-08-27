@@ -88,28 +88,79 @@ function validateSessionIds(value: unknown): readonly string[] | undefined {
   });
 }
 
+function envValue(env: Record<string, string | undefined>, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = env[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function commaSeparated(value: string | undefined): string[] | undefined {
+  return value?.split(",").map((item) => item.trim());
+}
+
+function booleanEnv(value: string | undefined): boolean | string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.toLowerCase();
+  if (normalized === "1" || normalized === "true") return true;
+  if (normalized === "0" || normalized === "false") return false;
+  return value;
+}
+
+/** Read the canonical ACI environment variables for any host adapter. */
+export function aciProviderConfigInputFromEnv(
+  profile: AciProviderProfile,
+  env: Record<string, string | undefined> = process.env,
+): AciProviderConfigInput {
+  const prefix = profile.envPrefix;
+  const baseURL = envValue(
+    env,
+    `${prefix}_BASE_URL`,
+    `${prefix}_CLOUD_API_PREFIX`,
+    `${prefix}_CLOUD_BASE_URL`,
+    ...(profile.baseURLAliases ?? []),
+  );
+  const isTeeOnly = booleanEnv(envValue(env, `${prefix}_IS_TEE_ONLY`, `${prefix}_TEE_ONLY`));
+  const thinkingFormat = envValue(env, `${prefix}_THINKING_FORMAT`);
+  const allowlist = commaSeparated(envValue(env, `${prefix}_MODEL_ALLOWLIST`));
+  const acceptedComposeHashes = commaSeparated(envValue(env, `${prefix}_ACCEPTED_COMPOSE_HASHES`));
+  const acceptedSessionIds = commaSeparated(envValue(env, `${prefix}_ACCEPTED_SESSION_IDS`));
+
+  return {
+    ...(baseURL ? { baseURL } : {}),
+    ...(isTeeOnly !== undefined || thinkingFormat !== undefined || allowlist !== undefined
+      ? {
+          models: {
+            ...(isTeeOnly !== undefined ? { isTeeOnly } : {}),
+            ...(thinkingFormat !== undefined ? { thinkingFormat } : {}),
+            ...(allowlist !== undefined ? { allowlist } : {}),
+          },
+        }
+      : {}),
+    ...(acceptedComposeHashes !== undefined || acceptedSessionIds !== undefined
+      ? {
+          trust: {
+            ...(acceptedComposeHashes !== undefined ? { acceptedComposeHashes } : {}),
+            ...(acceptedSessionIds !== undefined ? { acceptedSessionIds } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 export function resolveAciProviderConfig(
   profile: AciProviderProfile,
   input: AciProviderConfigInput = {},
   env: Record<string, string | undefined> = process.env,
 ): AciProviderConfig {
-  const envValue = (...names: string[]) => {
-    for (const name of names) {
-      const value = env[name]?.trim();
-      if (value) return value;
-    }
-    return undefined;
-  };
-  const prefix = profile.envPrefix;
-  const baseURL =
-    (typeof input.baseURL === "string" ? input.baseURL.trim() : "") ||
-    envValue(
-      `${prefix}_BASE_URL`,
-      `${prefix}_CLOUD_API_PREFIX`,
-      ...(profile.baseURLAliases ?? []),
-    ) ||
-    profile.defaultBaseURL;
-  if (!baseURL) fail("/baseURL", "expected a non-empty URL");
+  const envInput = aciProviderConfigInputFromEnv(profile, env);
+  const rawBaseURL =
+    input.baseURL === undefined ? (envInput.baseURL ?? profile.defaultBaseURL) : input.baseURL;
+  if (typeof rawBaseURL !== "string" || rawBaseURL.trim().length === 0) {
+    fail("/baseURL", "expected a non-empty URL");
+  }
+  const baseURL = rawBaseURL.trim();
   try {
     const parsed = new URL(baseURL);
     if (parsed.protocol !== "https:") fail("/baseURL", "expected an https URL");
@@ -118,45 +169,43 @@ export function resolveAciProviderConfig(
     fail("/baseURL", "expected a valid URL");
   }
 
-  const teeEnv = envValue(`${prefix}_IS_TEE_ONLY`, `${prefix}_TEE_ONLY`);
   const isTeeOnly =
-    input.models?.isTeeOnly ??
-    (teeEnv === undefined ? true : teeEnv === "1" || teeEnv.toLowerCase() === "true");
+    input.models?.isTeeOnly === undefined
+      ? (envInput.models?.isTeeOnly ?? true)
+      : input.models.isTeeOnly;
   if (typeof isTeeOnly !== "boolean") fail("/models/isTeeOnly", "expected a boolean");
 
   const thinkingFormat =
-    input.models?.thinkingFormat ?? envValue(`${prefix}_THINKING_FORMAT`) ?? "auto";
+    input.models?.thinkingFormat === undefined
+      ? (envInput.models?.thinkingFormat ?? "auto")
+      : input.models.thinkingFormat;
   if (!(["auto", "qwen", "openai", "off"] as const).includes(thinkingFormat as never)) {
     fail("/models/thinkingFormat", 'expected "auto", "qwen", "openai", or "off"');
   }
 
   const allowlist = optionalStringArray(
-    input.models?.allowlist ??
-      envValue(`${prefix}_MODEL_ALLOWLIST`)
-        ?.split(",")
-        .map((v) => v.trim()),
+    input.models?.allowlist === undefined ? envInput.models?.allowlist : input.models.allowlist,
     "/models/allowlist",
   );
   const acceptedComposeHashes =
     validateComposeHashes(
-      input.trust?.acceptedComposeHashes ??
-        envValue(`${prefix}_ACCEPTED_COMPOSE_HASHES`)
-          ?.split(",")
-          .map((v) => v.trim()),
+      input.trust?.acceptedComposeHashes === undefined
+        ? envInput.trust?.acceptedComposeHashes
+        : input.trust.acceptedComposeHashes,
     ) ?? profile.acceptedComposeHashes;
   const acceptedSessionIds =
     validateSessionIds(
-      input.trust?.acceptedSessionIds ??
-        envValue(`${prefix}_ACCEPTED_SESSION_IDS`)
-          ?.split(",")
-          .map((v) => v.trim()),
+      input.trust?.acceptedSessionIds === undefined
+        ? envInput.trust?.acceptedSessionIds
+        : input.trust.acceptedSessionIds,
     ) ?? profile.acceptedSessionIds;
 
-  const verification = input.receipts?.verification ?? "on-demand";
+  const verification =
+    input.receipts?.verification === undefined ? "on-demand" : input.receipts.verification;
   if (verification !== "on-demand" && verification !== "response") {
     fail("/receipts/verification", 'expected "on-demand" or "response"');
   }
-  const historySize = input.receipts?.historySize ?? 32;
+  const historySize = input.receipts?.historySize === undefined ? 32 : input.receipts.historySize;
   if (!Number.isInteger(historySize) || Number(historySize) < 1 || Number(historySize) > 1000) {
     fail("/receipts/historySize", "expected an integer between 1 and 1000");
   }

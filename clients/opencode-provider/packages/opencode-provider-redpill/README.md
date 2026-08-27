@@ -15,3 +15,7 @@ select `redpill/<model-id>`. The plugin discovers current TEE models and sends
 inference only through an attested, TLS-pinned connection. Every response
 receipt is verified before OpenCode can finish the model turn or continue its
 tool loop.
+
+Use the read-only `redpill_aci_inspect` tool to inspect the verified
+attestation, retained receipt history, a receipt audit, or a content-addressed
+session audit.

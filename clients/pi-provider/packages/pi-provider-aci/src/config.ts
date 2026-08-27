@@ -20,9 +20,13 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { AciProviderConfig } from "@phala/aci-provider";
+import {
+  aciProviderConfigInputFromEnv,
+  AciProviderConfigError,
+  resolveAciProviderConfig,
+  type AciProviderConfig,
+} from "@phala/aci-provider";
 
-import { getBaseUrl } from "./constants.ts";
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
 export type ThinkingFormat = "auto" | "qwen" | "openai" | "off";
@@ -100,14 +104,10 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
   trust: {},
 };
 
-/** Profile default config with the base URL resolved from the supplied env. */
-function defaultAciCloudConfig(
-  providerProfile: ProviderProfile,
-  env: NodeJS.ProcessEnv,
-): AciCloudConfig {
+function defaultAciCloudConfig(providerProfile: ProviderProfile): AciCloudConfig {
   return {
     ...DEFAULT_ACI_CLOUD_CONFIG,
-    baseUrl: getBaseUrl(providerProfile, env) || DEFAULT_ACI_CLOUD_CONFIG.baseUrl,
+    baseUrl: providerProfile.defaultBaseURL,
     trust: {
       ...(providerProfile.acceptedComposeHashes === undefined
         ? {}
@@ -191,63 +191,16 @@ function readConfigFileQuiet(path: string, logPrefix: string): Record<string, un
   }
 }
 
-function parseBoolean(value: string | undefined): boolean | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed === "true" || trimmed === "1") return true;
-  if (trimmed === "false" || trimmed === "0") return false;
-  return undefined;
-}
-
 function envConfigPatch(
   env: NodeJS.ProcessEnv,
   providerProfile: ProviderProfile,
 ): AciCloudConfigPatch {
-  const patch: AciCloudConfigPatch = {};
-  const prefix = providerProfile.envPrefix;
-  const read = (...names: string[]) => {
-    for (const name of names) {
-      const v = env[name]?.trim();
-      if (v) return v;
-    }
-    return undefined;
+  const input = aciProviderConfigInputFromEnv(providerProfile, env);
+  return {
+    ...(input.baseURL !== undefined ? { baseUrl: input.baseURL } : {}),
+    ...(input.models ? { models: input.models } : {}),
+    ...(input.trust ? { trust: input.trust } : {}),
   };
-
-  const baseUrl = read(
-    `${prefix}_CLOUD_API_PREFIX`,
-    `${prefix}_BASE_URL`,
-    `${prefix}_CLOUD_BASE_URL`,
-  );
-  if (baseUrl) patch.baseUrl = baseUrl;
-
-  const isTeeOnly = parseBoolean(read(`${prefix}_IS_TEE_ONLY`, `${prefix}_TEE_ONLY`) ?? undefined);
-  if (isTeeOnly !== undefined) patch.models = { ...patch.models, isTeeOnly };
-
-  const thinkingFormat = read(`${prefix}_THINKING_FORMAT`);
-  if (thinkingFormat) patch.models = { ...patch.models, thinkingFormat };
-
-  const acceptedComposeHashes = read(`${prefix}_ACCEPTED_COMPOSE_HASHES`);
-  if (acceptedComposeHashes) {
-    patch.trust = {
-      acceptedComposeHashes: acceptedComposeHashes
-        .split(",")
-        .map((hash) => hash.trim())
-        .filter(Boolean),
-    };
-  }
-
-  const acceptedSessionIds = read(`${prefix}_ACCEPTED_SESSION_IDS`);
-  if (acceptedSessionIds) {
-    patch.trust = {
-      ...patch.trust,
-      acceptedSessionIds: acceptedSessionIds
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean),
-    };
-  }
-
-  return patch;
 }
 
 function fail(configPath: string, pointer: string, message: string): never {
@@ -263,116 +216,61 @@ function requireRecord(raw: unknown, configPath: string, pointer: string): Recor
   );
 }
 
-function requireString(raw: unknown, configPath: string, pointer: string): string {
-  if (typeof raw === "string" && raw.length > 0) return raw;
-  return fail(configPath, pointer, `expected a non-empty string, got ${JSON.stringify(raw)}`);
-}
-
-function requireBoolean(raw: unknown, configPath: string, pointer: string): boolean {
-  if (typeof raw === "boolean") return raw;
-  return fail(configPath, pointer, `expected a boolean, got ${JSON.stringify(raw)}`);
-}
-
-function requireThinkingFormat(raw: unknown, configPath: string, pointer: string): ThinkingFormat {
-  if (raw === "auto" || raw === "qwen" || raw === "openai" || raw === "off") return raw;
-  return fail(
-    configPath,
-    pointer,
-    `expected "auto" | "qwen" | "openai" | "off", got ${JSON.stringify(raw)}`,
-  );
-}
-
-function requireStringArray(
+export function validateAciCloudConfig(
   raw: unknown,
-  configPath: string,
-  pointer: string,
-): string[] | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) {
-    return fail(configPath, pointer, `expected an array, got ${typeof raw}`);
-  }
-  return raw.map((value, index) => {
-    if (typeof value !== "string" || value.length === 0) {
-      return fail(
-        configPath,
-        `${pointer}/${index}`,
-        `expected a non-empty string, got ${JSON.stringify(value)}`,
-      );
-    }
-    return value;
-  });
-}
-
-function validateModelsConfig(raw: unknown, configPath: string, pointer: string): AciModelsConfig {
-  const model = requireRecord(raw, configPath, pointer);
-  return {
-    isTeeOnly: requireBoolean(model.isTeeOnly, configPath, `${pointer}/isTeeOnly`),
-    thinkingFormat: requireThinkingFormat(
-      model.thinkingFormat,
-      configPath,
-      `${pointer}/thinkingFormat`,
-    ),
-    allowlist: requireStringArray(model.allowlist, configPath, `${pointer}/allowlist`),
-  };
-}
-
-function validateTrustConfig(
-  raw: unknown,
-  configPath: string,
-  pointer: string,
-): AciCloudConfig["trust"] {
-  const trust = requireRecord(raw, configPath, pointer);
-  const acceptedComposeHashes = requireStringArray(
-    trust.acceptedComposeHashes,
-    configPath,
-    `${pointer}/acceptedComposeHashes`,
-  );
-  const acceptedSessionIds = requireStringArray(
-    trust.acceptedSessionIds,
-    configPath,
-    `${pointer}/acceptedSessionIds`,
-  );
-  for (const [name, values] of [
-    ["acceptedComposeHashes", acceptedComposeHashes],
-    ["acceptedSessionIds", acceptedSessionIds],
-  ] as const) {
-    if (values !== undefined && values.length === 0) {
-      fail(configPath, `${pointer}/${name}`, "expected a non-empty array when supplied");
-    }
-  }
-  for (const [index, hash] of (acceptedComposeHashes ?? []).entries()) {
-    if (!/^[0-9a-f]{64}$/i.test(hash)) {
-      fail(
-        configPath,
-        `${pointer}/acceptedComposeHashes/${index}`,
-        "expected a 64-character SHA-256 hex digest",
-      );
-    }
-  }
-  for (const [index, id] of (acceptedSessionIds ?? []).entries()) {
-    if (!/^[0-9a-f]{64}$/.test(id)) {
-      fail(
-        configPath,
-        `${pointer}/acceptedSessionIds/${index}`,
-        "expected a 64-character lowercase session id",
-      );
-    }
-  }
-  return {
-    ...(acceptedComposeHashes === undefined
-      ? {}
-      : { acceptedComposeHashes: acceptedComposeHashes.map((hash) => hash.toLowerCase()) }),
-    ...(acceptedSessionIds === undefined ? {} : { acceptedSessionIds }),
-  };
-}
-
-export function validateAciCloudConfig(raw: unknown, configPath = "<aci-config>"): AciCloudConfig {
+  configPath = "<aci-config>",
+  providerProfile: ProviderProfile = DEFAULT_PROFILE,
+): AciCloudConfig {
   const config = requireRecord(raw, configPath, "");
-  return {
-    baseUrl: requireString(config.baseUrl, configPath, "/baseUrl"),
-    models: validateModelsConfig(config.models, configPath, "/models"),
-    trust: validateTrustConfig(config.trust, configPath, "/trust"),
-  };
+  const models = requireRecord(config.models, configPath, "/models");
+  const trust = requireRecord(config.trust, configPath, "/trust");
+  for (const [record, field, pointer] of [
+    [config, "baseUrl", "/baseUrl"],
+    [models, "isTeeOnly", "/models/isTeeOnly"],
+    [models, "thinkingFormat", "/models/thinkingFormat"],
+  ] as const) {
+    if (!(field in record)) fail(configPath, pointer, "required field is missing");
+  }
+  try {
+    const resolved = resolveAciProviderConfig(
+      providerProfile,
+      {
+        baseURL: config.baseUrl,
+        models: {
+          isTeeOnly: models.isTeeOnly,
+          thinkingFormat: models.thinkingFormat,
+          allowlist: models.allowlist,
+        },
+        trust: {
+          acceptedComposeHashes: trust.acceptedComposeHashes,
+          acceptedSessionIds: trust.acceptedSessionIds,
+        },
+        receipts: { verification: "response", historySize: 32 },
+      },
+      {},
+    );
+    return {
+      baseUrl: resolved.baseURL,
+      models: {
+        isTeeOnly: resolved.models.isTeeOnly,
+        thinkingFormat: resolved.models.thinkingFormat,
+        ...(resolved.models.allowlist ? { allowlist: [...resolved.models.allowlist] } : {}),
+      },
+      trust: {
+        ...(resolved.trust.acceptedComposeHashes
+          ? { acceptedComposeHashes: [...resolved.trust.acceptedComposeHashes] }
+          : {}),
+        ...(resolved.trust.acceptedSessionIds
+          ? { acceptedSessionIds: [...resolved.trust.acceptedSessionIds] }
+          : {}),
+      },
+    };
+  } catch (error) {
+    if (!(error instanceof AciProviderConfigError)) throw error;
+    const pointer = error.pointer === "/baseURL" ? "/baseUrl" : error.pointer;
+    const detail = error.message.slice(error.pointer.length + 2);
+    return fail(configPath, pointer, detail);
+  }
 }
 
 function loadLayers(
@@ -402,44 +300,44 @@ export function loadAciCloudConfig(
   overrides?: AciCloudConfigPatch,
 ): AciCloudConfig {
   const providerProfile = options.profile ?? DEFAULT_PROFILE;
-  let merged = clone(
-    defaultAciCloudConfig(providerProfile, options.env ?? process.env),
-  ) as unknown as Record<string, unknown>;
+  let merged = clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>;
   for (const layer of loadLayers(options, overrides)) {
     merged = mergeConfigPatch(merged, layer);
   }
-  return validateAciCloudConfig(merged);
+  return validateAciCloudConfig(merged, "<aci-config>", providerProfile);
 }
 
 export function loadProjectAciCloudConfig(
   cwd: string,
   providerProfile: ProviderProfile = DEFAULT_PROFILE,
-  env: NodeJS.ProcessEnv = process.env,
 ): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig(providerProfile, env)) as unknown as Record<string, unknown>,
+      clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>,
       readConfigFileQuiet(
         getProjectAciCloudConfigPath(cwd, providerProfile.providerId),
         providerProfile.logPrefix,
       ),
     ),
+    "<aci-config>",
+    providerProfile,
   );
 }
 
 export function loadHomeAciCloudConfig(
   home: string,
   providerProfile: ProviderProfile = DEFAULT_PROFILE,
-  env: NodeJS.ProcessEnv = process.env,
 ): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig(providerProfile, env)) as unknown as Record<string, unknown>,
+      clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>,
       readConfigFileQuiet(
         getGlobalAciCloudConfigPath(home, providerProfile.providerId),
         providerProfile.logPrefix,
       ),
     ),
+    "<aci-config>",
+    providerProfile,
   );
 }
 

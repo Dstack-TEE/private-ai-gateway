@@ -10,6 +10,8 @@ import {
 } from "@phala/aci-provider";
 import type { AuthHook, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
+import { createAciInspectTool } from "./inspect.ts";
+
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
 interface OpenCodeProviderConfig {
@@ -121,8 +123,13 @@ export function createOpenCodeAciPlugin({
       if (!active) return Promise.reject(new Error(blockedReason));
       return active.fetch(request, init);
     };
+    const inspectToolName =
+      profile.providerId === "aci" ? "aci_inspect" : `${profile.providerId}_aci_inspect`;
 
     return {
+      tool: {
+        [inspectToolName]: createAciInspectTool(() => active),
+      },
       async config(config) {
         const baseURL = options.baseURL ?? defaults.baseURL;
         config.provider ??= {};

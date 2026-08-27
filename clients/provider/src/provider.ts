@@ -9,6 +9,7 @@ import {
 
 import type { AciProviderConfig } from "./config.ts";
 import { discoverAciModels, type AciModel } from "./models.ts";
+import { auditAciSession, isAciSessionId, type AciSessionAudit } from "./session.ts";
 
 export type AciProviderPhase = "idle" | "connecting" | "verified" | "blocked" | "closed";
 
@@ -114,6 +115,41 @@ export class AciProvider {
     return audit;
   }
 
+  async verifySession(
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AciSessionAudit> {
+    if (!isAciSessionId(sessionId)) {
+      throw new AciProviderError("ACI session id must be a 64-character lowercase hex digest");
+    }
+    await this.connect();
+    const url = new URL(this.config.baseURL);
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/aci/sessions/${sessionId}`;
+    url.search = "";
+    const response = await this.fetch(url, {
+      headers: { Accept: "application/json" },
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok) {
+      throw new AciProviderError(
+        `ACI session fetch returned HTTP ${response.status} ${response.statusText}`,
+      );
+    }
+    const value: unknown = await response.json().catch((error: unknown) => {
+      throw new AciProviderError("ACI session endpoint returned invalid JSON", { cause: error });
+    });
+    const audit = await auditAciSession(sessionId, value).catch((error: unknown) => {
+      throw new AciProviderError("ACI session endpoint returned an invalid session document", {
+        cause: error,
+      });
+    });
+    if (!audit.verified) {
+      const failed = audit.checks.filter((check) => !check.ok).map((check) => check.name);
+      throw new AciProviderError(`ACI session verification failed: ${failed.join(", ")}`);
+    }
+    return audit;
+  }
+
   status(): AciProviderStatus {
     return {
       phase: this.phase,
@@ -154,21 +190,13 @@ export function createAciProvider(config: AciProviderConfig): AciProvider {
 }
 
 /** @internal Response-stream boundary used by provider adapters and contract tests. */
-export function auditResponse(response: Response, verify: () => Promise<unknown>): Response {
+export async function auditResponse(
+  response: Response,
+  verify: () => Promise<unknown>,
+): Promise<Response> {
   if (!response.body) {
-    return new Response(
-      new ReadableStream({
-        async start(controller) {
-          try {
-            await verify();
-            controller.close();
-          } catch (error) {
-            controller.error(error);
-          }
-        },
-      }),
-      response,
-    );
+    await verify();
+    return response;
   }
   const body = response.body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({

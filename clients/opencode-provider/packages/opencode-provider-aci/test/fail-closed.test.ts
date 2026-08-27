@@ -23,6 +23,24 @@ test("keeps an existing provider blocked when configuration fails", async () => 
   const hooks = await plugin.server(input, {
     baseURL: "http://unverified.example/v1",
   });
+  const inspect = hooks.tool?.aci_inspect;
+  expect(inspect).toBeDefined();
+  if (!inspect) throw new Error("ACI inspection tool was not registered");
+  await expect(
+    inspect.execute(
+      { action: "status" },
+      {
+        sessionID: "test",
+        messageID: "test",
+        agent: "test",
+        directory: input.directory,
+        worktree: input.worktree,
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask() {},
+      },
+    ),
+  ).rejects.toThrow("not connected to a verified gateway");
   const config: Config = {
     provider: {
       aci: {

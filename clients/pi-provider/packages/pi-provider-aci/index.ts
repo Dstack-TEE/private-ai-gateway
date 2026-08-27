@@ -11,11 +11,10 @@
  *   # Set ACI_API_KEY (+ ACI_BASE_URL) then /model aci/<model-id>
  *
  * Source layout:
- *   src/constants.ts     — provider identity + env-driven endpoints
  *   src/config.ts        — layered config (default/home/project/env/runtime)
  *   src/project-trust.ts — project-scope config trust gate
  *   src/models.ts        — /v1/models discovery + thinkingFormat inference
- *   src/audit.ts         — receipt/session fetch and concise audit display
+ *   src/audit.ts         — concise receipt/session audit display
  *   src/settings-ui.ts   — SettingsList helpers for the settings command
  */
 
@@ -45,7 +44,7 @@ import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
 import { type AciServerModel, discoverAciModels, mapAciServerModel } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
-import { fetchSession, summarizeReceipt, summarizeSession } from "./src/audit.ts";
+import { summarizeReceipt, summarizeSession } from "./src/audit.ts";
 import {
   type AciConfigScope,
   THINKING_FORMAT_VALUES,
@@ -426,10 +425,10 @@ async function runSessionCommand(
   state: AciRuntimeState,
   args: string,
 ): Promise<void> {
-  const apiKey = await ctx.modelRegistry.getApiKeyForProvider(state.profile.providerId);
-  if (!apiKey) {
+  await ensureAciConnection(state);
+  if (!state.provider) {
     ctx.ui.notify(
-      `No ${state.profile.label} API key; run /login ${state.profile.providerId} or set ${state.profile.apiKeyEnv}`,
+      `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
       "error",
     );
     return;
@@ -439,16 +438,21 @@ async function runSessionCommand(
     ctx.ui.notify(`Usage: /${state.profile.providerId}-session <session-id>`, "error");
     return;
   }
-  const session = await fetchSession(apiKey, sessionId, {
-    baseUrl: state.config.baseUrl,
-    fetch: providerFetch(state),
-    logPrefix: state.profile.logPrefix,
-  });
-  if (!session) {
-    ctx.ui.notify(`Session ${sessionId} not found or fetch failed`, "error");
-    return;
+  try {
+    const audit = await state.provider.verifySession(sessionId);
+    const checks = audit.checks.map(
+      (check) => `${check.ok ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`,
+    );
+    ctx.ui.notify(
+      [...summarizeSession(audit.session, sessionId), ...checks].join("\n"),
+      audit.verified ? "info" : "error",
+    );
+  } catch (error) {
+    ctx.ui.notify(
+      `Session ${sessionId} verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
   }
-  ctx.ui.notify(summarizeSession(session).join("\n"), "info");
 }
 
 async function runAttestationCommand(

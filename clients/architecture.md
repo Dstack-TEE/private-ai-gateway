@@ -89,7 +89,7 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
-| Framework-neutral model, lifecycle, policy, status and receipt provider core | Current OpenCode work |
+| Framework-neutral model, lifecycle, policy, status, receipt and session provider core | Current OpenCode work |
 | Native OpenCode v1 plugin plus RedPill and Phala Cloud distributions | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
@@ -99,7 +99,7 @@ were hardened in place:
 | Streaming wire-digest capture, Pi response verification and on-demand receipt/session audit | Current refactor |
 | Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Current refactor |
 | Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
-| Fail-closed OpenCode provider ownership, live model discovery and end-of-stream receipt audit | Current OpenCode work |
+| Fail-closed OpenCode provider ownership, live model discovery, end-of-stream receipt audit and read-only inspection tool | Current OpenCode work |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
 | Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
 

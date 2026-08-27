@@ -70,8 +70,9 @@ pi -e clients/pi-provider/packages/pi-provider-aci
   neutral package these are `/aci-settings`, `/aci-attestation`, `/aci-receipt`
   and `/aci-session`; branded packages replace `aci` with their provider id.
   The receipt command displays or re-runs the complete recorded-exchange audit,
-  the session command inspects a session directly, and the attestation command
-  shows the pinned report, keyset digest, binding, keys, and expiry.
+  the session command fetches the public transparency artifact and verifies its
+  content address and evidence locally, and the attestation command shows the
+  pinned report, keyset digest, binding, keys, and expiry.
 
 ## How the verified connection is established
 

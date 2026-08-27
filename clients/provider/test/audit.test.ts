@@ -5,7 +5,7 @@ import { auditResponse } from "../src/provider.ts";
 
 test("holds response completion until receipt verification succeeds", async () => {
   let verified = false;
-  const response = auditResponse(new Response("complete"), async () => {
+  const response = await auditResponse(new Response("complete"), async () => {
     verified = true;
   });
 
@@ -14,9 +14,20 @@ test("holds response completion until receipt verification succeeds", async () =
 });
 
 test("turns a failed receipt audit into a response stream error", async () => {
-  const response = auditResponse(new Response("untrusted"), async () => {
+  const response = await auditResponse(new Response("untrusted"), async () => {
     throw new Error("receipt rejected");
   });
 
   await assert.rejects(response.text(), /receipt rejected/);
+});
+
+test("verifies a bodyless response before returning it", async () => {
+  let verified = false;
+  const original = new Response(null, { status: 204 });
+  const response = await auditResponse(original, async () => {
+    verified = true;
+  });
+
+  assert.equal(response, original);
+  assert.equal(verified, true);
 });

@@ -2,7 +2,8 @@
 
 Framework-neutral provider kernel for ACI gateways. It owns verified connection
 lifecycle, live model discovery, TEE-only filtering, model capability mapping,
-bounded receipt history, and optional response-completion receipt verification.
+bounded receipt history, optional response-completion receipt verification, and
+content-addressed session inspection.
 
 Host adapters such as Pi and OpenCode supply their native configuration and UI.
 Applications normally install a host adapter rather than this package directly.
@@ -39,3 +40,9 @@ have verified.
 Model discovery uses the verified connection but sends no inference API key;
 the gateway's `/v1/models` catalog is public. Host adapters own credentials and
 attach them only to inference requests.
+
+`provider.receipts()` returns the bounded in-process exchange history, newest
+first. `provider.verifyReceipt()` verifies the latest exchange when no id is
+given, while `provider.verifySession(id)` fetches the public session artifact
+over the pinned connection and validates its content address, API version,
+validity window, and evidence digest.

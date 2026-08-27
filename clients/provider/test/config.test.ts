@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveAciProviderConfig } from "../src/config.ts";
+import { aciProviderConfigInputFromEnv, resolveAciProviderConfig } from "../src/config.ts";
 import { resolveAciProviderProfile } from "../src/profile.ts";
 
 const profile = resolveAciProviderProfile({ defaultBaseURL: "https://gateway.example/v1" });
@@ -30,5 +30,31 @@ test("rejects a non-HTTPS model endpoint", () => {
   assert.throws(
     () => resolveAciProviderConfig(profile, { baseURL: "http://gateway.example/v1" }),
     /expected an https URL/,
+  );
+});
+
+test("uses one deterministic base URL environment priority for every adapter", () => {
+  const env = {
+    ACI_BASE_URL: "https://base.example/v1",
+    ACI_CLOUD_API_PREFIX: "https://prefix.example/v1",
+    ACI_CLOUD_BASE_URL: "https://cloud.example/v1",
+  };
+
+  assert.equal(aciProviderConfigInputFromEnv(profile, env).baseURL, env.ACI_BASE_URL);
+  assert.equal(resolveAciProviderConfig(profile, {}, env).baseURL, env.ACI_BASE_URL);
+});
+
+test("rejects an invalid boolean environment value", () => {
+  assert.throws(
+    () => resolveAciProviderConfig(profile, {}, { ACI_IS_TEE_ONLY: "sometimes" }),
+    /expected a boolean/,
+  );
+});
+
+test("rejects invalid explicit values instead of falling back to profile defaults", () => {
+  assert.throws(() => resolveAciProviderConfig(profile, { baseURL: 42 }), /non-empty URL/);
+  assert.throws(
+    () => resolveAciProviderConfig(profile, { models: { isTeeOnly: null } }),
+    /expected a boolean/,
   );
 });

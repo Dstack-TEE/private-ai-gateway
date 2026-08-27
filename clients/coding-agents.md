@@ -141,6 +141,14 @@ this ordering is required to prevent an ordinary HTTPS downgrade. Each
 inference response is held open until its signed receipt and cited session
 verify.
 
+OpenCode server plugins cannot register Pi-style TUI settings panels or footer
+state. Instead, each provider exposes the native read-only inspection tool
+`aci_inspect` or `<provider>_aci_inspect`. Its `status`, `attestation`,
+`receipts`, `receipt`, and `session` actions expose the same verified state and
+bounded audit history without returning prompts, responses, or raw evidence.
+OpenCode configuration remains in `opencode.json`, and credentials remain in
+OpenCode's native auth store.
+
 For a route that specifically implements `/v1/responses`, OpenCode documents
 `@ai-sdk/openai` instead of `@ai-sdk/openai-compatible`.
 

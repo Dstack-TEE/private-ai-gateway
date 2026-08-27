@@ -17,7 +17,9 @@ The provider fails closed when workload or channel verification fails. For a
 production reviewed-release claim, configure `ACI_ACCEPTED_COMPOSE_HASHES` with
 the comma-separated compose hashes published by the deployment operator.
 `/aci-receipt [id]` displays or re-verifies a recorded exchange's signed
-receipt, exact wire body hashes, and cited attested session.
+receipt, exact wire body hashes, and cited attested session. `/aci-session <id>`
+fetches the public session artifact over the pinned connection and validates it
+locally; it does not require an inference API key.
 
 See the [full client documentation](https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider)
 for configuration, trust boundaries, and branded packages.
