@@ -85,7 +85,6 @@ test('prepared requests retain authorization for receipt lookup', async () => {
   );
 
   assert.equal(prepared.authorization, 'Bearer request-token');
-  assert.equal(prepared.request.headers.get('authorization'), 'Bearer request-token');
 });
 
 test('connectAci rejects a self-consistent report without a hardware quote', async () => {

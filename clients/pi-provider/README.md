@@ -95,12 +95,9 @@ their reviewed compose hashes through `acceptedComposeHashes` when their
 release pipeline publishes them. Until then `/attestation` explicitly reports
 `measurement verified, not pinned`.
 
-Pi's `openai-completions` adapter accepts a custom `fetch`, so the provider
-injects the connection's scoped fetch through `StreamOptions.fetch`. It never
-changes `globalThis.fetch`: unrelated providers, tools, MCP servers and
-telemetry keep their own transports. A failed or expired connection blocks
-model traffic. Each Pi session gets a fresh connection and closes it on
-shutdown.
+Pi's `openai-completions` adapter receives the connection's scoped fetch through
+`StreamOptions.fetch`. A failed or expired connection blocks model traffic.
+Each Pi session gets a fresh connection and closes it on shutdown.
 
 The same `connectAci()` API works with other Node and Bun SDKs and agent
 frameworks; see the [verifier integration examples](../verifier-ts/README.md#runtime-sdk-and-agent-frameworks).

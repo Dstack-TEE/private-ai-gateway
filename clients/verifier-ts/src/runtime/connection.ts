@@ -103,7 +103,7 @@ class RuntimeAciConnection implements AciConnection {
     const identity = exchange.identity;
     const receipt = await this.fetchJsonArtifact<ReceiptEnvelope>(
       `receipts/${encodeURIComponent(id)}`,
-      exchange.authorization ?? legacyAuthorization(this.options),
+      exchange.authorization,
     );
     const sessionId = citedSessionId(receipt);
     let session: SessionRecord | undefined;
@@ -473,11 +473,6 @@ function publicExchange(exchange: InternalExchange): RecordedAciExchange {
     responseComplete: exchange.responseComplete,
     ...(exchange.responseError === undefined ? {} : { responseError: exchange.responseError }),
   };
-}
-
-function legacyAuthorization(options: ConnectAciOptions): string | undefined {
-  const apiKey = options.apiKey?.trim();
-  return apiKey ? `Bearer ${apiKey}` : undefined;
 }
 
 function citedSessionId(receipt: ReceiptEnvelope): string | undefined {

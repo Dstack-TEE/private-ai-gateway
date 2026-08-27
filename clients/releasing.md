@@ -43,8 +43,7 @@ bash clients/package-smoke.sh
 
 The smoke test packs all four packages, installs the tarballs together in a
 temporary clean project, proves `/runtime` selects the Node and Bun entries in
-their respective runtimes, imports every public ESM entry, and removes the
-temporary directory. It never writes package artifacts into the repository.
+their respective runtimes, and imports every public ESM entry.
 
 ## Trusted publishing
 
@@ -57,15 +56,14 @@ trusted publisher is configured with:
 - GitHub environment: `npm`
 - allowed action: `npm publish`
 
-The workflow uses npm's short-lived OIDC identity. It does not require an npm
-token, and no npm token should be stored in repository or environment secrets.
+The workflow authenticates with npm through a short-lived OIDC identity.
 
 Create and publish a GitHub Release whose tag is `clients-v<version>`, for
-example `clients-v0.2.0`. The workflow checks that the tag matches every package
+example `clients-v0.3.0`. The workflow checks that the tag matches every package
 manifest, runs all release gates, then publishes in dependency order. Do not
 move or reuse a release tag after publication; npm versions are immutable.
 
 Package publication and reviewed deployment approval are separate operations.
-The branded release must only claim a reviewed gateway deployment after the
-Redpill/Phala release pipeline has independently published the accepted compose
-hashes. Never learn those hashes from the live endpoint being verified.
+The branded release claims a reviewed gateway deployment after the
+Redpill/Phala release pipeline independently publishes the accepted compose
+hashes through an authenticated release channel.

@@ -15,7 +15,8 @@ condition automatically; native browser imports can use
 `@phala/aci-verifier/browser`. Runtime-aware applications import
 `connectAci()` from `@phala/aci-verifier/runtime`; package conditions select
 the tested Node or Bun transport. Explicit `/node` and `/bun` entries are also
-available. Pinned transport APIs are never exposed through the browser entry.
+available. Use the browser entry for document verification and the Node or Bun
+entries for a pinned transport.
 
 ACI documents verify over their JCS form (spec Appendix A), so this library
 canonicalizes whatever it parsed and hashes foreign bytes (HTTP bodies,
@@ -66,7 +67,7 @@ evidence) exactly as observed.
   not yet encrypt or decrypt content fields. Callers can implement that
   field-level wire contract or use a separate v2 client.
 
-## What it does not do
+## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3. It
@@ -88,9 +89,7 @@ evidence) exactly as observed.
 - **Ed25519 receipts only.** A receipt keyed to any other algorithm is
   reported as a failed signature check, not verified.
 
-Verification failures are reported as `{ ok: false, checks }` — never thrown —
-so a caller cannot pass by forgetting a `try/catch`. Errors are thrown only
-for malformed input.
+Verification failures return `{ ok: false, checks }`; malformed input throws.
 
 > **Release status:** Public releases are available from npm. The repository
 > builds an ESM package with declarations, validates it with publint and Are The
@@ -190,8 +189,8 @@ hashes.
 `source_provenance.repo_url` and `repo_commit` are published labels, not a
 cryptographic release identity. `acceptedComposeHashes` pins the value that is
 actually measured into RTMR3. Release automation should publish reviewed
-compose hashes alongside each deployment; clients must not learn and trust the
-first hash they observe.
+compose hashes alongside each deployment, and clients should load them from
+that authenticated release metadata.
 
 #### OpenAI Agents SDK
 

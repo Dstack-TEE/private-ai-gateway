@@ -1,8 +1,7 @@
 # Coding agents over ACI
 
-Coding-agent integrations have one rule: verification belongs at the transport
-boundary, not in agent-specific verification code. A plugin may wire the
-shared transport into an agent, but it must not reimplement ACI.
+Coding-agent integrations keep verification at the transport boundary. Agent
+plugins only inject the shared transport and manage its lifecycle.
 
 ```text
 fetch-aware Node/Bun client ---- connectAci() ---- ACI gateway
@@ -15,7 +14,8 @@ base-URL-only CLI ----------- aci serve ------- ACI gateway
 `fetch`; its conditional runtime entry selects the Node or Bun adapter.
 Applications that expose only a base URL use `aci serve`: one local process
 verifies the hardware-backed workload identity, pins the remote TLS SPKI, and
-forwards the agent's native HTTP surface. It does not translate API protocols.
+forwards the agent's protocol unchanged. The selected gateway route must serve
+that protocol.
 
 Both paths demand `provider.aci_verified` on JSON inference requests by
 default, record exact request/response digests without buffering streams, and
@@ -33,16 +33,16 @@ cargo run --bin aci -- serve https://gateway.example.com \
 ```
 
 The command verifies before listening and fails closed. `--accept-compose` is
-repeatable for a controlled release rotation. Without it, `aci serve` verifies
-and reports the measured compose but does not claim that the deployment is a
-reviewed release. Never populate this value from the first endpoint response.
+repeatable for a controlled release rotation. Omitting it verifies the measured
+compose without accepting a reviewed release. Populate it from authenticated
+release metadata, not the endpoint being verified.
 The agent-facing base URLs are:
 
 - OpenAI APIs: `http://127.0.0.1:4180/v1`
 - Anthropic Messages: `http://127.0.0.1:4180`
 
-Keep the gateway key in an environment variable. `aci serve` passes request
-authentication through and does not need the key in its command line.
+Keep the gateway key in an environment variable. Authentication passes through
+from the agent request; the `aci serve` command line contains no key.
 
 ## Compatibility
 
@@ -70,8 +70,7 @@ env_key = "ACI_API_KEY"
 wire_api = "responses"
 ```
 
-The gateway model route must implement `/v1/responses`; Codex does not support
-falling back to Chat Completions.
+The gateway model route must implement `/v1/responses`.
 
 ### Claude Code
 
@@ -98,7 +97,7 @@ plugin injects the shared ACI client. First add the verifier dependency:
 ```json
 {
   "dependencies": {
-    "@phala/aci-verifier": "^0.2.2"
+    "@phala/aci-verifier": "^0.3.0"
   }
 }
 ```
@@ -172,7 +171,7 @@ export const AciPlugin: Plugin = async () => {
 ```
 
 Replace the compose placeholder with a hash published by the reviewed release
-pipeline; never learn it from the endpoint being verified. Importing
+pipeline. Importing
 `/runtime` selects the Bun adapter, whose TLS callback is covered by the same
 pinned-channel contract test as the Node adapter. The plugin only performs
 dependency injection and lifecycle cleanup; quote, SPKI, policy, digest,
@@ -190,15 +189,14 @@ compatibility requirement.
 `aci serve` and `connectAci()` share the same trust contract: fresh quote and
 keyset binding, measured compose appraisal, optional reviewed compose
 allowlist, identity expiry, hostname/SPKI channel binding, verified-serving
-constraints, and receipt/session auditing. Agent adapters only select an HTTP
-protocol and transport; they do not redefine verification.
+constraints, and receipt/session auditing. Agent adapters select the HTTP
+protocol and transport; verification remains in the shared client.
 
-These configurations protect model HTTP traffic between the local verifier and
-the attested gateway. They do not automatically cover WebSockets, MCP servers,
-tool calls, browser automation, shell commands, extension traffic or agent
-telemetry. The local agent and `aci serve` necessarily see plaintext prompts
-and responses; the remote network path is the part bound to the attested TLS
-identity.
+Coverage ends at model HTTP traffic between the local verifier and attested
+gateway. WebSockets, MCP servers, tools, browser automation, shell commands,
+extensions, and telemetry have separate trust boundaries. The local agent and
+`aci serve` see plaintext prompts and responses; ACI binds the remote network
+path to the attested TLS identity.
 
 ## Sources
 

@@ -16,8 +16,8 @@ pi provider extension:
   Web Crypto. Its runtime subpath also exposes `connectAci()`, an
   instance-scoped verified transport with tested Node and Bun adapters that
   applications can inject into OpenAI Node, OpenAI Agents JS, Vercel AI SDK,
-  LangChain JS, OpenCode and other fetch-aware clients without replacing
-  global fetch. Ships an ESM bundle for `<script type="module">`.
+  LangChain JS, OpenCode and other fetch-aware clients. Ships an ESM bundle
+  for `<script type="module">`.
   Both runtime transports and the CLI can pin reviewed RTMR3-bound compose hashes;
   self-declared repository and commit fields are informational labels.
   Key custody (§9.1 check 5) is an honest skip in both verifiers; the channel
@@ -46,7 +46,7 @@ pi provider extension:
   The core provides live model discovery from `/v1/models`, `is_tee`
   filtering, and injects the shared Node verified transport through Pi's
   provider-scoped fetch hook. Published packages contain ESM JavaScript and
-  declarations; TypeScript source is never used as the npm runtime entry.
+  declarations.
   The transport records bounded wire digests while streaming, and
   `/aci-receipt` verifies the signed receipt plus cited session on demand.
   `/aci-session` remains available for direct session inspection.
