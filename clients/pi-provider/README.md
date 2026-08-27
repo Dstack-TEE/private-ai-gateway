@@ -11,8 +11,8 @@ publish their own npm packages:
 
 Both are thin skins over this package (`createProvider` with an instance-scoped
 brand profile). Multiple branded providers can coexist in one process without
-sharing provider ids, environment names, config paths, fallback models or
-connection state.
+sharing provider ids, environment names, config paths, commands, or connection
+state.
 
 ## Threat model: verified transport and verified responses
 
@@ -24,9 +24,10 @@ hashes, serving mode, session integrity, validity window, evidence digest, and
 configured session pins. A failed audit terminates the model stream before Pi
 can continue its tool loop.
 
-The transport also retains a bounded history of exact wire digests.
-`/aci-receipt [id]` displays or re-verifies a recorded exchange on demand; an
-exchange outside that history cannot receive a complete body-hash audit.
+The transport also retains a bounded history of exact wire digests. The
+provider-scoped `/<provider-id>-receipt [id]` command displays or re-verifies a
+recorded exchange on demand; an exchange outside that history cannot receive a
+complete body-hash audit.
 
 ## Install
 
@@ -65,10 +66,12 @@ pi -e clients/pi-provider/packages/pi-provider-aci
   `<PREFIX>_ACCEPTED_SESSION_IDS` or `trust.acceptedSessionIds` to a non-empty
   list of audited session ids. Request-supplied pins are intersected with this
   local set; a disjoint request fails before network access.
-- `/aci-settings`, `/attestation`, `/aci-receipt` and `/aci-session` commands.
-  `/aci-receipt [id]` displays or re-runs the complete recorded-exchange audit;
-  `/aci-session <id>` can inspect a session directly. `/attestation` shows the
-  pinned report, keyset digest, binding, keys, and expiry.
+- Provider-scoped settings, attestation, receipt, and session commands. For the
+  neutral package these are `/aci-settings`, `/aci-attestation`, `/aci-receipt`
+  and `/aci-session`; branded packages replace `aci` with their provider id.
+  The receipt command displays or re-runs the complete recorded-exchange audit,
+  the session command inspects a session directly, and the attestation command
+  shows the pinned report, keyset digest, binding, keys, and expiry.
 
 ## How the verified connection is established
 
@@ -92,8 +95,8 @@ SPKI pin, so the pin is **attested** — not trust-on-first-use.
 Hardware verification alone says that some real TDX workload owns the TLS key;
 it does not identify a reviewed gateway release. Branded packages should ship
 their reviewed compose hashes through `acceptedComposeHashes` when their
-release pipeline publishes them. Until then `/attestation` explicitly reports
-`measurement verified, not pinned`.
+release pipeline publishes them. Until then the provider's attestation command
+reports `measurement verified, not pinned`.
 
 The extension registers Pi's native `Provider` and `ApiKeyAuth` interfaces.
 Pi owns credential storage and environment resolution; the
@@ -121,7 +124,6 @@ export default createProvider({
   envPrefix: "MY",
   logPrefix: "[my-brand]",
   acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
-  catalog: [...],
   footerKey: "my-brand",
 });
 ```

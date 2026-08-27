@@ -8,8 +8,7 @@ import {
 } from "@phala/aci-provider";
 
 import { toAciProviderConfig, type AciCloudConfig } from "./config.ts";
-import { DEFAULT_DISCOVERY_TIMEOUT_MS, LOG_PREFIX } from "./constants.ts";
-import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
+import { DEFAULT_DISCOVERY_TIMEOUT_MS } from "./constants.ts";
 
 export type AciPiModel = Omit<Model<"openai-completions">, "api" | "provider" | "baseUrl">;
 
@@ -93,7 +92,7 @@ export interface DiscoverAciModelsOptions {
   timeoutMs?: number;
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
-  logPrefix?: string;
+  signal?: AbortSignal;
 }
 
 export interface DiscoverAciModelsResult {
@@ -102,29 +101,19 @@ export interface DiscoverAciModelsResult {
 }
 
 export async function discoverAciModels(
-  apiKey: string,
   config: AciCloudConfig,
   options: DiscoverAciModelsOptions = {},
 ): Promise<DiscoverAciModelsResult> {
-  try {
-    const catalog = await discoverAciModelCatalog({
-      ...(apiKey ? { apiKey } : {}),
-      config: toAciProviderConfig({ ...config, baseUrl: options.baseUrl ?? config.baseUrl }),
-      fetch: options.fetch ?? globalThis.fetch,
-      timeoutMs: options.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
-    });
-    return {
-      raw: [...catalog.raw],
-      models: catalog.models.map((model) => toPiModel(model, config.models.thinkingFormat)),
-    };
-  } catch (error) {
-    console.error(`${options.logPrefix ?? LOG_PREFIX} model discovery failed:`, error);
-    return { models: [], raw: [] };
-  }
-}
-
-export function fallbackModels(providerProfile: ProviderProfile = DEFAULT_PROFILE): AciPiModel[] {
-  return providerProfile.catalog.map((model) => toPiModel(model, "auto"));
+  const catalog = await discoverAciModelCatalog({
+    config: toAciProviderConfig({ ...config, baseUrl: options.baseUrl ?? config.baseUrl }),
+    fetch: options.fetch ?? globalThis.fetch,
+    ...(options.signal ? { signal: options.signal } : {}),
+    timeoutMs: options.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+  });
+  return {
+    raw: [...catalog.raw],
+    models: catalog.models.map((model) => toPiModel(model, config.models.thinkingFormat)),
+  };
 }
 
 export type { AciServerModel };

@@ -24,8 +24,8 @@ not the default verified transport.
 /model redpill/deepseek/deepseek-v4-flash
 ```
 
-Config: `/redpill-settings` · Attestation status: `/attestation` · Receipt
-history and audit: `/aci-receipt`
+Config: `/redpill-settings` · Attestation status: `/redpill-attestation` · Receipt
+history and audit: `/redpill-receipt` · Session inspection: `/redpill-session`
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

@@ -3,7 +3,7 @@
 - [`@phala/opencode-provider-aci`](packages/opencode-provider-aci) is the
   vendor-neutral OpenCode adapter.
 - [`opencode-provider-redpill`](packages/opencode-provider-redpill) supplies
-  the RedPill endpoint, identity, environment names, and bootstrap catalog.
+  the RedPill endpoint, identity, and environment names.
 - [`opencode-provider-phala-cloud`](packages/opencode-provider-phala-cloud)
   supplies the Phala Cloud endpoint and identity.
 

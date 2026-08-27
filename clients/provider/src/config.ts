@@ -175,14 +175,3 @@ export function resolveAciProviderConfig(
     receipts: { verification, historySize: Number(historySize) },
   };
 }
-
-export function resolveAciApiKey(
-  profile: AciProviderProfile,
-  env: Record<string, string | undefined> = process.env,
-): string | undefined {
-  for (const name of [profile.apiKeyEnv, ...(profile.apiKeyAliases ?? [])]) {
-    const value = env[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}

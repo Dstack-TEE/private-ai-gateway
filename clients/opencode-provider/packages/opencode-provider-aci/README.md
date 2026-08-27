@@ -25,6 +25,10 @@ receipt before the response stream can finish.
 Set `ACI_API_KEY` or run `opencode providers login`. Select a discovered model
 as `aci/<model-id>`.
 
+The plugin discovers the public `/v1/models` catalog over the verified
+connection without sending the inference API key. OpenCode stores the key and
+attaches it to model requests through its native auth loader.
+
 Do not also configure a separate `provider.aci`. The plugin owns that provider
 so installation, attestation, or channel-binding failure leaves no ordinary
 HTTPS path available.

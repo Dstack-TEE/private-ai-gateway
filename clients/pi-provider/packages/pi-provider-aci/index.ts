@@ -43,12 +43,7 @@ import {
 import { createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
-import {
-  type AciServerModel,
-  discoverAciModels,
-  fallbackModels,
-  mapAciServerModel,
-} from "./src/models.ts";
+import { type AciServerModel, discoverAciModels, mapAciServerModel } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import { fetchSession, summarizeReceipt, summarizeSession } from "./src/audit.ts";
 import {
@@ -78,11 +73,10 @@ interface AciConnectionSetup {
   promise: Promise<void>;
 }
 
-function modelsFromState(state: AciRuntimeState): ReturnType<typeof fallbackModels> {
-  const mapped = state.rawModels
+function modelsFromState(state: AciRuntimeState) {
+  return state.rawModels
     .map((m) => mapAciServerModel(m, state.config))
-    .filter((m): m is ReturnType<typeof fallbackModels>[number] => m !== null);
-  return mapped.length > 0 ? mapped : fallbackModels(state.profile);
+    .filter((m): m is NonNullable<typeof m> => m !== null);
 }
 
 /**
@@ -115,10 +109,7 @@ async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
   const setup = (async () => {
     await closeAciProvider(state);
     try {
-      const provider = createAciProvider({
-        profile: state.profile,
-        config: toAciProviderConfig(config),
-      });
+      const provider = createAciProvider(toAciProviderConfig(config));
       await provider.connect();
       state.provider = provider;
       state.providerConfigKey = configKey;
@@ -159,13 +150,20 @@ function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   };
 }
 
-async function refreshAciModels(state: AciRuntimeState, apiKey: string): Promise<AciServerModel[]> {
+async function refreshAciModels(
+  state: AciRuntimeState,
+  signal: AbortSignal,
+): Promise<AciServerModel[]> {
   await ensureAciConnection(state);
-  if (!state.provider) return [];
-  const discovered = await discoverAciModels(apiKey, state.config, {
+  if (!state.provider) {
+    throw new Error(
+      `${state.profile.logPrefix} model discovery blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
+    );
+  }
+  const discovered = await discoverAciModels(state.config, {
     baseUrl: state.config.baseUrl,
     fetch: providerFetch(state),
-    logPrefix: state.profile.logPrefix,
+    signal,
   });
   return discovered.raw;
 }
@@ -189,9 +187,8 @@ function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions
     auth: { apiKey: createApiKeyAuth(state.profile) },
     getModels: () => piModelsFromState(state),
     async refreshModels(context) {
-      if (!context.allowNetwork || context.credential?.type !== "api_key") return;
-      const rawModels = await refreshAciModels(state, context.credential.key ?? "");
-      if (rawModels.length === 0) return;
+      if (!context.allowNetwork) return;
+      const rawModels = await refreshAciModels(state, context.signal);
       await context.publish({
         update: () => {
           state.rawModels = rawModels;
@@ -439,7 +436,7 @@ async function runSessionCommand(
   }
   const sessionId = args.trim();
   if (!sessionId) {
-    ctx.ui.notify("Usage: /aci-session <session-id>", "error");
+    ctx.ui.notify(`Usage: /${state.profile.providerId}-session <session-id>`, "error");
     return;
   }
   const session = await fetchSession(apiKey, sessionId, {
@@ -544,6 +541,9 @@ export function createProvider(
     });
 
     const settingsCommand = `${state.profile.providerId}-settings`;
+    const attestationCommand = `${state.profile.providerId}-attestation`;
+    const receiptCommand = `${state.profile.providerId}-receipt`;
+    const sessionCommand = `${state.profile.providerId}-session`;
     pi.registerCommand(settingsCommand, {
       description: `Configure ${state.profile.label} models and thinking format`,
       handler: async (_args, ctx) => {
@@ -555,21 +555,21 @@ export function createProvider(
       },
     });
 
-    pi.registerCommand("attestation", {
+    pi.registerCommand(attestationCommand, {
       description: "Show the cached/current attestation report status",
       handler: async (_args, ctx) => {
         await runAttestationCommand(ctx, state);
       },
     });
 
-    pi.registerCommand("aci-receipt", {
+    pi.registerCommand(receiptCommand, {
       description: "Verify the latest (or a given) signed ACI receipt",
       handler: async (args, ctx) => {
         await runReceiptCommand(ctx, state, args ?? "");
       },
     });
 
-    pi.registerCommand("aci-session", {
+    pi.registerCommand(sessionCommand, {
       description: "Show an attested session document (audit trail)",
       handler: async (args, ctx) => {
         await runSessionCommand(ctx, state, args ?? "");

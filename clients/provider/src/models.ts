@@ -138,9 +138,9 @@ export function mapAciModel(
 }
 
 export interface DiscoverAciModelsOptions {
-  apiKey?: string;
   config: AciProviderConfig;
   fetch: AciFetch;
+  signal?: AbortSignal;
   timeoutMs?: number;
 }
 
@@ -150,9 +150,9 @@ export interface AciModelCatalog {
 }
 
 export async function discoverAciModelCatalog({
-  apiKey,
   config,
   fetch,
+  signal,
   timeoutMs = 10_000,
 }: DiscoverAciModelsOptions): Promise<AciModelCatalog> {
   const controller = new AbortController();
@@ -161,10 +161,9 @@ export async function discoverAciModelCatalog({
     const url = new URL(config.baseURL);
     url.pathname = `${url.pathname.replace(/\/$/, "")}/models`;
     const response = await fetch(url, {
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
       headers: {
         Accept: "application/json",
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
     });
     if (!response.ok) {

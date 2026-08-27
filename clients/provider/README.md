@@ -21,10 +21,7 @@ import {
 const profile = resolveAciProviderProfile({
   defaultBaseURL: "https://gateway.example.com/v1",
 });
-const provider = createAciProvider({
-  profile,
-  config: resolveAciProviderConfig(profile),
-});
+const provider = createAciProvider(resolveAciProviderConfig(profile));
 
 await provider.connect();
 const response = await provider.fetch("https://gateway.example.com/v1/chat/completions", {
@@ -38,3 +35,7 @@ The provider fails closed: model traffic is sent only after workload attestation
 and TLS SPKI binding succeed. Set `receipts.verification` to `"response"` to
 make a response stream finish only after its signed receipt and cited session
 have verified.
+
+Model discovery uses the verified connection but sends no inference API key;
+the gateway's `/v1/models` catalog is public. Host adapters own credentials and
+attach them only to inference requests.

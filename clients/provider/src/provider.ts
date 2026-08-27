@@ -9,7 +9,6 @@ import {
 
 import type { AciProviderConfig } from "./config.ts";
 import { discoverAciModels, type AciModel } from "./models.ts";
-import type { AciProviderProfile } from "./profile.ts";
 
 export type AciProviderPhase = "idle" | "connecting" | "verified" | "blocked" | "closed";
 
@@ -28,26 +27,18 @@ export class AciProviderError extends Error {
   }
 }
 
-export interface CreateAciProviderOptions {
-  profile: AciProviderProfile;
-  config: AciProviderConfig;
-}
-
 export class AciProvider {
   readonly fetch: AciFetch;
-  readonly profile: AciProviderProfile;
   readonly config: AciProviderConfig;
 
   private connection?: AciConnection;
   private connecting?: Promise<AciConnection>;
   private phase: AciProviderPhase = "idle";
   private error?: string;
-  private catalog: readonly AciModel[];
+  private catalog: readonly AciModel[] = [];
 
-  constructor(profile: AciProviderProfile, config: AciProviderConfig) {
-    this.profile = profile;
+  constructor(config: AciProviderConfig) {
     this.config = config;
-    this.catalog = profile.catalog;
     this.fetch = (input, init) => this.secureFetch(input, init);
   }
 
@@ -92,12 +83,12 @@ export class AciProvider {
     return (await this.connecting).identity;
   }
 
-  async discoverModels(apiKey?: string): Promise<readonly AciModel[]> {
+  async discoverModels(options: { signal?: AbortSignal } = {}): Promise<readonly AciModel[]> {
     await this.connect();
     const models = await discoverAciModels({
-      apiKey,
       config: this.config,
       fetch: this.fetch,
+      ...options,
     });
     this.catalog = models;
     return models;
@@ -158,8 +149,8 @@ export class AciProvider {
   }
 }
 
-export function createAciProvider(options: CreateAciProviderOptions): AciProvider {
-  return new AciProvider(options.profile, options.config);
+export function createAciProvider(config: AciProviderConfig): AciProvider {
+  return new AciProvider(config);
 }
 
 /** @internal Response-stream boundary used by provider adapters and contract tests. */

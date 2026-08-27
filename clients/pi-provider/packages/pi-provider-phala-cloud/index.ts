@@ -4,7 +4,7 @@
  *
  * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
  * registers it with the Phala Cloud identity (provider id, endpoint, env vars,
- * fallback catalog, device login). All protocol logic — attestation, TLS SPKI
+ * device login). All protocol logic — attestation, TLS SPKI
  * pinning, model discovery — lives in the core.
  *
  * Usage:

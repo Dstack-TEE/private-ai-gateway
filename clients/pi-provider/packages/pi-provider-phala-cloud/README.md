@@ -30,8 +30,8 @@ The device flow issues and stores a Confidential AI API key. When upgrading
 from 0.3, run `/login phala` once to replace the legacy OAuth-shaped
 credential.
 
-Config: `/phala-settings` · Attestation status: `/attestation` · Receipt
-history and audit: `/aci-receipt`
+Config: `/phala-settings` · Attestation status: `/phala-attestation` · Receipt
+history and audit: `/phala-receipt` · Session inspection: `/phala-session`
 
 Interchangeable with `pi-provider-redpill` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

@@ -1,5 +1,3 @@
-import type { AciModel } from "./models.ts";
-
 export interface AciProviderProfile {
   providerId: string;
   label: string;
@@ -7,7 +5,6 @@ export interface AciProviderProfile {
   apiKeyEnv: string;
   envPrefix: string;
   logPrefix: string;
-  catalog: readonly AciModel[];
   acceptedComposeHashes?: readonly string[];
   acceptedSessionIds?: readonly string[];
   baseURLAliases?: readonly string[];
@@ -21,7 +18,6 @@ export const DEFAULT_ACI_PROVIDER_PROFILE: AciProviderProfile = {
   apiKeyEnv: "ACI_API_KEY",
   envPrefix: "ACI",
   logPrefix: "[aci]",
-  catalog: [],
 };
 
 export function resolveAciProviderProfile(

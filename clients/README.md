@@ -52,8 +52,9 @@ and native coding-agent integrations:
   footer state around the shared provider.
   Pi uses its native Provider/Auth API and verifies the signed receipt plus
   cited session before every response stream completes. The transport retains
-  bounded wire digests, `/aci-receipt` displays or re-runs a recorded audit,
-  and `/aci-session` remains available for direct session inspection.
+  bounded wire digests, provider-scoped receipt commands display or re-run a
+  recorded audit, and provider-scoped session commands remain available for
+  direct session inspection.
   See [`pi-provider/README.md`](pi-provider/README.md)
   for install and use. The coordinated npm release process is documented in
   [`releasing.md`](releasing.md).

@@ -1,6 +1,5 @@
 import {
   createAciProvider,
-  resolveAciApiKey,
   resolveAciProviderConfig,
   resolveAciProviderProfile,
   type AciModel,
@@ -9,16 +8,16 @@ import {
   type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
+import type { AuthHook, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
 interface OpenCodeProviderConfig {
-  name?: string;
-  env?: string[];
-  npm?: string;
-  options?: Record<string, unknown>;
-  models?: Record<string, OpenCodeModelConfig>;
+  name: string;
+  env: string[];
+  npm: string;
+  options: Record<string, unknown>;
+  models: Record<string, OpenCodeModelConfig>;
 }
 
 export interface OpenCodeModelConfig {
@@ -102,13 +101,6 @@ function modelMap(models: readonly AciModel[]): Record<string, OpenCodeModelConf
   return Object.fromEntries(models.map((model) => [model.id, mapOpenCodeModel(model)]));
 }
 
-function providerFromConfig(
-  config: Config,
-  providerId: string,
-): OpenCodeProviderConfig | undefined {
-  return config.provider?.[providerId] as OpenCodeProviderConfig | undefined;
-}
-
 export function createOpenCodeAciPlugin({
   profile: profileInput = {},
   defaults = {},
@@ -132,27 +124,20 @@ export function createOpenCodeAciPlugin({
 
     return {
       async config(config) {
-        const existing = providerFromConfig(config, profile.providerId);
-        const existingOptions = existing?.options ?? {};
-        const baseURL = options.baseURL ?? existingOptions.baseURL ?? defaults.baseURL;
+        const baseURL = options.baseURL ?? defaults.baseURL;
         config.provider ??= {};
         const owned: OpenCodeProviderConfig = {
-          ...existing,
           name: profile.label,
           npm: OPENAI_COMPATIBLE_PACKAGE,
           env: Array.from(new Set([profile.apiKeyEnv, ...(profile.apiKeyAliases ?? [])])),
           options: {
-            ...existingOptions,
             baseURL:
               (typeof baseURL === "string" && baseURL) ||
               profile.defaultBaseURL ||
               "https://invalid.invalid/v1",
             fetch: secureFetch,
           },
-          models: {
-            ...modelMap(profile.catalog),
-            ...existing?.models,
-          },
+          models: {},
         };
         config.provider[profile.providerId] = owned;
 
@@ -160,7 +145,6 @@ export function createOpenCodeAciPlugin({
         active = undefined;
         let candidate: AciProvider | undefined;
         try {
-          const apiKey = resolveAciApiKey(profile);
           const resolved = resolveAciProviderConfig(profile, {
             ...defaults,
             ...options,
@@ -173,11 +157,11 @@ export function createOpenCodeAciPlugin({
               verification: "response",
             },
           });
-          candidate = createAciProvider({ profile, config: resolved });
+          candidate = createAciProvider(resolved);
           owned.options = { ...owned.options, baseURL: resolved.baseURL, fetch: secureFetch };
           await candidate.connect();
-          const models = await candidate.discoverModels(apiKey);
-          owned.models = { ...modelMap(models), ...existing?.models };
+          const models = await candidate.discoverModels();
+          owned.models = modelMap(models);
           active = candidate;
           blockedReason = "ACI provider is unavailable";
           await previous?.close();

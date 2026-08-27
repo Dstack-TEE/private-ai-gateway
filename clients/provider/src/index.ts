@@ -4,11 +4,9 @@ export {
   createAciProvider,
   type AciProviderPhase,
   type AciProviderStatus,
-  type CreateAciProviderOptions,
 } from "./provider.ts";
 export {
   AciProviderConfigError,
-  resolveAciApiKey,
   resolveAciProviderConfig,
   type AciProviderConfig,
   type AciProviderConfigInput,

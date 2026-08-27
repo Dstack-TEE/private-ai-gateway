@@ -3,8 +3,8 @@
  * vendor-neutral private-ai-gateway (ACI) Pi provider.
  *
  * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
- * registers it with the Redpill identity (provider id, endpoint, env vars,
- * fallback catalog). All protocol logic — attestation, TLS SPKI pinning,
+ * registers it with the Redpill identity (provider id, endpoint, env vars).
+ * All protocol logic — attestation, TLS SPKI pinning,
  * model discovery — lives in the core.
  *
  * Usage:

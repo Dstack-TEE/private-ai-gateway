@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { resolveAciProviderConfig } from "../src/config.ts";
-import { mapAciModel } from "../src/models.ts";
+import { discoverAciModelCatalog, mapAciModel } from "../src/models.ts";
 import { resolveAciProviderProfile } from "../src/profile.ts";
 
 const profile = resolveAciProviderProfile({ defaultBaseURL: "https://gateway.example/v1" });
@@ -46,4 +46,19 @@ test("filters non-TEE, disallowed, and embedding-only models", () => {
     ),
     undefined,
   );
+});
+
+test("discovers the public model catalog without an authorization header", async () => {
+  let request: Request | undefined;
+  await discoverAciModelCatalog({
+    config,
+    fetch: async (input, init) => {
+      request = new Request(input, init);
+      return Response.json({ data: [] });
+    },
+  });
+
+  assert.ok(request);
+  assert.equal(request.headers.get("authorization"), null);
+  assert.equal(new URL(request.url).pathname, "/v1/models");
 });
