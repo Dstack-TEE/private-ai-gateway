@@ -8,6 +8,8 @@ export interface PinnedTransportOptions {
 
 export interface PinnedTransport {
   fetch: AciFetch;
+  /** TLS peer SPKI observed and accepted by the latest handshake. */
+  observedSpkiSha256(): string | undefined;
   close(): Promise<void>;
 }
 

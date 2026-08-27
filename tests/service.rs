@@ -303,6 +303,51 @@ async fn verified_upstream_binding_creates_attested_session() {
 }
 
 #[tokio::test]
+async fn chutes_instance_session_retains_verification_evidence() {
+    let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
+    let evidence_data = "data:application/json;base64,YWJj";
+    let evidence_digest = private_ai_gateway::aci::digest::sha256_hex(b"abc");
+    let event = UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        url_origin: Some("https://stub-upstream".to_string()),
+        verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        evidence: Some(serde_json::json!({
+            "digest": evidence_digest,
+            "data": evidence_data,
+        })),
+        channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
+            provider: "chutes".to_string(),
+            key_id: Some("instance-1".to_string()),
+            algorithm: "chutes-ml-kem-768".to_string(),
+            public_key_sha256: "aa".repeat(32),
+        }],
+        ..verified_event("stub-upstream", "x")
+    };
+
+    let result = svc
+        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, Some(event))
+        .await
+        .unwrap();
+    let session_id = payload_event(&result.receipt, "upstream.verified")["session_id"]
+        .as_str()
+        .expect("verified Chutes binding should produce a session id")
+        .to_string();
+    let session = svc
+        .get_attested_session(&session_id)
+        .expect("Chutes session should be queryable");
+
+    assert_eq!(
+        session.document().evidence.digest.as_deref(),
+        Some(evidence_digest.as_str())
+    );
+    assert_eq!(
+        session.document().evidence.data_uri.as_deref(),
+        Some(evidence_data)
+    );
+    assert!(session.document().evidence.digest_matches_data());
+}
+
+#[tokio::test]
 async fn verified_upstream_binding_fails_without_persisted_session() {
     let (svc, received) = make_service_raw(br#"{"id":"chat-xyz","model":"x"}"#);
     let svc = svc.with_session_store(Arc::new(FailingSessionStore));

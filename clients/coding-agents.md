@@ -98,7 +98,7 @@ plugin injects the shared ACI client. First add the verifier dependency:
 ```json
 {
   "dependencies": {
-    "@phala/aci-verifier": "^0.2.0"
+    "@phala/aci-verifier": "^0.2.2"
   }
 }
 ```
@@ -155,6 +155,10 @@ export const AciPlugin: Plugin = async () => {
           acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
         },
       });
+      if (!next.identity.transcript.verdict.verified) {
+        await next.close();
+        throw new Error(next.identity.transcript.verdict.line);
+      }
       provider.options = { ...options, baseURL: next.baseURL, fetch: next.fetch };
 
       const previous = connection;

@@ -1,6 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { computeVerdict, receiptTranscriptFromDigests, reportTranscript } from '../transcript.js';
+import {
+  bindReportTranscriptChannel,
+  computeVerdict,
+  receiptTranscriptFromDigests,
+  reportTranscript,
+} from '../transcript.js';
 import type { AttestationReport, ReceiptEnvelope, SessionRecord, WorkloadKeyset } from '../types.js';
 import type {
   PinnedTransport,
@@ -185,9 +190,31 @@ class RuntimeAciConnection implements AciConnection {
       });
     }
 
+    const observedSpkiSha256 = candidate.observedSpkiSha256();
+    if (!observedSpkiSha256) {
+      await candidate.close();
+      throw new AciConnectionError(
+        'channel_binding',
+        'pinned ACI channel probe did not observe a TLS peer SPKI',
+      );
+    }
+    const transcript = bindReportTranscriptChannel(identity.transcript, {
+      observedSpkiSha256,
+      host: identity.hostname,
+    });
+    const channelCheck = transcript.lines.find((line) => line.id === 'id-6');
+    if (channelCheck?.status !== 'pass') {
+      await candidate.close();
+      throw new AciConnectionError(
+        'channel_binding',
+        `pinned ACI channel did not satisfy id-6: ${channelCheck?.detail ?? 'check did not run'}`,
+      );
+    }
+    const boundIdentity: VerifiedAciIdentity = { ...identity, transcript };
+
     const previous = this.transport;
     this.transport = candidate;
-    this.currentIdentity = identity;
+    this.currentIdentity = boundIdentity;
     this.rotationRequired = false;
     if (previous) await previous.close();
   }

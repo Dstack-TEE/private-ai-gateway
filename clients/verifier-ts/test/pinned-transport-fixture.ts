@@ -105,7 +105,9 @@ export async function assertPinnedTransport(factory: PinnedTransportFactory): Pr
     ca,
   });
   try {
+    assert.equal(transport.observedSpkiSha256(), undefined);
     assert.equal(await transport.fetch(primary.url).then((response) => response.text()), 'primary');
+    assert.equal(transport.observedSpkiSha256(), spki);
     await assert.rejects(
       transport.fetch(other.url),
       (error: unknown) =>
@@ -131,6 +133,7 @@ export async function assertPinnedTransport(factory: PinnedTransportFactory): Pr
   });
   try {
     await assert.rejects(mismatched.fetch(mismatchServer.url), /SPKI pin mismatch/);
+    assert.equal(mismatched.observedSpkiSha256(), undefined);
   } finally {
     await mismatched.close();
     await mismatchServer.close();
