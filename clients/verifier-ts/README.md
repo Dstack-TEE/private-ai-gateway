@@ -128,19 +128,18 @@ const apiKey = process.env.ACI_API_KEY;
 if (!apiKey) throw new Error('ACI_API_KEY is required');
 
 const aci = await connectAci({
-  baseURL: 'https://api.example.com/v1',
+  baseURL: 'https://tee.redpill.ai/v1',
   apiKey,
-  policy: {
-    requireProductionOs: true,
-    acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
-  },
+  policy: { requireProductionOs: true },
   serving: {
-    // Every JSON POST demands verified serving. When session ids are supplied,
-    // request pins are intersected with this locally accepted set.
+    // Every successful JSON POST must carry a receipt and cite verified serving.
     requireVerified: true,
-    acceptedSessionIds: ['<reviewed-attested-session-id>'],
+    requireReceipt: true,
   },
 });
+if (!aci.identity.transcript.verdict.verified) {
+  throw new Error(aci.identity.transcript.verdict.line);
+}
 
 const openai = new OpenAI({
   baseURL: aci.baseURL,
@@ -149,7 +148,7 @@ const openai = new OpenAI({
 });
 
 const response = await openai.chat.completions.create({
-  model: 'your-model',
+  model: 'z-ai/glm-5.2',
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
@@ -164,6 +163,13 @@ if (!audit.transcript.verdict.verified) {
 await aci.refresh(); // Verify a fresh report and rotate the scoped dispatcher.
 await aci.close();
 ```
+
+Install the two ESM packages with `npm install openai @phala/aci-verifier`.
+Run the same source under Node 20.18.1+ or Bun 1.4.0+; the `/runtime` export
+selects the matching pinned transport. Set `ACI_API_KEY` to the Redpill key.
+For release-level pinning, add the reviewed deployment's compose hash under
+`policy.acceptedComposeHashes`; do not copy a hash from the endpoint and trust
+it on first use.
 
 The public API is identical in Node and Bun. Internally, Node passes a scoped
 `undici` dispatcher to `fetch`, while Bun passes its documented

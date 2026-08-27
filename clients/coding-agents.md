@@ -155,6 +155,10 @@ export const AciPlugin: Plugin = async () => {
           acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],
         },
       });
+      if (!next.identity.transcript.verdict.verified) {
+        await next.close();
+        throw new Error(next.identity.transcript.verdict.line);
+      }
       provider.options = { ...options, baseURL: next.baseURL, fetch: next.fetch };
 
       const previous = connection;
