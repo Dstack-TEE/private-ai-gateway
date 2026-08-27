@@ -54,6 +54,10 @@ export type AciFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise
 
 export interface ConnectAciOptions {
   baseURL: string;
+  /**
+   * @deprecated The connection captures request authorization for receipt
+   * lookups. Kept as a fallback for callers upgrading from 0.2.x.
+   */
   apiKey?: string;
   policy?: AciPolicy;
   /** Gateway serving constraints applied to JSON POST bodies. */

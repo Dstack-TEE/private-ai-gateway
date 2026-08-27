@@ -27,6 +27,8 @@ const DEFAULT_RECEIPT_HISTORY_SIZE = 32;
 interface InternalExchange extends RecordedAciExchange {
   requestDigest: string;
   responseDigest?: string;
+  /** Original request credential, retained only for its private receipt lookup. */
+  authorization?: string;
   completion: Promise<void>;
   identity: VerifiedAciIdentity;
   pinnedSessions: string[];
@@ -99,7 +101,10 @@ class RuntimeAciConnection implements AciConnection {
     await exchange.completion;
     await this.ensureFreshIdentity();
     const identity = exchange.identity;
-    const receipt = await this.fetchJsonArtifact<ReceiptEnvelope>(`receipts/${encodeURIComponent(id)}`);
+    const receipt = await this.fetchJsonArtifact<ReceiptEnvelope>(
+      `receipts/${encodeURIComponent(id)}`,
+      exchange.authorization ?? legacyAuthorization(this.options),
+    );
     const sessionId = citedSessionId(receipt);
     let session: SessionRecord | undefined;
     if (sessionId) {
@@ -283,6 +288,7 @@ class RuntimeAciConnection implements AciConnection {
       recordedAt: Date.now(),
       responseComplete: false,
       requestDigest: prepared.bodyDigest,
+      ...(prepared.authorization === undefined ? {} : { authorization: prepared.authorization }),
       completion: Promise.resolve(),
       identity,
       pinnedSessions: prepared.pinnedSessions,
@@ -299,13 +305,13 @@ class RuntimeAciConnection implements AciConnection {
     if (this.exchanges.length > cap) this.exchanges.splice(0, this.exchanges.length - cap);
   }
 
-  private async fetchJsonArtifact<T extends object>(path: string): Promise<T> {
+  private async fetchJsonArtifact<T extends object>(path: string, authorization?: string): Promise<T> {
     const root = new URL(this.attestationURL);
     root.pathname = root.pathname.replace(/attestation$/, path);
     const response = await this.secureFetch(root, {
       headers: {
         Accept: 'application/json',
-        ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
+        ...(authorization ? { Authorization: authorization } : {}),
       },
     });
     if (!response.ok) {
@@ -327,16 +333,24 @@ interface PreparedRequest {
   request: Request;
   bodyDigest: string;
   pinnedSessions: string[];
+  authorization?: string;
 }
 
-async function prepareRequest(
+/** @internal Exported for transport-policy conformance tests. */
+export async function prepareRequest(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   options: ConnectAciOptions,
 ): Promise<PreparedRequest> {
   const original = new Request(input, init);
+  const authorization = original.headers.get('authorization')?.trim() || undefined;
   if (original.method !== 'POST') {
-    return { request: original, bodyDigest: await digestRequest(original), pinnedSessions: [] };
+    return {
+      request: original,
+      bodyDigest: await digestRequest(original),
+      pinnedSessions: [],
+      ...(authorization ? { authorization } : {}),
+    };
   }
   const bytes = new Uint8Array(await original.clone().arrayBuffer());
   const constrained = constrainJsonBody(bytes, options);
@@ -350,6 +364,7 @@ async function prepareRequest(
     request,
     bodyDigest: digestBytes(constrained.body),
     pinnedSessions: constrained.pinnedSessions,
+    ...(authorization ? { authorization } : {}),
   };
 }
 
@@ -458,6 +473,11 @@ function publicExchange(exchange: InternalExchange): RecordedAciExchange {
     responseComplete: exchange.responseComplete,
     ...(exchange.responseError === undefined ? {} : { responseError: exchange.responseError }),
   };
+}
+
+function legacyAuthorization(options: ConnectAciOptions): string | undefined {
+  const apiKey = options.apiKey?.trim();
+  return apiKey ? `Bearer ${apiKey}` : undefined;
 }
 
 function citedSessionId(receipt: ReceiptEnvelope): string | undefined {
@@ -607,7 +627,6 @@ async function fetchAttestation(
     {
       headers: {
         Accept: 'application/json',
-        ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
       },
     },
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -640,7 +659,6 @@ async function probePinnedChannel(
     {
       headers: {
         Accept: 'application/json',
-        ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
       },
     },
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,

@@ -149,7 +149,6 @@ export const AciPlugin: Plugin = async () => {
 
       const next = await connectAci({
         baseURL,
-        apiKey,
         policy: {
           requireProductionOs: true,
           acceptedComposeHashes: ['<reviewed-sha256-app-compose>'],

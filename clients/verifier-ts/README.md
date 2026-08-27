@@ -118,7 +118,7 @@ Node and Bun applications establish the same instance-scoped, SPKI-pinned
 connection and inject its ordinary `fetch` into any HTTP-based
 OpenAI-compatible SDK. The connection rejects HTTP, cross-origin requests,
 expired identities, and TLS peers whose SPKI is not in the verified workload
-keyset. It never replaces `globalThis.fetch`.
+keyset.
 
 ```ts
 import OpenAI from 'openai';
@@ -129,7 +129,6 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
-  apiKey,
   policy: { requireProductionOs: true },
   serving: {
     // Every successful JSON POST must carry a receipt and cite verified serving.
@@ -152,7 +151,8 @@ const response = await openai.chat.completions.create({
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
-// The transport hashes the exact request/response wire bodies while streaming.
+// The transport hashes the exact request/response wire bodies while streaming
+// and reuses this request's authorization only to fetch its private receipt.
 // Verification is on demand, so normal inference latency does not include a
 // receipt/session fetch.
 const audit = await aci.verifyReceipt();
@@ -167,6 +167,10 @@ await aci.close();
 Install the two ESM packages with `npm install openai @phala/aci-verifier`.
 Run the same source under Node 20.18.1+ or Bun 1.4.0+; the `/runtime` export
 selects the matching pinned transport. Set `ACI_API_KEY` to the Redpill key.
+The SDK adds it to the inference request; `aci.fetch` retains that request's
+authorization in its bounded exchange history and reuses it only for the
+matching private receipt lookup.
+
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`; do not copy a hash from the endpoint and trust
 it on first use.

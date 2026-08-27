@@ -101,9 +101,8 @@ were hardened in place:
 integration. It is the existing Rust local verifying proxy. It preserves the
 request path and body, so the gateway must implement the protocol spoken by the
 agent. `connectAci()` is the new runtime client for applications that accept a
-custom `fetch`; it never replaces `globalThis.fetch`. Node and Bun expose the
-same public API and differ only in how their native `fetch` receives the TLS
-identity callback.
+custom `fetch`. Node and Bun expose the same public API and differ only in how
+their native `fetch` receives the TLS identity callback.
 
 ## One trust contract, two integrations
 
