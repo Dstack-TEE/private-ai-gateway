@@ -90,7 +90,7 @@ were hardened in place:
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
 | Framework-neutral model, lifecycle, policy, status and receipt provider core | Current OpenCode work |
-| Native OpenCode v1 plugin and RedPill distribution | Current OpenCode work |
+| Native OpenCode v1 plugin plus RedPill and Phala Cloud distributions | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
@@ -174,7 +174,7 @@ deployment release process must still close the trust loop:
 5. Exercise both Rust and TypeScript clients against the same accepted and
    rejected measurements.
 
-The repository can publish all seven npm packages in dependency order from a
+The repository can publish all eight npm packages in dependency order from a
 signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.

@@ -1,6 +1,6 @@
 # npm client releases
 
-The seven client packages use one coordinated version and publish in dependency
+The eight client packages use one coordinated version and publish in dependency
 order:
 
 1. `@phala/aci-verifier`
@@ -10,8 +10,9 @@ order:
 5. `pi-provider-phala-cloud`
 6. `@phala/opencode-provider-aci`
 7. `opencode-provider-redpill`
+8. `opencode-provider-phala-cloud`
 
-All seven packages are managed by the Phala npm organization. The three branded
+All eight packages are managed by the Phala npm organization. The four branded
 provider names intentionally remain unscoped. After their bootstrap publish,
 grant a Phala organization release team read/write access to those packages;
 organization management does not require renaming them into the `@phala`
@@ -41,19 +42,20 @@ npm --prefix clients run lint:packages
 bash clients/package-smoke.sh
 ```
 
-The smoke test packs all seven packages, installs the tarballs together in a
+The smoke test packs all eight packages, installs the tarballs together in a
 temporary clean project, proves `/runtime` selects the Node and Bun entries in
 their respective runtimes, and imports every public ESM entry.
 
 ## Trusted publishing
 
 The four existing packages already publish through npm trusted publishing. The
-three new `0.4.0` packages require the same trusted-publisher configuration
+four new `0.4.0` packages require the same trusted-publisher configuration
 after their bootstrap publish:
 
 - `@phala/aci-provider`
 - `@phala/opencode-provider-aci`
 - `opencode-provider-redpill`
+- `opencode-provider-phala-cloud`
 
 Use these settings for each package:
 

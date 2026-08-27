@@ -44,7 +44,8 @@ jobs:
             clients/pi-provider/packages/pi-provider-redpill/package.json \
             clients/pi-provider/packages/pi-provider-phala-cloud/package.json \
             clients/opencode-provider/packages/opencode-provider-aci/package.json \
-            clients/opencode-provider/packages/opencode-provider-redpill/package.json
+            clients/opencode-provider/packages/opencode-provider-redpill/package.json \
+            clients/opencode-provider/packages/opencode-provider-phala-cloud/package.json
           do
             test "$(node -p "require('./$manifest').version")" = "$version"
           done
@@ -84,3 +85,4 @@ jobs:
           publish_if_missing pi-provider-phala-cloud clients/pi-provider/packages/pi-provider-phala-cloud
           publish_if_missing @phala/opencode-provider-aci clients/opencode-provider/packages/opencode-provider-aci
           publish_if_missing opencode-provider-redpill clients/opencode-provider/packages/opencode-provider-redpill
+          publish_if_missing opencode-provider-phala-cloud clients/opencode-provider/packages/opencode-provider-phala-cloud

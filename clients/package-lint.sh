@@ -13,7 +13,8 @@ for directory in \
   pi-provider/packages/pi-provider-redpill \
   pi-provider/packages/pi-provider-phala-cloud \
   opencode-provider/packages/opencode-provider-aci \
-  opencode-provider/packages/opencode-provider-redpill
+  opencode-provider/packages/opencode-provider-redpill \
+  opencode-provider/packages/opencode-provider-phala-cloud
 do
   publint "$directory"
   attw --pack --profile esm-only "$directory"

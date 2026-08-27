@@ -12,6 +12,7 @@
  *   # /login phala (or set PHALA_LLM_API_KEY), then /model phala/<model-id>
  */
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { startDeviceAuthorization } from "@phala/aci-provider";
 import { createProvider } from "@phala/pi-provider-aci";
 
 // Phala Cloud (teahouse) API base for account-level endpoints: the OAuth
@@ -19,28 +20,9 @@ import { createProvider } from "@phala/pi-provider-aci";
 // the inference gateway.
 const DEFAULT_CLOUD_API_URL = "https://cloud-api.phala.com";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-}
-
 export function getCloudApiBase(): string {
   const value = process.env.PHALA_CLOUD_API_BASE_URL || DEFAULT_CLOUD_API_URL;
   return value.trim().replace(/\/+$/, "") || DEFAULT_CLOUD_API_URL;
-}
-
-interface DeviceCodeResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete?: string;
-  expires_in: number;
-  interval: number;
-}
-
-interface DeviceTokenResponse {
-  access_token: string;
-  expires_in?: number | null;
-  redpill_key_id?: number | null;
 }
 
 interface PrivateAiSelfResponse {
@@ -49,170 +31,42 @@ interface PrivateAiSelfResponse {
   credits?: { balance?: string; granted_balance?: string };
 }
 
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} returned an invalid response`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Device authorization response is missing ${field}`);
-  }
-  return value;
-}
-
-function requiredHttpUrl(value: unknown, field: string): string {
-  const text = requiredString(value, field);
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
-    throw new Error(`Device authorization response has invalid ${field}`);
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error(`Device authorization response has invalid ${field}`);
-  }
-  return text;
-}
-
-function positiveNumber(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`Device authorization response has invalid ${field}`);
-  }
-  return value;
-}
-
-function parseDeviceCode(value: unknown): DeviceCodeResponse {
-  const data = record(value, "Device authorization endpoint");
-  const verificationUri = requiredHttpUrl(data.verification_uri, "verification_uri");
-  const complete = data.verification_uri_complete;
-  const completeUri =
-    complete === undefined ? undefined : requiredHttpUrl(complete, "verification_uri_complete");
-  return {
-    device_code: requiredString(data.device_code, "device_code"),
-    user_code: requiredString(data.user_code, "user_code"),
-    verification_uri: verificationUri,
-    ...(completeUri === undefined ? {} : { verification_uri_complete: completeUri }),
-    expires_in: positiveNumber(data.expires_in, "expires_in"),
-    interval: positiveNumber(data.interval, "interval"),
-  };
-}
-
-function parseDeviceToken(value: unknown): DeviceTokenResponse {
-  const data = record(value, "Device token endpoint");
-  const expiresIn = data.expires_in;
-  if (
-    expiresIn !== undefined &&
-    expiresIn !== null &&
-    (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0)
-  ) {
-    throw new Error("Device token response has invalid expires_in");
-  }
-  const keyId = data.redpill_key_id;
-  if (
-    keyId !== undefined &&
-    keyId !== null &&
-    (typeof keyId !== "number" || !Number.isInteger(keyId) || keyId < 0)
-  ) {
-    throw new Error("Device token response has invalid redpill_key_id");
-  }
-  return {
-    access_token: requiredString(data.access_token, "access_token"),
-    ...(typeof expiresIn === "number" ? { expires_in: expiresIn } : {}),
-    ...(typeof keyId === "number" ? { redpill_key_id: keyId } : {}),
-  };
-}
-
-function deviceError(value: unknown): { code?: string; description?: string } {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
-  const detail = (value as Record<string, unknown>).detail;
-  if (typeof detail === "string") return { description: detail };
-  if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return {};
-  const fields = detail as Record<string, unknown>;
-  return {
-    ...(typeof fields.error === "string" ? { code: fields.error } : {}),
-    ...(typeof fields.error_description === "string"
-      ? { description: fields.error_description }
-      : {}),
-  };
-}
-
 // RFC 8628 device authorization against Phala Cloud. On approval the consume
 // step (scope "redpill:api-key") issues a Redpill LLM virtual key — no phak_
 // cloud token is created. The key does not expire and cannot be refreshed, so
 // `expires` is set far in the future and refreshToken() always throws.
 async function loginPhalaDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
   const cloudApi = getCloudApiBase();
-  const codeRes = await fetch(`${cloudApi}/api/v1/auth/device/code`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: "pi", scope: "redpill:api-key" }),
+  const authorization = await startDeviceAuthorization({
+    baseURL: cloudApi,
+    clientId: "pi",
+    scope: "redpill:api-key",
     signal: callbacks.signal,
   });
-  if (!codeRes.ok) {
-    throw new Error(`Device authorization request failed: ${await codeRes.text()}`);
-  }
-  const code = parseDeviceCode(await codeRes.json());
-
   callbacks.onDeviceCode({
-    userCode: code.user_code,
-    verificationUri: code.verification_uri_complete ?? code.verification_uri,
-    intervalSeconds: code.interval,
-    expiresInSeconds: code.expires_in,
+    userCode: authorization.userCode,
+    verificationUri: authorization.verificationURI,
+    intervalSeconds: authorization.interval,
+    expiresInSeconds: authorization.expiresIn,
   });
-
-  const deadline = Date.now() + code.expires_in * 1000;
-  let token: DeviceTokenResponse | undefined;
-  // RFC 8628 §3.4: poll at the server-provided interval, and back off on
-  // slow_down. A loop without this would hammer the token endpoint.
-  let intervalMs = Math.max(Number(code.interval) || 5, 1) * 1000;
-  while (Date.now() < deadline) {
-    if (callbacks.signal?.aborted) throw new Error("Login cancelled");
-    callbacks.onProgress?.("Waiting for authorization...");
-    const tokenRes = await fetch(`${cloudApi}/api/v1/auth/device/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        device_code: code.device_code,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      }),
-      signal: callbacks.signal,
-    });
-    if (tokenRes.ok) {
-      token = parseDeviceToken(await tokenRes.json());
-      break;
-    }
-    const error = deviceError(await tokenRes.json().catch(() => undefined));
-    if (error.code === "authorization_pending") {
-      await sleep(Math.min(intervalMs, deadline - Date.now()));
-      continue;
-    }
-    if (error.code === "slow_down") {
-      // RFC 8628 §3.5: increase the polling interval.
-      intervalMs = Math.min(Math.max(intervalMs * 2, 5000), 30000);
-      await sleep(intervalMs);
-      continue;
-    }
-    const description = error.description ?? `HTTP ${tokenRes.status}`;
-    throw new Error(`Device authorization failed: ${description}`);
-  }
-  if (!token) throw new Error("Device authorization expired");
+  const token = await authorization.poll({
+    signal: callbacks.signal,
+    onProgress: callbacks.onProgress,
+  });
 
   const credentials: OAuthCredentials = {
     refresh: "",
-    access: token.access_token,
+    access: token.accessToken,
     expires: Date.now() + 100 * 365 * 24 * 60 * 60 * 1000,
   };
-  if (typeof token.redpill_key_id === "number") {
-    credentials.redpill_key_id = token.redpill_key_id;
+  if (token.keyId !== undefined) {
+    credentials.redpill_key_id = token.keyId;
   }
 
   // Best-effort display metadata from the LLM-key self endpoint.
   try {
     const selfRes = await fetch(`${cloudApi}/api/v1/private_ai/self`, {
-      headers: { Authorization: `Bearer ${token.access_token}` },
+      headers: { Authorization: `Bearer ${token.accessToken}` },
     });
     if (selfRes.ok) {
       const self = (await selfRes.json()) as PrivateAiSelfResponse;

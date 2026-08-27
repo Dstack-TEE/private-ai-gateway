@@ -3,13 +3,14 @@ import {
   resolveAciApiKey,
   resolveAciProviderConfig,
   resolveAciProviderProfile,
+  startDeviceAuthorization,
   type AciModel,
   type AciFetch,
   type AciProvider,
   type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
+import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
@@ -44,6 +45,21 @@ export interface OpenCodeModelConfig {
 }
 
 export type OpenCodeAciPluginOptions = AciProviderConfigInput;
+export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
+
+export interface CreateOpenCodeAciPluginOptions {
+  profile?: Partial<AciProviderProfile>;
+  defaults?: AciProviderConfigInput;
+  authMethods?: readonly OpenCodeAciAuthMethod[];
+}
+
+export interface CreateDeviceAuthMethodOptions {
+  label: string;
+  baseURL: string;
+  clientId: string;
+  scope: string;
+  fetch?: AciFetch;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -56,6 +72,40 @@ function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOpti
     ...(isRecord(options.models) ? { models: options.models } : {}),
     ...(isRecord(options.trust) ? { trust: options.trust } : {}),
     ...(isRecord(options.receipts) ? { receipts: options.receipts } : {}),
+  };
+}
+
+export function createDeviceAuthMethod({
+  label,
+  baseURL,
+  clientId,
+  scope,
+  fetch,
+}: CreateDeviceAuthMethodOptions): OpenCodeAciAuthMethod {
+  return {
+    type: "oauth",
+    label,
+    async authorize() {
+      const authorization = await startDeviceAuthorization({
+        baseURL,
+        clientId,
+        scope,
+        ...(fetch ? { fetch } : {}),
+      });
+      return {
+        url: authorization.verificationURI,
+        instructions: `Approve the device login with code ${authorization.userCode}`,
+        method: "auto",
+        async callback() {
+          const token = await authorization.poll();
+          return {
+            type: "success",
+            key: token.accessToken,
+            ...(token.keyId === undefined ? {} : { metadata: { keyId: String(token.keyId) } }),
+          };
+        },
+      };
+    },
   };
 }
 
@@ -98,11 +148,16 @@ function providerFromConfig(
   return config.provider?.[providerId] as OpenCodeProviderConfig | undefined;
 }
 
-export function createOpenCodeAciPlugin(
-  profileInput: Partial<AciProviderProfile> = {},
-  defaults: AciProviderConfigInput = {},
-): Plugin {
+export function createOpenCodeAciPlugin({
+  profile: profileInput = {},
+  defaults = {},
+  authMethods = [],
+}: CreateOpenCodeAciPluginOptions = {}): Plugin {
   const profile = resolveAciProviderProfile(profileInput);
+  const methods = [...authMethods];
+  if (!methods.some((method) => method.type === "api")) {
+    methods.push({ type: "api", label: `${profile.label} API key` });
+  }
 
   return async (_input, rawOptions) => {
     const options = pluginConfig(rawOptions);
@@ -180,7 +235,7 @@ export function createOpenCodeAciPlugin(
             ...(auth?.type === "api" ? { apiKey: auth.key } : {}),
           };
         },
-        methods: [{ type: "api", label: `${profile.label} API key` }],
+        methods,
       },
       async "chat.params"(request, output) {
         if (request.model.providerID !== profile.providerId) return;

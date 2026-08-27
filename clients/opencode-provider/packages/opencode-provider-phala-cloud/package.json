@@ -1,25 +1,24 @@
 {
-  "name": "pi-provider-phala-cloud",
+  "name": "opencode-provider-phala-cloud",
   "version": "0.4.0",
-  "description": "Phala Cloud Confidential AI for Pi with verified ACI transport and signed receipt auditing",
+  "description": "Phala Cloud ACI provider for OpenCode",
   "keywords": [
-    "ai-provider",
-    "attestation",
+    "aci",
+    "coding-agent",
     "confidential-ai",
+    "opencode",
+    "opencode-plugin",
     "phala",
     "phala-cloud",
-    "pi",
-    "pi-provider",
-    "tee",
-    "verifiable"
+    "tee"
   ],
-  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider/packages/pi-provider-phala-cloud",
+  "homepage": "https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/opencode-provider",
   "bugs": "https://github.com/Dstack-TEE/private-ai-gateway/issues",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dstack-TEE/private-ai-gateway.git",
-    "directory": "clients/pi-provider/packages/pi-provider-phala-cloud"
+    "directory": "clients/opencode-provider/packages/opencode-provider-phala-cloud"
   },
   "files": [
     "dist",
@@ -53,20 +52,15 @@
     "prepublishOnly": "npm run check && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.4.0",
-    "@phala/pi-provider-aci": "^0.4.0"
+    "@phala/opencode-provider-aci": "^0.4.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.83.0 <0.85.0"
+    "@opencode-ai/plugin": ">=1.18.23 <2"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "bun": ">=1.4.0"
   },
-  "pi": {
-    "extensions": [
-      "./dist/index.js"
-    ]
+  "opencode": {
+    "type": "plugin"
   }
 }

@@ -16,7 +16,8 @@ for package in \
   pi-provider-redpill \
   pi-provider-phala-cloud \
   @phala/opencode-provider-aci \
-  opencode-provider-redpill
+  opencode-provider-redpill \
+  opencode-provider-phala-cloud
 do
   (cd "$repo_root/clients" && \
     npm pack --workspace "$package" --pack-destination "$packs")
@@ -56,6 +57,7 @@ for (const name of [
 for (const name of [
   '@phala/opencode-provider-aci',
   'opencode-provider-redpill',
+  'opencode-provider-phala-cloud',
 ]) {
   const entry = await import(name);
   if (typeof entry.default?.server !== 'function') {
@@ -72,7 +74,11 @@ if (!runtimeEntry.endsWith("/dist/bun/index.js")) {
 await import("@phala/aci-verifier/runtime");
 await import("@phala/aci-verifier/bun");
 await import("@phala/aci-provider");
-for (const name of ["@phala/opencode-provider-aci", "opencode-provider-redpill"]) {
+for (const name of [
+  "@phala/opencode-provider-aci",
+  "opencode-provider-redpill",
+  "opencode-provider-phala-cloud",
+]) {
   const entry = await import(name);
   if (typeof entry.default?.server !== "function") {
     throw new Error(`${name} does not export an OpenCode v1 server plugin`);
