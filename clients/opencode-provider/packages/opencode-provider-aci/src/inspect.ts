@@ -98,8 +98,8 @@ function sessionSummary(audit: AciSessionAudit): string {
     `Upstream: ${String(session.upstream_name)}`,
     `Endpoint: ${String(session.endpoint ?? "none")}`,
     `Verifier: ${String(session.verifier_id)}`,
-    `Established: ${isoTime(Number(session.established_at) * 1000)}`,
-    `Expires: ${isoTime(Number(session.expires_at) * 1000)}`,
+    `Established: ${isoTime(session.established_at * 1000)}`,
+    `Expires: ${isoTime(session.expires_at * 1000)}`,
     ...audit.checks.map((check) => `${check.ok ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`),
   ].join("\n");
 }

@@ -133,18 +133,11 @@ export function getProjectAciCloudConfigPath(
   return join(cwd, PI_CONFIG_DIR_NAME, "providers", providerId, "config.json");
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function mergeConfigPatch<T extends Record<string, unknown>>(
-  base: T,
-  patch: Record<string, unknown>,
-): T {
+function mergeConfigPatch(base: object, patch: object): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
@@ -155,7 +148,7 @@ function mergeConfigPatch<T extends Record<string, unknown>>(
       result[key] = value;
     }
   }
-  return result as T;
+  return result;
 }
 
 function readConfigFile(path: string): Record<string, unknown> {
@@ -273,12 +266,9 @@ export function validateAciCloudConfig(
   }
 }
 
-function loadLayers(
-  options: LoadAciCloudConfigOptions,
-  overrides?: AciCloudConfigPatch,
-): Record<string, unknown>[] {
+function loadLayers(options: LoadAciCloudConfigOptions, overrides?: AciCloudConfigPatch): object[] {
   const providerProfile = options.profile ?? DEFAULT_PROFILE;
-  const layers: Record<string, unknown>[] = [
+  const layers: object[] = [
     readConfigFile(getGlobalAciCloudConfigPath(options.home, providerProfile.providerId)),
   ];
   if (options.includeProject !== false) {
@@ -286,11 +276,9 @@ function loadLayers(
       readConfigFile(getProjectAciCloudConfigPath(options.cwd, providerProfile.providerId)),
     );
   }
-  layers.push(
-    envConfigPatch(options.env ?? process.env, providerProfile) as Record<string, unknown>,
-  );
+  layers.push(envConfigPatch(options.env ?? process.env, providerProfile));
   if (overrides) {
-    layers.push(overrides as Record<string, unknown>);
+    layers.push(overrides);
   }
   return layers;
 }
@@ -300,7 +288,7 @@ export function loadAciCloudConfig(
   overrides?: AciCloudConfigPatch,
 ): AciCloudConfig {
   const providerProfile = options.profile ?? DEFAULT_PROFILE;
-  let merged = clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>;
+  let merged: object = defaultAciCloudConfig(providerProfile);
   for (const layer of loadLayers(options, overrides)) {
     merged = mergeConfigPatch(merged, layer);
   }
@@ -313,7 +301,7 @@ export function loadProjectAciCloudConfig(
 ): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>,
+      defaultAciCloudConfig(providerProfile),
       readConfigFileQuiet(
         getProjectAciCloudConfigPath(cwd, providerProfile.providerId),
         providerProfile.logPrefix,
@@ -330,7 +318,7 @@ export function loadHomeAciCloudConfig(
 ): AciCloudConfig {
   return validateAciCloudConfig(
     mergeConfigPatch(
-      clone(defaultAciCloudConfig(providerProfile)) as unknown as Record<string, unknown>,
+      defaultAciCloudConfig(providerProfile),
       readConfigFileQuiet(
         getGlobalAciCloudConfigPath(home, providerProfile.providerId),
         providerProfile.logPrefix,

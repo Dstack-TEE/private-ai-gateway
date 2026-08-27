@@ -3,6 +3,8 @@ import type { AciProviderProfile } from "./profile.ts";
 export type AciThinkingFormat = "auto" | "qwen" | "openai" | "off";
 export type AciReceiptVerification = "on-demand" | "response";
 
+const THINKING_FORMATS: ReadonlySet<unknown> = new Set(["auto", "qwen", "openai", "off"]);
+
 export interface AciProviderConfig {
   baseURL: string;
   models: {
@@ -86,6 +88,10 @@ function validateSessionIds(value: unknown): readonly string[] | undefined {
     }
     return id;
   });
+}
+
+function isThinkingFormat(value: unknown): value is AciThinkingFormat {
+  return THINKING_FORMATS.has(value);
 }
 
 function envValue(env: Record<string, string | undefined>, ...names: string[]): string | undefined {
@@ -179,7 +185,7 @@ export function resolveAciProviderConfig(
     input.models?.thinkingFormat === undefined
       ? (envInput.models?.thinkingFormat ?? "auto")
       : input.models.thinkingFormat;
-  if (!(["auto", "qwen", "openai", "off"] as const).includes(thinkingFormat as never)) {
+  if (!isThinkingFormat(thinkingFormat)) {
     fail("/models/thinkingFormat", 'expected "auto", "qwen", "openai", or "off"');
   }
 
@@ -187,18 +193,16 @@ export function resolveAciProviderConfig(
     input.models?.allowlist === undefined ? envInput.models?.allowlist : input.models.allowlist,
     "/models/allowlist",
   );
-  const acceptedComposeHashes =
-    validateComposeHashes(
-      input.trust?.acceptedComposeHashes === undefined
-        ? envInput.trust?.acceptedComposeHashes
-        : input.trust.acceptedComposeHashes,
-    ) ?? profile.acceptedComposeHashes;
-  const acceptedSessionIds =
-    validateSessionIds(
-      input.trust?.acceptedSessionIds === undefined
-        ? envInput.trust?.acceptedSessionIds
-        : input.trust.acceptedSessionIds,
-    ) ?? profile.acceptedSessionIds;
+  const acceptedComposeHashes = validateComposeHashes(
+    input.trust?.acceptedComposeHashes === undefined
+      ? (envInput.trust?.acceptedComposeHashes ?? profile.acceptedComposeHashes)
+      : input.trust.acceptedComposeHashes,
+  );
+  const acceptedSessionIds = validateSessionIds(
+    input.trust?.acceptedSessionIds === undefined
+      ? (envInput.trust?.acceptedSessionIds ?? profile.acceptedSessionIds)
+      : input.trust.acceptedSessionIds,
+  );
 
   const verification =
     input.receipts?.verification === undefined ? "on-demand" : input.receipts.verification;
@@ -206,7 +210,12 @@ export function resolveAciProviderConfig(
     fail("/receipts/verification", 'expected "on-demand" or "response"');
   }
   const historySize = input.receipts?.historySize === undefined ? 32 : input.receipts.historySize;
-  if (!Number.isInteger(historySize) || Number(historySize) < 1 || Number(historySize) > 1000) {
+  if (
+    typeof historySize !== "number" ||
+    !Number.isInteger(historySize) ||
+    historySize < 1 ||
+    historySize > 1000
+  ) {
     fail("/receipts/historySize", "expected an integer between 1 and 1000");
   }
 
@@ -214,13 +223,13 @@ export function resolveAciProviderConfig(
     baseURL,
     models: {
       isTeeOnly,
-      thinkingFormat: thinkingFormat as AciThinkingFormat,
+      thinkingFormat,
       ...(allowlist ? { allowlist } : {}),
     },
     trust: {
       ...(acceptedComposeHashes ? { acceptedComposeHashes } : {}),
       ...(acceptedSessionIds ? { acceptedSessionIds } : {}),
     },
-    receipts: { verification, historySize: Number(historySize) },
+    receipts: { verification, historySize },
   };
 }

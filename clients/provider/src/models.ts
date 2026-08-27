@@ -3,6 +3,8 @@ import type { AciFetch } from "@phala/aci-verifier/runtime";
 
 export type AciModality = "text" | "audio" | "image" | "video" | "pdf";
 
+const ACI_MODALITIES: ReadonlySet<unknown> = new Set(["text", "audio", "image", "video", "pdf"]);
+
 export interface AciModel {
   id: string;
   name: string;
@@ -67,9 +69,12 @@ function price(value: unknown): number {
 
 function modalities(value: unknown, fallback: readonly AciModality[]): readonly AciModality[] {
   if (!Array.isArray(value)) return fallback;
-  const supported = new Set<AciModality>(["text", "audio", "image", "video", "pdf"]);
-  const result = value.filter((item): item is AciModality => supported.has(item as AciModality));
+  const result = value.filter((item): item is AciModality => ACI_MODALITIES.has(item));
   return result.length > 0 ? result : fallback;
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function supportedParameters(value: unknown): Set<string> {
@@ -95,14 +100,8 @@ export function mapAciModel(
   if (config.models.allowlist?.length && !config.models.allowlist.includes(model.id))
     return undefined;
 
-  const contextWindow =
-    typeof model.context_length === "number" && model.context_length > 0
-      ? model.context_length
-      : 32_768;
-  const maxOutputTokens =
-    typeof model.max_output_length === "number" && model.max_output_length > 0
-      ? model.max_output_length
-      : Math.min(contextWindow, 8_192);
+  const contextWindow = positiveInteger(model.context_length, 32_768);
+  const maxOutputTokens = positiveInteger(model.max_output_length, Math.min(contextWindow, 8_192));
   const rawPricing =
     model.pricing && typeof model.pricing === "object"
       ? (model.pricing as Record<string, unknown>)

@@ -48,6 +48,22 @@ test("filters non-TEE, disallowed, and embedding-only models", () => {
   );
 });
 
+test("uses safe defaults for invalid model limits", () => {
+  const model = mapAciModel(
+    {
+      id: "qwen/qwen3-coder",
+      is_tee: true,
+      context_length: Number.POSITIVE_INFINITY,
+      max_output_length: 1.5,
+    },
+    config,
+  );
+
+  assert.ok(model);
+  assert.equal(model.contextWindow, 32_768);
+  assert.equal(model.maxOutputTokens, 8_192);
+});
+
 test("discovers the public model catalog without an authorization header", async () => {
   let request: Request | undefined;
   await discoverAciModelCatalog({

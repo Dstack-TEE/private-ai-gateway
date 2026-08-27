@@ -56,9 +56,7 @@ import {
 
 interface AciRuntimeState {
   profile: ProviderProfile;
-  cwd: string;
   config: AciCloudConfig;
-  projectTrusted: boolean;
   rawModels: AciServerModel[];
   provider: AciProvider | undefined;
   providerConfigKey: string | undefined;
@@ -204,12 +202,13 @@ function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
   pi.registerProvider(nativeAciProvider(state));
 }
 
-function reloadEffectiveConfig(
+function applyEffectiveConfig(
+  pi: ExtensionAPI,
   state: AciRuntimeState,
   cwd: string,
   projectTrusted: boolean,
-): AciCloudConfig {
-  const config = loadAciCloudConfig(
+): void {
+  state.config = loadAciCloudConfig(
     {
       cwd,
       home: os.homedir(),
@@ -218,19 +217,6 @@ function reloadEffectiveConfig(
     },
     state.overrides,
   );
-  state.cwd = cwd;
-  state.config = config;
-  state.projectTrusted = projectTrusted;
-  return config;
-}
-
-function applyEffectiveConfig(
-  pi: ExtensionAPI,
-  state: AciRuntimeState,
-  cwd: string,
-  projectTrusted: boolean,
-): void {
-  reloadEffectiveConfig(state, cwd, projectTrusted);
   registerAciProvider(pi, state);
 }
 
@@ -291,7 +277,7 @@ async function openSettingsMenu(
         applyEffectiveConfig(pi, state, ctx.cwd, scope === "project" ? true : projectTrusted);
         dirty = true;
       } catch (error: unknown) {
-        ctx.ui.notify((error as Error).message, "error");
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     };
 
@@ -419,7 +405,7 @@ async function runReceiptCommand(
   }
 }
 
-/** On-request audit: fetch and show an attested session document (raw). */
+/** Fetch, verify, and summarize an attested session document on request. */
 async function runSessionCommand(
   ctx: ExtensionCommandContext,
   state: AciRuntimeState,
@@ -517,9 +503,7 @@ export function createProvider(
     );
     const state: AciRuntimeState = {
       profile: providerProfile,
-      cwd,
       config,
-      projectTrusted: false,
       rawModels: [],
       provider: undefined,
       providerConfigKey: undefined,

@@ -150,7 +150,6 @@ function deviceError(value: unknown): { code?: string; description?: string } {
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new Error("Device authorization cancelled"));
   return new Promise((resolve, reject) => {
     const done = () => {
       signal?.removeEventListener("abort", abort);
@@ -158,10 +157,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     const abort = () => {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
       reject(new Error("Device authorization cancelled"));
     };
     const timeout = setTimeout(done, Math.max(0, ms));
     signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }
 

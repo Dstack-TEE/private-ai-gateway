@@ -58,3 +58,26 @@ test("rejects invalid explicit values instead of falling back to profile default
     /expected a boolean/,
   );
 });
+
+test("validates trust policy supplied by a provider profile", () => {
+  assert.throws(
+    () =>
+      resolveAciProviderConfig(
+        resolveAciProviderProfile({
+          defaultBaseURL: "https://gateway.example/v1",
+          acceptedComposeHashes: ["not-a-compose-hash"],
+        }),
+      ),
+    /expected a 64-character SHA-256 digest/,
+  );
+  assert.throws(
+    () =>
+      resolveAciProviderConfig(
+        resolveAciProviderProfile({
+          defaultBaseURL: "https://gateway.example/v1",
+          acceptedSessionIds: ["A".repeat(64)],
+        }),
+      ),
+    /expected a 64-character lowercase session id/,
+  );
+});

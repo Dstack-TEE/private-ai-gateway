@@ -8,19 +8,13 @@ import {
   type AciProviderConfigInput,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { AuthHook, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
+import type { AuthHook, Config, Plugin, PluginModule, PluginOptions } from "@opencode-ai/plugin";
 
 import { createAciInspectTool } from "./inspect.ts";
 
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
-interface OpenCodeProviderConfig {
-  name: string;
-  env: string[];
-  npm: string;
-  options: Record<string, unknown>;
-  models: Record<string, OpenCodeModelConfig>;
-}
+type OpenCodeProviderConfig = NonNullable<Config["provider"]>[string];
 
 export interface OpenCodeModelConfig {
   name: string;
@@ -132,16 +126,15 @@ export function createOpenCodeAciPlugin({
       },
       async config(config) {
         const baseURL = options.baseURL ?? defaults.baseURL;
+        const configuredBaseURL =
+          typeof baseURL === "string" && baseURL ? baseURL : profile.defaultBaseURL;
         config.provider ??= {};
         const owned: OpenCodeProviderConfig = {
           name: profile.label,
           npm: OPENAI_COMPATIBLE_PACKAGE,
           env: Array.from(new Set([profile.apiKeyEnv, ...(profile.apiKeyAliases ?? [])])),
           options: {
-            baseURL:
-              (typeof baseURL === "string" && baseURL) ||
-              profile.defaultBaseURL ||
-              "https://invalid.invalid/v1",
+            ...(configuredBaseURL ? { baseURL: configuredBaseURL } : {}),
             fetch: secureFetch,
           },
           models: {},
@@ -169,9 +162,9 @@ export function createOpenCodeAciPlugin({
           await candidate.connect();
           const models = await candidate.discoverModels();
           owned.models = modelMap(models);
+          await previous?.close();
           active = candidate;
           blockedReason = "ACI provider is unavailable";
-          await previous?.close();
         } catch (error) {
           blockedReason = `ACI provider blocked: ${error instanceof Error ? error.message : String(error)}`;
           await Promise.allSettled([candidate?.close(), previous?.close()]);
@@ -202,8 +195,9 @@ export function createOpenCodeAciPlugin({
         }
       },
       async dispose() {
-        await active?.close();
+        const provider = active;
         active = undefined;
+        await provider?.close();
       },
     };
   };

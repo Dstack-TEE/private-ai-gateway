@@ -10,8 +10,8 @@ export function summarizeReceipt(receipt: Record<string, unknown>): string[] {
   push("Endpoint", receipt.endpoint);
   push(
     "Served at",
-    receipt.served_at
-      ? new Date(Number(receipt.served_at) * 1000).toISOString()
+    typeof receipt.served_at === "number"
+      ? new Date(receipt.served_at * 1000).toISOString()
       : receipt.served_at,
   );
   push("Keyset digest", receipt.workload_keyset_digest);
@@ -52,7 +52,7 @@ export function summarizeSession(session: Record<string, unknown>, sessionId: st
     `Upstream: ${String(session.upstream_name ?? "?")}`,
     `Endpoint: ${String(session.endpoint ?? "(none)")}`,
     `Verifier: ${String(session.verifier_id ?? "?")}`,
-    `Established: ${session.established_at ? new Date(Number(session.established_at) * 1000).toISOString() : "?"}`,
-    `Expires: ${session.expires_at ? new Date(Number(session.expires_at) * 1000).toISOString() : "?"}`,
+    `Established: ${typeof session.established_at === "number" ? new Date(session.established_at * 1000).toISOString() : "?"}`,
+    `Expires: ${typeof session.expires_at === "number" ? new Date(session.expires_at * 1000).toISOString() : "?"}`,
   ];
 }

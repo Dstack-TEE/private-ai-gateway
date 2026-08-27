@@ -42,9 +42,10 @@ function sessionRecord(value: unknown): SessionRecord {
   for (const field of ["established_at", "expires_at"] as const) {
     const seconds = record[field];
     if (
+      typeof seconds !== "number" ||
       !Number.isSafeInteger(seconds) ||
-      Number(seconds) < 0 ||
-      Number.isNaN(new Date(Number(seconds) * 1000).getTime())
+      seconds < 0 ||
+      Number.isNaN(new Date(seconds * 1000).getTime())
     ) {
       throw new TypeError(`session document has an invalid ${field}`);
     }
