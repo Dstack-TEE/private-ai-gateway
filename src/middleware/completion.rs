@@ -21,6 +21,7 @@ use std::pin::Pin;
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
@@ -369,7 +370,7 @@ pub async fn run(
         spend_mode: consult.spend_mode,
         user_id: consult.user_id,
         organization_id: consult.organization_id,
-        workspace_id: consult.workspace_id.clone(),
+        workspace_id: consult.workspace_id,
         billing_owner_type: consult.billing_owner_type,
         billing_owner_id: consult.billing_owner_id,
         virtual_key_id: consult.virtual_key_id,
@@ -1180,7 +1181,7 @@ struct Meter {
     spend_mode: Option<SpendMode>,
     user_id: Option<i64>,
     organization_id: Option<i64>,
-    workspace_id: Option<String>,
+    workspace_id: Option<Uuid>,
     billing_owner_type: Option<BillingOwnerType>,
     billing_owner_id: Option<i64>,
     virtual_key_id: Option<i64>,
@@ -1499,6 +1500,10 @@ fn empty_report(request_id: &str, endpoint_path: &str) -> PostReport {
         pricing: None,
         spend_mode: None,
         user_id: None,
+        organization_id: None,
+        workspace_id: None,
+        billing_owner_type: None,
+        billing_owner_id: None,
         virtual_key_id: None,
         error_source: None,
         error_message: None,
@@ -1603,6 +1608,10 @@ impl Meter {
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             user_id: self.user_id,
+            organization_id: self.organization_id,
+            workspace_id: self.workspace_id,
+            billing_owner_type: self.billing_owner_type,
+            billing_owner_id: self.billing_owner_id,
             virtual_key_id: self.virtual_key_id,
             selected_route_id: Some(selected_route_id),
             attempt_index,
@@ -1630,7 +1639,7 @@ impl Meter {
             spend_mode: self.spend_mode,
             user_id: self.user_id,
             organization_id: self.organization_id,
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace_id,
             billing_owner_type: self.billing_owner_type,
             billing_owner_id: self.billing_owner_id,
             virtual_key_id: self.virtual_key_id,

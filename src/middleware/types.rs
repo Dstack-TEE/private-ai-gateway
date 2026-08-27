@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
@@ -182,7 +183,7 @@ pub struct PreConsult {
     #[serde(default)]
     pub organization_id: Option<i64>,
     #[serde(default)]
-    pub workspace_id: Option<String>,
+    pub workspace_id: Option<Uuid>,
     #[serde(default)]
     pub billing_owner_type: Option<BillingOwnerType>,
     #[serde(default)]
@@ -240,10 +241,7 @@ impl PreConsult {
                     (Some(BillingOwnerType::Organization), Some(owner_id)) => {
                         owner_id > 0
                             && self.organization_id == Some(owner_id)
-                            && self
-                                .workspace_id
-                                .as_deref()
-                                .is_some_and(|id| !id.trim().is_empty())
+                            && self.workspace_id.is_some()
                     }
                     _ => false,
                 }
@@ -303,7 +301,7 @@ pub struct PostReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
+    pub workspace_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing_owner_type: Option<BillingOwnerType>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -399,5 +397,20 @@ mod tests {
         partial.normalize_legacy_user_billing_identity();
 
         assert!(!partial.has_consistent_billing_identity());
+    }
+
+    #[test]
+    fn invalid_workspace_id_is_rejected_at_the_wire_boundary() {
+        let result = serde_json::from_value::<PreConsult>(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "workspaceId": "not-a-uuid",
+            "billingOwnerType": "organization",
+            "billingOwnerId": 11,
+            "virtualKeyId": 3
+        }));
+
+        assert!(result.is_err());
     }
 }

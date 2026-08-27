@@ -23,6 +23,7 @@ use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::Value;
 use tokio::time::{sleep, Sleep};
+use uuid::Uuid;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
@@ -114,7 +115,7 @@ pub struct StreamReport {
     pub spend_mode: Option<SpendMode>,
     pub user_id: Option<i64>,
     pub organization_id: Option<i64>,
-    pub workspace_id: Option<String>,
+    pub workspace_id: Option<Uuid>,
     pub billing_owner_type: Option<BillingOwnerType>,
     pub billing_owner_id: Option<i64>,
     pub virtual_key_id: Option<i64>,
@@ -175,7 +176,7 @@ impl StreamReport {
             spend_mode: self.spend_mode,
             user_id: self.user_id,
             organization_id: self.organization_id,
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace_id,
             billing_owner_type: self.billing_owner_type,
             billing_owner_id: self.billing_owner_id,
             virtual_key_id: self.virtual_key_id,
