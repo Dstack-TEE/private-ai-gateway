@@ -67,8 +67,6 @@ jobs:
           bash clients/package-smoke.sh
 
       - name: Publish packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           publish_if_missing() {
             name="$1"
