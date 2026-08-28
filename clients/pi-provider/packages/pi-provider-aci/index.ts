@@ -33,9 +33,11 @@ import {
   createAciProvider,
   formatAciInspection,
   inspectAciProvider,
+  type AccountApiKeyAuth,
   type AciModel,
   type AciInspectionRequest,
   type AciProvider,
+  type AciProviderProfile,
 } from "@phala/aci-provider";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -72,7 +74,15 @@ import {
 interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
   config: AciCloudConfig;
+  accountAuth: AccountApiKeyAuth | undefined;
   overrides?: AciCloudConfigPatch;
+}
+
+export interface CreatePiAciProviderOptions {
+  profile?: Partial<AciProviderProfile>;
+  accountAuth?: AccountApiKeyAuth;
+  config?: AciCloudConfigPatch;
+  footerKey?: string;
 }
 
 type OpenAICompletionsApi = ReturnType<
@@ -149,7 +159,7 @@ function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
-    auth: { apiKey: createApiKeyAuth(state.profile) },
+    auth: { apiKey: createApiKeyAuth(state.profile, state.accountAuth) },
     models: [],
     async fetchModels({ signal }) {
       return toPiModels(state, await refreshAciModels(state, signal));
@@ -349,15 +359,16 @@ async function runInspectionCommand(
 }
 
 /**
- * Create the provider extension for the given brand profile (and optional
- * runtime config patch). The neutral default profile ("aci") is used when no
- * profile is supplied; branded shells pass their own identity.
+ * Create a Pi extension from a shared brand profile and optional account auth.
+ * The neutral default profile ("aci") is used when no profile is supplied.
  */
-export function createProvider(
-  profileOverride?: Partial<ProviderProfile>,
-  overrides?: AciCloudConfigPatch,
-): ExtensionFactory {
-  const providerProfile = resolveProfile(profileOverride);
+export function createProvider({
+  profile: profileOverride,
+  accountAuth,
+  config: overrides,
+  footerKey,
+}: CreatePiAciProviderOptions = {}): ExtensionFactory {
+  const providerProfile = resolveProfile({ ...profileOverride, footerKey });
   return async (pi: ExtensionAPI) => {
     const cwd = process.cwd();
     const config = loadAciCloudConfig(
@@ -367,6 +378,7 @@ export function createProvider(
     const state: AciRuntimeState = {
       profile: providerProfile,
       config,
+      accountAuth,
       provider: undefined,
       providerConfigKey: undefined,
       connectionSetup: undefined,

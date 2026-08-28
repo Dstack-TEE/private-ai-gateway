@@ -2,9 +2,8 @@
 //
 // The core is a vendor-neutral client of the private-ai-gateway "ACI"
 // protocol. A single default profile ("aci") is defined here; branded
-// distributions (`pi-provider-redpill`, `pi-provider-phala-cloud`, ...) build
-// `createProvider(profile)` with their own identity. The core never enumerates
-// vendors.
+// distributions (`pi-provider-redpill`, `pi-provider-phala-cloud`, ...) pass a
+// profile to `createProvider()`. The core never enumerates vendors.
 //
 // profile.ts adds Pi-specific fields to the shared provider profile. Everything
 // protocol-y (attestation, TLS SPKI pinning, model discovery, config layering)
@@ -15,20 +14,10 @@ import {
   resolveAciProviderProfile,
   type AciProviderProfile,
 } from "@phala/aci-provider";
-import type { ApiKeyAuth } from "@earendil-works/pi-ai";
-
-export interface AciApiKeyAuthConfig {
-  /** Additional account login option shown before the standard API-key option. */
-  name?: string;
-  /** Account flow that returns an API-key credential issued by the provider. */
-  login?: ApiKeyAuth["login"];
-}
 
 export interface ProviderProfile extends AciProviderProfile {
   /** Footer/status bar key. */
   footerKey: string;
-  /** Optional account flow offered alongside Pi's standard API-key login. */
-  apiKeyAuth?: AciApiKeyAuthConfig;
 }
 
 export const DEFAULT_PROFILE: ProviderProfile = {
@@ -38,11 +27,10 @@ export const DEFAULT_PROFILE: ProviderProfile = {
 
 /** Resolve a (possibly partial) profile over the neutral defaults. */
 export function resolveProfile(patch: Partial<ProviderProfile> | undefined): ProviderProfile {
-  const { footerKey = DEFAULT_PROFILE.footerKey, apiKeyAuth, ...shared } = patch ?? {};
+  const { footerKey = DEFAULT_PROFILE.footerKey, ...shared } = patch ?? {};
   const profile = resolveAciProviderProfile(shared);
   return {
     ...profile,
     footerKey,
-    ...(apiKeyAuth ? { apiKeyAuth } : {}),
   };
 }

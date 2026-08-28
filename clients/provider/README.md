@@ -59,8 +59,21 @@ const result = await inspectAciProvider(provider, { action: "receipt" });
 console.log(formatAciInspection(result));
 ```
 
-Phala Cloud adapters also share the account authorization contract. It
-completes the device grant, returns the issued inference API key, and attaches
-optional account metadata. The host remains responsible for presenting the
-browser step and persisting the returned credential through its native auth
-API.
+Products that exchange account authorization for an inference API key implement
+the host-neutral `AccountApiKeyAuth` contract. It describes the browser/device
+step and returns one API key plus optional metadata; host adapters present it
+and persist the result through native auth APIs. Phala Cloud provides the
+shared factory directly:
+
+```ts
+import { createPhalaCloudAccountAuth } from "@phala/aci-provider/phala-cloud";
+
+const accountAuth = createPhalaCloudAccountAuth({
+  baseURL: "https://cloud-api.phala.com",
+  clientId: "my-agent",
+});
+```
+
+This product authentication contract is separate from ACI verification.
+Redpill currently has no account authorization implementation and remains
+API-key-only.

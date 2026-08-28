@@ -5,6 +5,14 @@ export {
   type AciProviderPhase,
   type AciProviderStatus,
 } from "./provider.ts";
+export type {
+  AccountApiKeyAuth,
+  AccountApiKeyAuthorization,
+  AccountApiKeyAuthorizationPresentation,
+  AccountApiKeyCredential,
+  CompleteAccountApiKeyAuthorizationOptions,
+  StartAccountApiKeyAuthorizationOptions,
+} from "./account-auth.ts";
 export {
   aciProviderConfigInputFromEnv,
   AciProviderConfigError,

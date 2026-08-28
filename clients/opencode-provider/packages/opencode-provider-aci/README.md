@@ -61,3 +61,8 @@ independent of this local history.
 Do not also configure a separate `provider.aci`. The plugin owns that provider
 so installation, attestation, or channel-binding failure leaves no ordinary
 HTTPS path available.
+
+Programmatic branded plugins may pass a shared `AccountApiKeyAuth` as
+`accountAuth`. The core maps it into OpenCode's official browser auth hook and
+automatically keeps the manual API-key method; the brand does not build its own
+OpenCode credential flow.

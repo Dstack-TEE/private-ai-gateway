@@ -14,18 +14,6 @@ test("resolveProfile fills neutral defaults for unset fields", () => {
   assert.equal(p.apiKeyEnv, DEFAULT_PROFILE.apiKeyEnv);
 });
 
-test("resolveProfile preserves a branded API-key login", () => {
-  const login = async () => ({ type: "api_key" as const, key: "token" });
-  const p = resolveProfile({
-    providerId: "brand-login",
-    defaultBaseURL: "https://brand.test/v1",
-    apiKeyAuth: { name: "Brand account", login },
-  });
-  assert.equal(p.providerId, "brand-login");
-  assert.equal(p.apiKeyAuth?.name, "Brand account");
-  assert.equal(p.apiKeyAuth?.login, login);
-});
-
 test("resolved profiles keep endpoint and config identity instance-scoped", () => {
   const redpill = resolveProfile({
     providerId: "redpill",

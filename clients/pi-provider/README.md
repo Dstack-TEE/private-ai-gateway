@@ -137,20 +137,27 @@ without a custom-fetch or provider-plugin extension point.
 
 ## Branding / profiles
 
-`createProvider(profile)` registers the provider with a brand identity:
+`createProvider()` registers the provider with a brand identity:
 
 ```ts
 import { createProvider } from "@phala/pi-provider-aci";
 export default createProvider({
-  providerId: "my-brand",
-  label: "My Brand",
-  defaultBaseURL: "https://gateway.example/v1",
-  apiKeyEnv: "MY_AI_API_KEY",
-  envPrefix: "MY",
-  logPrefix: "[my-brand]",
-  acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
+  profile: {
+    providerId: "my-brand",
+    label: "My Brand",
+    defaultBaseURL: "https://gateway.example/v1",
+    apiKeyEnv: "MY_AI_API_KEY",
+    envPrefix: "MY",
+    logPrefix: "[my-brand]",
+    acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
+  },
   footerKey: "my-brand",
 });
 ```
+
+Products with an account-to-API-key flow can also pass a shared
+`accountAuth`. The Pi core maps it into `/login` and keeps manual API-key entry
+alongside it; the branded package does not implement Pi credential storage or
+device polling.
 
 [private-ai-gateway]: https://github.com/Dstack-TEE/private-ai-gateway

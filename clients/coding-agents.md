@@ -165,11 +165,13 @@ completion verification.
 A native adapter needs official host boundaries for a custom `fetch`, provider
 lifecycle, credentials, and dynamic models. Create one `AciProvider`, map its
 `AciModel` catalog into the host model type, inject `AciProvider.fetch`, and
-reuse `inspectAciProvider()` for audit UI. Account-based Phala login maps
-`startPhalaCloudAccountAuthorization()` into the host's native browser/device
-interaction; manual API-key entry and all persistence stay in the host. If the
-host cannot inject a per-provider fetch, changing only its base URL cannot
-provide ACI channel binding.
+reuse `inspectAciProvider()` for audit UI. If a product supplies an
+`AccountApiKeyAuth`, map its authorization presentation and returned key into
+the host's native auth API; manual API-key entry and all persistence stay in
+the host. Phala Cloud already supplies this contract. Redpill should add one
+only after its Clerk endpoints are defined. If the host cannot inject a
+per-provider fetch, changing only its base URL cannot provide ACI channel
+binding.
 
 ## Unsupported hosts
 

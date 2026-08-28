@@ -2,6 +2,7 @@ import {
   createAciProvider,
   resolveAciProviderConfig,
   resolveAciProviderProfile,
+  type AccountApiKeyAuth,
   type AciModel,
   type AciFetch,
   type AciProvider,
@@ -49,6 +50,7 @@ export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
 export interface CreateOpenCodeAciPluginOptions {
   profile?: Partial<AciProviderProfile>;
   defaults?: OpenCodeAciPluginOptions;
+  accountAuth?: AccountApiKeyAuth;
   authMethods?: readonly OpenCodeAciAuthMethod[];
 }
 
@@ -133,13 +135,40 @@ function registerInspectCommands(config: Config, providerId: string, toolName: s
   for (const [name, value] of Object.entries(commands)) config.command[name] ??= value;
 }
 
+export function createOpenCodeAccountAuthMethod(account: AccountApiKeyAuth): OpenCodeAciAuthMethod {
+  return {
+    type: "oauth",
+    label: account.label,
+    async authorize() {
+      const authorization = await account.start();
+      return {
+        url: authorization.url,
+        instructions: authorization.instructions ?? `Continue in ${authorization.url}`,
+        method: "auto",
+        async callback() {
+          const credential = await authorization.complete();
+          return {
+            type: "success",
+            key: credential.apiKey,
+            ...(credential.metadata ? { metadata: credential.metadata } : {}),
+          };
+        },
+      };
+    },
+  };
+}
+
 export function createOpenCodeAciPlugin({
   profile: profileInput = {},
   defaults = {},
+  accountAuth,
   authMethods = [],
 }: CreateOpenCodeAciPluginOptions = {}): Plugin {
   const profile = resolveAciProviderProfile(profileInput);
-  const methods = [...authMethods];
+  const methods = [
+    ...(accountAuth ? [createOpenCodeAccountAuthMethod(accountAuth)] : []),
+    ...authMethods,
+  ];
   if (!methods.some((method) => method.type === "api")) {
     methods.push({ type: "api", label: `${profile.label} API key` });
   }

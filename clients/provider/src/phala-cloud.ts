@@ -1,5 +1,10 @@
 import type { AciFetch } from "@phala/aci-verifier/runtime";
 
+import type {
+  AccountApiKeyAuth,
+  AccountApiKeyCredential,
+  CompleteAccountApiKeyAuthorizationOptions,
+} from "./account-auth.ts";
 import { phalaCloudEndpoint, startPhalaCloudDeviceAuthorization } from "./device-auth.ts";
 
 export {
@@ -34,16 +39,11 @@ export interface PhalaCloudAccountAuthorizationOptions {
   accountMetadataTimeoutMs?: number;
 }
 
-export interface CompletePhalaCloudAccountAuthorizationOptions {
-  signal?: AbortSignal;
-  onProgress?: (message: string) => void;
+export interface CompletePhalaCloudAccountAuthorizationOptions extends CompleteAccountApiKeyAuthorizationOptions {
   includeAccountMetadata?: boolean;
 }
 
-export interface PhalaCloudAccountApiKey {
-  apiKey: string;
-  metadata?: Record<string, string>;
-}
+export type PhalaCloudAccountApiKey = AccountApiKeyCredential;
 
 export interface PhalaCloudAccountAuthorization {
   userCode: string;
@@ -53,6 +53,15 @@ export interface PhalaCloudAccountAuthorization {
   complete(
     options?: CompletePhalaCloudAccountAuthorizationOptions,
   ): Promise<PhalaCloudAccountApiKey>;
+}
+
+export interface CreatePhalaCloudAccountAuthOptions {
+  label?: string;
+  baseURL: string;
+  clientId: string;
+  fetch?: AciFetch;
+  includeAccountMetadata?: boolean;
+  accountMetadataTimeoutMs?: number;
 }
 
 export interface FetchPhalaCloudAccountOptions {
@@ -148,6 +157,45 @@ export async function startPhalaCloudAccountAuthorization({
       return {
         apiKey: token.accessToken,
         ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+      };
+    },
+  };
+}
+
+export function createPhalaCloudAccountAuth({
+  label = "Phala Cloud account",
+  baseURL,
+  clientId,
+  fetch,
+  includeAccountMetadata = true,
+  accountMetadataTimeoutMs,
+}: CreatePhalaCloudAccountAuthOptions): AccountApiKeyAuth {
+  return {
+    label,
+    async start(options = {}) {
+      const authorization = await startPhalaCloudAccountAuthorization({
+        baseURL,
+        clientId,
+        ...(fetch ? { fetch } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(accountMetadataTimeoutMs === undefined ? {} : { accountMetadataTimeoutMs }),
+      });
+      return {
+        url: authorization.verificationURI,
+        instructions: `Approve the device login with code ${authorization.userCode}`,
+        presentation: {
+          type: "device_code",
+          userCode: authorization.userCode,
+          intervalSeconds: authorization.interval,
+          expiresInSeconds: authorization.expiresIn,
+        },
+        async complete(completion = {}) {
+          return authorization.complete({
+            ...(completion.signal ? { signal: completion.signal } : {}),
+            ...(completion.onProgress ? { onProgress: completion.onProgress } : {}),
+            includeAccountMetadata,
+          });
+        },
       };
     },
   };

@@ -27,26 +27,42 @@ test("native auth prefers stored credentials over the configured API key environ
 
 test("branded account login remains optional alongside the native API-key prompt", async () => {
   let accountLogins = 0;
+  const notifications: unknown[] = [];
   const auth = createApiKeyAuth(
     resolveProfile({
       providerId: "brand",
       label: "Brand Cloud",
       apiKeyEnv: "BRAND_API_KEY",
-      apiKeyAuth: {
-        name: "Brand Cloud account",
-        async login() {
-          accountLogins += 1;
-          return { type: "api_key", key: "account-issued" };
-        },
-      },
     }),
+    {
+      label: "Brand Cloud account",
+      async start() {
+        return {
+          url: "https://brand.test/device",
+          instructions: "Approve the device login",
+          presentation: {
+            type: "device_code" as const,
+            userCode: "ABCD-EFGH",
+            intervalSeconds: 2,
+            expiresInSeconds: 60,
+          },
+          async complete(options) {
+            accountLogins += 1;
+            options?.onProgress?.("Waiting for authorization...");
+            return { apiKey: "account-issued" };
+          },
+        };
+      },
+    },
   );
   const prompts: unknown[] = [];
   const signal = new AbortController().signal;
 
   const account = await auth.login?.({
     signal,
-    notify() {},
+    notify(event) {
+      notifications.push(event);
+    },
     async prompt(prompt) {
       prompts.push(prompt);
       return "account";
@@ -54,6 +70,16 @@ test("branded account login remains optional alongside the native API-key prompt
   });
   assert.deepEqual(account, { type: "api_key", key: "account-issued" });
   assert.equal(accountLogins, 1);
+  assert.deepEqual(notifications, [
+    {
+      type: "device_code",
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://brand.test/device",
+      intervalSeconds: 2,
+      expiresInSeconds: 60,
+    },
+    { type: "progress", message: "Waiting for authorization..." },
+  ]);
   assert.deepEqual(prompts[0], {
     type: "select",
     message: "Log in to Brand Cloud",

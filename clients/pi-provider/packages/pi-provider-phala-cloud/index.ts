@@ -11,48 +11,21 @@
  *   pi install npm:pi-provider-phala-cloud
  *   # /login phala (or set PHALA_AI_API_KEY), then /model phala/<model-id>
  */
-import type { ApiKeyCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import {
+  createPhalaCloudAccountAuth,
   resolvePhalaCloudApiBaseURL,
-  startPhalaCloudAccountAuthorization,
 } from "@phala/aci-provider/phala-cloud";
 import { PHALA_CLOUD_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createProvider } from "@phala/pi-provider-aci";
 
-// Phala Cloud device authorization issues a Confidential AI API key, so Pi
-// stores the result as an API-key credential instead of inventing an OAuth
-// token lifecycle.
-async function loginPhalaDeviceFlow(
-  interaction: ProviderAuthInteraction,
-): Promise<ApiKeyCredential> {
-  const cloudApi = resolvePhalaCloudApiBaseURL();
-  const authorization = await startPhalaCloudAccountAuthorization({
-    baseURL: cloudApi,
-    clientId: "pi",
-    signal: interaction.signal,
-  });
-  interaction.notify({
-    type: "device_code",
-    userCode: authorization.userCode,
-    verificationUri: authorization.verificationURI,
-    intervalSeconds: authorization.interval,
-    expiresInSeconds: authorization.expiresIn,
-  });
-  const credential = await authorization.complete({
-    signal: interaction.signal,
-    onProgress: (message) => interaction.notify({ type: "progress", message }),
-    includeAccountMetadata: false,
-  });
-  return { type: "api_key", key: credential.apiKey };
-}
-
 export default createProvider({
-  ...PHALA_CLOUD_ACI_PROFILE,
+  profile: PHALA_CLOUD_ACI_PROFILE,
   footerKey: "phala",
-  apiKeyAuth: {
-    name: "Phala Cloud account",
-    login: loginPhalaDeviceFlow,
-  },
+  accountAuth: createPhalaCloudAccountAuth({
+    baseURL: resolvePhalaCloudApiBaseURL(),
+    clientId: "pi",
+    includeAccountMetadata: false,
+  }),
 });
 
 export { createProvider } from "@phala/pi-provider-aci";

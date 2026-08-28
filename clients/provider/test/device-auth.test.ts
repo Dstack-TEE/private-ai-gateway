@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { startPhalaCloudDeviceAuthorization } from "../src/device-auth.ts";
-import { startPhalaCloudAccountAuthorization } from "../src/phala-cloud.ts";
+import { createPhalaCloudAccountAuth } from "../src/phala-cloud.ts";
 
 test("completes Phala device authorization and returns the issued API key", async () => {
   const requests: Request[] = [];
@@ -62,7 +62,7 @@ test("completes Phala device authorization and returns the issued API key", asyn
   });
 });
 
-test("completes Phala account authorization as one host-neutral API-key credential", async () => {
+test("exposes Phala account authorization through the shared API-key contract", async () => {
   const responses = [
     Response.json({
       device_code: "device-secret",
@@ -77,7 +77,7 @@ test("completes Phala account authorization as one host-neutral API-key credenti
       workspace: { name: "Confidential AI", slug: "confidential-ai" },
     }),
   ];
-  const authorization = await startPhalaCloudAccountAuthorization({
+  const account = createPhalaCloudAccountAuth({
     baseURL: "https://cloud.example",
     clientId: "coding-agent",
     fetch: async () => {
@@ -86,7 +86,16 @@ test("completes Phala account authorization as one host-neutral API-key credenti
       return response;
     },
   });
+  const authorization = await account.start();
 
+  assert.equal(account.label, "Phala Cloud account");
+  assert.equal(authorization.url, "https://cloud.example/cli/verify");
+  assert.deepEqual(authorization.presentation, {
+    type: "device_code",
+    userCode: "ABCD-EFGH",
+    intervalSeconds: 0.001,
+    expiresInSeconds: 30,
+  });
   assert.deepEqual(await authorization.complete(), {
     apiKey: "llm-key",
     metadata: {
