@@ -14,7 +14,6 @@ name = "private-ai-gateway"
 path = "src/main.rs"
 
 [dependencies]
-http-body-util = "0.1"
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -59,6 +58,9 @@ futures-util = "0.3"
 # timeout below could never arm.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+# Names the body-cap error type (`LengthLimitError`) that the in-handler
+# request-size limit downcasts to; already in the tree via axum.
+http-body-util = "0.1"
 async-stream = "0.3"
 
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
@@ -83,7 +85,6 @@ clap = { version = "4", default-features = false, features = ["derive", "std", "
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
-http-body-util = "0.1"
 
 [lints.rust]
 unused_must_use = "deny"
