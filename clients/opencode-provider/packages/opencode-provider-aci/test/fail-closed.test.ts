@@ -52,6 +52,7 @@ test("keeps an existing provider blocked when configuration fails", async () => 
   };
 
   await expect(hooks.config?.(config)).rejects.toThrow("expected an https URL");
+  expect(config.provider?.aci?.env).toEqual(["ACI_API_KEY"]);
   const fetch = config.provider?.aci?.options?.fetch;
   expect(typeof fetch).toBe("function");
   if (typeof fetch !== "function") throw new Error("secure fetch was not installed");
