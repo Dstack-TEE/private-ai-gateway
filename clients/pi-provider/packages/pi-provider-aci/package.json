@@ -1,6 +1,6 @@
 {
   "name": "@phala/pi-provider-aci",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Vendor-neutral Pi provider for private-ai-gateway using an instance-scoped verified ACI transport",
   "keywords": [
     "aci",
@@ -63,7 +63,7 @@
     "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.5.0"
+    "@phala/aci-provider": "^0.5.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.84.3 <0.85.0",

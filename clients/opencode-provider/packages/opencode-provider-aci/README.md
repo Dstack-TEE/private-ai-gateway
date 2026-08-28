@@ -22,12 +22,23 @@ receipt before the response stream can finish.
 }
 ```
 
-Set `ACI_API_KEY` or run `opencode providers login`. Select a discovered model
-as `aci/<model-id>`.
+After adding the configured plugin tuple above, store the key through
+OpenCode's official provider login and select a discovered model as
+`aci/<model-id>`:
+
+```sh
+opencode providers login --provider aci
+```
+
+The neutral package has no default gateway, so `baseURL` must be configured.
+`ACI_API_KEY` is also supported for the current process, but environment
+variables are not copied into OpenCode's auth store.
 
 The plugin discovers the public `/v1/models` catalog over the verified
 connection without sending the inference API key. OpenCode stores the key and
-attaches it to model requests through its native auth loader.
+attaches it to model requests through its native auth loader. The plugin uses
+OpenCode's server-plugin, provider config, auth, model, and disposal hooks; it
+does not maintain parallel config or credential files.
 
 The read-only `aci_inspect` tool exposes five actions: `status`, `attestation`,
 `receipts`, `receipt`, and `session`. Receipt inspection verifies the latest

@@ -14,21 +14,23 @@ can finish the model turn or continue its tool loop.
 pi install npm:pi-provider-phala-cloud
 ```
 
-Sign in with a Phala Cloud account (`/login phala`, device authorization —
-no API key to manage), or set one directly:
-
-```bash
-export PHALA_AI_API_KEY=...
-```
+Start Pi, complete the native device login, wait for the verified connection,
+then save a default model from the native model picker:
 
 ```text
 /login phala
-/model phala/openai/gpt-oss-20b
+# approve the device login and wait for the footer to show aci-verified
+/model
+# search for phala/, select a model, and press Ctrl+S
 ```
 
-The device flow issues and stores a Confidential AI API key. When upgrading
-from 0.3, run `/login phala` once to replace the legacy OAuth-shaped
-credential.
+The device flow issues a Confidential AI API key and returns it to Pi's official
+API-key auth interface. Pi stores the credential in `~/.pi/agent/auth.json`, the
+refreshed catalog in `~/.pi/agent/models-store.json`, and the saved default in
+`~/.pi/agent/settings.json`. These values survive a restart and the cached
+catalog remains available offline. As an alternative for one process, set
+`PHALA_AI_API_KEY`; Pi does not copy environment variables into its credential
+store.
 
 Config: `/phala-settings` · Attestation status: `/phala-attestation` · Receipt
 history and audit: `/phala-receipt` · Session inspection: `/phala-session`

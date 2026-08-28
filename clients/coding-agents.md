@@ -1,119 +1,89 @@
 # Coding agents over ACI
 
-Coding-agent integrations keep verification at the transport boundary. Native
-providers also own model discovery and host-specific lifecycle integration.
+Coding agents should integrate ACI through capabilities officially exposed by
+their host. The adapter owns only ACI-specific verification and model mapping;
+the host continues to own installation, authentication, model selection,
+persistence, and lifecycle.
+
+| Host | Official extension point | ACI integration |
+| --- | --- | --- |
+| Pi | Provider extension, auth API, model registry, commands, footer | `pi-provider-redpill`, `pi-provider-phala-cloud`, or `@phala/pi-provider-aci` |
+| OpenCode | Server plugin, provider config, auth hooks, tools, dispose | `opencode-provider-redpill`, `opencode-provider-phala-cloud`, or `@phala/opencode-provider-aci` |
+| Node/Bun SDK application | Per-client custom `fetch` | `connectAci().fetch` |
+| Base-URL-only coding agent | No transport injection point | No native ACI adapter in this release |
+
+All supported paths share `@phala/aci-provider` and
+`@phala/aci-verifier`. They verify the workload and TLS channel before sending
+model traffic, discover the live model catalog, require verified serving,
+retain bounded wire digests, and verify every signed receipt and cited session
+before an inference response finishes.
+
+## Pi
+
+Install one provider through Pi's package manager:
+
+```sh
+pi install npm:pi-provider-redpill
+# or
+pi install npm:pi-provider-phala-cloud
+```
+
+Then use Pi's native login and model picker:
 
 ```text
-fetch-aware Node/Bun client ---- connectAci() ---- ACI gateway
+/login redpill
+# paste the Redpill API key
 
-base-URL-only CLI ----------- aci serve ------- ACI gateway
-                            127.0.0.1:4180
+# or
+/login phala
+# approve the Phala Cloud device login
+
+# wait for the footer to show aci-verified
+/model
+# search for redpill/ or phala/, select a model, and press Ctrl+S
 ```
 
-`connectAci()` is the direct integration when an application accepts a custom
-`fetch`; its conditional runtime entry selects the Node or Bun adapter.
-Applications that expose only a base URL use `aci serve`: one local process
-verifies the hardware-backed workload identity, pins the remote TLS SPKI, and
-forwards the agent's protocol unchanged. The selected gateway route must serve
-that protocol.
+Pi owns persistence. It writes credentials to `~/.pi/agent/auth.json`, dynamic
+catalogs to `~/.pi/agent/models-store.json`, and a default selected with
+`Ctrl+S` to `~/.pi/agent/settings.json`. A normal model selection changes only
+the current session. Cached dynamic models are restored offline.
 
-Both paths demand `provider.aci_verified` on JSON inference requests by
-default, record exact request/response digests without buffering streams, and
-verify signed receipts plus cited sessions on demand. A configured session set
-is a local acceptance policy: request pins are intersected with it, and a
-disjoint request fails before reaching the gateway.
+`REDPILL_AI_API_KEY` and `PHALA_AI_API_KEY` can provide a credential to the
+current process. Pi intentionally does not copy environment variables into its
+credential store; use `/login` when the key must survive a restart.
 
-## Start the local verifier
+The provider-scoped commands expose ACI-specific state that Pi does not know
+about: settings, attestation, retained receipts, and content-addressed sessions.
+For example, Redpill registers `/redpill-settings`, `/redpill-attestation`,
+`/redpill-receipt`, and `/redpill-session`.
 
-From this repository:
+## OpenCode
 
-```bash
-cargo run --bin aci -- serve https://gateway.example.com \
-  --accept-compose <reviewed-sha256-app-compose>
+Install a branded provider through OpenCode's native plugin command:
+
+```sh
+opencode plugin opencode-provider-redpill --global
+opencode providers login --provider redpill
+
+# or
+opencode plugin opencode-provider-phala-cloud --global
+opencode providers login --provider phala
 ```
 
-The command verifies before listening and fails closed. `--accept-compose` is
-repeatable for a controlled release rotation. Omitting it verifies the measured
-compose without accepting a reviewed release. Populate it from authenticated
-release metadata, not the endpoint being verified.
-The agent-facing base URLs are:
+Omit `--global` for a project installation. The plugin command persists the
+plugin entry in OpenCode configuration, and provider login persists the
+credential in OpenCode's auth store. Do not add a separate provider block: the
+plugin owns the provider, verified fetch, live models, and auth loader.
 
-- OpenAI APIs: `http://127.0.0.1:4180/v1`
-- Anthropic Messages: `http://127.0.0.1:4180`
+Redpill currently supports API keys only. Phala Cloud offers both its device
+account flow and an API-key method. The device flow returns the issued
+Confidential AI key through OpenCode's documented browser-authorization hook;
+the plugin does not create a parallel OAuth token lifecycle or credential file.
 
-Keep the gateway key in an environment variable. Authentication passes through
-from the agent request; the `aci serve` command line contains no key.
+`REDPILL_AI_API_KEY` and `PHALA_AI_API_KEY` are supported for the current
+process. OpenCode does not copy environment variables into its auth store.
 
-## Compatibility
-
-| Agent | Agent protocol | Integration | Status |
-| --- | --- | --- | --- |
-| Pi | OpenAI Chat Completions | Inject `connectAci().fetch` | Native |
-| Codex CLI | OpenAI Responses | Point a custom model provider at `aci serve` | Supported when the selected gateway route serves `/v1/responses` |
-| Claude Code | Anthropic Messages | Set `ANTHROPIC_BASE_URL` to `aci serve` | Supported; `/v1/messages/count_tokens` is optional |
-| OpenCode | OpenAI Chat Completions or Responses | Plugin injects Bun `connectAci().fetch` | Native |
-
-The native Pi and OpenCode providers additionally hold each inference stream
-open until its signed receipt and cited session verify. The bounded receipt
-history remains available for later inspection.
-
-### Codex CLI
-
-Codex custom providers use the Responses API. Put the provider in the
-user-level `$CODEX_HOME/config.toml`; project-local config cannot override
-provider definitions.
-
-```toml
-model = "<model-id>"
-model_provider = "aci"
-
-[model_providers.aci]
-name = "ACI local verifier"
-base_url = "http://127.0.0.1:4180/v1"
-env_key = "ACI_API_KEY"
-wire_api = "responses"
-```
-
-The gateway model route must implement `/v1/responses`.
-
-### Claude Code
-
-Claude Code speaks Anthropic Messages to a custom gateway:
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:4180
-export ANTHROPIC_AUTH_TOKEN="$ACI_API_KEY"
-export ANTHROPIC_MODEL=<model-id>
-claude
-```
-
-The gateway already exposes `/v1/messages`. Claude Code may also call
-`/v1/messages/count_tokens`; that endpoint is optional and Claude Code falls
-back when it is unavailable. New Claude Code releases may add beta headers and
-body fields, so compatibility should be exercised when either side upgrades.
-
-### OpenCode
-
-For RedPill, add one plugin entry to `opencode.json`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-provider-redpill"],
-}
-```
-
-Run `opencode providers login`, paste a Redpill API key, or set
-`REDPILL_AI_API_KEY`, then choose `redpill/<model-id>`. Redpill does not
-currently expose account OAuth; a future Clerk OAuth integration is outside
-this release.
-
-For Phala Cloud, install `opencode-provider-phala-cloud`, then use its device
-login or set `PHALA_AI_API_KEY` and choose `phala/<model-id>`. The plugin
-creates the provider itself; do not add a separate provider block for the same
-id.
-
-For another ACI gateway, use the neutral plugin:
+For another ACI gateway, configure the neutral plugin:
 
 ```jsonc
 {
@@ -124,61 +94,71 @@ For another ACI gateway, use the neutral plugin:
       {
         "baseURL": "https://gateway.example.com/v1",
         "trust": {
-          "acceptedComposeHashes": ["<reviewed-compose-sha256>"],
-        },
-      },
-    ],
-  ],
+          "acceptedComposeHashes": ["<reviewed-compose-sha256>"]
+        }
+      }
+    ]
+  ]
 }
 ```
 
-The plugin discovers `/v1/models` over the verified connection, defaults to
-`is_tee: true`, excludes embedding-only entries, maps model limits, prices,
-modalities, tools and reasoning controls, and accepts an optional model
-allowlist. The provider is installed with a rejecting fetch before any async
-verification starts. OpenCode currently ignores `config()` hook errors, so
-this ordering is required to prevent an ordinary HTTPS downgrade. Each
-inference response is held open until its signed receipt and cited session
-verify.
+Then run `opencode providers login --provider aci` or set `ACI_API_KEY`.
+The read-only `aci_inspect`, `redpill_aci_inspect`, or `phala_aci_inspect` tool
+reports connection status, attestation, receipt history, receipt audits, and
+session audits without returning prompts, responses, or raw evidence.
 
-OpenCode server plugins cannot register Pi-style TUI settings panels or footer
-state. Instead, each provider exposes the native read-only inspection tool
-`aci_inspect` or `<provider>_aci_inspect`. Its `status`, `attestation`,
-`receipts`, `receipt`, and `session` actions expose the same verified state and
-bounded audit history without returning prompts, responses, or raw evidence.
-OpenCode configuration remains in `opencode.json`, and credentials remain in
-OpenCode's native auth store.
+## SDK applications
 
-For a route that specifically implements `/v1/responses`, OpenCode documents
-`@ai-sdk/openai` instead of `@ai-sdk/openai-compatible`.
+Applications that expose a per-client fetch hook can inject the verified
+transport directly:
 
-OpenCode can still point at `aci serve` when an operator wants one shared local
-process for several tools. That is an operational choice, not a Bun
-compatibility requirement.
+```ts
+import { connectAci } from "@phala/aci-verifier/runtime";
+
+const aci = await connectAci({
+  baseURL: "https://gateway.example.com/v1",
+  acceptedComposeHashes: ["<reviewed-compose-sha256>"],
+});
+
+const response = await aci.fetch("https://gateway.example.com/v1/models");
+```
+
+Node and Bun expose the same API. Conditional package exports select the
+runtime-specific TLS adapter; application and framework code should not branch
+on the runtime. Prefer `@phala/aci-provider` when the application also needs
+shared model discovery, capability mapping, receipt history, and response
+completion verification.
+
+## Unsupported hosts
+
+A custom API base URL is not enough to inject ACI's attested TLS transport. A
+coding agent without an official custom-fetch or provider-plugin extension
+point therefore has no native integration in this release. In particular, this
+guide does not claim native Codex CLI or Claude Code support. Add a dedicated
+adapter only when the host exposes a supported transport boundary and lifecycle
+contract.
 
 ## Trust boundary
 
-`aci serve` and `connectAci()` share the same trust contract: fresh quote and
-keyset binding, measured compose appraisal, optional reviewed compose
-allowlist, identity expiry, hostname/SPKI channel binding, verified-serving
-constraints, and receipt/session auditing. Agent adapters select the HTTP
-protocol and transport; verification remains in the shared client.
+The shared clients verify a fresh quote and nonce-bound keyset, measured
+compose, optional reviewed-release allowlist, identity expiry, hostname and TLS
+SPKI binding, verified-serving constraints, exact wire digests, signed receipts,
+and cited sessions. Any required failure blocks the request or response.
 
-Coverage ends at model HTTP traffic between the local verifier and attested
+Coverage ends at model HTTP traffic between the local client and the attested
 gateway. WebSockets, MCP servers, tools, browser automation, shell commands,
-extensions, and telemetry have separate trust boundaries. The local agent and
-`aci serve` see plaintext prompts and responses; ACI binds the remote network
-path to the attested TLS identity.
+extensions, and telemetry have separate trust boundaries. The local coding
+agent still sees plaintext prompts and responses; ACI binds the remote network
+path to the attested workload identity.
 
 ## Sources
 
-Checked 2026-08-27:
+Checked 2026-08-28:
 
-- [Codex custom model providers](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers)
-  and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)
-- [Claude Code gateway connection](https://code.claude.com/docs/en/llm-gateway-connect)
-  and [protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol)
+- [Pi providers](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/providers.md),
+  [custom providers](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/custom-provider.md),
+  and [models and thinking](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/keybindings.md#models-and-thinking)
 - [OpenCode providers](https://opencode.ai/docs/providers/) and
-  [plugins](https://opencode.ai/docs/plugins/), source commit
-  tag [`v1.18.23`](https://github.com/anomalyco/opencode/tree/v1.18.23)
-- [Bun fetch TLS and proxy options](https://bun.com/docs/runtime/networking/fetch)
+  [plugins](https://opencode.ai/docs/plugins/), source tag
+  [`v1.18.23`](https://github.com/anomalyco/opencode/tree/v1.18.23)
+- [Bun fetch TLS options](https://bun.com/docs/runtime/networking/fetch)
