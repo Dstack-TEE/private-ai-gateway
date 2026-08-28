@@ -49,7 +49,6 @@ pub(super) async fn forward_to_backend(
     // surfaces whose shape carries a request id.
     let request_id = input.context.request_id.clone();
     if input.stream {
-        let request_id = input.context.request_id.clone();
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
                 context: input.context,

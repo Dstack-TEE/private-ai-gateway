@@ -156,18 +156,13 @@ pub(super) fn gateway_timeout_response(
     message: String,
 ) -> Response {
     tracing::warn!(error = %message, "upstream timed out");
-    let body = crate::middleware::errors::envelope_bytes(
+    crate::middleware::errors::error_response(
         surface,
+        504,
         crate::middleware::errors::error_type(surface, 504),
         crate::middleware::errors::upstream_message(504),
         request_id,
-    );
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    (StatusCode::GATEWAY_TIMEOUT, headers, body).into_response()
+    )
 }
 
 pub(super) fn internal_error_response(err: ServiceError) -> Response {
