@@ -7,7 +7,8 @@ trap 'rm -rf "$scratch"' EXIT
 
 packs="$scratch/packs"
 consumer="$scratch/consumer"
-mkdir -p "$packs" "$consumer"
+pi_npm="$scratch/pi-agent/npm"
+mkdir -p "$packs" "$consumer" "$pi_npm"
 
 for package in \
   @phala/aci-verifier \
@@ -85,3 +86,28 @@ for (const name of [
   }
 }
 '
+
+# Pi deliberately omits host-provided peer dependencies when it installs an
+# extension. Load the packaged extension with Pi's own loader in that layout.
+npm init --yes --silent --prefix "$pi_npm" >/dev/null
+npm install --prefix "$pi_npm" --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
+  "$packs"/phala-aci-verifier-*.tgz \
+  "$packs"/phala-aci-provider-*.tgz \
+  "$packs"/phala-pi-provider-aci-*.tgz \
+  "$packs"/pi-provider-phala-cloud-*.tgz
+
+for peer in pi-ai pi-coding-agent pi-tui; do
+  if [[ -e "$pi_npm/node_modules/@earendil-works/$peer" ]]; then
+    echo "Pi smoke unexpectedly installed host peer @earendil-works/$peer" >&2
+    exit 1
+  fi
+done
+
+PI_CODING_AGENT_DIR="$scratch/pi-agent" \
+  "$repo_root/clients/node_modules/.bin/pi" \
+  --offline \
+  --no-context-files \
+  --no-skills \
+  --no-themes \
+  --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
+  --list-models >/dev/null
