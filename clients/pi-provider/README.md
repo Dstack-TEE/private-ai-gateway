@@ -121,7 +121,7 @@ export default createProvider({
   providerId: "my-brand",
   label: "My Brand",
   defaultBaseURL: "https://gateway.example/v1",
-  apiKeyEnv: "MY_LLM_API_KEY",
+  apiKeyEnv: "MY_AI_API_KEY",
   envPrefix: "MY",
   logPrefix: "[my-brand]",
   acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],

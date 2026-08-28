@@ -9,7 +9,7 @@
  *
  * Usage:
  *   pi install npm:pi-provider-phala-cloud
- *   # /login phala (or set PHALA_LLM_API_KEY), then /model phala/<model-id>
+ *   # /login phala (or set PHALA_AI_API_KEY), then /model phala/<model-id>
  */
 import type { ApiKeyCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import {

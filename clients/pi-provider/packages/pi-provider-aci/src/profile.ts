@@ -33,7 +33,6 @@ export interface ProviderProfile extends AciProviderProfile {
 
 export const DEFAULT_PROFILE: ProviderProfile = {
   ...DEFAULT_ACI_PROVIDER_PROFILE,
-  apiKeyAliases: ["ACI_LLM_API_KEY"],
   footerKey: "aci",
 };
 
@@ -43,9 +42,6 @@ export function resolveProfile(patch: Partial<ProviderProfile> | undefined): Pro
   const profile = resolveAciProviderProfile(shared);
   return {
     ...profile,
-    ...(profile.providerId === DEFAULT_PROFILE.providerId && profile.apiKeyAliases === undefined
-      ? { apiKeyAliases: DEFAULT_PROFILE.apiKeyAliases }
-      : {}),
     footerKey,
     ...(apiKeyAuth ? { apiKeyAuth } : {}),
   };

@@ -8,7 +8,7 @@ opencode plugin opencode-provider-redpill
 
 Pass `--global` to install it in the global OpenCode config. Then run
 `opencode providers login` and paste a Redpill API key, or set
-`REDPILL_LLM_API_KEY`. Redpill does not currently expose account OAuth. Then
+`REDPILL_AI_API_KEY`. Redpill does not currently expose account OAuth. Then
 select `redpill/<model-id>`. The plugin discovers current TEE models and sends
 inference only through an attested, TLS-pinned connection. Every response
 receipt is verified before OpenCode can finish the model turn or continue its

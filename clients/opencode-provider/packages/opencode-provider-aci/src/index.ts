@@ -132,7 +132,7 @@ export function createOpenCodeAciPlugin({
         const owned: OpenCodeProviderConfig = {
           name: profile.label,
           npm: OPENAI_COMPATIBLE_PACKAGE,
-          env: Array.from(new Set([profile.apiKeyEnv, ...(profile.apiKeyAliases ?? [])])),
+          env: [profile.apiKeyEnv],
           options: {
             ...(configuredBaseURL ? { baseURL: configuredBaseURL } : {}),
             fetch: secureFetch,

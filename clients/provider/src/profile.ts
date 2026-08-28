@@ -8,7 +8,6 @@ export interface AciProviderProfile {
   acceptedComposeHashes?: readonly string[];
   acceptedSessionIds?: readonly string[];
   baseURLAliases?: readonly string[];
-  apiKeyAliases?: readonly string[];
 }
 
 export const DEFAULT_ACI_PROVIDER_PROFILE: AciProviderProfile = {

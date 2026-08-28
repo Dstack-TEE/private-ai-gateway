@@ -200,7 +200,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   hashes. Verifiers should not compare `request.received.body_hash` with the
   original encrypted HTTP body.
 - Write neutral docs with `{API_KEY_ENV_VAR}` and product wrappers that render
-  `REDPILL_API_KEY` for Redpill and `PHALA_MODEL_API_KEY` for Phala.
+  `REDPILL_AI_API_KEY` for Redpill and `PHALA_AI_API_KEY` for Phala.
 
 ### P1: Local Backend Proxy Mode
 

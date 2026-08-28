@@ -112,6 +112,43 @@ PI_CODING_AGENT_DIR="$scratch/pi-agent" \
   --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
   --list-models >/dev/null
 
+printf '%s\n' '{"type":"get_commands"}' | \
+  PI_CODING_AGENT_DIR="$scratch/pi-agent" \
+  "$repo_root/clients/node_modules/.bin/pi" \
+  --mode rpc \
+  --no-session \
+  --offline \
+  --no-extensions \
+  --no-context-files \
+  --no-skills \
+  --no-themes \
+  --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
+  >"$scratch/pi-rpc.jsonl"
+
+node --input-type=module - "$scratch/pi-rpc.jsonl" <<'NODE'
+import { readFile } from "node:fs/promises";
+
+const records = (await readFile(process.argv[2], "utf8"))
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+const response = records.find(
+  (record) => record.type === "response" && record.command === "get_commands",
+);
+if (!response?.success || !Array.isArray(response.data?.commands)) {
+  throw new Error("Pi RPC did not return the extension command list");
+}
+const commands = new Set(response.data.commands.map((command) => command.name));
+for (const command of [
+  "phala-settings",
+  "phala-attestation",
+  "phala-receipt",
+  "phala-session",
+]) {
+  if (!commands.has(command)) throw new Error(`Pi did not register /${command}`);
+}
+NODE
+
 smoke_opencode_provider() {
   local package_name="$1"
   local provider_id="$2"
