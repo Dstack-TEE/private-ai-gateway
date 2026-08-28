@@ -30,7 +30,7 @@ use crate::sse_protocol::SseProtocol;
 
 use super::completion::{
     debug_gated_detail, detail_snippet, finish_reasons_anomalous, sanitize_identifier,
-    sanitize_reason, should_log_failure,
+    sanitize_reason, should_log_failure, truncate,
 };
 use super::control::ControlClient;
 use super::pricing;
@@ -52,14 +52,55 @@ pub enum Outcome {
     ClientClosed,
 }
 
-/// Map a stream outcome onto the recorded status: client disconnect → 499, any
-/// failure (broken/truncated/in-band error in a 200 stream) → 502, otherwise the
-/// raw upstream status.
-fn metered_status(outcome: Outcome, upstream_status: u16) -> u16 {
+/// Map a stream outcome onto the recorded status: client disconnect → 499, a
+/// failure (broken/truncated/in-band error in a 200 stream) → the failure's
+/// own status (502, or 504 when the gateway's read deadline cut the stream),
+/// otherwise the raw upstream status.
+fn metered_status(outcome: Outcome, upstream_status: u16, failure_status: u16) -> u16 {
     match outcome {
         Outcome::ClientClosed => 499,
-        Outcome::Failed => 502,
+        Outcome::Failed => failure_status,
         Outcome::Completed => upstream_status,
+    }
+}
+
+/// How a stream failed, for the usage report: the status to record, the error's
+/// own words (already bounded), and which component broke when it was not the
+/// upstream. A stream that ends any other way carries the default.
+#[derive(Debug, Clone)]
+pub(super) struct StreamFailure {
+    pub status: u16,
+    pub message: Option<String>,
+    pub source: Option<ErrorSource>,
+}
+
+impl Default for StreamFailure {
+    fn default() -> Self {
+        Self {
+            status: 502,
+            message: None,
+            source: None,
+        }
+    }
+}
+
+impl StreamFailure {
+    /// Classify the error that ended the stream. A gateway-enforced read
+    /// deadline is 504; any other upstream failure 502; an error raised by a
+    /// gateway stage ahead of the meter (receipt drafting, a transform) is
+    /// still 502 but attributed to the gateway so it does not count against
+    /// the serving route.
+    fn from_error(err: &ServiceError) -> Self {
+        let (status, source) = match err {
+            ServiceError::Upstream(UpstreamError::Timeout(_)) => (504, None),
+            ServiceError::Upstream(_) => (502, None),
+            _ => (502, Some(ErrorSource::Gateway)),
+        };
+        Self {
+            status,
+            message: Some(truncate(&err.to_string(), 500)),
+            source,
+        }
     }
 }
 
@@ -92,17 +133,33 @@ pub struct StreamReport {
 }
 
 impl StreamReport {
-    fn settle(&self, outcome: Outcome, usage: Option<Value>, ttft_ms: Option<u64>) {
+    fn settle(
+        &self,
+        outcome: Outcome,
+        usage: Option<Value>,
+        ttft_ms: Option<u64>,
+        failure: StreamFailure,
+    ) {
         self.settled.store(true, Ordering::Relaxed);
         // A Failed settle caused by the downstream finalizer is a gateway
         // failure, not the upstream's: attribute it so health scoring does not
         // count it against the serving route.
         let downstream =
             matches!(outcome, Outcome::Failed) && self.downstream_abort.load(Ordering::Relaxed);
+        let (error_source, error_message) = if downstream {
+            (
+                Some(ErrorSource::Gateway),
+                Some("downstream finalizer aborted the response".to_string()),
+            )
+        } else if matches!(outcome, Outcome::Failed) {
+            (failure.source, failure.message)
+        } else {
+            (None, None)
+        };
         let report = PostReport {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint.clone(),
-            status: metered_status(outcome, self.upstream_status),
+            status: metered_status(outcome, self.upstream_status, failure.status),
             duration_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms,
             is_streaming: Some(true),
@@ -114,9 +171,8 @@ impl StreamReport {
             spend_mode: self.spend_mode,
             user_id: self.user_id,
             virtual_key_id: self.virtual_key_id,
-            error_source: downstream.then_some(ErrorSource::Gateway),
-            error_message: downstream
-                .then(|| "downstream finalizer aborted the response".to_string()),
+            error_source,
+            error_message,
             prefix_hash: self.prefix_hash.clone(),
         };
         let control = self.control.clone();
@@ -168,6 +224,9 @@ pub struct MeterStream {
     /// diagnostics.
     framing: crate::sse_framing::SseFramingObserver,
     settled: bool,
+    /// Recorded when the inner stream errors, so the settle reports the
+    /// failure's own status and words rather than a generic 502.
+    failure: StreamFailure,
     // Observation state for the `request_outcome` settle log. Always
     // collected; the distinct-reason list is capped so a pathological stream
     // cannot grow it without bound.
@@ -197,6 +256,7 @@ impl MeterStream {
             report,
             inject,
             started: false,
+            failure: StreamFailure::default(),
             buf: Vec::new(),
             inner_done: false,
             last_usage: None,
@@ -248,7 +308,7 @@ impl MeterStream {
             return;
         }
         self.settled = true;
-        let status = metered_status(outcome, self.report.upstream_status);
+        let status = metered_status(outcome, self.report.upstream_status, self.failure.status);
         // Failures are always logged; a Completed stream is logged only when
         // its finish reasons are nonstandard (an upstream error smuggled
         // through a "success").
@@ -281,8 +341,19 @@ impl MeterStream {
                 "stream settled"
             );
         }
+        let mut failure = std::mem::take(&mut self.failure);
+        if outcome == Outcome::Failed && failure.message.is_none() {
+            failure.message = Some(
+                if self.saw_error || self.framing.saw_error() {
+                    "upstream stream carried an in-band error event"
+                } else {
+                    "upstream stream ended without a terminal marker"
+                }
+                .to_string(),
+            );
+        }
         self.report
-            .settle(outcome, self.last_usage.take(), self.ttft_ms);
+            .settle(outcome, self.last_usage.take(), self.ttft_ms, failure);
     }
 
     // Judge the raw reason once, then retain only a sanitized copy for the
@@ -315,17 +386,21 @@ impl MeterStream {
             });
         if let Some(error_value) = error_value {
             self.saw_error = true;
-            // Collect detail only when it can actually be emitted
-            // (request_outcome=debug), and prefer the error's message field
-            // over serializing the whole value — an in-band error event can
-            // approach the 16 MiB SSE line cap, and the 240-char output bound
-            // must also bound the transient memory spent producing it.
+            let message = error_value
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error_value.as_str())
+                .unwrap_or("in-band stream error");
+            // The usage record carries the error's own words (bounded copy;
+            // the full value can approach the 16 MiB SSE line cap and is never
+            // retained). Without this, a 200 stream failed by an in-band error
+            // settles as a bare 502 that nothing can be asked about.
+            if self.failure.message.is_none() {
+                self.failure.message = Some(truncate(message, 500));
+            }
+            // Log detail stays debug-gated separately: it may be echoed to the
+            // request_outcome line, whose exposure policy is the operator's.
             if self.error_detail.is_none() && self.detail_enabled {
-                let message = error_value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .or_else(|| error_value.as_str())
-                    .unwrap_or("in-band stream error");
                 self.error_detail = Some(detail_snippet(message.as_bytes()));
             }
         }
@@ -550,6 +625,9 @@ impl Stream for MeterStream {
                         Fed::Overflow => {
                             this.inner_done = true;
                             this.buf.clear();
+                            if this.failure.message.is_none() {
+                                this.failure.message = Some("sse line overflow".to_string());
+                            }
                             if this.error_detail.is_none() {
                                 this.error_detail = Some("sse line overflow".to_string());
                             }
@@ -571,6 +649,7 @@ impl Stream for MeterStream {
                     if this.error_detail.is_none() {
                         this.error_detail = Some(detail_snippet(err.to_string().as_bytes()));
                     }
+                    this.failure = StreamFailure::from_error(&err);
                     let outcome = this.protocol_outcome(false);
                     this.settle(outcome);
                     return Poll::Ready(Some(Err(err)));
@@ -599,17 +678,27 @@ impl Stream for MeterStream {
 impl Drop for MeterStream {
     fn drop(&mut self) {
         // A drop after streaming started but before a terminal poll means the
-        // downstream consumer went away. A drop before the first poll (the stream
-        // was never consumed, e.g. the finalizer errored) is not a client cancel.
-        if self.started {
-            if self.report.downstream_abort.load(Ordering::Relaxed) {
-                // The finalizer aborted mid-consumption: an internal failure,
-                // not a client disconnect (the settle line carries the
-                // `downstream_abort` flag).
-                self.settle(Outcome::Failed);
-            } else {
-                self.settle(Outcome::ClientClosed);
-            }
+        // downstream consumer went away. A drop before the first poll is the
+        // same client disconnect (hyper never got to read the body) unless the
+        // pipeline explicitly marked its own teardown via `downstream_abort` —
+        // the handler sets that flag around the finalizer hand-off, the one
+        // point that can drop the pipeline unpolled for an internal reason.
+        // Inferring "internal" from "unpolled" alone would misreport a client
+        // that vanishes right after the headers as a gateway failure.
+        if !self.started && self.report.downstream_abort.load(Ordering::Relaxed) {
+            self.failure = StreamFailure {
+                status: 502,
+                message: Some("response pipeline dropped before the body was consumed".to_string()),
+                source: Some(ErrorSource::Gateway),
+            };
+            self.settle(Outcome::Failed);
+        } else if self.report.downstream_abort.load(Ordering::Relaxed) {
+            // The finalizer aborted mid-consumption: an internal failure,
+            // not a client disconnect (the settle line carries the
+            // `downstream_abort` flag).
+            self.settle(Outcome::Failed);
+        } else {
+            self.settle(Outcome::ClientClosed);
         }
     }
 }
@@ -680,9 +769,11 @@ mod tests {
 
     #[test]
     fn metered_status_mapping() {
-        assert_eq!(metered_status(Outcome::Completed, 200), 200);
-        assert_eq!(metered_status(Outcome::Failed, 200), 502);
-        assert_eq!(metered_status(Outcome::ClientClosed, 200), 499);
+        assert_eq!(metered_status(Outcome::Completed, 200, 502), 200);
+        assert_eq!(metered_status(Outcome::Failed, 200, 502), 502);
+        // The gateway's own read deadline cutting a stream is a 504.
+        assert_eq!(metered_status(Outcome::Failed, 200, 504), 504);
+        assert_eq!(metered_status(Outcome::ClientClosed, 200, 502), 499);
     }
 
     // A clean end of stream and a transport error are the dividing line, not a

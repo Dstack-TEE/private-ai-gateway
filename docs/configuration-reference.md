@@ -89,7 +89,7 @@ out-of-process hop. When the section is omitted the gateway serves directly.
 | `middleware.control_token` | unset | Bearer token sent to the control plane. When unset, no `Authorization` header is sent. |
 | `middleware.control_timeout_ms` | `60000` | Timeout for the pre-request consult and catalog fetches. A failed or timed-out consult fails closed. |
 | `middleware.control_post_timeout_ms` | `10000` | Timeout for the fire-and-forget post-request usage report. |
-| `middleware.sse_keepalive_ms` | `10000` | Idle keep-alive interval for streaming responses; `0` disables the heartbeat. |
+| `middleware.sse_keepalive_ms` | `5000` | Keep-alive interval for streaming responses, measured from the start of the upstream forward. A streaming request with no upstream response headers after one interval is committed as `200 text/event-stream` and heartbeated (`: PROCESSING`) until the upstream answers; a later forward failure is delivered as the surface's in-band error event whose `code`/`type` is the status the request would otherwise have carried, while the usage report keeps the real status. A response committed this early carries no `x-receipt-id` header — when the upstream answers and the stream finalizes, the receipt is issued and fetchable by the response `id`, but an early-committed stream whose forward fails never drafts one. E2EE requests and requests carrying an ACI constraint (`provider.aci_verified` — the aci CLI's default — or pinned session ids) are never committed early, and neither is a request whose current candidate has already failed once (a same-route retry usually ends in a relayable HTTP status, 429 above all, which an early 200 would demote to an in-band error). Once a stream is open the same interval drives idle heartbeats. `0` disables the heartbeat and the pre-upstream commit with it. |
 | `middleware.prefix_hash_secret` | unset | HMAC key for the consult prefix hash (the cache-affinity key). When set, it must contain at least 32 bytes of randomly generated secret material (after trimming whitespace) — anything shorter fails startup, because HMAC under a weak key is as computable as the plain hash it claims to improve on. The hash is then HMAC-SHA256(secret, prefix), so the control plane cannot dictionary-test guessed prompts — it carries no content signal beyond prefix equality. Every gateway replica must share the same value, or affinity silently fragments per replica; rotating it invalidates live affinity keys, which roll off within their 600s TTL. Unset falls back to plain SHA-256: prefix equality stays linkable and a fully-known 4KB template can be confirmed by hashing it. Either way the hash is only sent when the canonical prefix fills its 4KB cap — shorter (dictionary-enumerable) prefixes are never keyed. |
 | `middleware.send_request_features` | `true` | Extract content-derived request features (a low-biased token-count estimate — deliberately under real tokenizer output on ordinary text, but a heuristic, not a guaranteed bound; the control plane may steer on it but never empties a candidate list on it — plus input modalities, tools/response-format flags, reasoning intent, and a prefix hash for cache affinity) and send them in the pre-request consult. Content never leaves the gateway — only numbers, closed enums and a one-way hash. `false` restores the featureless consult body byte-for-byte; it is the rollback lever if extraction misbehaves. |
 | `middleware.tee_only_domains` | `[]` | Hosts (matched against the request `Host` header, case-insensitive) that serve TEE models only. On these hosts the model catalog is forced to `?tee=true`, a non-TEE model is refused with `404` at the pre-consult (before any forward), and serving is forced to attested (`aci_verified`) upstreams — a client cannot opt out via `provider.aci_verified:false`. Two predicates apply by design: the catalog/consult gate uses the model's `is_tee` capability flag, while serving is enforced against the deployment's attestation, so a listed `is_tee` model with no live attested deployment still fails closed (`503`). Empty (the default) leaves every host unrestricted. |
@@ -101,8 +101,16 @@ disconnects; final 429s excepted, they are recorded per-attempt in the usage
 pipeline) emits a `request_outcome` tracing line carrying the client-facing
 and upstream status, route, attempt chain length, TTFT/duration, finish
 reasons, and terminal marker. Requests rejected before that path — malformed
-JSON, oversized bodies, E2EE setup failures — do not produce lines, so
-complete request accounting still needs the usage pipeline. Consult denials
+JSON, E2EE setup failures — do not produce lines, so
+complete request accounting still needs the usage pipeline; an oversized body
+does emit a `phase=body_too_large` line carrying the request id, and is
+answered with the surface's JSON `413` envelope (the Anthropic envelope shape
+also carries the id; the OpenAI shape, matching the upstream wire format,
+does not).
+A client that disconnects before the upstream's first byte is reported to the
+usage pipeline as a `499` with the route that was in flight and no TTFT; a
+gateway-enforced connect or read deadline is reported as a `504`, per attempt
+and as the client-facing status. Consult denials
 that carry a key identity (`userId` on the pre-consult response), every
 429/5xx denial, and the no-route 404 are also reported to the usage
 pipeline (`errorSource: "control"`, no route) so the control plane can

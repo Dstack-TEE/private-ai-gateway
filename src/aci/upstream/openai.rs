@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::tls::{pinned_spki_client, response_headers};
 use super::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+    transport_error, PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
@@ -218,14 +218,10 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .body(req.body)
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?
-            .to_vec();
+        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -243,12 +239,12 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .body(req.body)
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
         let body = resp
             .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| UpstreamError::Transport(e.to_string())));
+            .map(|chunk| chunk.map_err(transport_error));
         Ok(UpstreamStreamResponse {
             status_code: status,
             headers,
@@ -272,14 +268,10 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .body(req.request.body)
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?
-            .to_vec();
+        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -299,12 +291,12 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .body(req.request.body)
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
         let body = resp
             .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| UpstreamError::Transport(e.to_string())));
+            .map(|chunk| chunk.map_err(transport_error));
         Ok(UpstreamStreamResponse {
             status_code: status,
             headers,
@@ -373,14 +365,10 @@ impl OpenAICompatibleBackend {
             .get_builder(path, accept)
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?
-            .to_vec();
+        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
         Ok(UpstreamResponse {
             status_code: status,
             body,

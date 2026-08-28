@@ -146,6 +146,25 @@ pub(super) fn error_response(
     (status, Json(body)).into_response()
 }
 
+/// A deadline the gateway's own upstream client enforced expired before the
+/// upstream answered: 504, in the requesting surface's envelope shape, so the
+/// recorded and client-facing status say what actually happened instead of a
+/// generic internal error.
+pub(super) fn gateway_timeout_response(
+    surface: crate::middleware::errors::Surface,
+    request_id: Option<&str>,
+    message: String,
+) -> Response {
+    tracing::warn!(error = %message, "upstream timed out");
+    crate::middleware::errors::error_response(
+        surface,
+        504,
+        crate::middleware::errors::error_type(surface, 504),
+        crate::middleware::errors::upstream_message(504),
+        request_id,
+    )
+}
+
 pub(super) fn internal_error_response(err: ServiceError) -> Response {
     tracing::error!(error = %err, "aci service internal error");
     error_response(

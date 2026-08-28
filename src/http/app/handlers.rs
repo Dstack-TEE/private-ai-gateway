@@ -3,9 +3,9 @@
 use std::collections::HashSet;
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, RawQuery, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -454,7 +454,7 @@ pub(super) fn report_with_legacy_attestation_fields(
 pub(super) async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     openai_completion_endpoint(state, headers, body, CHAT_COMPLETIONS_PATH, false).await
 }
@@ -462,7 +462,7 @@ pub(super) async fn chat_completions(
 pub(super) async fn embeddings(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     // OpenAI embeddings is buffered-only: any client-sent `stream:true`
     // is forced back to buffered so the receipt/E2EE pipeline runs the
@@ -473,7 +473,7 @@ pub(super) async fn embeddings(
 pub(super) async fn messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     // Native Anthropic-format downstream surface. The frontend treats the body
     // as opaque plaintext: it only extracts `model`/`stream` and forwards to the
@@ -493,7 +493,7 @@ pub(super) async fn messages(
 pub(super) async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     // Native OpenAI Responses API passthrough (create only). The frontend treats
     // the body as opaque plaintext (extracts `model`/`stream`); the path flows
@@ -609,13 +609,91 @@ fn strip_aci_constraint(mut parsed: Value) -> (Value, bool) {
     (parsed, changed)
 }
 
+/// The 413 an oversize inference body earns: the surface's error envelope plus
+/// a `request_outcome` line carrying the request id, in place of the
+/// extractor's bare connection reset. Only the Anthropic envelope shape has a
+/// `request_id` field; the OpenAI envelope deliberately matches the upstream
+/// wire shape and carries none — there the id lives on the log line.
+fn body_too_large_response(
+    surface: crate::middleware::errors::Surface,
+    request_id: &str,
+) -> Response {
+    tracing::info!(
+        target: "request_outcome",
+        request_id = %request_id,
+        model = "",
+        route = "",
+        attempt = 0u32,
+        upstream_status = 0u16,
+        status = 413u16,
+        outcome = "Generated",
+        phase = "body_too_large",
+        "request body exceeds the inference-surface limit"
+    );
+    let body = crate::middleware::errors::envelope_bytes(
+        surface,
+        crate::middleware::errors::error_type(surface, 413),
+        "request body exceeds the 32 MiB limit",
+        Some(request_id),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::PAYLOAD_TOO_LARGE, headers, body).into_response()
+}
+
 pub(super) async fn openai_completion_endpoint(
     state: AppState,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    // The request id and surface exist before the body is read so an oversize
+    // body is refused with a proper envelope and a `request_outcome` line,
+    // rather than the extractor-level 413 (an unread upload hyper turns into a
+    // connection reset that never reaches request logging).
+    let request_id = generate_request_id();
+    let surface = if endpoint_path == MESSAGES_PATH {
+        Surface::Anthropic
+    } else {
+        Surface::Openai
+    };
+    // Reject on a declared length before reading anything; this is the common
+    // case (a client that sets content-length) and avoids buffering the body.
+    if let Some(declared) =
+        header_str(&headers, "content-length").and_then(|value| value.parse::<usize>().ok())
+    {
+        if declared > super::MAX_REQUEST_BODY_BYTES {
+            return body_too_large_response(surface, &request_id);
+        }
+    }
+    let body = match axum::body::to_bytes(body, super::MAX_REQUEST_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            // `to_bytes` fails either because the body ran past the limit or
+            // because the transport broke mid-read. Only the former is a 413;
+            // the response is written without draining the rest of the upload,
+            // so a client still sending may still see a reset after the 413
+            // headers — the content-length check above catches the usual case.
+            // The limit error can sit at any depth of the wrapper chain, so
+            // walk the whole chain rather than trusting one `source()` level.
+            let mut source = std::error::Error::source(&err);
+            while let Some(current) = source {
+                if current.is::<http_body_util::LengthLimitError>() {
+                    return body_too_large_response(surface, &request_id);
+                }
+                source = current.source();
+            }
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "could not read request body",
+            );
+        }
+    };
     let has_e2ee = has_e2ee_headers(&headers);
     // `supported_e2ee_versions` advertises client-facing E2EE extensions (ACI
     // §6). The inherited
@@ -689,7 +767,7 @@ pub(super) async fn openai_completion_endpoint(
         .as_deref()
         .map(ReceiptOwner::from_bearer);
     let context = GatewayRequestContext {
-        request_id: generate_request_id(),
+        request_id: request_id.clone(),
         // The receipt `model` is the model the client requested: under E2EE
         // the clear top-level `model` bound into E2EE v2 §6 AAD, otherwise the body's.
         user_model: e2ee
@@ -718,11 +796,6 @@ pub(super) async fn openai_completion_endpoint(
             MESSAGES_PATH => Endpoint::Messages,
             RESPONSES_PATH => Endpoint::CreateModelResponse,
             _ => Endpoint::ChatComplete,
-        };
-        let surface = if endpoint == Endpoint::Messages {
-            Surface::Anthropic
-        } else {
-            Surface::Openai
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
         // TEE-only host: force attested serving. The `tee_only` flag is carried
@@ -793,7 +866,7 @@ pub(super) async fn openai_completion_endpoint(
 pub(super) async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     openai_completion_endpoint(state, headers, body, COMPLETIONS_PATH, false).await
 }

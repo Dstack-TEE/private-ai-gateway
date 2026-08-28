@@ -130,7 +130,20 @@ pub fn stream_error_tail(
     request_id: Option<&str>,
     last_sequence_number: Option<u64>,
 ) -> String {
-    let message = upstream_message(502);
+    stream_error_event(protocol, 502, request_id, last_sequence_number)
+}
+
+/// Like [`stream_error_tail`], but for a chosen status. Used where the gateway
+/// commits a 200 stream before the upstream answers (the pre-first-byte
+/// keep-alive) and then has to deliver the real failure in-band: the client
+/// reads `code`/`type` as the status the request would otherwise have had.
+pub fn stream_error_event(
+    protocol: SseProtocol,
+    status: u16,
+    request_id: Option<&str>,
+    last_sequence_number: Option<u64>,
+) -> String {
+    let message = upstream_message(status);
     // The leading blank line dispatches an event written but not yet dispatched
     // (a `data:` line with no blank line after it), so these start their own
     // event instead of folding into it as extra `data:` lines. Two newlines,
@@ -141,7 +154,7 @@ pub fn stream_error_tail(
         SseProtocol::AnthropicMessages => {
             let body = envelope(
                 Surface::Anthropic,
-                error_type(Surface::Anthropic, 502),
+                error_type(Surface::Anthropic, status),
                 message,
                 request_id,
             );
@@ -156,7 +169,7 @@ pub fn stream_error_tail(
             // upstream-reported error, which are deliberately
             // indistinguishable.
             let body = responses_error_event(
-                Some(responses_gateway_code(502)),
+                Some(responses_gateway_code(status)),
                 message,
                 None,
                 Some(last_sequence_number.map_or(0, |last| last.saturating_add(1))),
@@ -164,7 +177,7 @@ pub fn stream_error_tail(
             format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
         }
         SseProtocol::OpenaiChat => {
-            let body = json!({ "error": chat_gateway_error(502) });
+            let body = json!({ "error": chat_gateway_error(status) });
             format!("\n\ndata: {}\n\ndata: [DONE]\n\n", json_str(&body))
         }
     }

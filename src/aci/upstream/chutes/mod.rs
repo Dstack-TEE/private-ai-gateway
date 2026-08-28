@@ -19,8 +19,8 @@ pub use session::ChutesSessionStore;
 
 use super::tls::response_headers;
 use super::{
-    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream,
-    UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    transport_error, OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend,
+    UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crypto::{
@@ -186,10 +186,7 @@ impl ChutesProviderBackend {
         for (name, value) in headers {
             builder = builder.header(name, value);
         }
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        let resp = builder.send().await.map_err(transport_error)?;
         let status_code = resp.status().as_u16();
         let headers = response_headers(&resp);
         Ok(ChutesInvokeResponse {
@@ -220,12 +217,9 @@ impl ChutesProviderBackend {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream {
                 status,
@@ -261,12 +255,9 @@ impl ChutesProviderBackend {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream {
                 status,
@@ -350,12 +341,9 @@ impl ChutesProviderBackend {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+            .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+        let body = resp.bytes().await.map_err(transport_error)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream {
                 status,
@@ -399,7 +387,7 @@ impl UpstreamBackend for ChutesProviderBackend {
             .response
             .bytes()
             .await
-            .map_err(|e| UpstreamError::Transport(e.to_string()))?
+            .map_err(transport_error)?
             .to_vec();
         if status_code != 200 {
             return Ok(UpstreamResponse {
@@ -437,7 +425,7 @@ impl UpstreamBackend for ChutesProviderBackend {
         let raw_body = invoke
             .response
             .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| UpstreamError::Transport(e.to_string())));
+            .map(|chunk| chunk.map_err(transport_error));
         let body: UpstreamBodyStream = if status_code == 200 {
             headers.insert("content-type".to_string(), "text/event-stream".to_string());
             Box::pin(ChutesE2eeDecryptingStream::new(

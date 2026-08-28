@@ -447,6 +447,15 @@ MUST NOT infer trust from `/v1/models` entries.
 | `X-ACI-Keyset-Digest` | every response | The serving `workload_keyset_digest`. |
 | `X-Receipt-Id` | inference responses and refusal errors (§7.5) | Lookup id for the signed receipt. |
 
+An aggregator that commits a streaming response before selecting an
+upstream (a keep-alive heartbeat ahead of the upstream's first byte)
+cannot name a receipt in the header: such a response omits
+`X-Receipt-Id`, and the receipt — issued once the stream finalizes — is
+retrievable by the response's `id` (§7.2). A stream whose forward fails
+after that early commit issues no receipt. Requests carrying §5.3
+constraints are never committed early, so constrained clients always
+see the header.
+
 Headers are unauthenticated hints. Only the attested keyset and the
 signed receipt bind anything. On a changed `X-ACI-Keyset-Digest`, the
 client SHOULD re-verify the attestation report before sending further

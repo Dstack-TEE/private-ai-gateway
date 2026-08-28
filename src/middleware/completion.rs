@@ -10,19 +10,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::{
     body::Body,
     http::{header::CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use std::future::Future;
+use std::pin::Pin;
+
 use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
-    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, ForwardCandidate,
-    GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner,
-    ServiceError, ServiceResponseStream, UpstreamVerificationError,
+    is_sse_content_type, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
+    E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
+    MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
+    ServiceResponseStream, UpstreamVerificationError,
 };
 
 use super::control::ControlClient;
@@ -236,7 +241,7 @@ fn log_generated_outcome(
 /// Run the completion flow and produce the client response.
 pub async fn run(
     control: &ControlClient,
-    service: &AciService,
+    service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
     prefix_hash_secret: Option<&str>,
@@ -262,6 +267,7 @@ pub async fn run(
     // What the client is told about who served the request. Built before
     // `user_model` moves into the request context, and shared with the streaming
     // transform, which needs it for every chunk.
+    let received_body = Arc::new(received_body);
     let identity = Arc::new(response_transform::ResponseIdentity {
         request_id: request_id.clone(),
         user_model: user_model.clone(),
@@ -304,7 +310,7 @@ pub async fn run(
                         request_id: &request_id,
                         model,
                         started,
-                        received_body: &received_body,
+                        received_body: received_body.as_slice(),
                         requester: &requester,
                     },
                 );
@@ -321,7 +327,7 @@ pub async fn run(
         request_id: &request_id,
         model: model.unwrap_or(""),
         started,
-        received_body: &received_body,
+        received_body: received_body.as_slice(),
         requester: &requester,
     };
     // Forward the routing block verbatim; the control plane validates it. Parsing
@@ -352,8 +358,8 @@ pub async fn run(
         )
         .await;
 
-    let meter = Meter {
-        control,
+    let mut meter = Meter {
+        control: control.clone(),
         request_id: request_id.clone(),
         endpoint_path,
         request_model: model.unwrap_or("").to_string(),
@@ -365,6 +371,8 @@ pub async fn run(
             .as_ref()
             .and_then(|features| features.prefix_hash.clone()),
         started,
+        is_streaming: stream,
+        armed: None,
     };
 
     // Denial (also the fail-closed control-unavailable path: allow=false, 503).
@@ -498,24 +506,111 @@ pub async fn run(
     // The receipt-draft journal is only consumed by the streaming finalizer; the
     // buffered result carries its draft inline.
     let journal = MiddlewareReceiptJournal::default();
-    let result = service
-        .forward_chat_completion_for_middleware(
-            ChatCompletionRequest {
-                context,
-                endpoint_path,
-                received_body: &received_body,
-                forwarded_body: None,
-                aci_required,
-                aci_session_ids,
-                upstream_verification_event: None,
-                requester: requester.clone(),
-                e2ee: e2ee.clone(),
-            },
-            forward_candidates,
-            stream,
-            journal.clone(),
-        )
-        .await;
+    // The consult above is not covered: a client that leaves during it has no
+    // identity to report under yet.
+    meter.arm(journal.clone());
+
+    // An unset interval uses the 5-second default. Only 0 disables the
+    // heartbeat and, with it, the pre-first-byte early commit below.
+    let keepalive = match sse_keepalive_ms.unwrap_or(5_000) {
+        0 => None,
+        ms => Some(Duration::from_millis(ms)),
+    };
+
+    // The forward is driven as an owned future so that, when the upstream is
+    // slow, it can be moved into the response body and kept running while the
+    // client is held with heartbeats.
+    // An ACI-constrained request is never committed early: its contract
+    // includes refusal receipts and the 412 pinned-session refresh, which only
+    // exist as HTTP responses. `provider.aci_verified` is the aci CLI's
+    // default, so the clients that read `x-receipt-id` off every 2xx keep
+    // their header.
+    let aci_constrained = aci_required || !aci_session_ids.is_empty();
+    let forward_service = service.clone();
+    let forward_body = received_body.clone();
+    let forward_requester = requester.clone();
+    let forward_e2ee = e2ee.clone();
+    let forward_journal = journal.clone();
+    let mut forward: Pin<
+        Box<dyn Future<Output = Result<MiddlewareForwardResult, ServiceError>> + Send>,
+    > = Box::pin(async move {
+        forward_service
+            .forward_chat_completion_for_middleware(
+                ChatCompletionRequest {
+                    context,
+                    endpoint_path,
+                    received_body: forward_body.as_slice(),
+                    forwarded_body: None,
+                    aci_required,
+                    aci_session_ids,
+                    upstream_verification_event: None,
+                    requester: forward_requester,
+                    e2ee: forward_e2ee,
+                },
+                forward_candidates,
+                stream,
+                forward_journal,
+            )
+            .await
+    });
+
+    // Pre-first-byte early commit: a streaming request whose upstream has not
+    // answered within the keep-alive interval is answered now with a 200 SSE
+    // body that heartbeats until the upstream does. E2EE responses are
+    // excluded — they can only be re-encrypted once the stream is known to be
+    // SSE, which is not known before the upstream answers — and so are
+    // ACI-constrained requests (see `aci_constrained` above). A fast upstream
+    // (answering inside the interval) keeps today's real HTTP status
+    // semantics either way.
+    let early_commit = stream && e2ee.is_none() && !aci_constrained;
+    let result = match (keepalive, early_commit) {
+        (Some(interval), true) => loop {
+            match tokio::time::timeout(interval, &mut forward).await {
+                Ok(result) => break result,
+                Err(_) => {
+                    // Commit only while the candidate being waited on has not
+                    // itself failed in this request. A same-route retry (the
+                    // capacity second pass above all) usually ends in a
+                    // relayable HTTP status — a 429 the caller uses to fail
+                    // over and that its uptime accounting excludes — which an
+                    // early 200 would demote to an in-band error. A fresh
+                    // candidate that is merely slow is the case this commit
+                    // exists for, whatever happened to its predecessors.
+                    let abandoned = journal.abandoned_attempts();
+                    let waiting_on_clean_candidate = match journal.in_flight() {
+                        Some(current) => !abandoned.iter().any(|a| a.route_id == current.route_id),
+                        None => abandoned.is_empty(),
+                    };
+                    if !waiting_on_clean_candidate {
+                        continue;
+                    }
+                    let pipeline_inputs = StreamPipelineInputs {
+                        endpoint,
+                        endpoint_path,
+                        identity: identity.clone(),
+                        exclude_reasoning,
+                        candidates: candidates.clone(),
+                    };
+                    return build_early_streaming_response(
+                        service.clone(),
+                        control.clone(),
+                        meter,
+                        forward,
+                        journal,
+                        pipeline_inputs,
+                        keepalive,
+                        surface,
+                        received_body.clone(),
+                        requester.clone(),
+                        request_id.clone(),
+                        model.unwrap_or("").to_string(),
+                        started,
+                    );
+                }
+            }
+        },
+        _ => forward.await,
+    };
 
     match result {
         Ok(MiddlewareForwardResult::Forwarded(forward)) => {
@@ -665,7 +760,7 @@ pub async fn run(
                     surface,
                     upstream_status,
                     &forward.upstream_body,
-                    &received_body,
+                    received_body.as_slice(),
                     Some(&request_id),
                 );
                 if should_log_failure(mapped) {
@@ -686,7 +781,7 @@ pub async fn run(
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
-                    errors::client_safe_error_message(&forward.upstream_body),
+                    errors::upstream_report_message(&forward.upstream_body),
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -749,33 +844,54 @@ pub async fn run(
             let attempt_index = forward.failed_attempts.len() as u32;
             meter.failed_attempts(&forward.failed_attempts, true);
 
+            // An E2EE response can only be re-encrypted as SSE. Decided here,
+            // before the pipeline exists, so the caller's request shape is
+            // answered as such — a 400 with no usage report, like the other
+            // client-attributable failures — rather than reaching the
+            // finalizer, which would refuse a stream already built.
+            if e2ee.is_some() && !is_sse_content_type(Some(&content_type)) {
+                let err = ServiceError::E2ee(E2eeError::EncryptionFailed);
+                let status = forward_error_status(&err);
+                log_generated_outcome(
+                    &request_id,
+                    model.unwrap_or(""),
+                    "finalize_error",
+                    status,
+                    upstream_status,
+                    &forward.selected_route,
+                    attempt_index,
+                    started,
+                    &detail_snippet(err.to_string().as_bytes()),
+                );
+                meter.disarm();
+                return service_error_response(outcome_ctx, err, None);
+            }
+
             // Set when the downstream finalizer (receipt drafting / E2EE)
             // errors while the body is being consumed: the meter's drop must
             // then record an internal failure, not a client disconnect.
             let downstream_abort = Arc::new(AtomicBool::new(false));
             let meter_settled = Arc::new(AtomicBool::new(false));
-            let report = StreamReport {
-                control: control.clone(),
-                request_id: request_id.clone(),
-                endpoint: endpoint_path.to_string(),
-                request_model: model.unwrap_or("").to_string(),
-                pricing: consult.pricing.clone(),
-                spend_mode: consult.spend_mode,
-                user_id: consult.user_id,
-                virtual_key_id: consult.virtual_key_id,
+            // A finalizer failure after the meter has settled Completed
+            // (receipt store / E2EE finish at end of stream) is reported from
+            // the body wrapper below with this template.
+            let late_failure = PostReport {
+                status: 502,
+                is_streaming: Some(true),
+                attempt_index: Some(attempt_index),
                 selected_route_id: Some(forward.selected_route.clone()),
+                error_source: Some(ErrorSource::Gateway),
+                error_message: Some("downstream finalizer failed after end of stream".to_string()),
+                ..meter.base()
+            };
+            let late_failure_control = control.clone();
+            let report = meter.into_stream_report(
+                forward.selected_route.clone(),
                 attempt_index,
                 upstream_status,
-                prefix_hash: meter.prefix_hash.clone(),
-                started,
-                downstream_abort: downstream_abort.clone(),
-                settled: meter_settled.clone(),
-            };
-            // 0 (or unset → default) disables the heartbeat.
-            let keepalive = match sse_keepalive_ms.unwrap_or(10_000) {
-                0 => None,
-                ms => Some(Duration::from_millis(ms)),
-            };
+                downstream_abort.clone(),
+                meter_settled.clone(),
+            );
             // Order: provider stream (drafts response.received) -> format
             // transform (if cross-format) -> response visibility -> sanitize
             // -> meter/cost -> keep-alive -> finalizer (hashes response.returned).
@@ -783,48 +899,30 @@ pub async fn run(
             // keep-alive so it only ever buffers real upstream SSE bytes; heartbeat
             // comments are injected downstream and never enter its line reassembly.
             let response_header_map = gateway_owned_headers(&content_type);
-            // Looked up in the ORIGINAL list even though shaping may have
-            // skipped candidates: a route id names one deployment and a
-            // deployment has one format, so a repeated id (an ordered list
-            // may name a route twice) cannot disagree on format — and
-            // same-id copies shape identically, so a skip can never split
-            // them either.
-            let selected_format = candidates
-                .iter()
-                .find(|c| c.route_id == forward.selected_route)
-                .or_else(|| candidates.first())
-                .map(|c| c.format)
-                .unwrap_or(ProviderFormat::Openai);
-            let transformed: ServiceResponseStream =
-                match stream_transform::select_stream_transform(selected_format, endpoint) {
-                    Some(transform) => Box::pin(SseTransformStream::new(forward.body, transform)),
-                    None => forward.body,
-                };
-            let visible: ServiceResponseStream = if exclude_reasoning {
-                Box::pin(SseTransformStream::new(
-                    transformed,
-                    StreamTransform::ExcludeReasoning,
-                ))
-            } else {
-                transformed
+            let pipeline_inputs = StreamPipelineInputs {
+                endpoint,
+                endpoint_path,
+                identity: identity.clone(),
+                exclude_reasoning,
+                candidates: candidates.clone(),
             };
-            // Unconditional, unlike the two above: same-format streaming skips
-            // every other transform, and that is exactly the path that used to
-            // hand the provider's bytes to the client verbatim.
-            let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
-                visible,
-                StreamTransform::SanitizeResponse(identity.clone(), endpoint),
-            ));
-            let metered: ServiceResponseStream = Box::pin(MeterStream::new(
-                sanitized,
+            let metered = build_metered_pipeline(
+                forward.body,
+                &forward.selected_route,
                 report,
-                errors::sse_protocol(endpoint_path),
-            ));
+                &pipeline_inputs,
+            );
             // A failure anywhere below reaches the finalizer, which holds the
             // protocol state needed to decide whether the client can be told.
             let kept: ServiceResponseStream = Box::pin(KeepAliveStream::new(metered, keepalive));
 
             let receipt_id = journal.peek_receipt_id();
+            // The finalizer consumes the pipeline; if it refuses, the meter in
+            // it is dropped unpolled. Pre-set the abort flag so that drop is
+            // attributed to the gateway, and clear it once the body is on its
+            // way to hyper — from then on an unpolled drop is the client
+            // vanishing, not an internal failure.
+            downstream_abort.store(true, Ordering::Relaxed);
             match service.finalize_middleware_response_stream(
                 journal,
                 kept,
@@ -835,6 +933,7 @@ pub async fn run(
                 Some(request_id.clone()),
             ) {
                 Ok(finalized) => {
+                    downstream_abort.store(false, Ordering::Relaxed);
                     let status =
                         StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let mut headers = response_header_map;
@@ -894,6 +993,9 @@ pub async fn run(
                                         started,
                                         &detail_snippet(err.to_string().as_bytes()),
                                     );
+                                    let mut report = late_failure.clone();
+                                    report.duration_ms = started.elapsed().as_millis() as u64;
+                                    spawn_report(&late_failure_control, report);
                                 }
                                 None
                             }
@@ -902,9 +1004,10 @@ pub async fn run(
                     (status, headers, body).into_response()
                 }
                 Err(err) => {
-                    // Synchronous finalizer failure: the stream never started,
-                    // so the meter never settles — this is the request's only
-                    // outcome line.
+                    // Synchronous finalizer failure. The pipeline it refused is
+                    // dropped unpolled inside the finalizer, and the meter in
+                    // it reports that as a gateway failure against the route;
+                    // this line records what the client was told.
                     let status = forward_error_status(&err);
                     if should_log_failure(status) {
                         log_generated_outcome(
@@ -931,7 +1034,7 @@ pub async fn run(
                 surface,
                 forward.error.upstream_status,
                 &forward.error.upstream_body,
-                &received_body,
+                received_body.as_slice(),
                 Some(&request_id),
             );
             let attempt_index = forward.failed_attempts.len() as u32;
@@ -957,7 +1060,7 @@ pub async fn run(
                 ),
                 attempt_index,
                 &forward.selected_route,
-                errors::client_safe_error_message(&forward.error.upstream_body),
+                errors::upstream_report_message(&forward.error.upstream_body),
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -986,11 +1089,14 @@ pub async fn run(
             if status >= 500 {
                 meter.gateway_failure_at(
                     forward.failed_attempts.len() as u32,
+                    None,
                     status,
                     forward_error_source(&forward.error),
                     &forward.error.to_string(),
                     stream,
                 );
+            } else {
+                meter.disarm();
             }
             service_error_response(outcome_ctx, forward.error, e2ee)
         }
@@ -1017,6 +1123,8 @@ pub async fn run(
             }
             if status >= 500 {
                 meter.gateway_failure(status, forward_error_source(&err), &err.to_string(), stream);
+            } else {
+                meter.disarm();
             }
             service_error_response(outcome_ctx, err, e2ee)
         }
@@ -1050,8 +1158,15 @@ fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCan
 // Posts usage reports to the control plane (fire-and-forget). Buffered reports
 // have no TTFT and `is_streaming = false`; the status recorded is the raw upstream
 // status, distinct from the client-facing mapped status.
-struct Meter<'a> {
-    control: &'a ControlClient,
+//
+// Every admitted request must produce exactly one terminal report, whichever
+// way the handler exits. The methods below cover the exits the code reaches;
+// `Drop` covers the one it does not — hyper dropping the handler future
+// because the client connection closed while the upstream was still being
+// waited for. While `armed` holds the forward's journal, that drop reports a
+// client disconnect against the candidate that was in flight.
+struct Meter {
+    control: ControlClient,
     request_id: String,
     endpoint_path: &'static str,
     request_model: String,
@@ -1063,9 +1178,432 @@ struct Meter<'a> {
     /// `PostReport::prefix_hash`.
     prefix_hash: Option<String>,
     started: Instant,
+    is_streaming: bool,
+    /// Present only between arming the forward and reporting its outcome.
+    armed: Option<MiddlewareReceiptJournal>,
 }
 
-impl Meter<'_> {
+impl Meter {
+    /// Account one non-Stream forward result to the usage pipeline and return
+    /// the client-facing status for it. Mirrors the terminal reporting the
+    /// immediate match arms do; used by the early-committed streaming path,
+    /// which cannot take those arms because it has already sent 200 headers
+    /// and delivers the failure in-band.
+    fn account_forward_failure(
+        &mut self,
+        surface: Surface,
+        received_body: &[u8],
+        result: Result<MiddlewareForwardResult, ServiceError>,
+    ) -> u16 {
+        let meter = self;
+        let request_id = &meter.request_id.clone();
+        let model = &meter.request_model.clone();
+        let started = meter.started;
+        let is_streaming = meter.is_streaming;
+        match result {
+            Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
+                let (status, _) = errors::normalize_upstream_error_parts(
+                    surface,
+                    forward.error.upstream_status,
+                    &forward.error.upstream_body,
+                    received_body,
+                    Some(request_id),
+                );
+                let attempt_index = forward.failed_attempts.len() as u32;
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "upstream_error_stream",
+                        status,
+                        forward.error.upstream_status,
+                        &forward.selected_route,
+                        attempt_index,
+                        started,
+                        &detail_snippet(&forward.error.upstream_body),
+                    );
+                }
+                meter.failed_attempts(&forward.failed_attempts, is_streaming);
+                meter.upstream_error(
+                    reported_status(
+                        status,
+                        forward.error.upstream_status,
+                        &forward.error.upstream_body,
+                    ),
+                    attempt_index,
+                    &forward.selected_route,
+                    errors::upstream_report_message(&forward.error.upstream_body),
+                );
+                status
+            }
+            Ok(MiddlewareForwardResult::AllFailed(forward)) => {
+                let status = forward_error_status(&forward.error);
+                meter.failed_attempts(&forward.failed_attempts, is_streaming);
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "all_candidates_failed",
+                        status,
+                        0,
+                        "",
+                        forward.failed_attempts.len() as u32,
+                        started,
+                        &detail_snippet(forward.error.to_string().as_bytes()),
+                    );
+                }
+                if status >= 500 {
+                    meter.gateway_failure_at(
+                        forward.failed_attempts.len() as u32,
+                        None,
+                        status,
+                        forward_error_source(&forward.error),
+                        &forward.error.to_string(),
+                        is_streaming,
+                    );
+                } else {
+                    meter.disarm();
+                }
+                status
+            }
+            Err(err) => {
+                let status = forward_error_status(&err);
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "forward_failed",
+                        status,
+                        0,
+                        "",
+                        0,
+                        started,
+                        &detail_snippet(err.to_string().as_bytes()),
+                    );
+                }
+                if status >= 500 {
+                    meter.gateway_failure(
+                        status,
+                        forward_error_source(&err),
+                        &err.to_string(),
+                        is_streaming,
+                    );
+                } else {
+                    meter.disarm();
+                }
+                status
+            }
+            // A streaming request never resolves to a buffered forward, and the
+            // Stream case is handled by the caller; an unexpected value is recorded
+            // as a gateway failure rather than dropped.
+            Ok(MiddlewareForwardResult::Forwarded(_)) | Ok(MiddlewareForwardResult::Stream(_)) => {
+                meter.gateway_failure(
+                    502,
+                    ErrorSource::Gateway,
+                    "unexpected forward result on the streaming path",
+                    is_streaming,
+                );
+                502
+            }
+        }
+    }
+}
+
+/// Answer a slow streaming request that has not produced upstream headers within
+/// the keep-alive interval: commit `200 text/event-stream` now and move the
+/// still-running forward into the response body. The body heartbeats until the
+/// forward resolves, then splices in the metered client pipeline (2xx) or
+/// delivers the failure as the surface's in-band error event. A drop before the
+/// forward resolves is the client giving up: the meter is still armed, so its
+/// drop records the 499.
+#[allow(clippy::too_many_arguments)]
+fn build_early_streaming_response(
+    service: Arc<AciService>,
+    control: ControlClient,
+    mut meter: Meter,
+    forward: Pin<Box<dyn Future<Output = Result<MiddlewareForwardResult, ServiceError>> + Send>>,
+    journal: MiddlewareReceiptJournal,
+    inputs: StreamPipelineInputs,
+    keepalive: Option<Duration>,
+    surface: Surface,
+    received_body: Arc<Vec<u8>>,
+    requester: Option<ReceiptOwner>,
+    request_id: String,
+    model: String,
+    started: Instant,
+) -> Response {
+    let endpoint_path = inputs.endpoint_path;
+    let protocol = errors::sse_protocol(endpoint_path);
+    let content_type = "text/event-stream";
+    let downstream_abort = Arc::new(AtomicBool::new(false));
+    let meter_settled = Arc::new(AtomicBool::new(false));
+    // Template for a finalizer error that lands after the meter has already
+    // settled at end of stream; the exact route/attempt are filled in once the
+    // Stream result is known, so this carries what is knowable now.
+    let late_failure_control = control.clone();
+
+    let stream_request_id = request_id.clone();
+    let stream_abort = downstream_abort.clone();
+    let stream_settled = meter_settled.clone();
+    let body_stream = async_stream::stream! {
+        // Committed after the interval already elapsed: give the client a byte
+        // immediately so the 200 does not read as an empty hang.
+        yield Ok::<Bytes, ServiceError>(Bytes::from_static(b": PROCESSING\n\n"));
+        match forward.await {
+            Ok(MiddlewareForwardResult::Stream(f)) => {
+                let attempt_index = f.failed_attempts.len() as u32;
+                meter.failed_attempts(&f.failed_attempts, true);
+                let upstream_status = f.upstream_status;
+                let selected_route = f.selected_route.clone();
+                let report = meter.into_stream_report(
+                    selected_route.clone(),
+                    attempt_index,
+                    upstream_status,
+                    stream_abort.clone(),
+                    stream_settled.clone(),
+                );
+                let mut pipeline = build_metered_pipeline(f.body, &selected_route, report, &inputs);
+                while let Some(item) = pipeline.next().await {
+                    yield item;
+                }
+            }
+            other => {
+                let status =
+                    meter.account_forward_failure(surface, received_body.as_slice(), other);
+                yield Ok(Bytes::from(errors::stream_error_event(
+                    protocol,
+                    status,
+                    Some(&stream_request_id),
+                    None,
+                )));
+            }
+        }
+    };
+    let kept: ServiceResponseStream =
+        Box::pin(KeepAliveStream::new(Box::pin(body_stream), keepalive));
+
+    // For a finalizer failure after the stream settled: the serving candidate
+    // and its attempt index are read back from the journal at failure time —
+    // they are unknown when this response is committed.
+    let late_journal = journal.clone();
+    let finalized = match service.finalize_middleware_response_stream(
+        journal,
+        kept,
+        endpoint_path,
+        Some(content_type),
+        requester,
+        None,
+        Some(request_id.clone()),
+    ) {
+        Ok(finalized) => finalized,
+        Err(_) => {
+            // The finalizer only refuses an E2EE-on-non-SSE stream, which the
+            // early path never builds; treat any refusal as an internal error.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                gateway_owned_headers("application/json"),
+                Vec::new(),
+            )
+                .into_response();
+        }
+    };
+
+    // No `x-receipt-id`: at commit time no candidate has been chosen, so none is
+    // reserved yet. The receipt is still issued and retrievable by the response
+    // `id`.
+    let mut headers = gateway_owned_headers(content_type);
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    headers.insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-cache"),
+    );
+    let scan_request_id = request_id.clone();
+    let scan_model = model.clone();
+    let body = Body::from_stream(finalized.body.scan((), move |_, chunk| {
+        std::future::ready(match chunk {
+            Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
+            Err(err) => {
+                downstream_abort.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "stream_abort",
+                    request_id = %scan_request_id,
+                    error = %err,
+                    "response stream error; ending body gracefully instead of aborting the connection"
+                );
+                if meter_settled.load(Ordering::Relaxed) {
+                    let in_flight = late_journal.in_flight();
+                    let attempt_index = in_flight.as_ref().map_or(0, |a| a.attempt_index);
+                    let selected_route = in_flight.map(|a| a.route_id);
+                    log_generated_outcome(
+                        &scan_request_id,
+                        &scan_model,
+                        "finalize_error",
+                        502,
+                        0,
+                        selected_route.as_deref().unwrap_or(""),
+                        attempt_index,
+                        started,
+                        &detail_snippet(err.to_string().as_bytes()),
+                    );
+                    spawn_report(
+                        &late_failure_control,
+                        PostReport {
+                            status: 502,
+                            duration_ms: started.elapsed().as_millis() as u64,
+                            is_streaming: Some(true),
+                            attempt_index: Some(attempt_index),
+                            selected_route_id: selected_route,
+                            request_model: scan_model.clone(),
+                            error_source: Some(ErrorSource::Gateway),
+                            error_message: Some(
+                                "downstream finalizer failed after end of stream".to_string(),
+                            ),
+                            ..empty_report(&scan_request_id, endpoint_path)
+                        },
+                    );
+                }
+                None
+            }
+        })
+    }));
+    (StatusCode::OK, headers, body).into_response()
+}
+
+/// A `PostReport` with every optional field cleared, for callers that fill in
+/// only what they know. Used where no `Meter` is in scope to supply `base()`.
+fn empty_report(request_id: &str, endpoint_path: &str) -> PostReport {
+    PostReport {
+        request_id: request_id.to_string(),
+        endpoint: endpoint_path.to_string(),
+        status: 0,
+        duration_ms: 0,
+        ttft_ms: None,
+        is_streaming: None,
+        attempt_index: None,
+        selected_route_id: None,
+        request_model: String::new(),
+        usage: None,
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        error_source: None,
+        error_message: None,
+        prefix_hash: None,
+    }
+}
+
+/// The per-request context a committed upstream stream needs to become the
+/// client pipeline: which surface it is, the identity to stamp on it, whether
+/// reasoning is excluded, and the candidate list the serving route's format is
+/// read from. Cloned once so it can be shared between the immediate streaming
+/// arm and the pre-first-byte deferred path.
+#[derive(Clone)]
+pub(super) struct StreamPipelineInputs {
+    pub endpoint: Endpoint,
+    pub endpoint_path: &'static str,
+    pub identity: Arc<response_transform::ResponseIdentity>,
+    pub exclude_reasoning: bool,
+    pub candidates: Vec<RouteCandidate>,
+}
+
+/// Assemble the client-facing streaming pipeline for one committed upstream
+/// stream: the format/visibility/sanitize transforms, then the meter. The meter
+/// sits innermost so it only ever parses real upstream SSE bytes; the caller
+/// layers the keep-alive and finalizer outside it.
+pub(super) fn build_metered_pipeline(
+    body: ServiceResponseStream,
+    selected_route: &str,
+    report: StreamReport,
+    inputs: &StreamPipelineInputs,
+) -> ServiceResponseStream {
+    // Looked up in the ORIGINAL list even though shaping may have skipped
+    // candidates: a route id names one deployment and a deployment has one
+    // format, so a repeated id cannot disagree on format, and same-id copies
+    // shape identically.
+    let selected_format = inputs
+        .candidates
+        .iter()
+        .find(|c| c.route_id == selected_route)
+        .or_else(|| inputs.candidates.first())
+        .map(|c| c.format)
+        .unwrap_or(ProviderFormat::Openai);
+    let transformed: ServiceResponseStream =
+        match stream_transform::select_stream_transform(selected_format, inputs.endpoint) {
+            Some(transform) => Box::pin(SseTransformStream::new(body, transform)),
+            None => body,
+        };
+    let visible: ServiceResponseStream = if inputs.exclude_reasoning {
+        Box::pin(SseTransformStream::new(
+            transformed,
+            StreamTransform::ExcludeReasoning,
+        ))
+    } else {
+        transformed
+    };
+    // Unconditional, unlike the two above: same-format streaming skips every
+    // other transform, and that is exactly the path that used to hand the
+    // provider's bytes to the client verbatim.
+    let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
+        visible,
+        StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
+    ));
+    Box::pin(MeterStream::new(
+        sanitized,
+        report,
+        errors::sse_protocol(inputs.endpoint_path),
+    ))
+}
+
+impl Meter {
+    /// Cover the forward's await: a drop while armed reports the request as
+    /// abandoned by the client. Every method that emits the terminal report
+    /// disarms; `failed_attempts` alone does not, since attempt rows are not
+    /// the request's outcome.
+    fn arm(&mut self, journal: MiddlewareReceiptJournal) {
+        self.armed = Some(journal);
+    }
+
+    /// The request's outcome is settled without a report — a client-
+    /// attributable failure that the usage pipeline deliberately does not
+    /// record. A later drop must then stay silent.
+    fn disarm(&mut self) {
+        self.armed = None;
+    }
+
+    /// Hand the request's outcome over to the stream meter. From here on the
+    /// `MeterStream` settles exactly once, so this guard stands down.
+    fn into_stream_report(
+        mut self,
+        selected_route_id: String,
+        attempt_index: u32,
+        upstream_status: u16,
+        downstream_abort: Arc<AtomicBool>,
+        settled: Arc<AtomicBool>,
+    ) -> StreamReport {
+        self.armed = None;
+        StreamReport {
+            control: self.control.clone(),
+            request_id: self.request_id.clone(),
+            endpoint: self.endpoint_path.to_string(),
+            request_model: self.request_model.clone(),
+            pricing: self.pricing.clone(),
+            spend_mode: self.spend_mode,
+            user_id: self.user_id,
+            virtual_key_id: self.virtual_key_id,
+            selected_route_id: Some(selected_route_id),
+            attempt_index,
+            upstream_status,
+            prefix_hash: self.prefix_hash.clone(),
+            started: self.started,
+            downstream_abort,
+            settled,
+        }
+    }
+
     fn base(&self) -> PostReport {
         PostReport {
             request_id: self.request_id.clone(),
@@ -1094,13 +1632,14 @@ impl Meter<'_> {
     // which would misattribute a provider's failure and take it out of that
     // provider's health signal entirely.
     fn success(
-        &self,
+        &mut self,
         status: u16,
         attempt_index: u32,
         selected_route_id: Option<&str>,
         usage: Option<Value>,
         error_message: Option<String>,
     ) {
+        self.armed = None;
         self.spawn(PostReport {
             status,
             attempt_index: Some(attempt_index),
@@ -1112,12 +1651,13 @@ impl Meter<'_> {
     }
 
     fn upstream_error(
-        &self,
+        &mut self,
         status: u16,
         attempt_index: u32,
         selected_route_id: &str,
         error_message: Option<String>,
     ) {
+        self.armed = None;
         self.spawn(PostReport {
             status,
             is_streaming: Some(true),
@@ -1128,24 +1668,30 @@ impl Meter<'_> {
         });
     }
 
-    fn failed_attempts(&self, attempts: &[(String, u16)], is_streaming: bool) {
-        for (index, (route_id, status)) in attempts.iter().enumerate() {
-            if *status == 0 {
+    fn failed_attempts(&self, attempts: &[FailedAttempt], is_streaming: bool) {
+        for (index, attempt) in attempts.iter().enumerate() {
+            if attempt.status == 0 {
                 continue;
             }
             self.spawn(PostReport {
-                status: *status,
-                duration_ms: 0,
+                status: attempt.status,
+                duration_ms: attempt.duration_ms,
                 is_streaming: Some(is_streaming),
                 attempt_index: Some(index as u32),
-                selected_route_id: Some(route_id.clone()),
+                selected_route_id: Some(attempt.route_id.clone()),
                 ..self.base()
             });
         }
     }
 
-    fn gateway_failure(&self, status: u16, source: ErrorSource, message: &str, is_streaming: bool) {
-        self.gateway_failure_at(0, status, source, message, is_streaming);
+    fn gateway_failure(
+        &mut self,
+        status: u16,
+        source: ErrorSource,
+        message: &str,
+        is_streaming: bool,
+    ) {
+        self.gateway_failure_at(0, None, status, source, message, is_streaming);
     }
 
     // Like `gateway_failure`, but placed at an explicit attempt index. Control
@@ -1153,17 +1699,20 @@ impl Meter<'_> {
     // follows per-attempt rows must sit after them or it collides with (and
     // silently drops) the first attempt's row.
     fn gateway_failure_at(
-        &self,
+        &mut self,
         attempt_index: u32,
+        selected_route_id: Option<&str>,
         status: u16,
         source: ErrorSource,
         message: &str,
         is_streaming: bool,
     ) {
+        self.armed = None;
         self.spawn(PostReport {
             status,
             is_streaming: Some(is_streaming),
             attempt_index: Some(attempt_index),
+            selected_route_id: selected_route_id.map(str::to_string),
             error_source: Some(source),
             error_message: Some(truncate(message, 500)),
             ..self.base()
@@ -1171,14 +1720,57 @@ impl Meter<'_> {
     }
 
     fn spawn(&self, report: PostReport) {
-        let control = self.control.clone();
-        tokio::spawn(async move {
+        spawn_report(&self.control, report);
+    }
+}
+
+impl Drop for Meter {
+    fn drop(&mut self) {
+        // Reached only when the handler future was dropped between arming and
+        // the forward's return: hyper cancels the handler when the client
+        // connection closes, so this is the client giving up before the
+        // upstream answered — the same client-attributed 499 that
+        // `MeterStream` records for a disconnect mid-stream, with no TTFT
+        // because no byte ever arrived. The route is the candidate the
+        // forwarder was waiting on, when it had reached one.
+        let Some(journal) = self.armed.take() else {
+            return;
+        };
+        // Candidates that had already failed before the disconnect are real
+        // route evidence (a 429/502/504 each) and would otherwise vanish with
+        // the cancelled forward — exactly when failover is slow and evidence
+        // matters most.
+        let abandoned = journal.abandoned_attempts();
+        self.failed_attempts(&abandoned, self.is_streaming);
+        let in_flight = journal.in_flight();
+        self.spawn(PostReport {
+            status: 499,
+            is_streaming: Some(self.is_streaming),
+            attempt_index: Some(
+                in_flight
+                    .as_ref()
+                    .map_or(abandoned.len() as u32, |a| a.attempt_index),
+            ),
+            selected_route_id: in_flight.map(|a| a.route_id),
+            error_message: Some("client disconnected before upstream response".to_string()),
+            ..self.base()
+        });
+    }
+}
+
+/// Fire-and-forget delivery of one usage report. Safe to call from a `Drop`
+/// that may run outside a Tokio runtime (shutdown teardown), where a bare
+/// `tokio::spawn` would panic and abort the process.
+fn spawn_report(control: &ControlClient, report: PostReport) {
+    let control = control.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
             control.consult_post(&report).await;
         });
     }
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
+pub(super) fn truncate(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
@@ -1230,6 +1822,14 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         ) => 412,
         ServiceError::UpstreamVerification(_) => 503,
         ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
+        // The gateway's own connect/read deadline expired: the upstream was
+        // reachable but never answered in time.
+        ServiceError::Upstream(UpstreamError::Timeout(_)) => 504,
+        // The caller's own input: a malformed nonce, or a Host the gateway
+        // has no TLS domain for. Nothing upstream was involved.
+        ServiceError::InvalidNonce(_)
+        | ServiceError::DownstreamTlsDomainMissing
+        | ServiceError::DownstreamTlsDomainUnknown(_) => 400,
         _ => 502,
     }
 }

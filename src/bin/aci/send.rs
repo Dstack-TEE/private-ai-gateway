@@ -130,12 +130,24 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         println!();
     }
 
-    let receipt_id = response
+    // A streaming response the aggregator committed before selecting an
+    // upstream (pre-first-byte keep-alive, §5.2) carries no X-Receipt-Id
+    // header; the receipt still exists once the stream finalized and is
+    // retrievable by the response's own id. That is only legitimate for an
+    // unverified stream — a constrained request (the default) is never
+    // committed early, so a missing header there is a §5.2 violation this
+    // command must keep surfacing, not paper over.
+    let receipt_id = match response
         .headers
         .get("x-receipt-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
-        .ok_or("response carried no X-Receipt-Id header")?;
+    {
+        Some(id) => id,
+        None if args.allow_unverified && stream => response_chat_id(&response.body)
+            .ok_or("response carried no X-Receipt-Id header and no readable response id")?,
+        None => return Err("response carried no X-Receipt-Id header".into()),
+    };
     let receipt_resp = client
         .fetch_receipt(&base_url, &receipt_id, bearer.as_deref())
         .await?;
@@ -197,6 +209,30 @@ async fn first_model(
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| "GET /v1/models returned no models; pass --model".to_string())
+}
+
+/// The response's own `id`, from a buffered JSON body or the first SSE data
+/// event that carries one. The receipt endpoint accepts it as a lookup key.
+fn response_chat_id(body: &[u8]) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(id) = value["id"].as_str() {
+            return Some(id.to_string());
+        }
+    }
+    for line in body.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
+            if let Some(id) = value["id"].as_str() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn buffered_response_text(response: &HttpResult) -> String {

@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 pub use crate::error_payload::{error_type, upstream_message, Surface};
 pub use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, sse_protocol,
-    stream_error_tail, SseProtocol,
+    stream_error_event, stream_error_tail, SseProtocol,
 };
 
 use crate::error_payload::envelope;
@@ -154,8 +154,23 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
             .get("message")
             .and_then(Value::as_str)
             .map(str::to_string),
-        None => None,
+        // Some providers put the message at the top level
+        // (`{"code":400,"message":"..."}` or `{"message":"...","type":"..."}`)
+        // with no `error` member at all; without this fallback their 4xx/5xx
+        // record as status-only rows nothing can be asked about.
+        None => value
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
+}
+
+/// The upstream's own words for the usage record, bounded but unscrubbed:
+/// the record is internal telemetry, and a message the relay policy withholds
+/// from the caller is still the only way to ask why a route started failing.
+/// The client-facing envelope keeps using `client_safe_error_message`.
+pub(crate) fn upstream_report_message(body: &[u8]) -> Option<String> {
+    extract_error_message(body).map(|m| m.chars().take(500).collect())
 }
 
 /// The upstream's message, fit to hand to the client, or `None` to fall back to
@@ -837,6 +852,20 @@ mod scrub_tests {
 #[cfg(test)]
 mod tests {
     use super::is_upstream_capacity_signal;
+
+    #[test]
+    fn top_level_message_bodies_still_yield_a_report_message() {
+        // Provider error bodies without an `error` member, message at the top.
+        for body in [
+            br#"{"code":400, "reason":"INVALID_REQUEST_BODY", "message":"max_tokens must be between 0 and 393216"}"#.as_slice(),
+            br#"{"message":"invalid request error","type":"invalid_request_error"}"#.as_slice(),
+        ] {
+            let got = upstream_report_message(body).expect("message extracted");
+            assert!(!got.is_empty());
+        }
+        // No message anywhere stays None rather than fabricating one.
+        assert!(upstream_report_message(br#"{"code":400}"#).is_none());
+    }
 
     /// The same 429 carries both "slow down" and "your account is unpaid", and
     /// some providers report the latter under 400. Only the unpaid one is

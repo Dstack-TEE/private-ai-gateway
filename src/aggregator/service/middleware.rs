@@ -13,11 +13,11 @@ use super::streaming::{
 };
 use super::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
-    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
-    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
-    MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
-    StreamingUpstreamError, UpstreamVerificationError,
+    FailedAttempt, ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult,
+    MiddlewareForwarded, MiddlewareGeneratedFinalization, MiddlewareReceiptDraft,
+    MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
+    MiddlewareStreamingForwarded, MiddlewareUpstreamError, ReceiptOwner, ServiceError,
+    ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
@@ -43,6 +43,16 @@ use std::time::{Duration, Instant};
 //
 // 400/422 stay excluded: those describe the request body, which every candidate
 // receives identically.
+/// Status recorded for a candidate that produced no HTTP response: 504 when the
+/// gateway's own connect/read deadline expired, 502 for every other failure.
+fn abandoned_status(err: &UpstreamError) -> u16 {
+    if matches!(err, UpstreamError::Timeout(_)) {
+        504
+    } else {
+        502
+    }
+}
+
 fn is_retryable_provider_status(status: u16) -> bool {
     matches!(status, 401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504)
 }
@@ -209,7 +219,7 @@ impl AciService {
     fn commit_buffered_response(
         &self,
         commit: BufferedCommit,
-        failed_attempts: Vec<(String, u16)>,
+        failed_attempts: Vec<FailedAttempt>,
         endpoint_path: &str,
         received_body: &[u8],
         user_model: Option<String>,
@@ -329,9 +339,9 @@ impl AciService {
         // Candidates that failed and were failed over, as (route_id, status),
         // in the order tried. The committed route is carried separately via
         // `selected_route`; these are surfaced to the caller so every attempt
-        // is observable, not just the one that served the response. Non-HTTP
-        // failures (prepare/verification/transport) record 502.
-        let mut failed_attempts: Vec<(String, u16)> = Vec::new();
+        // is observable, not just the one that served the response. How each
+        // attempt's status is chosen is documented on `FailedAttempt`.
+        let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
 
         // The most recent candidate that actually answered, held back in case
         // nothing better follows. See [`RetainedResponse`].
@@ -357,6 +367,24 @@ impl AciService {
             for (index, candidate) in current.iter().enumerate() {
                 let route_id = candidate.route_id.clone();
                 let is_last = index == last_index;
+                let attempt_started = Instant::now();
+                // Mirrored into the journal as well as the local list: the
+                // local list reaches the caller only through the forward
+                // result, which a request cancelled mid-walk never sees.
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                    let attempt = FailedAttempt {
+                        route_id: route_id.clone(),
+                        status,
+                        duration_ms: attempt_started.elapsed().as_millis() as u64,
+                    };
+                    receipt_journal.record_abandoned(attempt.clone());
+                    failed_attempts.push(attempt);
+                };
+                // This candidate is now the one being worked on; a request
+                // abandoned anywhere in the attempt — the verification await
+                // included, which can be slow on a verifier-cache miss — is
+                // attributed to it.
+                receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
                 let prepared = match self.upstream.prepare(UpstreamRequest {
                     body: candidate.body.clone(),
@@ -366,7 +394,7 @@ impl AciService {
                 }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        failed_attempts.push((route_id.clone(), 502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -375,7 +403,7 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        failed_attempts.push((route_id.clone(), 502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
@@ -413,7 +441,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        failed_attempts.push((route_id.clone(), 502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -462,7 +490,7 @@ impl AciService {
                         )
                         .await
                     {
-                        ReverifyOutcome::Forwarded(response) => Some(response),
+                        ReverifyOutcome::Forwarded(response) => Ok(response),
                         ReverifyOutcome::RefreshFailed(err) => {
                             let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                                 3
@@ -470,19 +498,25 @@ impl AciService {
                                 2
                             };
                             upgrade_err(&mut aggregated_err, priority, err);
-                            None
+                            Err(502)
                         }
                         ReverifyOutcome::Failed(err) => {
                             // Terminal binding mismatch and transport errors
                             // intentionally share failover priority 2 (a failed
-                            // reverify outranks them at 3).
+                            // reverify outranks them at 3). The recorded status
+                            // still tells them apart: a deadline the gateway's
+                            // client enforced is 504, everything else 502.
+                            let status = abandoned_status(&err);
                             upgrade_err(&mut aggregated_err, 2, err.into());
-                            None
+                            Err(status)
                         }
                     };
-                    let Some(upstream_response) = upstream_response else {
-                        failed_attempts.push((route_id.clone(), 502));
-                        continue;
+                    let upstream_response = match upstream_response {
+                        Ok(response) => response,
+                        Err(status) => {
+                            abandon(&mut failed_attempts, status);
+                            continue;
+                        }
                     };
 
                     let status = upstream_response.status_code;
@@ -525,7 +559,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            failed_attempts.push((route_id.clone(), attempt_status));
+                            abandon(&mut failed_attempts, attempt_status);
                             continue;
                         }
                         self.metrics
@@ -611,7 +645,7 @@ impl AciService {
                     )
                     .await
                 {
-                    ReverifyOutcome::Forwarded(response) => Some(response),
+                    ReverifyOutcome::Forwarded(response) => Ok(response),
                     ReverifyOutcome::RefreshFailed(err) => {
                         let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                             3
@@ -619,19 +653,25 @@ impl AciService {
                             2
                         };
                         upgrade_err(&mut aggregated_err, priority, err);
-                        None
+                        Err(502)
                     }
                     ReverifyOutcome::Failed(err) => {
                         // Terminal binding mismatch and transport errors
                         // intentionally share failover priority 2 (a failed
-                        // reverify outranks them at 3).
+                        // reverify outranks them at 3). The recorded status
+                        // still tells them apart: a deadline the gateway's
+                        // client enforced is 504, everything else 502.
+                        let status = abandoned_status(&err);
                         upgrade_err(&mut aggregated_err, 2, err.into());
-                        None
+                        Err(status)
                     }
                 };
-                let Some(upstream_response) = upstream_response else {
-                    failed_attempts.push((route_id.clone(), 502));
-                    continue;
+                let upstream_response = match upstream_response {
+                    Ok(response) => response,
+                    Err(status) => {
+                        abandon(&mut failed_attempts, status);
+                        continue;
+                    }
                 };
 
                 // Counted once, here, where the response arrives — a response that is
@@ -671,7 +711,7 @@ impl AciService {
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    failed_attempts.push((route_id.clone(), attempt_status));
+                    abandon(&mut failed_attempts, attempt_status);
                     continue;
                 }
 
@@ -700,6 +740,10 @@ impl AciService {
             {
                 capacity_retry_done = true;
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
+                // Nothing is being waited on during the pause; a request abandoned
+                // here must not be pinned on whichever candidate happened to
+                // answer last.
+                receipt_journal.clear_in_flight();
                 tokio::time::sleep(std::time::Duration::from_millis(
                     CAPACITY_RETRY_DELAY_MS + jitter,
                 ))

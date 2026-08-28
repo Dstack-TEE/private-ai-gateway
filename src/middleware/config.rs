@@ -25,8 +25,22 @@ pub struct MiddlewareConfig {
     /// 10_000 ms.
     #[serde(default)]
     pub control_post_timeout_ms: Option<u64>,
-    /// SSE keep-alive interval for streaming responses. Defaults to 10_000 ms;
-    /// `0` disables the heartbeat.
+    /// SSE keep-alive interval for streaming responses, measured from the
+    /// start of the upstream forward. A streaming request with no upstream
+    /// response headers after one interval is committed as
+    /// `200 text/event-stream` and heartbeated until the upstream answers; a
+    /// later forward failure arrives as the surface's in-band error event.
+    /// A response committed this early carries no `x-receipt-id` header: when
+    /// the upstream answers and the stream finalizes, the receipt is issued
+    /// and fetchable by the response id, but an early-committed stream whose
+    /// forward fails never drafts one. Requests carrying an ACI constraint
+    /// (`provider.aci_verified` — the aci CLI's default — or pinned session
+    /// ids) are never committed early: their refusal-receipt and 412
+    /// semantics only exist as HTTP responses. Neither is a candidate that has
+    /// already failed once in this request: a same-route retry usually ends in
+    /// a relayable HTTP status (429 above all), which an early 200 would
+    /// demote to an in-band error. Defaults to 5_000 ms; `0` disables the
+    /// heartbeat and the pre-upstream commit with it.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
     /// Whether to extract content-derived request features (token estimate,

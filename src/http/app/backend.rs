@@ -19,8 +19,8 @@ use crate::aggregator::service::{
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 
 use super::error_responses::{
-    e2ee_error_response, error_response, insert_str_header, internal_error_response,
-    refusal_error_body,
+    e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
+    internal_error_response, refusal_error_body,
 };
 use crate::middleware::errors::{normalize_upstream_error, surface_for_path};
 
@@ -45,8 +45,10 @@ pub(super) async fn forward_to_backend(
     // still needs them to finalize the receipt the error response cites.
     let user_model = input.context.user_model.clone();
     let requester = input.requester.clone();
+    // Kept out of `context` moves below: the timeout envelope cites it on the
+    // surfaces whose shape carries a request id.
+    let request_id = input.context.request_id.clone();
     if input.stream {
-        let request_id = input.context.request_id.clone();
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
                 context: input.context,
@@ -129,6 +131,13 @@ pub(super) async fn forward_to_backend(
             Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
                 routing_error_response(message)
             }
+            Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
+                gateway_timeout_response(
+                    surface_for_path(input.endpoint_path),
+                    Some(&request_id),
+                    message,
+                )
+            }
             Err(other) => internal_error_response(other),
         };
     }
@@ -176,6 +185,11 @@ pub(super) async fn forward_to_backend(
         Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
             routing_error_response(message)
         }
+        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
+            surface_for_path(input.endpoint_path),
+            Some(&request_id),
+            message,
+        ),
         Err(other) => internal_error_response(other),
     }
 }

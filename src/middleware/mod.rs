@@ -29,6 +29,8 @@ pub use completion::CompletionInput;
 pub use config::MiddlewareConfig;
 pub use control::{hash_api_key, ControlClient};
 
+use std::sync::Arc;
+
 use crate::aggregator::service::AciService;
 use errors::Surface;
 
@@ -117,7 +119,7 @@ impl Middleware {
     /// candidate bodies, forward through the service, and finalize the response.
     pub async fn handle_completion(
         &self,
-        service: &AciService,
+        service: &Arc<AciService>,
         input: CompletionInput,
     ) -> Response {
         completion::run(
