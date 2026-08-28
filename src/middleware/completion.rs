@@ -510,7 +510,7 @@ pub async fn run(
     // identity to report under yet.
     meter.arm(journal.clone());
 
-    // An unset interval uses the 10-second default. Only 0 disables the
+    // An unset interval uses the 5-second default. Only 0 disables the
     // heartbeat and, with it, the pre-first-byte early commit below.
     let keepalive = match sse_keepalive_ms.unwrap_or(5_000) {
         0 => None,
