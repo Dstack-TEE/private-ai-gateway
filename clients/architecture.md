@@ -112,7 +112,7 @@ verified transport:
 | Contract | Shared responsibility | Host responsibility |
 | --- | --- | --- |
 | Provider lifecycle | Resolve policy, establish the verified connection, expose one scoped `fetch`, and fail closed | Create and close the provider through native lifecycle hooks |
-| Model catalog | Discover `/v1/models` once and normalize filtering, capabilities, pricing, and thinking format into `AciModel` | Map `AciModel` into the host's model type and let the host persist selection/catalog state |
+| Model catalog | Strictly validate `/v1/models` and map its declared capabilities, pricing, limits, and modalities into `AciModel` | Map `AciModel` into the host's model type and let the host persist selection/catalog state |
 | Account authorization | Describe one browser/device flow with `AccountApiKeyAuth` and return one API key plus optional metadata | Map the flow into native auth UI and persist the key |
 | ACI inspection | Return structured status, attestation, receipt, and session results and format them for text UIs | Register native commands/tools and render the result |
 
@@ -120,6 +120,15 @@ This is the extension boundary for another coding agent. A new adapter should
 map these contracts into official host APIs. It should not implement
 attestation, receipt verification, device polling, credential storage, or
 another model catalog.
+
+Model metadata has one authority: the gateway catalog. `supported_features`
+drives reasoning and tool support, while `supported_sampling_parameters`
+drives temperature support. Empty capability arrays are treated conservatively
+and never expanded from a model id. Required limits, modalities, base prices,
+and capability arrays are validated instead of replaced with client defaults.
+Optional cache prices remain absent.
+Provider-specific reasoning dialects remain a gateway routing concern; clients
+use the gateway's public reasoning fields.
 
 Account authorization is a product capability, not part of ACI. Phala Cloud
 currently implements `AccountApiKeyAuth` with its device grant. RedPill does

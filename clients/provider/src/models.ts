@@ -1,4 +1,4 @@
-import type { AciProviderConfig, AciThinkingFormat } from "./config.ts";
+import type { AciProviderConfig } from "./config.ts";
 import type { AciFetch } from "@phala/aci-verifier/runtime";
 
 export type AciModality = "text" | "audio" | "image" | "video" | "pdf";
@@ -8,10 +8,8 @@ const ACI_MODALITIES: ReadonlySet<unknown> = new Set(["text", "audio", "image", 
 export interface AciModel {
   id: string;
   name: string;
-  family?: string;
   description?: string;
   reasoning: boolean;
-  thinkingFormat: Exclude<AciThinkingFormat, "auto">;
   toolCall: boolean;
   temperature: boolean;
   input: readonly AciModality[];
@@ -19,8 +17,8 @@ export interface AciModel {
   cost: {
     input: number;
     output: number;
-    cacheRead: number;
-    cacheWrite: number;
+    cacheRead?: number;
+    cacheWrite?: number;
   };
   contextWindow: number;
   maxOutputTokens: number;
@@ -35,7 +33,9 @@ export interface AciServerModel {
   pricing?: unknown;
   input_modalities?: unknown;
   output_modalities?: unknown;
+  supported_features?: unknown;
   supported_parameters?: unknown;
+  supported_sampling_parameters?: unknown;
   description?: unknown;
 }
 
@@ -46,91 +46,102 @@ export class AciModelDiscoveryError extends Error {
   }
 }
 
-export function inferThinkingFormat(modelId: string): Exclude<AciThinkingFormat, "auto"> {
-  const id = modelId.toLowerCase();
-  if (id.includes("qwen")) return "qwen";
-  if (
-    id.includes("gpt-oss") ||
-    (id.includes("deepseek") && (id.includes("r1") || id.includes("v4"))) ||
-    id.includes("reasoner") ||
-    id.includes("glm-5")
-  ) {
-    return "openai";
-  }
-  return "off";
+function invalidModel(id: string, field: string, expected: string): never {
+  throw new AciModelDiscoveryError(`model "${id}" ${field} must be ${expected}`);
 }
 
-function price(value: unknown): number {
-  if (typeof value !== "string" && typeof value !== "number") return 0;
+function nonEmptyString(value: unknown, id: string, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    return invalidModel(id, field, "a non-empty string");
+  }
+  return value;
+}
+
+function price(value: unknown, id: string, field: string): number {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return invalidModel(id, field, "a non-negative number");
+  }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  if (
+    (typeof value === "string" && value.trim() === "") ||
+    !Number.isFinite(parsed) ||
+    parsed < 0
+  ) {
+    return invalidModel(id, field, "a non-negative number");
+  }
   return Math.round(parsed * 1_000_000 * 1_000_000_000) / 1_000_000_000;
 }
 
-function modalities(value: unknown, fallback: readonly AciModality[]): readonly AciModality[] {
-  if (!Array.isArray(value)) return fallback;
-  const result = value.filter((item): item is AciModality => ACI_MODALITIES.has(item));
-  return result.length > 0 ? result : fallback;
+function modalities(value: unknown, id: string, field: string): readonly AciModality[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return invalidModel(id, field, "a non-empty array of supported modalities");
+  }
+  return value.map((item) => {
+    if (!ACI_MODALITIES.has(item)) {
+      return invalidModel(id, field, "an array of supported modalities");
+    }
+    return item as AciModality;
+  });
 }
 
-function positiveInteger(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+function positiveInteger(value: unknown, id: string, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    return invalidModel(id, field, "a positive safe integer");
+  }
+  return value;
 }
 
-function supportedParameters(value: unknown): Set<string> {
-  return new Set(
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [],
-  );
+function stringSet(value: unknown, id: string, field: string): ReadonlySet<string> {
+  if (!Array.isArray(value)) return invalidModel(id, field, "an array of strings");
+  return new Set(value.map((item) => nonEmptyString(item, id, field)));
+}
+
+function pricing(value: unknown, id: string): AciModel["cost"] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return invalidModel(id, "pricing", "an object");
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    input: price(raw.prompt, id, "pricing.prompt"),
+    output: price(raw.completion, id, "pricing.completion"),
+    ...(raw.input_cache_read === undefined
+      ? {}
+      : { cacheRead: price(raw.input_cache_read, id, "pricing.input_cache_read") }),
+    ...(raw.input_cache_write === undefined
+      ? {}
+      : { cacheWrite: price(raw.input_cache_write, id, "pricing.input_cache_write") }),
+  };
 }
 
 export function mapAciModel(
   model: AciServerModel,
   config: AciProviderConfig,
 ): AciModel | undefined {
-  if (typeof model.id !== "string" || model.id.length === 0) return undefined;
-  if (
-    Array.isArray(model.output_modalities) &&
-    model.output_modalities.length === 1 &&
-    model.output_modalities[0] === "embeddings"
-  ) {
-    return undefined;
-  }
-  const output = modalities(model.output_modalities, ["text"]);
+  const id = nonEmptyString(model.id, "<unknown>", "id");
   if (config.models.isTeeOnly && model.is_tee !== true) return undefined;
-  if (config.models.allowlist?.length && !config.models.allowlist.includes(model.id))
-    return undefined;
+  if (config.models.allowlist?.length && !config.models.allowlist.includes(id)) return undefined;
 
-  const contextWindow = positiveInteger(model.context_length, 32_768);
-  const maxOutputTokens = positiveInteger(model.max_output_length, Math.min(contextWindow, 8_192));
-  const rawPricing =
-    model.pricing && typeof model.pricing === "object"
-      ? (model.pricing as Record<string, unknown>)
-      : {};
-  const parameters = supportedParameters(model.supported_parameters);
-  const thinkingFormat =
-    config.models.thinkingFormat === "auto"
-      ? inferThinkingFormat(model.id)
-      : config.models.thinkingFormat;
+  const contextWindow = positiveInteger(model.context_length, id, "context_length");
+  const maxOutputTokens = positiveInteger(model.max_output_length, id, "max_output_length");
+  const features = stringSet(model.supported_features, id, "supported_features");
+  const sampling = stringSet(
+    model.supported_sampling_parameters,
+    id,
+    "supported_sampling_parameters",
+  );
 
   return {
-    id: model.id,
-    name: typeof model.name === "string" && model.name ? model.name : model.id,
-    family: model.id.split("/").at(-1)?.split(/[-:]/)[0],
-    ...(typeof model.description === "string" && model.description
-      ? { description: model.description }
-      : {}),
-    reasoning: thinkingFormat !== "off",
-    thinkingFormat,
-    toolCall: parameters.size === 0 || parameters.has("tools") || parameters.has("tool_choice"),
-    temperature: parameters.size === 0 || parameters.has("temperature"),
-    input: modalities(model.input_modalities, ["text"]),
-    output,
-    cost: {
-      input: price(rawPricing.prompt),
-      output: price(rawPricing.completion),
-      cacheRead: price(rawPricing.input_cache_read ?? rawPricing.cache_read),
-      cacheWrite: price(rawPricing.input_cache_write ?? rawPricing.cache_write),
-    },
+    id,
+    name: nonEmptyString(model.name, id, "name"),
+    ...(model.description === undefined
+      ? {}
+      : { description: nonEmptyString(model.description, id, "description") }),
+    reasoning: features.has("reasoning"),
+    toolCall: features.has("tools"),
+    temperature: sampling.has("temperature"),
+    input: modalities(model.input_modalities, id, "input_modalities"),
+    output: modalities(model.output_modalities, id, "output_modalities"),
+    cost: pricing(model.pricing, id),
     contextWindow,
     maxOutputTokens,
   };
@@ -174,12 +185,22 @@ export async function discoverAciModelCatalog({
     if (!value || typeof value !== "object" || !Array.isArray((value as { data?: unknown }).data)) {
       throw new AciModelDiscoveryError("model discovery returned an invalid catalog");
     }
-    const raw = (value as { data: AciServerModel[] }).data.filter(
-      (model) => model && typeof model === "object" && !Array.isArray(model),
-    );
+    const raw = (value as { data: unknown[] }).data.map((model, index) => {
+      if (!model || typeof model !== "object" || Array.isArray(model)) {
+        throw new AciModelDiscoveryError(`model catalog entry ${index} must be an object`);
+      }
+      return model as AciServerModel;
+    });
     const models = raw
       .map((model) => mapAciModel(model, config))
       .filter((model): model is AciModel => model !== undefined);
+    const ids = new Set<string>();
+    for (const model of models) {
+      if (ids.has(model.id)) {
+        throw new AciModelDiscoveryError(`model catalog contains duplicate id "${model.id}"`);
+      }
+      ids.add(model.id);
+    }
     return { raw, models };
   } catch (error) {
     if (error instanceof AciModelDiscoveryError) throw error;

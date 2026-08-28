@@ -15,7 +15,6 @@ import { PROVIDER_VERSION } from "./constants.ts";
 
 export type AciConfigScope = "project" | "home";
 
-export const THINKING_FORMAT_VALUES = ["auto", "qwen", "openai", "off"] as const;
 export const BOOLEAN_VALUES = ["true", "false"] as const;
 
 export function buildSettingsTheme(theme: Theme): SettingsListTheme {
@@ -62,5 +61,5 @@ export function modelRegistrationSummary(config: AciCloudConfig): string {
   const allow = config.models.allowlist?.length
     ? `, allowlist: ${config.models.allowlist.length}`
     : "";
-  return `Models: ${tee}${allow} | thinking: ${config.models.thinkingFormat}`;
+  return `Models: ${tee}${allow}`;
 }

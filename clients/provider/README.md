@@ -43,6 +43,13 @@ Model discovery uses the verified connection but sends no inference API key;
 the gateway's `/v1/models` catalog is public. Host adapters own credentials and
 attach them only to inference requests.
 
+The catalog is authoritative. The provider maps reasoning and tools only from
+`supported_features`, and temperature only from
+`supported_sampling_parameters`. It does not infer capabilities, family,
+limits, modalities, or request dialects from model ids. Malformed required
+metadata fails discovery instead of being replaced with guessed defaults.
+Optional cache prices remain absent when the catalog omits them.
+
 `provider.receipts()` returns the bounded in-process exchange history, newest
 first. `provider.verifyReceipt()` verifies the latest exchange when no id is
 given, while `provider.verifySession(id)` fetches the public session artifact

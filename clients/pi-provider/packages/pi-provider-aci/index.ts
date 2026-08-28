@@ -13,7 +13,7 @@
  * Source layout:
  *   src/config.ts        — layered config (default/home/project/env/runtime)
  *   src/project-trust.ts — project-scope config trust gate
- *   src/models.ts        — /v1/models discovery + thinkingFormat inference
+ *   src/models.ts        — strict /v1/models mapping into Pi models
  *   src/settings-ui.ts   — SettingsList helpers for the settings command
  */
 
@@ -64,7 +64,6 @@ import {
 } from "./src/connection.ts";
 import {
   type AciConfigScope,
-  THINKING_FORMAT_VALUES,
   buildSettingsTheme,
   formatScopeDescription,
   modelRegistrationSummary,
@@ -236,7 +235,6 @@ async function openSettingsMenu(
     const refreshValues = () => {
       list.updateValue("scope", scope);
       list.updateValue("isTeeOnly", drafts[scope].models.isTeeOnly ? "true" : "false");
-      list.updateValue("thinkingFormat", drafts[scope].models.thinkingFormat);
     };
 
     const save = () => {
@@ -269,13 +267,6 @@ async function openSettingsMenu(
         save();
         return;
       }
-      if (id === "thinkingFormat") {
-        drafts[scope].models.thinkingFormat =
-          newValue as AciCloudConfig["models"]["thinkingFormat"];
-        list.updateValue(id, newValue);
-        save();
-        return;
-      }
     };
 
     const scopeItem: SettingItem = {
@@ -296,13 +287,6 @@ async function openSettingsMenu(
         description: "Only register models served confidentially (is_tee === true)",
         currentValue: drafts[scope].models.isTeeOnly ? "true" : "false",
         values: ["true", "false"],
-      },
-      {
-        id: "thinkingFormat",
-        label: "Thinking format",
-        description: "How pi thinking levels map to provider parameters",
-        currentValue: drafts[scope].models.thinkingFormat,
-        values: [...THINKING_FORMAT_VALUES],
       },
     ];
 
@@ -414,13 +398,17 @@ export function createProvider({
     const receiptCommand = `${state.profile.providerId}-receipt`;
     const sessionCommand = `${state.profile.providerId}-session`;
     pi.registerCommand(settingsCommand, {
-      description: `Configure ${state.profile.label} models and thinking format`,
+      description: `Configure ${state.profile.label} model discovery`,
       handler: async (_args, ctx) => {
         if (ctx.mode !== "tui") {
           ctx.ui.notify(`${settingsCommand} requires TUI mode`, "error");
           return;
         }
-        await openSettingsMenu(pi, ctx, state);
+        try {
+          await openSettingsMenu(pi, ctx, state);
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
       },
     });
 
@@ -469,10 +457,5 @@ export const PROVIDER_ID = DEFAULT_PROFILE.providerId;
 export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
-export {
-  discoverAciModels,
-  inferThinkingFormat,
-  mapAciModelToPi,
-  mapAciServerModel,
-} from "./src/models.ts";
+export { discoverAciModels, mapAciModelToPi, mapAciServerModel } from "./src/models.ts";
 export { createAciProvider } from "@phala/aci-provider";

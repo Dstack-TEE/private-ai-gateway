@@ -31,6 +31,12 @@ environment variables into its credential store.
 The provider fails closed when workload or channel verification fails. For a
 production reviewed-release claim, configure `ACI_ACCEPTED_COMPOSE_HASHES` with
 the comma-separated compose hashes published by the deployment operator.
+Model capabilities come only from the gateway catalog. Pi reasoning levels use
+the gateway's public normalized reasoning field; upstream model dialects are
+handled by the gateway, not by this extension.
+Pi requires numeric rates for every token category, so an omitted cache rate is
+represented at the ordinary input rate rather than as a free cache operation.
+
 `/aci-receipts` lists retained exchanges. `/aci-receipt [id]` displays or
 re-verifies the latest or selected exchange's signed receipt, exact wire body
 hashes, and cited attested session. `/aci-session <id>` fetches the public

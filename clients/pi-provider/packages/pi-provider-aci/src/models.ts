@@ -1,7 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   discoverAciModelCatalog,
-  inferThinkingFormat as inferAciThinkingFormat,
   mapAciModel,
   type AciModel,
   type AciServerModel,
@@ -11,60 +10,42 @@ import { toAciProviderConfig, type AciCloudConfig } from "./config.ts";
 
 export type AciPiModel = Omit<Model<"openai-completions">, "api" | "provider" | "baseUrl">;
 
-interface InferredThinking {
-  reasoning: boolean;
-  format: "qwen" | "openai" | "off";
-  maxTokensField: "max_tokens" | "max_completion_tokens";
-  supportsReasoningEffort: boolean;
+function piInput(model: AciModel): Array<"text" | "image"> {
+  const input = model.input.filter(
+    (modality): modality is "text" | "image" => modality === "text" || modality === "image",
+  );
+  if (input.length === 0) {
+    throw new Error(`Pi does not support the input modalities declared by model "${model.id}"`);
+  }
+  return input;
 }
 
-function piThinking(modelId: string, format: InferredThinking["format"]): InferredThinking {
-  if (format === "qwen") {
-    return {
-      reasoning: true,
-      format,
-      maxTokensField: "max_tokens",
-      supportsReasoningEffort: false,
-    };
-  }
-  if (format === "openai") {
-    return {
-      reasoning: true,
-      format,
-      maxTokensField: modelId.toLowerCase().includes("gpt-oss")
-        ? "max_completion_tokens"
-        : "max_tokens",
-      supportsReasoningEffort: true,
-    };
-  }
+function piCost(model: AciModel): AciPiModel["cost"] {
   return {
-    reasoning: false,
-    format,
-    maxTokensField: "max_tokens",
-    supportsReasoningEffort: false,
+    input: model.cost.input,
+    output: model.cost.output,
+    cacheRead: model.cost.cacheRead ?? model.cost.input,
+    cacheWrite: model.cost.cacheWrite ?? model.cost.input,
   };
 }
 
-export function inferThinkingFormat(modelId: string): InferredThinking {
-  return piThinking(modelId, inferAciThinkingFormat(modelId));
-}
-
 export function mapAciModelToPi(model: AciModel): AciPiModel {
-  const thinking = piThinking(model.id, model.thinkingFormat);
   return {
     id: model.id,
     name: model.name,
     reasoning: model.reasoning,
-    input: model.input.includes("image") ? ["text", "image"] : ["text"],
-    cost: model.cost,
+    input: piInput(model),
+    cost: piCost(model),
     contextWindow: model.contextWindow,
     maxTokens: model.maxOutputTokens,
     compat: {
-      thinkingFormat: thinking.format === "off" ? "openai" : thinking.format,
-      maxTokensField: thinking.maxTokensField,
-      supportsReasoningEffort: thinking.supportsReasoningEffort,
+      thinkingFormat: "openrouter",
+      maxTokensField: "max_tokens",
+      supportsStore: true,
+      supportsDeveloperRole: true,
       supportsStrictMode: false,
       supportsUsageInStreaming: true,
+      supportsLongCacheRetention: false,
     },
   };
 }

@@ -29,13 +29,9 @@ import {
 
 import { DEFAULT_PROFILE, type ProviderProfile } from "./profile.ts";
 
-export type ThinkingFormat = "auto" | "qwen" | "openai" | "off";
-
 export interface AciModelsConfig {
   /** Only register models whose /v1/models entry has is_tee === true. */
   isTeeOnly: boolean;
-  /** How to map pi thinking levels onto provider request parameters. */
-  thinkingFormat: ThinkingFormat;
   /** Optional model-id allowlist. When set, only these ids are registered. */
   allowlist?: string[];
 }
@@ -64,7 +60,6 @@ export type AciCloudConfigPatch = {
   baseUrl?: unknown;
   models?: Partial<{
     isTeeOnly: unknown;
-    thinkingFormat: unknown;
     allowlist: unknown;
   }>;
   trust?: Partial<{
@@ -99,7 +94,6 @@ export const DEFAULT_ACI_CLOUD_CONFIG: AciCloudConfig = {
   baseUrl: DEFAULT_PROFILE.defaultBaseURL,
   models: {
     isTeeOnly: true,
-    thinkingFormat: "auto",
   },
   trust: {},
 };
@@ -175,15 +169,6 @@ function readConfigFile(path: string): Record<string, unknown> {
   }
 }
 
-function readConfigFileQuiet(path: string, logPrefix: string): Record<string, unknown> {
-  try {
-    return readConfigFile(path);
-  } catch (error) {
-    console.error(`${logPrefix} failed to read config file ${path}:`, error);
-    return {};
-  }
-}
-
 function envConfigPatch(
   env: NodeJS.ProcessEnv,
   providerProfile: ProviderProfile,
@@ -220,7 +205,6 @@ export function validateAciCloudConfig(
   for (const [record, field, pointer] of [
     [config, "baseUrl", "/baseUrl"],
     [models, "isTeeOnly", "/models/isTeeOnly"],
-    [models, "thinkingFormat", "/models/thinkingFormat"],
   ] as const) {
     if (!(field in record)) fail(configPath, pointer, "required field is missing");
   }
@@ -231,7 +215,6 @@ export function validateAciCloudConfig(
         baseURL: config.baseUrl,
         models: {
           isTeeOnly: models.isTeeOnly,
-          thinkingFormat: models.thinkingFormat,
           allowlist: models.allowlist,
         },
         trust: {
@@ -246,7 +229,6 @@ export function validateAciCloudConfig(
       baseUrl: resolved.baseURL,
       models: {
         isTeeOnly: resolved.models.isTeeOnly,
-        thinkingFormat: resolved.models.thinkingFormat,
         ...(resolved.models.allowlist ? { allowlist: [...resolved.models.allowlist] } : {}),
       },
       trust: {
@@ -302,10 +284,7 @@ export function loadProjectAciCloudConfig(
   return validateAciCloudConfig(
     mergeConfigPatch(
       defaultAciCloudConfig(providerProfile),
-      readConfigFileQuiet(
-        getProjectAciCloudConfigPath(cwd, providerProfile.providerId),
-        providerProfile.logPrefix,
-      ),
+      readConfigFile(getProjectAciCloudConfigPath(cwd, providerProfile.providerId)),
     ),
     "<aci-config>",
     providerProfile,
@@ -319,10 +298,7 @@ export function loadHomeAciCloudConfig(
   return validateAciCloudConfig(
     mergeConfigPatch(
       defaultAciCloudConfig(providerProfile),
-      readConfigFileQuiet(
-        getGlobalAciCloudConfigPath(home, providerProfile.providerId),
-        providerProfile.logPrefix,
-      ),
+      readConfigFile(getGlobalAciCloudConfigPath(home, providerProfile.providerId)),
     ),
     "<aci-config>",
     providerProfile,
