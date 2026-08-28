@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-redpill",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "RedPill AI for Pi with verified ACI transport and per-response receipt verification",
   "keywords": [
     "ai-provider",
@@ -52,8 +52,8 @@
     "prepublishOnly": "npm run check && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.7.0",
-    "@phala/pi-provider-aci": "^0.7.0"
+    "@phala/aci-provider": "^0.7.1",
+    "@phala/pi-provider-aci": "^0.7.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.84.3 <0.85.0",

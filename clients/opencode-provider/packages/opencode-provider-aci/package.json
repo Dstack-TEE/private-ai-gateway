@@ -1,6 +1,6 @@
 {
   "name": "@phala/opencode-provider-aci",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Native OpenCode provider for Attested Confidential Inference gateways",
   "keywords": [
     "aci",
@@ -52,7 +52,7 @@
     "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.7.0"
+    "@phala/aci-provider": "^0.7.1"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.24",
