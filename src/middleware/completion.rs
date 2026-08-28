@@ -243,7 +243,6 @@ pub async fn run(
     control: &ControlClient,
     service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
-    sse_commit_before_upstream: bool,
     send_request_features: bool,
     prefix_hash_secret: Option<&str>,
     input: CompletionInput,
@@ -521,10 +520,11 @@ pub async fn run(
     // The forward is driven as an owned future so that, when the upstream is
     // slow, it can be moved into the response body and kept running while the
     // client is held with heartbeats.
-    // An ACI-constrained request is never committed early even when the
-    // operator enables the pre-upstream commit: its contract includes refusal
-    // receipts and the 412 pinned-session refresh, which only exist as HTTP
-    // responses.
+    // An ACI-constrained request is never committed early: its contract
+    // includes refusal receipts and the 412 pinned-session refresh, which only
+    // exist as HTTP responses. `provider.aci_verified` is the aci CLI's
+    // default, so the clients that read `x-receipt-id` off every 2xx keep
+    // their header.
     let aci_constrained = aci_required || !aci_session_ids.is_empty();
     let forward_service = service.clone();
     let forward_body = received_body.clone();
@@ -554,15 +554,15 @@ pub async fn run(
             .await
     });
 
-    // Pre-first-byte early commit (operator opt-in): a streaming request whose
-    // upstream has not answered within the keep-alive interval is answered now
-    // with a 200 SSE body that heartbeats until the upstream does. E2EE
-    // responses are excluded — they can only be re-encrypted once the stream
-    // is known to be SSE, which is not known before the upstream answers —
-    // and so are ACI-constrained requests (see `aci_constrained` above). A
-    // fast upstream (answering inside the interval) keeps today's real HTTP
-    // status semantics either way.
-    let early_commit = sse_commit_before_upstream && stream && e2ee.is_none() && !aci_constrained;
+    // Pre-first-byte early commit: a streaming request whose upstream has not
+    // answered within the keep-alive interval is answered now with a 200 SSE
+    // body that heartbeats until the upstream does. E2EE responses are
+    // excluded — they can only be re-encrypted once the stream is known to be
+    // SSE, which is not known before the upstream answers — and so are
+    // ACI-constrained requests (see `aci_constrained` above). A fast upstream
+    // (answering inside the interval) keeps today's real HTTP status
+    // semantics either way.
+    let early_commit = stream && e2ee.is_none() && !aci_constrained;
     let result = match (keepalive, early_commit) {
         (Some(interval), true) => match tokio::time::timeout(interval, &mut forward).await {
             Ok(result) => result,

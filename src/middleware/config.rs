@@ -25,24 +25,21 @@ pub struct MiddlewareConfig {
     /// 10_000 ms.
     #[serde(default)]
     pub control_post_timeout_ms: Option<u64>,
-    /// SSE keep-alive interval for streaming responses. Defaults to 10_000 ms;
-    /// `0` disables the heartbeat.
+    /// SSE keep-alive interval for streaming responses, measured from the
+    /// start of the upstream forward. A streaming request with no upstream
+    /// response headers after one interval is committed as
+    /// `200 text/event-stream` and heartbeated until the upstream answers; a
+    /// later forward failure arrives as the surface's in-band error event.
+    /// A response committed this early carries no `x-receipt-id` header: when
+    /// the upstream answers and the stream finalizes, the receipt is issued
+    /// and fetchable by the response id, but an early-committed stream whose
+    /// forward fails never drafts one. Requests carrying an ACI constraint
+    /// (`provider.aci_verified` — the aci CLI's default — or pinned session
+    /// ids) are never committed early: their refusal-receipt and 412
+    /// semantics only exist as HTTP responses. Defaults to 10_000 ms; `0`
+    /// disables the heartbeat and the pre-upstream commit with it.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
-    /// Whether the keep-alive also covers the wait for the upstream's response
-    /// headers: a streaming request with no upstream answer after one
-    /// `sse_keepalive_ms` interval is committed as `200 text/event-stream`
-    /// and heartbeated until the upstream responds; a later forward failure
-    /// arrives as the surface's in-band error event. Off by default because a
-    /// response committed this early carries no `x-receipt-id` header (spec
-    /// §5.2 puts a receipt on every inference response): when the upstream
-    /// does answer and the stream finalizes, the receipt is issued and
-    /// fetchable by the response id, but an early-committed stream whose
-    /// forward fails never drafts one. Requests carrying an ACI constraint
-    /// (`provider.aci_verified` / pinned session ids) are never committed
-    /// early even when enabled, preserving refusal-receipt semantics.
-    #[serde(default)]
-    pub sse_commit_before_upstream: Option<bool>,
     /// Whether to extract content-derived request features (token estimate,
     /// modalities, reasoning intent, prefix hash — see
     /// `request_features.rs`) and send them in the pre-request consult.
