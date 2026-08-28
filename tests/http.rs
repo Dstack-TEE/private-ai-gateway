@@ -1454,9 +1454,10 @@ async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
 }
 
 #[tokio::test]
-async fn oversized_body_is_a_json_413_with_request_id() {
-    // A body past the 32 MiB inference limit must be a proper JSON 413 carrying
-    // the request id, not the extractor's bare connection reset.
+async fn oversized_body_is_a_json_413() {
+    // A body past the 32 MiB inference limit must be a proper JSON 413, not
+    // the extractor's bare connection reset. (The OpenAI envelope shape carries
+    // no request id by design; the /v1/messages test below covers the id.)
     let h = make_harness();
     let app = build_router(h.service.clone());
     let oversize = vec![b'a'; 33 * 1024 * 1024];
@@ -1537,4 +1538,59 @@ async fn oversized_chunked_body_without_content_length_is_still_a_413() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(value["error"]["type"], "invalid_request_error");
+}
+
+/// An upstream whose forward always reports the gateway client's own deadline.
+struct TimingOutStubUpstream;
+
+#[async_trait]
+impl UpstreamBackend for TimingOutStubUpstream {
+    fn name(&self) -> &str {
+        "stub-timeout-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("http://stub-timeout-upstream")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Timeout("read timeout".to_string()))
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward(req.request).await
+    }
+}
+
+#[tokio::test]
+async fn direct_mode_upstream_timeout_is_a_504() {
+    // The direct (no-middleware) path must classify the gateway's own
+    // connect/read deadline as 504, matching the middleware path, instead of
+    // collapsing it into a 500 internal error.
+    let keys = Arc::new(StaticKeyProvider::default());
+    let svc = AciService::new(
+        keys,
+        Arc::new(StubQuoter::default()),
+        Arc::new(TimingOutStubUpstream),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let app = build_router(Arc::new(svc));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(value["error"]["type"], "timeout_error");
 }

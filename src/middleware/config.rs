@@ -29,6 +29,19 @@ pub struct MiddlewareConfig {
     /// `0` disables the heartbeat.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
+    /// Whether the keep-alive also covers the wait for the upstream's response
+    /// headers: a streaming request with no upstream answer after one
+    /// `sse_keepalive_ms` interval is committed as `200 text/event-stream`
+    /// and heartbeated until the upstream responds; a later forward failure
+    /// arrives as the surface's in-band error event. Off by default because a
+    /// response committed this early carries no `x-receipt-id` header (spec
+    /// §5.2 puts a receipt on every inference response; here the receipt is
+    /// still issued and fetchable by the response id, but header-driven
+    /// clients cannot see it). Requests carrying an ACI constraint
+    /// (`provider.aci_verified` / pinned session ids) are never committed
+    /// early even when enabled, preserving refusal-receipt semantics.
+    #[serde(default)]
+    pub sse_commit_before_upstream: Option<bool>,
     /// Whether to extract content-derived request features (token estimate,
     /// modalities, reasoning intent, prefix hash — see
     /// `request_features.rs`) and send them in the pre-request consult.

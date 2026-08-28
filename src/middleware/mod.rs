@@ -38,6 +38,8 @@ use errors::Surface;
 pub struct Middleware {
     control: ControlClient,
     sse_keepalive_ms: Option<u64>,
+    /// See `MiddlewareConfig::sse_commit_before_upstream`; off by default.
+    sse_commit_before_upstream: bool,
     /// See `MiddlewareConfig::send_request_features`; `None` means on.
     send_request_features: bool,
     /// See `MiddlewareConfig::prefix_hash_secret`.
@@ -65,6 +67,7 @@ impl Middleware {
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
+            sse_commit_before_upstream: config.sse_commit_before_upstream.unwrap_or(false),
             send_request_features: config.send_request_features.unwrap_or(true),
             prefix_hash_secret: config.prefix_hash_secret.clone(),
             tee_only_domains: config
@@ -126,6 +129,7 @@ impl Middleware {
             &self.control,
             service,
             self.sse_keepalive_ms,
+            self.sse_commit_before_upstream,
             self.send_request_features,
             self.prefix_hash_secret.as_deref(),
             input,
@@ -163,6 +167,7 @@ mod tests {
             control_timeout_ms: None,
             control_post_timeout_ms: None,
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: secret.map(str::to_string),
             tee_only_domains: Vec::new(),
@@ -186,6 +191,7 @@ mod tests {
             control_timeout_ms: Some(2_000),
             control_post_timeout_ms: Some(2_000),
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
@@ -214,6 +220,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: None,
             tee_only_domains: Vec::new(),
@@ -232,6 +239,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: None,
             tee_only_domains: vec!["Tee.Example.com".to_string(), "  ".to_string()],

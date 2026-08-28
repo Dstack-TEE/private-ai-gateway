@@ -243,6 +243,7 @@ pub async fn run(
     control: &ControlClient,
     service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
+    sse_commit_before_upstream: bool,
     send_request_features: bool,
     prefix_hash_secret: Option<&str>,
     input: CompletionInput,
@@ -520,6 +521,11 @@ pub async fn run(
     // The forward is driven as an owned future so that, when the upstream is
     // slow, it can be moved into the response body and kept running while the
     // client is held with heartbeats.
+    // An ACI-constrained request is never committed early even when the
+    // operator enables the pre-upstream commit: its contract includes refusal
+    // receipts and the 412 pinned-session refresh, which only exist as HTTP
+    // responses.
+    let aci_constrained = aci_required || !aci_session_ids.is_empty();
     let forward_service = service.clone();
     let forward_body = received_body.clone();
     let forward_requester = requester.clone();
@@ -548,14 +554,17 @@ pub async fn run(
             .await
     });
 
-    // Pre-first-byte early commit: a streaming request whose upstream has not
-    // answered within the keep-alive interval is answered now with a 200 SSE
-    // body that heartbeats until the upstream does. E2EE responses are excluded
-    // — they can only be re-encrypted once the stream is known to be SSE, which
-    // is not known before the upstream answers. A fast upstream (answering
-    // inside the interval) keeps today's real HTTP status semantics.
-    let result = match (keepalive, stream, e2ee.is_none()) {
-        (Some(interval), true, true) => match tokio::time::timeout(interval, &mut forward).await {
+    // Pre-first-byte early commit (operator opt-in): a streaming request whose
+    // upstream has not answered within the keep-alive interval is answered now
+    // with a 200 SSE body that heartbeats until the upstream does. E2EE
+    // responses are excluded — they can only be re-encrypted once the stream
+    // is known to be SSE, which is not known before the upstream answers —
+    // and so are ACI-constrained requests (see `aci_constrained` above). A
+    // fast upstream (answering inside the interval) keeps today's real HTTP
+    // status semantics either way.
+    let early_commit = sse_commit_before_upstream && stream && e2ee.is_none() && !aci_constrained;
+    let result = match (keepalive, early_commit) {
+        (Some(interval), true) => match tokio::time::timeout(interval, &mut forward).await {
             Ok(result) => result,
             Err(_) => {
                 let pipeline_inputs = StreamPipelineInputs {
@@ -890,6 +899,12 @@ pub async fn run(
             let kept: ServiceResponseStream = Box::pin(KeepAliveStream::new(metered, keepalive));
 
             let receipt_id = journal.peek_receipt_id();
+            // The finalizer consumes the pipeline; if it refuses, the meter in
+            // it is dropped unpolled. Pre-set the abort flag so that drop is
+            // attributed to the gateway, and clear it once the body is on its
+            // way to hyper — from then on an unpolled drop is the client
+            // vanishing, not an internal failure.
+            downstream_abort.store(true, Ordering::Relaxed);
             match service.finalize_middleware_response_stream(
                 journal,
                 kept,
@@ -900,6 +915,7 @@ pub async fn run(
                 Some(request_id.clone()),
             ) {
                 Ok(finalized) => {
+                    downstream_abort.store(false, Ordering::Relaxed);
                     let status =
                         StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let mut headers = response_header_map;
@@ -1348,6 +1364,10 @@ fn build_early_streaming_response(
     let kept: ServiceResponseStream =
         Box::pin(KeepAliveStream::new(Box::pin(body_stream), keepalive));
 
+    // For a finalizer failure after the stream settled: the serving candidate
+    // and its attempt index are read back from the journal at failure time —
+    // they are unknown when this response is committed.
+    let late_journal = journal.clone();
     let finalized = match service.finalize_middleware_response_stream(
         journal,
         kept,
@@ -1396,14 +1416,17 @@ fn build_early_streaming_response(
                     "response stream error; ending body gracefully instead of aborting the connection"
                 );
                 if meter_settled.load(Ordering::Relaxed) {
+                    let in_flight = late_journal.in_flight();
+                    let attempt_index = in_flight.as_ref().map_or(0, |a| a.attempt_index);
+                    let selected_route = in_flight.map(|a| a.route_id);
                     log_generated_outcome(
                         &scan_request_id,
                         &scan_model,
                         "finalize_error",
                         502,
                         0,
-                        "",
-                        0,
+                        selected_route.as_deref().unwrap_or(""),
+                        attempt_index,
                         started,
                         &detail_snippet(err.to_string().as_bytes()),
                     );
@@ -1413,8 +1436,8 @@ fn build_early_streaming_response(
                             status: 502,
                             duration_ms: started.elapsed().as_millis() as u64,
                             is_streaming: Some(true),
-                            attempt_index: Some(0),
-                            selected_route_id: None,
+                            attempt_index: Some(attempt_index),
+                            selected_route_id: selected_route,
                             request_model: scan_model.clone(),
                             error_source: Some(ErrorSource::Gateway),
                             error_message: Some(

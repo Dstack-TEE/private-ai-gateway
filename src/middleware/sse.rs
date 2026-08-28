@@ -661,15 +661,14 @@ impl Stream for MeterStream {
 impl Drop for MeterStream {
     fn drop(&mut self) {
         // A drop after streaming started but before a terminal poll means the
-        // downstream consumer went away. A drop before the first poll means the
-        // response pipeline was torn down before hyper ever read the body —
-        // the finalizer refused the stream, or the handler failed after
-        // building it. That is the gateway's own failure and is recorded as
-        // one, route-carrying, so the request does not vanish from the usage
-        // pipeline. (A client that vanishes in the same instant, before
-        // hyper's first poll, is indistinguishable and lands here too; that
-        // window is microseconds wide.)
-        if !self.started {
+        // downstream consumer went away. A drop before the first poll is the
+        // same client disconnect (hyper never got to read the body) unless the
+        // pipeline explicitly marked its own teardown via `downstream_abort` —
+        // the handler sets that flag around the finalizer hand-off, the one
+        // point that can drop the pipeline unpolled for an internal reason.
+        // Inferring "internal" from "unpolled" alone would misreport a client
+        // that vanishes right after the headers as a gateway failure.
+        if !self.started && self.report.downstream_abort.load(Ordering::Relaxed) {
             self.failure = StreamFailure {
                 status: 502,
                 message: Some("response pipeline dropped before the body was consumed".to_string()),
@@ -917,6 +916,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: None,
             tee_only_domains: Vec::new(),

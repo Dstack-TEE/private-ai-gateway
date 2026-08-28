@@ -445,6 +445,7 @@ fn middleware(control_url: String) -> Middleware {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -944,6 +945,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -1614,6 +1616,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -1677,6 +1680,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -2194,6 +2198,7 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: Some(false),
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -2223,6 +2228,18 @@ impl UpstreamBackend for HangingUpstream {
     }
     fn url_origin(&self) -> Option<&str> {
         Some("https://hang-upstream.example")
+    }
+    // Classified attested so an `aci_verified` request passes route
+    // eligibility and reaches the (never-resolving) header wait.
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        Ok(PreparedUpstreamRequest {
+            upstream_name: self.name().to_string(),
+            url_origin: self.url_origin().map(str::to_string),
+            model_id: "gpt-test".to_string(),
+            is_tee: Some(true),
+            route_id: req.target_route_id.clone(),
+            request: req,
+        })
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         std::future::pending().await
@@ -2413,6 +2430,7 @@ async fn mid_stream_read_timeout_settles_504_with_message() {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -2509,6 +2527,7 @@ fn middleware_with_keepalive(control_url: String, ms: u64) -> Middleware {
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: Some(ms),
+        sse_commit_before_upstream: Some(true),
         send_request_features: None,
         prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
@@ -2600,4 +2619,96 @@ async fn early_keepalive_turns_forward_failure_into_in_band_error() {
             .any(|r| r["status"].as_i64() == Some(499)),
         "a slow upstream failure is not a client disconnect"
     );
+}
+
+#[tokio::test]
+async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself() {
+    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+    let config = MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+        sse_commit_before_upstream: None,
+        send_request_features: None,
+        prefix_hash_secret: None,
+        tee_only_domains: Vec::new(),
+    };
+    let report_for = |id: &str, abort: &Arc<std::sync::atomic::AtomicBool>| StreamReport {
+        control: ControlClient::new(&config).unwrap(),
+        request_id: id.to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        request_model: "gpt".to_string(),
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        selected_route_id: Some("openai:gpt".to_string()),
+        attempt_index: 0,
+        upstream_status: 200,
+        prefix_hash: None,
+        started: std::time::Instant::now(),
+        downstream_abort: abort.clone(),
+        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let pending = || -> ServiceResponseStream { Box::pin(futures_util::stream::pending()) };
+
+    // Dropped unpolled with no abort mark: hyper never read the body because
+    // the client vanished right after the headers — a 499, not our failure.
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    drop(MeterStream::new(
+        pending(),
+        report_for("r-unpolled-client", &abort),
+        SseProtocol::OpenaiChat,
+    ));
+    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-client")).await;
+    assert_eq!(report["status"], json!(499));
+    assert!(report
+        .get("errorSource")
+        .map(Value::is_null)
+        .unwrap_or(true));
+
+    // Dropped unpolled with the abort mark set (the finalizer hand-off is the
+    // one internal point that drops an unpolled pipeline): a gateway failure.
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    drop(MeterStream::new(
+        pending(),
+        report_for("r-unpolled-gateway", &abort),
+        SseProtocol::OpenaiChat,
+    ));
+    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-gateway")).await;
+    assert_eq!(report["status"], json!(502));
+    assert_eq!(report["errorSource"], json!("gateway"));
+    assert_eq!(report["selectedRouteId"], json!("openai:gpt"));
+}
+
+#[tokio::test]
+async fn aci_constrained_requests_are_never_committed_early() {
+    // Even with the pre-upstream commit enabled, an `aci_verified` request must
+    // keep HTTP semantics (refusal receipts, x-receipt-id): the gateway keeps
+    // waiting for the upstream instead of committing a 200.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "tee-hang:gpt-test", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 100);
+    let service = build_service_with_backend(Arc::new(HangingUpstream));
+    let mut input = chat_input();
+    input.stream = true;
+    input.aci_required = true;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(400),
+        mw.handle_completion(&service, input),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "an ACI-constrained request must not be committed before the upstream answers"
+    );
+    // The abandoned wait still reports through the drop guard.
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
+    assert_eq!(report["selectedRouteId"], json!("tee-hang:gpt-test"));
 }

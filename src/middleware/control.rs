@@ -282,6 +282,7 @@ mod tests {
             control_timeout_ms: Some(200),
             control_post_timeout_ms: Some(200),
             sse_keepalive_ms: None,
+            sse_commit_before_upstream: None,
             send_request_features: None,
             prefix_hash_secret: None,
             tee_only_domains: Vec::new(),

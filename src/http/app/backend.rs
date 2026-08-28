@@ -19,8 +19,8 @@ use crate::aggregator::service::{
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 
 use super::error_responses::{
-    e2ee_error_response, error_response, insert_str_header, internal_error_response,
-    refusal_error_body,
+    e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
+    internal_error_response, refusal_error_body,
 };
 use crate::middleware::errors::{normalize_upstream_error, surface_for_path};
 
@@ -129,6 +129,9 @@ pub(super) async fn forward_to_backend(
             Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
                 routing_error_response(message)
             }
+            Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
+                gateway_timeout_response(message)
+            }
             Err(other) => internal_error_response(other),
         };
     }
@@ -175,6 +178,9 @@ pub(super) async fn forward_to_backend(
         Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
         Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
             routing_error_response(message)
+        }
+        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
+            gateway_timeout_response(message)
         }
         Err(other) => internal_error_response(other),
     }

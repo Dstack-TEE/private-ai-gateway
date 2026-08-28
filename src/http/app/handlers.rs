@@ -609,9 +609,11 @@ fn strip_aci_constraint(mut parsed: Value) -> (Value, bool) {
     (parsed, changed)
 }
 
-/// The 413 an oversize inference body earns: a proper error envelope carrying
-/// the request id, plus a `request_outcome` line, in place of the extractor's
-/// bare connection reset.
+/// The 413 an oversize inference body earns: the surface's error envelope plus
+/// a `request_outcome` line carrying the request id, in place of the
+/// extractor's bare connection reset. Only the Anthropic envelope shape has a
+/// `request_id` field; the OpenAI envelope deliberately matches the upstream
+/// wire shape and carries none — there the id lives on the log line.
 fn body_too_large_response(
     surface: crate::middleware::errors::Surface,
     request_id: &str,
