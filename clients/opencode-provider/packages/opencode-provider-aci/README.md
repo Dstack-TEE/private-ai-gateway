@@ -42,6 +42,12 @@ attaches it to model requests through its native auth loader. The plugin uses
 OpenCode's server-plugin, provider config, auth, model, and disposal hooks; it
 does not maintain parallel config or credential files.
 
+Capability flags come only from the catalog. The plugin does not create
+model-family variants or rewrite reasoning parameters; OpenCode's official
+OpenAI-compatible provider handles its standard reasoning request and response
+fields.
+Optional cache prices stay absent when the catalog does not publish them.
+
 The plugin registers `/aci-attestation`, `/aci-receipts`, `/aci-receipt [id]`,
 and `/aci-session <id>` as native OpenCode custom commands. They dispatch the
 read-only `aci_inspect` tool, whose five actions are `status`, `attestation`,

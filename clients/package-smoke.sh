@@ -134,10 +134,6 @@ await Promise.all([
     join(agentDir, "models-store.json"),
     JSON.stringify({ phala: { models: [model], checkedAt: Date.now() } }, null, 2),
   ),
-  writeFile(
-    join(agentDir, "settings.json"),
-    JSON.stringify({ defaultProvider: "phala", defaultModel: "smoke/model" }, null, 2),
-  ),
 ]);
 NODE
 
@@ -154,6 +150,8 @@ printf '%s\n' \
   --no-context-files \
   --no-skills \
   --no-themes \
+  --provider phala \
+  --model smoke/model \
   --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
   >"$scratch/pi-rpc.jsonl"
 
@@ -184,7 +182,7 @@ if (
   state.data?.model?.id !== "smoke/model"
 ) {
   throw new Error(
-    `Pi did not restore its stored dynamic catalog and default model offline: ${JSON.stringify({ state, available })}`,
+    `Pi did not select the restored dynamic model offline: ${JSON.stringify({ state, available })}`,
   );
 }
 const response = records.find(

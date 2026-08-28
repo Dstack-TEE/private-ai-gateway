@@ -17,28 +17,7 @@ const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
 type OpenCodeProviderConfig = NonNullable<Config["provider"]>[string];
 type OpenCodeCommandConfig = NonNullable<Config["command"]>[string];
-
-export interface OpenCodeModelConfig {
-  name: string;
-  family?: string;
-  attachment: boolean;
-  reasoning: boolean;
-  temperature: boolean;
-  tool_call: boolean;
-  interleaved: false | { field: "reasoning_content" };
-  cost: {
-    input: number;
-    output: number;
-    cache_read: number;
-    cache_write: number;
-  };
-  limit: { context: number; output: number };
-  modalities: {
-    input: ("text" | "audio" | "image" | "video" | "pdf")[];
-    output: ("text" | "audio" | "image" | "video" | "pdf")[];
-  };
-  variants?: Record<string, Record<string, unknown>>;
-}
+export type OpenCodeModelConfig = NonNullable<OpenCodeProviderConfig["models"]>[string];
 
 type AciReceiptOptions = NonNullable<AciProviderConfigInput["receipts"]>;
 
@@ -71,28 +50,18 @@ function pluginConfig(options: PluginOptions | undefined): OpenCodeAciPluginOpti
 export function mapOpenCodeModel(model: AciModel): OpenCodeModelConfig {
   return {
     name: model.name,
-    ...(model.family ? { family: model.family } : {}),
     attachment: model.input.some((modality) => modality !== "text"),
     reasoning: model.reasoning,
     temperature: model.temperature,
     tool_call: model.toolCall,
-    interleaved: model.reasoning ? { field: "reasoning_content" } : false,
     cost: {
       input: model.cost.input,
       output: model.cost.output,
-      cache_read: model.cost.cacheRead,
-      cache_write: model.cost.cacheWrite,
+      ...(model.cost.cacheRead === undefined ? {} : { cache_read: model.cost.cacheRead }),
+      ...(model.cost.cacheWrite === undefined ? {} : { cache_write: model.cost.cacheWrite }),
     },
     limit: { context: model.contextWindow, output: model.maxOutputTokens },
     modalities: { input: [...model.input], output: [...model.output] },
-    ...(model.thinkingFormat === "qwen"
-      ? {
-          variants: {
-            off: { enable_thinking: false },
-            high: { enable_thinking: true },
-          },
-        }
-      : {}),
   };
 }
 
@@ -247,18 +216,6 @@ export function createOpenCodeAciPlugin({
           };
         },
         methods,
-      },
-      async "chat.params"(request, output) {
-        if (request.model.providerID !== profile.providerId) return;
-        const model = active?.models().find((item) => item.id === request.model.id);
-        if (!model) return;
-        if (model.thinkingFormat === "qwen" && output.options.enable_thinking === undefined) {
-          output.options.enable_thinking = true;
-        }
-        if (model.thinkingFormat === "off") {
-          delete output.options.enable_thinking;
-          delete output.options.reasoningEffort;
-        }
       },
       async dispose() {
         const provider = active;

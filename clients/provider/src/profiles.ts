@@ -7,7 +7,6 @@ export const REDPILL_ACI_PROFILE = {
   apiKeyEnv: "REDPILL_AI_API_KEY",
   envPrefix: "REDPILL",
   logPrefix: "[redpill]",
-  baseURLAliases: ["REDPILL_CLOUD_API_PREFIX", "REDPILL_BASE_URL"],
 } as const satisfies AciProviderProfile;
 
 export const PHALA_CLOUD_ACI_PROFILE = {
@@ -17,5 +16,4 @@ export const PHALA_CLOUD_ACI_PROFILE = {
   apiKeyEnv: "PHALA_AI_API_KEY",
   envPrefix: "PHALA",
   logPrefix: "[phala]",
-  baseURLAliases: ["PHALA_CLOUD_API_PREFIX", "PHALA_BASE_URL", "PHALA_CLOUD_BASE_URL"],
 } as const satisfies AciProviderProfile;

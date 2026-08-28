@@ -1,15 +1,11 @@
 import type { AciProviderProfile } from "./profile.ts";
 
-export type AciThinkingFormat = "auto" | "qwen" | "openai" | "off";
 export type AciReceiptVerification = "on-demand" | "response";
-
-const THINKING_FORMATS: ReadonlySet<unknown> = new Set(["auto", "qwen", "openai", "off"]);
 
 export interface AciProviderConfig {
   baseURL: string;
   models: {
     isTeeOnly: boolean;
-    thinkingFormat: AciThinkingFormat;
     allowlist?: readonly string[];
   };
   trust: {
@@ -26,7 +22,6 @@ export interface AciProviderConfigInput {
   baseURL?: unknown;
   models?: {
     isTeeOnly?: unknown;
-    thinkingFormat?: unknown;
     allowlist?: unknown;
   };
   trust?: {
@@ -90,10 +85,6 @@ function validateSessionIds(value: unknown): readonly string[] | undefined {
   });
 }
 
-function isThinkingFormat(value: unknown): value is AciThinkingFormat {
-  return THINKING_FORMATS.has(value);
-}
-
 function envValue(env: Record<string, string | undefined>, ...names: string[]): string | undefined {
   for (const name of names) {
     const value = env[name]?.trim();
@@ -120,26 +111,18 @@ export function aciProviderConfigInputFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): AciProviderConfigInput {
   const prefix = profile.envPrefix;
-  const baseURL = envValue(
-    env,
-    `${prefix}_BASE_URL`,
-    `${prefix}_CLOUD_API_PREFIX`,
-    `${prefix}_CLOUD_BASE_URL`,
-    ...(profile.baseURLAliases ?? []),
-  );
-  const isTeeOnly = booleanEnv(envValue(env, `${prefix}_IS_TEE_ONLY`, `${prefix}_TEE_ONLY`));
-  const thinkingFormat = envValue(env, `${prefix}_THINKING_FORMAT`);
+  const baseURL = envValue(env, `${prefix}_BASE_URL`);
+  const isTeeOnly = booleanEnv(envValue(env, `${prefix}_IS_TEE_ONLY`));
   const allowlist = commaSeparated(envValue(env, `${prefix}_MODEL_ALLOWLIST`));
   const acceptedComposeHashes = commaSeparated(envValue(env, `${prefix}_ACCEPTED_COMPOSE_HASHES`));
   const acceptedSessionIds = commaSeparated(envValue(env, `${prefix}_ACCEPTED_SESSION_IDS`));
 
   return {
     ...(baseURL ? { baseURL } : {}),
-    ...(isTeeOnly !== undefined || thinkingFormat !== undefined || allowlist !== undefined
+    ...(isTeeOnly !== undefined || allowlist !== undefined
       ? {
           models: {
             ...(isTeeOnly !== undefined ? { isTeeOnly } : {}),
-            ...(thinkingFormat !== undefined ? { thinkingFormat } : {}),
             ...(allowlist !== undefined ? { allowlist } : {}),
           },
         }
@@ -181,14 +164,6 @@ export function resolveAciProviderConfig(
       : input.models.isTeeOnly;
   if (typeof isTeeOnly !== "boolean") fail("/models/isTeeOnly", "expected a boolean");
 
-  const thinkingFormat =
-    input.models?.thinkingFormat === undefined
-      ? (envInput.models?.thinkingFormat ?? "auto")
-      : input.models.thinkingFormat;
-  if (!isThinkingFormat(thinkingFormat)) {
-    fail("/models/thinkingFormat", 'expected "auto", "qwen", "openai", or "off"');
-  }
-
   const allowlist = optionalStringArray(
     input.models?.allowlist === undefined ? envInput.models?.allowlist : input.models.allowlist,
     "/models/allowlist",
@@ -223,7 +198,6 @@ export function resolveAciProviderConfig(
     baseURL,
     models: {
       isTeeOnly,
-      thinkingFormat,
       ...(allowlist ? { allowlist } : {}),
     },
     trust: {

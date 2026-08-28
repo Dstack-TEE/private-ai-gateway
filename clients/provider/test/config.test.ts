@@ -11,7 +11,7 @@ test("resolves provider policy from profile, environment, and explicit options",
   const config = resolveAciProviderConfig(
     profile,
     {
-      models: { allowlist: ["qwen/qwen3"] },
+      models: { allowlist: ["provider/model"] },
       receipts: { verification: "response", historySize: 8 },
     },
     {
@@ -21,7 +21,7 @@ test("resolves provider policy from profile, environment, and explicit options",
   );
 
   assert.equal(config.baseURL, "https://custom.example/v1");
-  assert.deepEqual(config.models.allowlist, ["qwen/qwen3"]);
+  assert.deepEqual(config.models.allowlist, ["provider/model"]);
   assert.deepEqual(config.trust.acceptedComposeHashes, [composeHash]);
   assert.deepEqual(config.receipts, { verification: "response", historySize: 8 });
 });
@@ -33,12 +33,8 @@ test("rejects a non-HTTPS model endpoint", () => {
   );
 });
 
-test("uses one deterministic base URL environment priority for every adapter", () => {
-  const env = {
-    ACI_BASE_URL: "https://base.example/v1",
-    ACI_CLOUD_API_PREFIX: "https://prefix.example/v1",
-    ACI_CLOUD_BASE_URL: "https://cloud.example/v1",
-  };
+test("uses the canonical base URL environment variable for every adapter", () => {
+  const env = { ACI_BASE_URL: "https://base.example/v1" };
 
   assert.equal(aciProviderConfigInputFromEnv(profile, env).baseURL, env.ACI_BASE_URL);
   assert.equal(resolveAciProviderConfig(profile, {}, env).baseURL, env.ACI_BASE_URL);

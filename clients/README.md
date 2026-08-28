@@ -61,7 +61,7 @@ and native coding-agent integrations:
   [`releasing.md`](releasing.md).
 - [`opencode-provider`](opencode-provider) — the native OpenCode v1 server
   plugin. `@phala/opencode-provider-aci` maps the shared provider into
-  OpenCode's config, auth, model, reasoning, and lifecycle hooks;
+  OpenCode's config, auth, model, and lifecycle hooks;
   `opencode-provider-redpill` supplies API-key authentication, while
   `opencode-provider-phala-cloud` also adds Phala Cloud device login. Both use
   shared branded profiles. It verifies every receipt before the response stream

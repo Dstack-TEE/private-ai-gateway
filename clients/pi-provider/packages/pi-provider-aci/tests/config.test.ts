@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import {
   DEFAULT_ACI_CLOUD_CONFIG,
+  getGlobalAciCloudConfigPath,
+  loadHomeAciCloudConfig,
   toAciProviderConfig,
   validateAciCloudConfig,
   type AciCloudConfig,
@@ -19,7 +24,6 @@ test("validating a concrete config passes and preserves values", () => {
   const validated = validateAciCloudConfig(BASE);
   assert.equal(validated.baseUrl, "https://gateway.test/v1");
   assert.equal(validated.models.isTeeOnly, true);
-  assert.equal(validated.models.thinkingFormat, "auto");
   assert.deepEqual(validated.trust, {});
   assert.equal(toAciProviderConfig(validated).receipts.verification, "response");
 });
@@ -57,11 +61,6 @@ test("validateAciCloudConfig: accepts only canonical attested-session ids", () =
   assert.throws(() => validateAciCloudConfig(bad), /lowercase session id/);
 });
 
-test("validateAciCloudConfig: rejects invalid thinkingFormat", () => {
-  const bad = { ...BASE, models: { ...BASE.models, thinkingFormat: "bogus" } };
-  assert.throws(() => validateAciCloudConfig(bad), /expected "auto", "qwen", "openai", or "off"/);
-});
-
 test("validateAciCloudConfig: rejects non-boolean isTeeOnly", () => {
   const bad = { ...BASE, models: { ...BASE.models, isTeeOnly: "yes" } };
   assert.throws(() => validateAciCloudConfig(bad), /expected a boolean/);
@@ -94,4 +93,14 @@ test("validateAciCloudConfig: allowlist with empty string is rejected", () => {
     models: { ...BASE.models, allowlist: [""] },
   };
   assert.throws(() => validateAciCloudConfig(bad), /expected a non-empty string/);
+});
+
+test("loadHomeAciCloudConfig rejects a malformed persisted config", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-provider-aci-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const path = getGlobalAciCloudConfigPath(home);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "{");
+
+  assert.throws(() => loadHomeAciCloudConfig(home), /invalid JSON/);
 });

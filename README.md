@@ -24,6 +24,8 @@ Start here:
 - [ACI client architecture](clients/architecture.md) — the framework-neutral
   client product, existing versus new components, release policy, and coding
   agent integration boundary.
+- [Coding agent integrations](clients/coding-agents.md) — native Pi and
+  OpenCode installation, login, model selection, and ACI inspection.
 
 ## Audience
 
@@ -586,7 +588,9 @@ tests/                         unit and integration coverage
 
 - [ACI spec, quickstart, and test vectors](spec/README.md)
 - [Client verifiers](clients/README.md)
-- [PI provider extension (use the gateway from pi)](clients/pi-provider/README.md)
+- [Coding agent integrations](clients/coding-agents.md)
+- [Pi provider](clients/pi-provider/README.md)
+- [OpenCode provider](clients/opencode-provider/README.md)
 - [Deployment guide](deploy/README.md)
 - [Configuration reference](docs/configuration-reference.md)
 - [Live E2E test suite](docs/live-e2e-test-suite.md)

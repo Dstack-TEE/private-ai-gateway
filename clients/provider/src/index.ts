@@ -20,13 +20,11 @@ export {
   type AciProviderConfig,
   type AciProviderConfigInput,
   type AciReceiptVerification,
-  type AciThinkingFormat,
 } from "./config.ts";
 export {
   AciModelDiscoveryError,
   discoverAciModelCatalog,
   discoverAciModels,
-  inferThinkingFormat,
   mapAciModel,
   type AciModel,
   type AciModelCatalog,

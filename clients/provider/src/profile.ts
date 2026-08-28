@@ -7,7 +7,6 @@ export interface AciProviderProfile {
   logPrefix: string;
   acceptedComposeHashes?: readonly string[];
   acceptedSessionIds?: readonly string[];
-  baseURLAliases?: readonly string[];
 }
 
 export const DEFAULT_ACI_PROVIDER_PROFILE: AciProviderProfile = {
