@@ -24,7 +24,11 @@ import type {
   ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import * as piAi from "@earendil-works/pi-ai";
-import type { Model, Provider } from "@earendil-works/pi-ai";
+import {
+  createProvider as createPiProvider,
+  type Model,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
 import { createAciProvider, type AciProvider } from "@phala/aci-provider";
 import os from "node:os";
@@ -46,6 +50,11 @@ import { type AciServerModel, discoverAciModels, mapAciServerModel } from "./src
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import { summarizeReceipt, summarizeSession } from "./src/audit.ts";
 import {
+  closeAciProvider,
+  ensureAciConnection,
+  type AciConnectionState,
+} from "./src/connection.ts";
+import {
   type AciConfigScope,
   THINKING_FORMAT_VALUES,
   buildSettingsTheme,
@@ -54,20 +63,10 @@ import {
   settingsTitle,
 } from "./src/settings-ui.ts";
 
-interface AciRuntimeState {
+interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
   config: AciCloudConfig;
-  rawModels: AciServerModel[];
-  provider: AciProvider | undefined;
-  providerConfigKey: string | undefined;
-  connectionSetup: AciConnectionSetup | undefined;
-  connectionError: string | undefined;
   overrides?: AciCloudConfigPatch;
-}
-
-interface AciConnectionSetup {
-  configKey: string;
-  promise: Promise<void>;
 }
 
 type OpenAICompletionsApi = ReturnType<
@@ -102,76 +101,9 @@ function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
   return api;
 }
 
-function modelsFromState(state: AciRuntimeState) {
-  return state.rawModels
-    .map((m) => mapAciServerModel(m, state.config))
-    .filter((m): m is NonNullable<typeof m> => m !== null);
-}
-
-/**
- * Establish an instance-scoped ACI connection for the configured gateway.
- * Default posture is fail closed: when verification or channel binding fails,
- * the provider stream receives a rejecting fetch implementation.
- */
-function connectionConfig(config: AciCloudConfig): string {
-  return JSON.stringify({
-    baseUrl: config.baseUrl,
-    acceptedComposeHashes: config.trust.acceptedComposeHashes,
-    acceptedSessionIds: config.trust.acceptedSessionIds,
-  });
-}
-
-async function ensureAciConnection(state: AciRuntimeState): Promise<void> {
-  const config = state.config;
-  const configKey = connectionConfig(config);
-  if (state.provider && state.providerConfigKey === configKey) {
-    return;
-  }
-
-  const activeSetup = state.connectionSetup;
-  if (activeSetup) {
-    await activeSetup.promise;
-    if (activeSetup.configKey === configKey) return;
-    return ensureAciConnection(state);
-  }
-
-  const setup = (async () => {
-    await closeAciProvider(state);
-    try {
-      const provider = createAciProvider(toAciProviderConfig(config));
-      await provider.connect();
-      state.provider = provider;
-      state.providerConfigKey = configKey;
-      state.connectionError = undefined;
-    } catch (error) {
-      state.connectionError = error instanceof Error ? error.message : String(error);
-      console.error(`${state.profile.logPrefix} ACI connection failed:`, error);
-    }
-  })();
-  const pending = { configKey, promise: setup };
-  state.connectionSetup = pending;
-  try {
-    await setup;
-  } finally {
-    if (state.connectionSetup === pending) state.connectionSetup = undefined;
-  }
-}
-
-async function closeAciProvider(state: AciRuntimeState): Promise<void> {
-  const provider = state.provider;
-  state.provider = undefined;
-  state.providerConfigKey = undefined;
-  if (!provider) return;
-  try {
-    await provider.close();
-  } catch (error) {
-    console.error(`${state.profile.logPrefix} ACI connection close failed:`, error);
-  }
-}
-
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   return async (input, init) => {
-    await ensureAciConnection(state);
+    await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
     if (state.provider) return state.provider.fetch(input, init);
     throw new Error(
       `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
@@ -183,7 +115,7 @@ async function refreshAciModels(
   state: AciRuntimeState,
   signal: AbortSignal,
 ): Promise<AciServerModel[]> {
-  await ensureAciConnection(state);
+  await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
   if (!state.provider) {
     throw new Error(
       `${state.profile.logPrefix} model discovery blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
@@ -197,37 +129,39 @@ async function refreshAciModels(
   return discovered.raw;
 }
 
-function piModelsFromState(state: AciRuntimeState): Model<"openai-completions">[] {
-  return modelsFromState(state).map((model) => ({
-    ...model,
-    api: "openai-completions",
-    provider: state.profile.providerId,
-    baseUrl: state.config.baseUrl,
-  }));
+function toPiModels(
+  state: AciRuntimeState,
+  rawModels: readonly AciServerModel[],
+): Model<"openai-completions">[] {
+  return rawModels
+    .map((model) => mapAciServerModel(model, state.config))
+    .filter((model): model is NonNullable<typeof model> => model !== null)
+    .map((model) => ({
+      ...model,
+      api: "openai-completions",
+      provider: state.profile.providerId,
+      baseUrl: state.config.baseUrl,
+    }));
 }
 
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
   const streams = getHostOpenAICompletionsApi();
   const fetch = providerFetch(state);
-  return {
+  return createPiProvider({
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
     auth: { apiKey: createApiKeyAuth(state.profile) },
-    getModels: () => piModelsFromState(state),
-    async refreshModels(context) {
-      if (!context.allowNetwork) return;
-      const rawModels = await refreshAciModels(state, context.signal);
-      await context.publish({
-        update: () => {
-          state.rawModels = rawModels;
-        },
-      });
+    models: [],
+    async fetchModels({ signal }) {
+      return toPiModels(state, await refreshAciModels(state, signal));
     },
-    stream: (model, context, options) => streams.stream(model, context, { ...options, fetch }),
-    streamSimple: (model, context, options) =>
-      streams.streamSimple(model, context, { ...options, fetch }),
-  };
+    api: {
+      stream: (model, context, options) => streams.stream(model, context, { ...options, fetch }),
+      streamSimple: (model, context, options) =>
+        streams.streamSimple(model, context, { ...options, fetch }),
+    },
+  });
 }
 
 function registerAciProvider(pi: ExtensionAPI, state: AciRuntimeState): void {
@@ -443,7 +377,7 @@ async function runSessionCommand(
   state: AciRuntimeState,
   args: string,
 ): Promise<void> {
-  await ensureAciConnection(state);
+  await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
   if (!state.provider) {
     ctx.ui.notify(
       `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
@@ -477,7 +411,7 @@ async function runAttestationCommand(
   ctx: ExtensionCommandContext,
   state: AciRuntimeState,
 ): Promise<void> {
-  await ensureAciConnection(state);
+  await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
   if (!state.provider) {
     ctx.ui.notify(
       `Attestation validation failed: ${state.connectionError ?? "no verified connection"}`,
@@ -536,26 +470,31 @@ export function createProvider(
     const state: AciRuntimeState = {
       profile: providerProfile,
       config,
-      rawModels: [],
       provider: undefined,
       providerConfigKey: undefined,
       connectionSetup: undefined,
       connectionError: undefined,
+      renderConnectionStatus: undefined,
       overrides,
     };
     registerAciProvider(pi, state);
 
     pi.on("session_start", async (_event, ctx) => {
+      state.renderConnectionStatus = () => updateFooter(ctx, state);
+      state.renderConnectionStatus?.();
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      await ctx.modelRegistry.refresh({
-        allowNetwork: true,
-        providers: [state.profile.providerId],
-      });
-      updateFooter(ctx, state);
+      try {
+        await ctx.modelRegistry.refresh({
+          providers: [state.profile.providerId],
+        });
+      } finally {
+        state.renderConnectionStatus?.();
+      }
     });
 
     pi.on("session_shutdown", async () => {
+      state.renderConnectionStatus = undefined;
       await state.connectionSetup?.promise;
       await closeAciProvider(state);
     });

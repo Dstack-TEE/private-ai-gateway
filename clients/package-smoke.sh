@@ -89,7 +89,11 @@ for (const name of [
 
 # Pi deliberately omits host-provided peer dependencies when it installs an
 # extension. Load the packaged extension with Pi's own loader in that layout.
-npm init --yes --silent --prefix "$pi_npm" >/dev/null
+node --input-type=module - "$pi_npm/package.json" <<'NODE'
+import { writeFile } from "node:fs/promises";
+
+await writeFile(process.argv[2], JSON.stringify({ private: true }, null, 2));
+NODE
 npm install --prefix "$pi_npm" --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
   "$packs"/phala-aci-verifier-*.tgz \
   "$packs"/phala-aci-provider-*.tgz \
@@ -103,16 +107,41 @@ for peer in pi-ai pi-coding-agent pi-tui; do
   fi
 done
 
-PI_CODING_AGENT_DIR="$scratch/pi-agent" \
-  "$repo_root/clients/node_modules/.bin/pi" \
-  --offline \
-  --no-context-files \
-  --no-skills \
-  --no-themes \
-  --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
-  --list-models >/dev/null
+node --input-type=module - "$scratch/pi-agent" <<'NODE'
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
-printf '%s\n' '{"type":"get_commands"}' | \
+const agentDir = process.argv[2];
+await mkdir(agentDir, { recursive: true });
+const model = {
+  id: "smoke/model",
+  name: "Smoke Model",
+  api: "openai-completions",
+  provider: "phala",
+  baseUrl: "https://inference.phala.com/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 4096,
+  maxTokens: 1024,
+};
+await Promise.all([
+  writeFile(
+    join(agentDir, "auth.json"),
+    JSON.stringify({ phala: { type: "api_key", key: "smoke-test-key" } }, null, 2),
+  ),
+  writeFile(
+    join(agentDir, "models-store.json"),
+    JSON.stringify({ phala: { models: [model], checkedAt: Date.now() } }, null, 2),
+  ),
+  writeFile(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ defaultProvider: "phala", defaultModel: "smoke/model" }, null, 2),
+  ),
+]);
+NODE
+
+printf '%s\n' '{"type":"get_state"}' '{"type":"get_commands"}' | \
   PI_CODING_AGENT_DIR="$scratch/pi-agent" \
   "$repo_root/clients/node_modules/.bin/pi" \
   --mode rpc \
@@ -132,6 +161,16 @@ const records = (await readFile(process.argv[2], "utf8"))
   .trim()
   .split("\n")
   .map((line) => JSON.parse(line));
+const state = records.find(
+  (record) => record.type === "response" && record.command === "get_state",
+);
+if (
+  !state?.success ||
+  state.data?.model?.provider !== "phala" ||
+  state.data?.model?.id !== "smoke/model"
+) {
+  throw new Error("Pi did not restore its stored dynamic catalog and default model offline");
+}
 const response = records.find(
   (record) => record.type === "response" && record.command === "get_commands",
 );

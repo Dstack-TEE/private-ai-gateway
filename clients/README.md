@@ -70,8 +70,10 @@ and native coding-agent integrations:
   receipt, and session status.
 
 SDKs that accept a function can use `connectAci().fetch` directly. Native Pi
-and OpenCode integrations use the provider packages above. Agents that only
-accept a base URL use `aci serve` as a local verification boundary.
+and OpenCode integrations use their official provider and plugin APIs through
+the packages above. A base URL alone cannot inject ACI's attested TLS transport;
+hosts without a custom-fetch or provider-plugin extension point are not claimed
+as native integrations in this release.
 
 [docs/quickstart.md](../docs/quickstart.md) exercises both verifier
 surfaces against a live deployment. The `pi-provider` extension is loaded

@@ -48,14 +48,8 @@ their respective runtimes, and imports every public ESM entry.
 
 ## Trusted publishing
 
-The four existing packages already publish through npm trusted publishing. The
-four new `0.4.0` packages require the same trusted-publisher configuration
-after their bootstrap publish:
-
-- `@phala/aci-provider`
-- `@phala/opencode-provider-aci`
-- `opencode-provider-redpill`
-- `opencode-provider-phala-cloud`
+All eight packages publish through npm trusted publishing. Their trusted
+publisher must use the same repository and release workflow settings:
 
 Use these settings for each package:
 
@@ -68,7 +62,7 @@ Use these settings for each package:
 The workflow authenticates with npm through a short-lived OIDC identity.
 
 Create and publish a GitHub Release whose tag is `clients-v<version>`, for
-example `clients-v0.4.0`. The workflow checks that the tag matches every package
+example `clients-v0.5.1`. The workflow checks that the tag matches every package
 manifest, runs all release gates, then publishes in dependency order. Do not
 move or reuse a release tag after publication; npm versions are immutable.
 

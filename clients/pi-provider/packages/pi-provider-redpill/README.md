@@ -12,17 +12,30 @@ can finish the model turn or continue its tool loop.
 
 ```bash
 pi install npm:pi-provider-redpill
-export REDPILL_AI_API_KEY=...
+pi
 ```
+
+In Pi, store the API key through the native login flow, wait for the verified
+connection, then save a default model from the native model picker:
+
+```text
+/login redpill
+# paste the Redpill API key and wait for the footer to show aci-verified
+/model
+# search for redpill/, select a model, and press Ctrl+S
+```
+
+Pi stores the credential in `~/.pi/agent/auth.json`, the refreshed catalog in
+`~/.pi/agent/models-store.json`, and the saved default in
+`~/.pi/agent/settings.json`. These values survive a restart and the cached
+catalog remains available offline. As an alternative for one process, set
+`REDPILL_AI_API_KEY`; Pi does not copy environment variables into its credential
+store.
 
 The default ACI gateway is `https://tee.redpill.ai/v1`; override with
 `REDPILL_BASE_URL`. `tee.redpill.ai` and `inference.phala.com` enforce TEE-only
 routing and accept the same key. `api.redpill.ai` is the general API endpoint,
 not the default verified transport.
-
-```text
-/model redpill/deepseek/deepseek-v4-flash
-```
 
 Config: `/redpill-settings` · Attestation status: `/redpill-attestation` · Receipt
 history and audit: `/redpill-receipt` · Session inspection: `/redpill-session`

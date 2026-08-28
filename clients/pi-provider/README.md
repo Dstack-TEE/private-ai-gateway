@@ -37,6 +37,22 @@ Install the published package:
 pi install npm:@phala/pi-provider-aci
 ```
 
+Pi owns login, model-catalog persistence, and default-model persistence. For a
+branded package, use the provider id shown below:
+
+```text
+/login redpill
+# or: /login phala
+# wait for the footer to show aci-verified
+/model
+# search for the provider, select a model, and press Ctrl+S
+```
+
+Pi stores credentials in `~/.pi/agent/auth.json`, dynamic catalogs in
+`~/.pi/agent/models-store.json`, and the saved default in
+`~/.pi/agent/settings.json`. Environment variables are process inputs and are
+not copied into these files.
+
 For a source checkout:
 
 ```bash
@@ -100,7 +116,9 @@ release pipeline publishes them. Until then the provider's attestation command
 reports `measurement verified, not pinned`.
 
 The extension registers Pi's native `Provider` and `ApiKeyAuth` interfaces.
-Pi owns credential storage and environment resolution; the
+Its provider uses Pi's native dynamic-catalog helper, so Pi owns catalog refresh,
+offline restoration, persistence, and publication ordering. Pi also owns
+credential storage, default-model selection, and environment resolution; the
 `openai-completions` adapter receives the connection's scoped fetch through
 `StreamOptions.fetch`. A failed or expired connection blocks model traffic,
 and a failed receipt audit fails the response stream. Each Pi session gets a
@@ -108,8 +126,10 @@ fresh connection and closes it on shutdown.
 
 The same `connectAci()` API works with other Node and Bun SDKs and agent
 frameworks; see the [verifier integration examples](../verifier-ts/README.md#runtime-sdk-and-agent-frameworks).
-Coding-agent CLIs without a custom fetch hook use the local `aci serve` proxy;
-see the [coding agent guide](../coding-agents.md).
+Pi and OpenCode use host-native provider adapters; see the
+[coding agent guide](../coding-agents.md). A base URL alone cannot inject ACI's
+attested TLS transport, so this release does not claim native support for hosts
+without a custom-fetch or provider-plugin extension point.
 
 ## Branding / profiles
 

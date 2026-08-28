@@ -28,11 +28,9 @@ flowchart LR
     core[ACI provider core<br/>new]:::refactor
     sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
     opencode[OpenCode on Bun]:::external
-    agents[Codex and Claude Code]:::external
     connect[connectAci shared runtime client<br/>current refactor]:::refactor
     node[Node fetch adapter<br/>current refactor]:::refactor
     bun[Bun fetch adapter<br/>current refactor]:::refactor
-    serve[aci serve local proxy<br/>existing upstream]:::upstream
 
     pi --> core
     opencode --> ocadapter --> core
@@ -40,7 +38,6 @@ flowchart LR
     sdk --> connect
     connect -->|Node host| node
     connect -->|Bun host| bun
-    agents --> serve
   end
 
   subgraph trust[Shared trust contract]
@@ -53,7 +50,6 @@ flowchart LR
 
   node --> identity
   bun --> identity
-  serve --> identity
 
   subgraph tee[Private AI Gateway inside the TEE - existing upstream]
     api[OpenAI, Responses and<br/>Anthropic API surfaces]:::upstream
@@ -110,20 +106,24 @@ attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
 should be added when that product endpoint exists, without changing the
 verifier.
 
-`aci serve` is not a new protocol translator and was not introduced by the Pi
-integration. It is the existing Rust local verifying proxy. It preserves the
-request path and body, so the gateway must implement the protocol spoken by the
-agent. `connectAci()` is the new runtime client for applications that accept a
-custom `fetch`. Node and Bun expose the same public API and differ only in how
-their native `fetch` receives the TLS identity callback.
+Pi and OpenCode integrate through their official host APIs. Pi owns credentials,
+dynamic-catalog persistence, default-model persistence, and the provider
+lifecycle. OpenCode owns plugin configuration and credential persistence; its
+server plugin supplies the provider config, auth loader, verified fetch, tools,
+and disposal hook. Neither adapter maintains a parallel host state store.
 
-## One trust contract, two integrations
+`connectAci()` is the runtime client for applications that accept a custom
+`fetch`. Node and Bun expose the same public API and differ only in how their
+native `fetch` receives the TLS identity callback.
 
-Fetch-aware Node and Bun applications inject `connectAci().fetch`. Software
-that exposes only a base URL points at `aci serve` on localhost. This is a
-capability split, not two competing ACI products: one side receives a function,
-the other can only receive a URL. Both paths must enforce the same security
-meaning:
+## One trust contract, host-native integrations
+
+Pi and OpenCode inject the shared verified fetch through their official provider
+extension points. Other fetch-aware Node and Bun applications inject
+`connectAci().fetch` directly. A base URL alone cannot inject the attested TLS
+transport, so clients without a supported custom-fetch or provider-plugin
+boundary are not native ACI integrations in this release. Every supported path
+enforces the same security meaning:
 
 1. Verify a fresh TDX quote and its nonce-bound workload keyset.
 2. Verify that `sha256(app_compose)` is measured into the quote's RTMR3.
@@ -186,7 +186,6 @@ signed GitHub Release. Publishing alone does not create a reviewed-release
 claim: the Redpill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.
 
-The local agent and `aci serve` see plaintext prompts and responses. This
-architecture covers the remote model HTTP path; MCP servers, tools, browser
-automation, shell commands, WebSockets, extensions, and telemetry have separate
-trust boundaries.
+The local agent sees plaintext prompts and responses. This architecture covers
+the remote model HTTP path; MCP servers, tools, browser automation, shell
+commands, WebSockets, extensions, and telemetry have separate trust boundaries.
