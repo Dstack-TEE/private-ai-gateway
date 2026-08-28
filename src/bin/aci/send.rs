@@ -133,9 +133,10 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     // A streaming response the aggregator committed before selecting an
     // upstream (pre-first-byte keep-alive, §5.2) carries no X-Receipt-Id
     // header; the receipt still exists once the stream finalized and is
-    // retrievable by the response's own id. Constrained requests (the
-    // default: verified serving) always carry the header, so this fallback
-    // only runs for --allow-unverified streams against a slow upstream.
+    // retrievable by the response's own id. That is only legitimate for an
+    // unverified stream — a constrained request (the default) is never
+    // committed early, so a missing header there is a §5.2 violation this
+    // command must keep surfacing, not paper over.
     let receipt_id = match response
         .headers
         .get("x-receipt-id")
@@ -143,9 +144,9 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         .map(str::to_string)
     {
         Some(id) => id,
-        None => response_chat_id(&response.body).ok_or(
-            "response carried no X-Receipt-Id header and no readable response id;              nothing to fetch a receipt by",
-        )?,
+        None if args.allow_unverified && stream => response_chat_id(&response.body)
+            .ok_or("response carried no X-Receipt-Id header and no readable response id")?,
+        None => return Err("response carried no X-Receipt-Id header".into()),
     };
     let receipt_resp = client
         .fetch_receipt(&base_url, &receipt_id, bearer.as_deref())
