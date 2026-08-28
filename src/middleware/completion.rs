@@ -512,7 +512,7 @@ pub async fn run(
 
     // An unset interval uses the 10-second default. Only 0 disables the
     // heartbeat and, with it, the pre-first-byte early commit below.
-    let keepalive = match sse_keepalive_ms.unwrap_or(10_000) {
+    let keepalive = match sse_keepalive_ms.unwrap_or(5_000) {
         0 => None,
         ms => Some(Duration::from_millis(ms)),
     };
@@ -564,31 +564,49 @@ pub async fn run(
     // semantics either way.
     let early_commit = stream && e2ee.is_none() && !aci_constrained;
     let result = match (keepalive, early_commit) {
-        (Some(interval), true) => match tokio::time::timeout(interval, &mut forward).await {
-            Ok(result) => result,
-            Err(_) => {
-                let pipeline_inputs = StreamPipelineInputs {
-                    endpoint,
-                    endpoint_path,
-                    identity: identity.clone(),
-                    exclude_reasoning,
-                    candidates: candidates.clone(),
-                };
-                return build_early_streaming_response(
-                    service.clone(),
-                    control.clone(),
-                    meter,
-                    forward,
-                    journal,
-                    pipeline_inputs,
-                    keepalive,
-                    surface,
-                    received_body.clone(),
-                    requester.clone(),
-                    request_id.clone(),
-                    model.unwrap_or("").to_string(),
-                    started,
-                );
+        (Some(interval), true) => loop {
+            match tokio::time::timeout(interval, &mut forward).await {
+                Ok(result) => break result,
+                Err(_) => {
+                    // Commit only while the candidate being waited on has not
+                    // itself failed in this request. A same-route retry (the
+                    // capacity second pass above all) usually ends in a
+                    // relayable HTTP status — a 429 the caller uses to fail
+                    // over and that its uptime accounting excludes — which an
+                    // early 200 would demote to an in-band error. A fresh
+                    // candidate that is merely slow is the case this commit
+                    // exists for, whatever happened to its predecessors.
+                    let abandoned = journal.abandoned_attempts();
+                    let waiting_on_clean_candidate = match journal.in_flight() {
+                        Some(current) => !abandoned.iter().any(|a| a.route_id == current.route_id),
+                        None => abandoned.is_empty(),
+                    };
+                    if !waiting_on_clean_candidate {
+                        continue;
+                    }
+                    let pipeline_inputs = StreamPipelineInputs {
+                        endpoint,
+                        endpoint_path,
+                        identity: identity.clone(),
+                        exclude_reasoning,
+                        candidates: candidates.clone(),
+                    };
+                    return build_early_streaming_response(
+                        service.clone(),
+                        control.clone(),
+                        meter,
+                        forward,
+                        journal,
+                        pipeline_inputs,
+                        keepalive,
+                        surface,
+                        received_body.clone(),
+                        requester.clone(),
+                        request_id.clone(),
+                        model.unwrap_or("").to_string(),
+                        started,
+                    );
+                }
             }
         },
         _ => forward.await,
@@ -763,7 +781,7 @@ pub async fn run(
                     attempt_index,
                     Some(&forward.selected_route),
                     None,
-                    errors::client_safe_error_message(&forward.upstream_body),
+                    errors::upstream_report_message(&forward.upstream_body),
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -1042,7 +1060,7 @@ pub async fn run(
                 ),
                 attempt_index,
                 &forward.selected_route,
-                errors::client_safe_error_message(&forward.error.upstream_body),
+                errors::upstream_report_message(&forward.error.upstream_body),
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -1214,7 +1232,7 @@ impl Meter {
                     ),
                     attempt_index,
                     &forward.selected_route,
-                    errors::client_safe_error_message(&forward.error.upstream_body),
+                    errors::upstream_report_message(&forward.error.upstream_body),
                 );
                 status
             }

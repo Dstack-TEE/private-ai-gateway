@@ -1075,6 +1075,9 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     );
     assert_eq!(report["isStreaming"], json!(true));
     assert_eq!(report["attemptIndex"], json!(0));
+    // The record carries the upstream's own words (bounded, unscrubbed): the
+    // client-facing envelope is the scrubbed surface, the report is not.
+    assert_eq!(report["errorMessage"], json!("unavailable"));
     // A real upstream attempt, not a gateway-generated failure: error_source
     // stays empty so the status is attributed to the route itself.
     assert!(
@@ -2858,4 +2861,111 @@ async fn mid_failover_disconnect_reports_the_finished_attempts_too() {
     let cancelled = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
     assert_eq!(cancelled["selectedRouteId"], json!("b:gpt-test"));
     assert_eq!(cancelled["attemptIndex"], json!(1));
+}
+
+// Streams an immediate 429 for every attempt — the same-route capacity-retry
+// shape whose relayable HTTP status the early commit must not demote.
+struct Always429StreamUpstream;
+
+#[async_trait]
+impl UpstreamBackend for Always429StreamUpstream {
+    fn name(&self) -> &str {
+        "always-429-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://always-429-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Transport("buffered path unused".to_string()))
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Transport("unused".to_string()))
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        Ok(UpstreamStreamResponse {
+            status_code: 429,
+            headers,
+            body: Box::pin(futures_util::stream::once(async {
+                Ok(Bytes::from(
+                    r#"{"error":{"message":"upstream at capacity"}}"#,
+                ))
+            })),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn same_route_retry_is_not_committed_early_and_relays_the_429() {
+    // The whole chain (429 → capacity-retry sleep → 429 again) far outlasts the
+    // keep-alive interval, but the candidate being waited on has already failed
+    // once — so no early 200: the client gets the real HTTP 429 it fails over on.
+    let (control_url, _posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 100);
+    let service = build_service_with_backend(Arc::new(Always429StreamUpstream));
+    let mut input = chat_input();
+    input.stream = true;
+
+    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(status, 429, "the capacity signal must stay an HTTP status");
+    assert_eq!(body["error"]["type"], json!("rate_limit_error"));
+}
+
+#[tokio::test]
+async fn in_band_stream_error_message_reaches_the_usage_report() {
+    // A 200 stream failed by an in-band error event must settle with the
+    // error's own words, not a bare 502 nothing can be asked about.
+    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+    let control = ControlClient::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+        send_request_features: None,
+        prefix_hash_secret: None,
+        tee_only_domains: Vec::new(),
+    })
+    .unwrap();
+    let report = StreamReport {
+        control,
+        request_id: "r-inband".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        request_model: "gpt".to_string(),
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        selected_route_id: Some("openai:gpt".to_string()),
+        attempt_index: 0,
+        upstream_status: 200,
+        prefix_hash: None,
+        started: std::time::Instant::now(),
+        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(
+        "data: {\"error\":{\"message\":\"Failed to compile json grammar: unsupported\"}}\n\ndata: [DONE]\n\n",
+    ))];
+    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
+    while metered.next().await.is_some() {}
+    drop(metered);
+
+    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-inband")).await;
+    assert_eq!(report["status"], json!(502));
+    assert!(report["errorMessage"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Failed to compile json grammar"));
 }

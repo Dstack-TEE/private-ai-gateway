@@ -341,7 +341,17 @@ impl MeterStream {
                 "stream settled"
             );
         }
-        let failure = std::mem::take(&mut self.failure);
+        let mut failure = std::mem::take(&mut self.failure);
+        if outcome == Outcome::Failed && failure.message.is_none() {
+            failure.message = Some(
+                if self.saw_error || self.framing.saw_error() {
+                    "upstream stream carried an in-band error event"
+                } else {
+                    "upstream stream ended without a terminal marker"
+                }
+                .to_string(),
+            );
+        }
         self.report
             .settle(outcome, self.last_usage.take(), self.ttft_ms, failure);
     }
@@ -376,17 +386,21 @@ impl MeterStream {
             });
         if let Some(error_value) = error_value {
             self.saw_error = true;
-            // Collect detail only when it can actually be emitted
-            // (request_outcome=debug), and prefer the error's message field
-            // over serializing the whole value — an in-band error event can
-            // approach the 16 MiB SSE line cap, and the 240-char output bound
-            // must also bound the transient memory spent producing it.
+            let message = error_value
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error_value.as_str())
+                .unwrap_or("in-band stream error");
+            // The usage record carries the error's own words (bounded copy;
+            // the full value can approach the 16 MiB SSE line cap and is never
+            // retained). Without this, a 200 stream failed by an in-band error
+            // settles as a bare 502 that nothing can be asked about.
+            if self.failure.message.is_none() {
+                self.failure.message = Some(truncate(message, 500));
+            }
+            // Log detail stays debug-gated separately: it may be echoed to the
+            // request_outcome line, whose exposure policy is the operator's.
             if self.error_detail.is_none() && self.detail_enabled {
-                let message = error_value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .or_else(|| error_value.as_str())
-                    .unwrap_or("in-band stream error");
                 self.error_detail = Some(detail_snippet(message.as_bytes()));
             }
         }
@@ -611,6 +625,9 @@ impl Stream for MeterStream {
                         Fed::Overflow => {
                             this.inner_done = true;
                             this.buf.clear();
+                            if this.failure.message.is_none() {
+                                this.failure.message = Some("sse line overflow".to_string());
+                            }
                             if this.error_detail.is_none() {
                                 this.error_detail = Some("sse line overflow".to_string());
                             }

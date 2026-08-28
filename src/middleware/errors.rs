@@ -158,6 +158,14 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
     }
 }
 
+/// The upstream's own words for the usage record, bounded but unscrubbed:
+/// the record is internal telemetry, and a message the relay policy withholds
+/// from the caller is still the only way to ask why a route started failing.
+/// The client-facing envelope keeps using `client_safe_error_message`.
+pub(crate) fn upstream_report_message(body: &[u8]) -> Option<String> {
+    extract_error_message(body).map(|m| m.chars().take(500).collect())
+}
+
 /// The upstream's message, fit to hand to the client, or `None` to fall back to
 /// our own per-status text.
 ///

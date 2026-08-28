@@ -36,8 +36,11 @@ pub struct MiddlewareConfig {
     /// forward fails never drafts one. Requests carrying an ACI constraint
     /// (`provider.aci_verified` — the aci CLI's default — or pinned session
     /// ids) are never committed early: their refusal-receipt and 412
-    /// semantics only exist as HTTP responses. Defaults to 10_000 ms; `0`
-    /// disables the heartbeat and the pre-upstream commit with it.
+    /// semantics only exist as HTTP responses. Neither is a candidate that has
+    /// already failed once in this request: a same-route retry usually ends in
+    /// a relayable HTTP status (429 above all), which an early 200 would
+    /// demote to an in-band error. Defaults to 5_000 ms; `0` disables the
+    /// heartbeat and the pre-upstream commit with it.
     #[serde(default)]
     pub sse_keepalive_ms: Option<u64>,
     /// Whether to extract content-derived request features (token estimate,
