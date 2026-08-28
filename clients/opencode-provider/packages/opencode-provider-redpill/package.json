@@ -1,6 +1,6 @@
 {
   "name": "opencode-provider-redpill",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "RedPill ACI provider for OpenCode",
   "keywords": [
     "aci",
@@ -51,8 +51,8 @@
     "prepublishOnly": "npm run check && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.4.1",
-    "@phala/opencode-provider-aci": "^0.4.1"
+    "@phala/aci-provider": "^0.4.2",
+    "@phala/opencode-provider-aci": "^0.4.2"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.18.23 <2"
