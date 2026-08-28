@@ -85,7 +85,9 @@ function isOpenAICompletionsApi(api: unknown): api is OpenAICompletionsApi {
   );
 }
 
-function openAICompletionsApi(): OpenAICompletionsApi {
+// Pi exposes compat stream factories at the root module for extensions while
+// managed installs intentionally omit Pi peer packages.
+function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
   if (!("openAICompletionsApi" in piAi)) {
     throw new Error("Pi does not provide the OpenAI Completions API");
   }
@@ -205,7 +207,7 @@ function piModelsFromState(state: AciRuntimeState): Model<"openai-completions">[
 }
 
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
-  const streams = openAICompletionsApi();
+  const streams = getHostOpenAICompletionsApi();
   const fetch = providerFetch(state);
   return {
     id: state.profile.providerId,

@@ -111,3 +111,36 @@ PI_CODING_AGENT_DIR="$scratch/pi-agent" \
   --no-themes \
   --extension "$pi_npm/node_modules/pi-provider-phala-cloud/dist/index.js" \
   --list-models >/dev/null
+
+smoke_opencode_provider() {
+  local package_name="$1"
+  local provider_id="$2"
+  local config
+  local models
+
+  config="$(
+    node --input-type=module - "$consumer/node_modules/$package_name" "$provider_id" <<'NODE'
+import { pathToFileURL } from "node:url";
+
+const plugin = pathToFileURL(process.argv[2]).href;
+process.stdout.write(JSON.stringify({ plugin: [plugin], enabled_providers: [process.argv[3]] }));
+NODE
+  )"
+
+  models="$(
+    XDG_CONFIG_HOME="$scratch/opencode/$provider_id/config" \
+    XDG_CACHE_HOME="$scratch/opencode/$provider_id/cache" \
+    XDG_DATA_HOME="$scratch/opencode/$provider_id/data" \
+    XDG_STATE_HOME="$scratch/opencode/$provider_id/state" \
+    OPENCODE_CONFIG_CONTENT="$config" \
+      "$repo_root/clients/node_modules/.bin/opencode" models "$provider_id"
+  )"
+
+  if ! rg -q "^$provider_id/" <<<"$models"; then
+    echo "OpenCode did not load any $provider_id models" >&2
+    exit 1
+  fi
+}
+
+smoke_opencode_provider opencode-provider-phala-cloud phala
+smoke_opencode_provider opencode-provider-redpill redpill
