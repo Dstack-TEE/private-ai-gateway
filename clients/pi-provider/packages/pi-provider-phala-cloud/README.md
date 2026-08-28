@@ -18,7 +18,7 @@ Sign in with a Phala Cloud account (`/login phala`, device authorization —
 no API key to manage), or set one directly:
 
 ```bash
-export PHALA_LLM_API_KEY=...
+export PHALA_AI_API_KEY=...
 ```
 
 ```text

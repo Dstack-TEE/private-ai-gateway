@@ -5,7 +5,6 @@ import type { ProviderProfile } from "./profile.ts";
 export function createApiKeyAuth(profile: ProviderProfile): ApiKeyAuth {
   const auth = envApiKeyAuth(profile.apiKeyAuth?.name ?? `${profile.label} API key`, [
     profile.apiKeyEnv,
-    ...(profile.apiKeyAliases ?? []),
   ]);
   return profile.apiKeyAuth?.login ? { ...auth, login: profile.apiKeyAuth.login } : auth;
 }

@@ -12,7 +12,6 @@ test("resolveProfile fills neutral defaults for unset fields", () => {
   assert.equal(p.envPrefix, DEFAULT_PROFILE.envPrefix);
   assert.equal(p.footerKey, DEFAULT_PROFILE.footerKey);
   assert.equal(p.apiKeyEnv, DEFAULT_PROFILE.apiKeyEnv);
-  assert.deepEqual(resolveProfile(undefined).apiKeyAliases, ["ACI_LLM_API_KEY"]);
 });
 
 test("resolveProfile preserves a branded API-key login", () => {

@@ -12,7 +12,7 @@ can finish the model turn or continue its tool loop.
 
 ```bash
 pi install npm:pi-provider-redpill
-export REDPILL_LLM_API_KEY=...
+export REDPILL_AI_API_KEY=...
 ```
 
 The default ACI gateway is `https://tee.redpill.ai/v1`; override with
