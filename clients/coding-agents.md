@@ -36,7 +36,7 @@ Then use Pi's native login and model picker:
 
 # or
 /login phala
-# approve the Phala Cloud device login
+# choose the Phala Cloud account flow or enter an API key
 
 # wait for the footer to show aci-verified
 /model
@@ -55,7 +55,12 @@ credential store; use `/login` when the key must survive a restart.
 The provider-scoped commands expose ACI-specific state that Pi does not know
 about: settings, attestation, retained receipts, and content-addressed sessions.
 For example, Redpill registers `/redpill-settings`, `/redpill-attestation`,
-`/redpill-receipt`, and `/redpill-session`.
+`/redpill-receipts`, `/redpill-receipt`, and `/redpill-session`.
+
+Pi keeps the latest 32 receipt-bearing wire digests by default. That local audit
+history and the verified connection are cleared when Pi exits; credential,
+catalog, and default-model persistence are independent, and gateway artifacts
+follow the deployment's server-side retention policy.
 
 ## OpenCode
 
@@ -63,17 +68,23 @@ Install a branded provider through OpenCode's native plugin command:
 
 ```sh
 opencode plugin opencode-provider-redpill --global
-opencode providers login --provider redpill
-
-# or
 opencode plugin opencode-provider-phala-cloud --global
-opencode providers login --provider phala
 ```
 
-Omit `--global` for a project installation. The plugin command persists the
-plugin entry in OpenCode configuration, and provider login persists the
-credential in OpenCode's auth store. Do not add a separate provider block: the
-plugin owns the provider, verified fetch, live models, and auth loader.
+Omit `--global` for a project installation, then restart OpenCode. Use its
+native TUI flow:
+
+```text
+/connect
+# select Redpill AI or Phala Cloud and complete login
+/models
+# select a redpill/ or phala/ model
+```
+
+The plugin command persists the plugin entry in OpenCode configuration, and
+`/connect` persists the credential in OpenCode's auth store. Do not add a
+separate provider block: the plugin owns the provider, verified fetch, live
+models, and auth loader.
 
 Redpill currently supports API keys only. Phala Cloud offers both its device
 account flow and an API-key method. The device flow returns the issued
@@ -82,6 +93,24 @@ the plugin does not create a parallel OAuth token lifecycle or credential file.
 
 `REDPILL_AI_API_KEY` and `PHALA_AI_API_KEY` are supported for the current
 process. OpenCode does not copy environment variables into its auth store.
+
+The branded plugins register matching inspection commands:
+
+```text
+/phala-attestation
+/phala-receipts
+/phala-receipt [receipt-id]
+/phala-session <session-id>
+```
+
+Replace `phala` with `redpill` for Redpill. These OpenCode custom commands
+use OpenCode's official prompt-command mechanism to ask the selected model to
+call the provider-scoped read-only inspect tool. The tool itself performs the
+local inspection; no second verifier is involved. Pi can render the same data
+directly because its extension API supports command callbacks. Attestation and
+response receipt verification already happen automatically and fail closed.
+OpenCode keeps the latest 32 receipt-bearing wire digests by default, and that
+local history is cleared when the process exits.
 
 For another ACI gateway, configure the neutral plugin:
 
@@ -102,7 +131,7 @@ For another ACI gateway, configure the neutral plugin:
 }
 ```
 
-Then run `opencode providers login --provider aci` or set `ACI_API_KEY`.
+Then use `/connect` and `/models`, or set `ACI_API_KEY` for the current process.
 The read-only `aci_inspect`, `redpill_aci_inspect`, or `phala_aci_inspect` tool
 reports connection status, attestation, receipt history, receipt audits, and
 session audits without returning prompts, responses, or raw evidence.
@@ -117,7 +146,9 @@ import { connectAci } from "@phala/aci-verifier/runtime";
 
 const aci = await connectAci({
   baseURL: "https://gateway.example.com/v1",
-  acceptedComposeHashes: ["<reviewed-compose-sha256>"],
+  policy: {
+    acceptedComposeHashes: ["<reviewed-compose-sha256>"],
+  },
 });
 
 const response = await aci.fetch("https://gateway.example.com/v1/models");
@@ -128,6 +159,17 @@ runtime-specific TLS adapter; application and framework code should not branch
 on the runtime. Prefer `@phala/aci-provider` when the application also needs
 shared model discovery, capability mapping, receipt history, and response
 completion verification.
+
+## Adding another coding agent
+
+A native adapter needs official host boundaries for a custom `fetch`, provider
+lifecycle, credentials, and dynamic models. Create one `AciProvider`, map its
+`AciModel` catalog into the host model type, inject `AciProvider.fetch`, and
+reuse `inspectAciProvider()` for audit UI. Account-based Phala login maps
+`startPhalaCloudAccountAuthorization()` into the host's native browser/device
+interaction; manual API-key entry and all persistence stay in the host. If the
+host cannot inject a per-provider fetch, changing only its base URL cannot
+provide ACI channel binding.
 
 ## Unsupported hosts
 
@@ -159,6 +201,7 @@ Checked 2026-08-28:
   [custom providers](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/custom-provider.md),
   and [models and thinking](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/keybindings.md#models-and-thinking)
 - [OpenCode providers](https://opencode.ai/docs/providers/) and
-  [plugins](https://opencode.ai/docs/plugins/), source tag
-  [`v1.18.23`](https://github.com/anomalyco/opencode/tree/v1.18.23)
+  [plugins](https://opencode.ai/docs/plugins/), and
+  [commands](https://opencode.ai/docs/commands/), source tag
+  [`v1.18.24`](https://github.com/anomalyco/opencode/tree/v1.18.24)
 - [Bun fetch TLS options](https://bun.com/docs/runtime/networking/fetch)

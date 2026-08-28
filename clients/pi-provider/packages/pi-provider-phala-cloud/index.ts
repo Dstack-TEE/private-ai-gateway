@@ -14,7 +14,7 @@
 import type { ApiKeyCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import {
   resolvePhalaCloudApiBaseURL,
-  startPhalaCloudDeviceAuthorization,
+  startPhalaCloudAccountAuthorization,
 } from "@phala/aci-provider/phala-cloud";
 import { PHALA_CLOUD_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createProvider } from "@phala/pi-provider-aci";
@@ -26,7 +26,7 @@ async function loginPhalaDeviceFlow(
   interaction: ProviderAuthInteraction,
 ): Promise<ApiKeyCredential> {
   const cloudApi = resolvePhalaCloudApiBaseURL();
-  const authorization = await startPhalaCloudDeviceAuthorization({
+  const authorization = await startPhalaCloudAccountAuthorization({
     baseURL: cloudApi,
     clientId: "pi",
     signal: interaction.signal,
@@ -38,11 +38,12 @@ async function loginPhalaDeviceFlow(
     intervalSeconds: authorization.interval,
     expiresInSeconds: authorization.expiresIn,
   });
-  const token = await authorization.poll({
+  const credential = await authorization.complete({
     signal: interaction.signal,
     onProgress: (message) => interaction.notify({ type: "progress", message }),
+    includeAccountMetadata: false,
   });
-  return { type: "api_key", key: token.accessToken };
+  return { type: "api_key", key: credential.apiKey };
 }
 
 export default createProvider({

@@ -24,10 +24,10 @@ hashes, serving mode, session integrity, validity window, evidence digest, and
 configured session pins. A failed audit terminates the model stream before Pi
 can continue its tool loop.
 
-The transport also retains a bounded history of exact wire digests. The
-provider-scoped `/<provider-id>-receipt [id]` command displays or re-verifies a
-recorded exchange on demand; an exchange outside that history cannot receive a
-complete body-hash audit.
+The transport also retains a bounded history of exact wire digests.
+`/<provider-id>-receipts` lists it, and `/<provider-id>-receipt [id]` displays or
+re-verifies the latest or selected exchange. An exchange outside that history
+cannot receive a complete body-hash audit.
 
 ## Install
 
@@ -43,6 +43,7 @@ branded package, use the provider id shown below:
 ```text
 /login redpill
 # or: /login phala
+# Phala offers both its account flow and manual API-key entry
 # wait for the footer to show aci-verified
 /model
 # search for the provider, select a model, and press Ctrl+S
@@ -51,7 +52,9 @@ branded package, use the provider id shown below:
 Pi stores credentials in `~/.pi/agent/auth.json`, dynamic catalogs in
 `~/.pi/agent/models-store.json`, and the saved default in
 `~/.pi/agent/settings.json`. Environment variables are process inputs and are
-not copied into these files.
+not copied into these files. The verified connection and its latest 32
+receipt-bearing wire digests are process-local and are cleared when Pi exits;
+gateway receipt and session artifacts have separate server-side retention.
 
 For a source checkout:
 
@@ -83,12 +86,13 @@ pi -e clients/pi-provider/packages/pi-provider-aci
   list of audited session ids. Request-supplied pins are intersected with this
   local set; a disjoint request fails before network access.
 - Provider-scoped settings, attestation, receipt, and session commands. For the
-  neutral package these are `/aci-settings`, `/aci-attestation`, `/aci-receipt`
-  and `/aci-session`; branded packages replace `aci` with their provider id.
-  The receipt command displays or re-runs the complete recorded-exchange audit,
-  the session command fetches the public transparency artifact and verifies its
-  content address and evidence locally, and the attestation command shows the
-  pinned report, keyset digest, binding, keys, and expiry.
+  neutral package these are `/aci-settings`, `/aci-attestation`, `/aci-receipts`,
+  `/aci-receipt`, and `/aci-session`; branded packages replace `aci` with their
+  provider id. The receipt commands list history or re-run the complete
+  recorded-exchange audit, the session command fetches the public transparency
+  artifact and verifies its content address and evidence locally, and the
+  attestation command shows the pinned report, keyset digest, binding, keys,
+  and expiry.
 
 ## How the verified connection is established
 

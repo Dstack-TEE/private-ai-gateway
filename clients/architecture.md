@@ -85,8 +85,8 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
-| Framework-neutral model, lifecycle, policy, status, receipt and session provider core | Current OpenCode work |
-| Native OpenCode v1 plugin plus RedPill and Phala Cloud distributions | Current OpenCode work |
+| Framework-neutral model, lifecycle, policy, account-auth mapping, and structured inspection core | Current OpenCode work |
+| Native OpenCode v1 plugin, provider-scoped inspection commands, plus RedPill and Phala Cloud distributions | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
@@ -105,6 +105,21 @@ metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
 attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
 should be added when that product endpoint exists, without changing the
 verifier.
+
+The shared provider exposes four host-neutral integration contracts above the
+verified transport:
+
+| Contract | Shared responsibility | Host responsibility |
+| --- | --- | --- |
+| Provider lifecycle | Resolve policy, establish the verified connection, expose one scoped `fetch`, and fail closed | Create and close the provider through native lifecycle hooks |
+| Model catalog | Discover `/v1/models` once and normalize filtering, capabilities, pricing, and thinking format into `AciModel` | Map `AciModel` into the host's model type and let the host persist selection/catalog state |
+| Account authorization | Complete the Phala device grant and return one API key plus optional account metadata | Show the browser/code interaction and persist the key through native auth |
+| ACI inspection | Return structured status, attestation, receipt, and session results and format them for text UIs | Register native commands/tools and render the result |
+
+This is the extension boundary for another coding agent. A new adapter should
+map these contracts into official host APIs. It should not implement
+attestation, receipt verification, device polling, credential storage, or
+another model catalog.
 
 Pi and OpenCode integrate through their official host APIs. Pi owns credentials,
 dynamic-catalog persistence, default-model persistence, and the provider

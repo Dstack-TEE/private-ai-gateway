@@ -1,14 +1,11 @@
 import type { PluginModule } from "@opencode-ai/plugin";
 import type { AciFetch } from "@phala/aci-provider";
 import {
-  fetchPhalaCloudAccount,
   resolvePhalaCloudApiBaseURL,
-  startPhalaCloudDeviceAuthorization,
+  startPhalaCloudAccountAuthorization,
 } from "@phala/aci-provider/phala-cloud";
 import { PHALA_CLOUD_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createOpenCodeAciPlugin, type OpenCodeAciAuthMethod } from "@phala/opencode-provider-aci";
-
-const ACCOUNT_METADATA_TIMEOUT_MS = 5_000;
 
 export interface CreatePhalaCloudDeviceAuthMethodOptions {
   label?: string;
@@ -27,7 +24,7 @@ export function createPhalaCloudDeviceAuthMethod({
     type: "oauth",
     label,
     async authorize() {
-      const authorization = await startPhalaCloudDeviceAuthorization({
+      const authorization = await startPhalaCloudAccountAuthorization({
         baseURL,
         clientId,
         ...(fetch ? { fetch } : {}),
@@ -37,26 +34,11 @@ export function createPhalaCloudDeviceAuthMethod({
         instructions: `Approve the device login with code ${authorization.userCode}`,
         method: "auto",
         async callback() {
-          const token = await authorization.poll();
-          const metadata: Record<string, string> = {};
-          if (token.keyId !== undefined) metadata.keyId = String(token.keyId);
-          try {
-            const account = await fetchPhalaCloudAccount({
-              baseURL,
-              apiKey: token.accessToken,
-              signal: AbortSignal.timeout(ACCOUNT_METADATA_TIMEOUT_MS),
-              ...(fetch ? { fetch } : {}),
-            });
-            if (account.username) metadata.username = account.username;
-            if (account.workspaceName) metadata.workspaceName = account.workspaceName;
-            if (account.workspaceSlug) metadata.workspaceSlug = account.workspaceSlug;
-          } catch {
-            // Account metadata is optional; the issued inference key remains valid.
-          }
+          const credential = await authorization.complete();
           return {
             type: "success",
-            key: token.accessToken,
-            ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+            key: credential.apiKey,
+            ...(credential.metadata ? { metadata: credential.metadata } : {}),
           };
         },
       };

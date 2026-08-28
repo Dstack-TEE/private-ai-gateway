@@ -33,6 +33,14 @@ export {
   type AciSessionCheck,
 } from "./session.ts";
 export {
+  formatAciInspection,
+  inspectAciProvider,
+  type AciInspectionRequest,
+  type AciInspectionResult,
+  type FormatAciInspectionOptions,
+  type InspectAciProviderOptions,
+} from "./inspection.ts";
+export {
   DEFAULT_ACI_PROVIDER_PROFILE,
   resolveAciProviderProfile,
   type AciProviderProfile,

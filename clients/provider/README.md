@@ -3,7 +3,9 @@
 Framework-neutral provider kernel for ACI gateways. It owns verified connection
 lifecycle, live model discovery, TEE-only filtering, model capability mapping,
 bounded receipt history, optional response-completion receipt verification, and
-content-addressed session inspection.
+content-addressed session inspection. It also exposes structured inspection
+results and a shared text formatter, so host adapters do not duplicate ACI
+audit semantics.
 
 Host adapters such as Pi and OpenCode supply their native configuration and UI.
 Applications normally install a host adapter rather than this package directly.
@@ -46,3 +48,19 @@ first. `provider.verifyReceipt()` verifies the latest exchange when no id is
 given, while `provider.verifySession(id)` fetches the public session artifact
 over the pinned connection and validates its content address, API version,
 validity window, and evidence digest.
+
+Host integrations can use one structured inspection contract for status,
+attestation, receipt history, receipt verification, and session verification:
+
+```ts
+import { formatAciInspection, inspectAciProvider } from "@phala/aci-provider";
+
+const result = await inspectAciProvider(provider, { action: "receipt" });
+console.log(formatAciInspection(result));
+```
+
+Phala Cloud adapters also share the account authorization contract. It
+completes the device grant, returns the issued inference API key, and attaches
+optional account metadata. The host remains responsible for presenting the
+browser step and persisting the returned credential through its native auth
+API.

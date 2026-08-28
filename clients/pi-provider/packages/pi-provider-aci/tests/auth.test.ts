@@ -24,3 +24,55 @@ test("native auth prefers stored credentials over the configured API key environ
     source: "PROVIDER_API_KEY",
   });
 });
+
+test("branded account login remains optional alongside the native API-key prompt", async () => {
+  let accountLogins = 0;
+  const auth = createApiKeyAuth(
+    resolveProfile({
+      providerId: "brand",
+      label: "Brand Cloud",
+      apiKeyEnv: "BRAND_API_KEY",
+      apiKeyAuth: {
+        name: "Brand Cloud account",
+        async login() {
+          accountLogins += 1;
+          return { type: "api_key", key: "account-issued" };
+        },
+      },
+    }),
+  );
+  const prompts: unknown[] = [];
+  const signal = new AbortController().signal;
+
+  const account = await auth.login?.({
+    signal,
+    notify() {},
+    async prompt(prompt) {
+      prompts.push(prompt);
+      return "account";
+    },
+  });
+  assert.deepEqual(account, { type: "api_key", key: "account-issued" });
+  assert.equal(accountLogins, 1);
+  assert.deepEqual(prompts[0], {
+    type: "select",
+    message: "Log in to Brand Cloud",
+    options: [
+      { id: "account", label: "Brand Cloud account" },
+      { id: "api-key", label: "Brand Cloud API key" },
+    ],
+  });
+
+  const manual = await auth.login?.({
+    signal,
+    notify() {},
+    async prompt(prompt) {
+      if (prompt.type === "select") return "api-key";
+      assert.equal(prompt.type, "secret");
+      assert.equal(prompt.message, "Enter Brand Cloud API key");
+      return "manual-key";
+    },
+  });
+  assert.deepEqual(manual, { type: "api_key", key: "manual-key" });
+  assert.equal(accountLogins, 1);
+});

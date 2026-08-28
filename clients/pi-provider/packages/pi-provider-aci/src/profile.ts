@@ -18,16 +18,16 @@ import {
 import type { ApiKeyAuth } from "@earendil-works/pi-ai";
 
 export interface AciApiKeyAuthConfig {
-  /** Login option shown by Pi. Defaults to `<label> API key`. */
+  /** Additional account login option shown before the standard API-key option. */
   name?: string;
-  /** Optional branded login flow. The neutral default prompts for an API key. */
+  /** Account flow that returns an API-key credential issued by the provider. */
   login?: ApiKeyAuth["login"];
 }
 
 export interface ProviderProfile extends AciProviderProfile {
   /** Footer/status bar key. */
   footerKey: string;
-  /** Optional branded API-key login flow, such as Phala Cloud device authorization. */
+  /** Optional account flow offered alongside Pi's standard API-key login. */
   apiKeyAuth?: AciApiKeyAuthConfig;
 }
 

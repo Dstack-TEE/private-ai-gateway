@@ -38,7 +38,13 @@ routing and accept the same key. `api.redpill.ai` is the general API endpoint,
 not the default verified transport.
 
 Config: `/redpill-settings` · Attestation status: `/redpill-attestation` · Receipt
-history and audit: `/redpill-receipt` · Session inspection: `/redpill-session`
+history: `/redpill-receipts` · Receipt audit: `/redpill-receipt` · Session
+inspection: `/redpill-session`
+
+Attestation and every response receipt are verified automatically. The commands
+only display the evidence or rerun an audit. The local wire-digest history keeps
+the latest 32 receipt-bearing requests by default and is cleared when Pi exits;
+gateway receipt and session artifacts have their own server-side retention.
 
 Interchangeable with `pi-provider-phala-cloud` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral
