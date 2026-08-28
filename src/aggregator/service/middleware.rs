@@ -368,10 +368,17 @@ impl AciService {
                 let route_id = candidate.route_id.clone();
                 let is_last = index == last_index;
                 let attempt_started = Instant::now();
-                let abandoned = |status: u16| FailedAttempt {
-                    route_id: route_id.clone(),
-                    status,
-                    duration_ms: attempt_started.elapsed().as_millis() as u64,
+                // Mirrored into the journal as well as the local list: the
+                // local list reaches the caller only through the forward
+                // result, which a request cancelled mid-walk never sees.
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                    let attempt = FailedAttempt {
+                        route_id: route_id.clone(),
+                        status,
+                        duration_ms: attempt_started.elapsed().as_millis() as u64,
+                    };
+                    receipt_journal.record_abandoned(attempt.clone());
+                    failed_attempts.push(attempt);
                 };
                 // This candidate is now the one being worked on; a request
                 // abandoned anywhere in the attempt — the verification await
@@ -387,7 +394,7 @@ impl AciService {
                 }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        failed_attempts.push(abandoned(502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -396,7 +403,7 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        failed_attempts.push(abandoned(502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
@@ -434,7 +441,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        failed_attempts.push(abandoned(502));
+                        abandon(&mut failed_attempts, 502);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -507,7 +514,7 @@ impl AciService {
                     let upstream_response = match upstream_response {
                         Ok(response) => response,
                         Err(status) => {
-                            failed_attempts.push(abandoned(status));
+                            abandon(&mut failed_attempts, status);
                             continue;
                         }
                     };
@@ -552,7 +559,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            failed_attempts.push(abandoned(attempt_status));
+                            abandon(&mut failed_attempts, attempt_status);
                             continue;
                         }
                         self.metrics
@@ -662,7 +669,7 @@ impl AciService {
                 let upstream_response = match upstream_response {
                     Ok(response) => response,
                     Err(status) => {
-                        failed_attempts.push(abandoned(status));
+                        abandon(&mut failed_attempts, status);
                         continue;
                     }
                 };
@@ -704,7 +711,7 @@ impl AciService {
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    failed_attempts.push(abandoned(attempt_status));
+                    abandon(&mut failed_attempts, attempt_status);
                     continue;
                 }
 
@@ -733,6 +740,10 @@ impl AciService {
             {
                 capacity_retry_done = true;
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
+                // Nothing is being waited on during the pause; a request abandoned
+                // here must not be pinned on whichever candidate happened to
+                // answer last.
+                receipt_journal.clear_in_flight();
                 tokio::time::sleep(std::time::Duration::from_millis(
                     CAPACITY_RETRY_DELAY_MS + jitter,
                 ))

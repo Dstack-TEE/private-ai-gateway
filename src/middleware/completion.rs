@@ -510,8 +510,8 @@ pub async fn run(
     // identity to report under yet.
     meter.arm(journal.clone());
 
-    // 0 (or unset -> default) disables the heartbeat, and with it the pre-first-
-    // byte early commit below.
+    // An unset interval uses the 10-second default. Only 0 disables the
+    // heartbeat and, with it, the pre-first-byte early commit below.
     let keepalive = match sse_keepalive_ms.unwrap_or(10_000) {
         0 => None,
         ms => Some(Duration::from_millis(ms)),
@@ -1718,11 +1718,21 @@ impl Drop for Meter {
         let Some(journal) = self.armed.take() else {
             return;
         };
+        // Candidates that had already failed before the disconnect are real
+        // route evidence (a 429/502/504 each) and would otherwise vanish with
+        // the cancelled forward — exactly when failover is slow and evidence
+        // matters most.
+        let abandoned = journal.abandoned_attempts();
+        self.failed_attempts(&abandoned, self.is_streaming);
         let in_flight = journal.in_flight();
         self.spawn(PostReport {
             status: 499,
             is_streaming: Some(self.is_streaming),
-            attempt_index: Some(in_flight.as_ref().map_or(0, |a| a.attempt_index)),
+            attempt_index: Some(
+                in_flight
+                    .as_ref()
+                    .map_or(abandoned.len() as u32, |a| a.attempt_index),
+            ),
             selected_route_id: in_flight.map(|a| a.route_id),
             error_message: Some("client disconnected before upstream response".to_string()),
             ..self.base()

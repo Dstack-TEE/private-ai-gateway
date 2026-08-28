@@ -182,6 +182,11 @@ struct MiddlewareReceiptJournalState {
     receipt_id: Option<String>,
     draft: Option<MiddlewareReceiptDraft>,
     in_flight: Option<InFlightAttempt>,
+    /// Candidates the failover walk has abandoned so far, mirrored out of the
+    /// forwarder's own list so a request cancelled mid-walk can still report
+    /// them. Never read on a completed request (the forward result carries
+    /// the authoritative list).
+    abandoned: Vec<FailedAttempt>,
 }
 
 impl MiddlewareReceiptJournal {
@@ -200,6 +205,31 @@ impl MiddlewareReceiptJournal {
             .lock()
             .expect("middleware receipt journal poisoned")
             .in_flight
+            .clone()
+    }
+
+    /// No candidate is being waited on (e.g. the delayed capacity-retry
+    /// pause): a request abandoned now is attributed to no route.
+    pub fn clear_in_flight(&self) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .in_flight = None;
+    }
+
+    pub fn record_abandoned(&self, attempt: FailedAttempt) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .abandoned
+            .push(attempt);
+    }
+
+    pub fn abandoned_attempts(&self) -> Vec<FailedAttempt> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .abandoned
             .clone()
     }
 

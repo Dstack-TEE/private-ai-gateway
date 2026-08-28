@@ -2789,3 +2789,73 @@ async fn in_flight_tracks_the_serving_candidate_across_failover() {
         ),
     }
 }
+
+// First streaming forward reports the gateway's read deadline, every later
+// one never answers — the shape of "A failed fast, B is being waited on".
+struct TimeoutThenHangUpstream {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamBackend for TimeoutThenHangUpstream {
+    fn name(&self) -> &str {
+        "timeout-then-hang-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://timeout-then-hang-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(UpstreamError::Timeout("read timeout".to_string()));
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn mid_failover_disconnect_reports_the_finished_attempts_too() {
+    // Candidate a fails with the gateway's deadline, candidate b is being
+    // waited on when the client disconnects. a's 504 is route evidence that
+    // must not vanish with the cancelled forward; b gets the 499.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_backend(Arc::new(TimeoutThenHangUpstream {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        mw.handle_completion(&service, input),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the handler must still be waiting on candidate b"
+    );
+
+    let failed = wait_for_post(&posts, |r| r["status"].as_i64() == Some(504)).await;
+    assert_eq!(failed["selectedRouteId"], json!("a:gpt-test"));
+    assert_eq!(failed["attemptIndex"], json!(0));
+    let cancelled = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
+    assert_eq!(cancelled["selectedRouteId"], json!("b:gpt-test"));
+    assert_eq!(cancelled["attemptIndex"], json!(1));
+}
