@@ -58,8 +58,6 @@ futures-util = "0.3"
 # timeout below could never arm.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
-# Names the body-cap error type (`LengthLimitError`) that the in-handler
-# request-size limit downcasts to; already in the tree via axum.
 http-body-util = "0.1"
 async-stream = "0.3"
 

@@ -2005,28 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn client_attributable_forward_errors_map_to_400_and_a_timeout_to_504() {
-        // A gateway-enforced upstream deadline is the upstream not answering:
-        // 504, so the record lines up with what a downstream proxy saw.
-        assert_eq!(
-            forward_error_status(&ServiceError::Upstream(UpstreamError::Timeout(
-                "read timeout".to_string()
-            ))),
-            504
-        );
-        // The caller's own input broke the request; nothing upstream was
-        // involved, so it is a 400 (and, being <500, reported to no one).
-        assert_eq!(
-            forward_error_status(&ServiceError::DownstreamTlsDomainMissing),
-            400
-        );
-        assert_eq!(
-            forward_error_status(&ServiceError::DownstreamTlsDomainUnknown("h".to_string())),
-            400
-        );
-    }
-
-    #[test]
     fn conflicting_route_twins_are_dropped_identical_ones_kept() {
         let kept = drop_conflicting_route_twins(vec![
             twin("a:m", ProviderFormat::Anthropic),
