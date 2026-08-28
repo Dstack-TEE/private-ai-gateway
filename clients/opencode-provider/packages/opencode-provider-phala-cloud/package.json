@@ -60,9 +60,7 @@
     "@opencode-ai/plugin": ">=1.18.23 <2"
   },
   "engines": {
-    "bun": ">=1.4.0"
-  },
-  "opencode": {
-    "type": "plugin"
+    "bun": ">=1.4.0",
+    "opencode": ">=1.18.23 <2"
   }
 }
