@@ -1149,125 +1149,128 @@ struct Meter {
     armed: Option<MiddlewareReceiptJournal>,
 }
 
-/// Account one non-Stream forward result to the usage pipeline and return the
-/// client-facing status for it. Mirrors the terminal reporting the immediate
-/// match arms do; shared with the early-committed streaming path, which cannot
-/// take those arms because it has already sent 200 headers and delivers the
-/// failure in-band.
-fn account_forward_failure(
-    meter: &mut Meter,
-    request_id: &str,
-    model: &str,
-    started: Instant,
-    is_streaming: bool,
-    surface: Surface,
-    received_body: &[u8],
-    result: Result<MiddlewareForwardResult, ServiceError>,
-) -> u16 {
-    match result {
-        Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
-            let (status, _) = errors::normalize_upstream_error_parts(
-                surface,
-                forward.error.upstream_status,
-                &forward.error.upstream_body,
-                received_body,
-                Some(request_id),
-            );
-            let attempt_index = forward.failed_attempts.len() as u32;
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    request_id,
-                    model,
-                    "upstream_error_stream",
-                    status,
-                    forward.error.upstream_status,
-                    &forward.selected_route,
-                    attempt_index,
-                    started,
-                    &detail_snippet(&forward.error.upstream_body),
-                );
-            }
-            meter.failed_attempts(&forward.failed_attempts, is_streaming);
-            meter.upstream_error(
-                reported_status(
-                    status,
+impl Meter {
+    /// Account one non-Stream forward result to the usage pipeline and return
+    /// the client-facing status for it. Mirrors the terminal reporting the
+    /// immediate match arms do; used by the early-committed streaming path,
+    /// which cannot take those arms because it has already sent 200 headers
+    /// and delivers the failure in-band.
+    fn account_forward_failure(
+        &mut self,
+        surface: Surface,
+        received_body: &[u8],
+        result: Result<MiddlewareForwardResult, ServiceError>,
+    ) -> u16 {
+        let meter = self;
+        let request_id = &meter.request_id.clone();
+        let model = &meter.request_model.clone();
+        let started = meter.started;
+        let is_streaming = meter.is_streaming;
+        match result {
+            Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
+                let (status, _) = errors::normalize_upstream_error_parts(
+                    surface,
                     forward.error.upstream_status,
                     &forward.error.upstream_body,
-                ),
-                attempt_index,
-                &forward.selected_route,
-                errors::client_safe_error_message(&forward.error.upstream_body),
-            );
-            status
-        }
-        Ok(MiddlewareForwardResult::AllFailed(forward)) => {
-            let status = forward_error_status(&forward.error);
-            meter.failed_attempts(&forward.failed_attempts, is_streaming);
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    request_id,
-                    model,
-                    "all_candidates_failed",
-                    status,
-                    0,
-                    "",
-                    forward.failed_attempts.len() as u32,
-                    started,
-                    &detail_snippet(forward.error.to_string().as_bytes()),
+                    received_body,
+                    Some(request_id),
                 );
-            }
-            if status >= 500 {
-                meter.gateway_failure_at(
-                    forward.failed_attempts.len() as u32,
-                    None,
-                    status,
-                    forward_error_source(&forward.error),
-                    &forward.error.to_string(),
-                    is_streaming,
+                let attempt_index = forward.failed_attempts.len() as u32;
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "upstream_error_stream",
+                        status,
+                        forward.error.upstream_status,
+                        &forward.selected_route,
+                        attempt_index,
+                        started,
+                        &detail_snippet(&forward.error.upstream_body),
+                    );
+                }
+                meter.failed_attempts(&forward.failed_attempts, is_streaming);
+                meter.upstream_error(
+                    reported_status(
+                        status,
+                        forward.error.upstream_status,
+                        &forward.error.upstream_body,
+                    ),
+                    attempt_index,
+                    &forward.selected_route,
+                    errors::client_safe_error_message(&forward.error.upstream_body),
                 );
-            } else {
-                meter.disarm();
+                status
             }
-            status
-        }
-        Err(err) => {
-            let status = forward_error_status(&err);
-            if should_log_failure(status) {
-                log_generated_outcome(
-                    request_id,
-                    model,
-                    "forward_failed",
-                    status,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(err.to_string().as_bytes()),
-                );
+            Ok(MiddlewareForwardResult::AllFailed(forward)) => {
+                let status = forward_error_status(&forward.error);
+                meter.failed_attempts(&forward.failed_attempts, is_streaming);
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "all_candidates_failed",
+                        status,
+                        0,
+                        "",
+                        forward.failed_attempts.len() as u32,
+                        started,
+                        &detail_snippet(forward.error.to_string().as_bytes()),
+                    );
+                }
+                if status >= 500 {
+                    meter.gateway_failure_at(
+                        forward.failed_attempts.len() as u32,
+                        None,
+                        status,
+                        forward_error_source(&forward.error),
+                        &forward.error.to_string(),
+                        is_streaming,
+                    );
+                } else {
+                    meter.disarm();
+                }
+                status
             }
-            if status >= 500 {
+            Err(err) => {
+                let status = forward_error_status(&err);
+                if should_log_failure(status) {
+                    log_generated_outcome(
+                        request_id,
+                        model,
+                        "forward_failed",
+                        status,
+                        0,
+                        "",
+                        0,
+                        started,
+                        &detail_snippet(err.to_string().as_bytes()),
+                    );
+                }
+                if status >= 500 {
+                    meter.gateway_failure(
+                        status,
+                        forward_error_source(&err),
+                        &err.to_string(),
+                        is_streaming,
+                    );
+                } else {
+                    meter.disarm();
+                }
+                status
+            }
+            // A streaming request never resolves to a buffered forward, and the
+            // Stream case is handled by the caller; an unexpected value is recorded
+            // as a gateway failure rather than dropped.
+            Ok(MiddlewareForwardResult::Forwarded(_)) | Ok(MiddlewareForwardResult::Stream(_)) => {
                 meter.gateway_failure(
-                    status,
-                    forward_error_source(&err),
-                    &err.to_string(),
+                    502,
+                    ErrorSource::Gateway,
+                    "unexpected forward result on the streaming path",
                     is_streaming,
                 );
-            } else {
-                meter.disarm();
+                502
             }
-            status
-        }
-        // A streaming request never resolves to a buffered forward, and the
-        // Stream case is handled by the caller; an unexpected value is recorded
-        // as a gateway failure rather than dropped.
-        Ok(MiddlewareForwardResult::Forwarded(_)) | Ok(MiddlewareForwardResult::Stream(_)) => {
-            meter.gateway_failure(
-                502,
-                ErrorSource::Gateway,
-                "unexpected forward result on the streaming path",
-                is_streaming,
-            );
-            502
         }
     }
 }
@@ -1306,7 +1309,6 @@ fn build_early_streaming_response(
     let late_failure_control = control.clone();
 
     let stream_request_id = request_id.clone();
-    let stream_model = model.clone();
     let stream_abort = downstream_abort.clone();
     let stream_settled = meter_settled.clone();
     let body_stream = async_stream::stream! {
@@ -1332,16 +1334,8 @@ fn build_early_streaming_response(
                 }
             }
             other => {
-                let status = account_forward_failure(
-                    &mut meter,
-                    &stream_request_id,
-                    &stream_model,
-                    started,
-                    true,
-                    surface,
-                    received_body.as_slice(),
-                    other,
-                );
+                let status =
+                    meter.account_forward_failure(surface, received_body.as_slice(), other);
                 yield Ok(Bytes::from(errors::stream_error_event(
                     protocol,
                     status,
