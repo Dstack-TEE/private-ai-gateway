@@ -23,8 +23,8 @@ import type {
   ExtensionCommandContext,
   ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import * as piAi from "@earendil-works/pi-ai";
 import type { Model, Provider } from "@earendil-works/pi-ai";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
 import { createAciProvider, type AciProvider } from "@phala/aci-provider";
 import os from "node:os";
@@ -68,6 +68,36 @@ interface AciRuntimeState {
 interface AciConnectionSetup {
   configKey: string;
   promise: Promise<void>;
+}
+
+type OpenAICompletionsApi = ReturnType<
+  typeof import("@earendil-works/pi-ai/compat").openAICompletionsApi
+>;
+
+function isOpenAICompletionsApi(api: unknown): api is OpenAICompletionsApi {
+  return (
+    typeof api === "object" &&
+    api !== null &&
+    "stream" in api &&
+    typeof api.stream === "function" &&
+    "streamSimple" in api &&
+    typeof api.streamSimple === "function"
+  );
+}
+
+function openAICompletionsApi(): OpenAICompletionsApi {
+  if (!("openAICompletionsApi" in piAi)) {
+    throw new Error("Pi does not provide the OpenAI Completions API");
+  }
+  const factory = piAi.openAICompletionsApi;
+  if (typeof factory !== "function") {
+    throw new Error("Pi provides an invalid OpenAI Completions API factory");
+  }
+  const api: unknown = factory();
+  if (!isOpenAICompletionsApi(api)) {
+    throw new Error("Pi provides an invalid OpenAI Completions API");
+  }
+  return api;
 }
 
 function modelsFromState(state: AciRuntimeState) {
