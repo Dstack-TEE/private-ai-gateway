@@ -1,6 +1,6 @@
 from .types import AttestationReport, VerificationResult
 from .sdk import TeeVerifier
-from .providers import TinfoilProvider, RedpillProvider, NearaiProvider
+from .providers import TinfoilProvider, RedPillProvider, NearaiProvider
 from .verifiers import IntelTdxVerifier, NvidiaGpuVerifier
 
 __all__ = [
@@ -8,7 +8,7 @@ __all__ = [
     "VerificationResult",
     "TeeVerifier",
     "TinfoilProvider",
-    "RedpillProvider",
+    "RedPillProvider",
     "NearaiProvider",
     "IntelTdxVerifier",
     "NvidiaGpuVerifier",

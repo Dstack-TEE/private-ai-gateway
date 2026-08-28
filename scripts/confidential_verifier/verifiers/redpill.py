@@ -13,11 +13,11 @@ from ..types import VerificationResult
 logger = logging.getLogger(__name__)
 
 
-class RedpillVerifier(Verifier):
+class RedPillVerifier(Verifier):
     """
-    Verifier for Redpill models.
+    Verifier for RedPill models.
 
-    Redpill models are Phala Cloud apps, so this verifier uses PhalaCloudVerifier
+    RedPill models are Phala Cloud apps, so this verifier uses PhalaCloudVerifier
     internally to verify the dstack TEE environment (App/KMS/Gateway components).
     Additionally verifies nvidia GPU attestation and report data binding.
     """
@@ -29,7 +29,7 @@ class RedpillVerifier(Verifier):
     def _extract_report_data_from_quote(intel_quote: str) -> Optional[str]:
         """
         Extract report_data (64 bytes) from TDX quote for nonce/address binding check.
-        The Redpill intel_quote contains the nonce/address that was passed to the API.
+        The RedPill intel_quote contains the nonce/address that was passed to the API.
         """
         try:
             quote_bytes = bytes.fromhex(intel_quote)
@@ -42,7 +42,7 @@ class RedpillVerifier(Verifier):
 
     @staticmethod
     def get_redpill_models() -> List[Dict[str, Any]]:
-        """Fetches running models from Redpill API."""
+        """Fetches running models from RedPill API."""
         url = "https://api.redpill.ai/v1/models"
         try:
             response = requests.get(url)
@@ -50,11 +50,11 @@ class RedpillVerifier(Verifier):
             data = response.json()
             return data.get("data", [])
         except Exception as e:
-            logger.warning(f"Failed to fetch Redpill models: {e}")
+            logger.warning(f"Failed to fetch RedPill models: {e}")
             return []
 
     def _get_model_info(self, model_id: str) -> Optional[Dict[str, Any]]:
-        """Look up the model info for a given Redpill model_id."""
+        """Look up the model info for a given RedPill model_id."""
         models = self.get_redpill_models()
         for model in models:
             if model.get("id") == model_id:
@@ -62,7 +62,7 @@ class RedpillVerifier(Verifier):
         return None
 
     def _get_app_id_for_model(self, model_id: str) -> Optional[str]:
-        """Look up the Phala app_id for a given Redpill model_id."""
+        """Look up the Phala app_id for a given RedPill model_id."""
         model = self._get_model_info(model_id)
         if model:
             return model.get("metadata", {}).get("appid")
@@ -70,10 +70,10 @@ class RedpillVerifier(Verifier):
 
     async def verify(self, report_data: Dict[str, Any]) -> VerificationResult:
         """
-        Verify a Redpill model attestation report.
+        Verify a RedPill model attestation report.
 
         Args:
-            report_data: Raw attestation report from Redpill API containing:
+            report_data: Raw attestation report from RedPill API containing:
                 - model_id or model: The model identifier
                 - intel_quote: TDX quote (optional, for report data verification)
                 - nvidia_payload: GPU attestation payload
@@ -179,7 +179,7 @@ class RedpillVerifier(Verifier):
                 # NearAI verifier expects the raw data from NearAI API
                 raw_data = report_data.get("raw") or report_data
 
-                # For NearAI resold via Redpill, we only care about the first model attestation
+                # For NearAI resold via RedPill, we only care about the first model attestation
                 if isinstance(raw_data, dict) and "model_attestations" in raw_data:
                     model_atts = raw_data.get("model_attestations", [])
                     if len(model_atts) > 1:
@@ -234,12 +234,12 @@ class RedpillVerifier(Verifier):
                 if not result.model_verified:
                     return result
 
-                # 4. Verify report data binding (nonce/address) against the Redpill intel_quote
+                # 4. Verify report data binding (nonce/address) against the RedPill intel_quote
                 request_nonce = report_data.get("request_nonce")
                 signing_address = report_data.get("signing_address")
                 intel_quote = report_data.get("intel_quote")
 
-                # Extract report_data from the Redpill intel_quote
+                # Extract report_data from the RedPill intel_quote
                 report_data_hex = None
                 if intel_quote:
                     report_data_hex = self._extract_report_data_from_quote(intel_quote)
@@ -278,7 +278,7 @@ class RedpillVerifier(Verifier):
             )
 
         except Exception as e:
-            logger.exception("Redpill verification failed")
+            logger.exception("RedPill verification failed")
             # Try to get model provider from model_info if available
             model_provider = None
             try:

@@ -6,7 +6,7 @@ with **attested TLS (SPKI) pinning** as the security control.
 This is the neutral Pi adapter. Branded distributions add their identity on top and
 publish their own npm packages:
 
-- [`pi-provider-redpill`](https://www.npmjs.com/package/pi-provider-redpill) — Redpill AI
+- [`pi-provider-redpill`](https://www.npmjs.com/package/pi-provider-redpill) — RedPill AI
 - [`pi-provider-phala-cloud`](https://www.npmjs.com/package/pi-provider-phala-cloud) — Phala Cloud
 
 Both are thin skins over this package (`createProvider` with an instance-scoped

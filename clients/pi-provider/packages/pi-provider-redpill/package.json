@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-redpill",
   "version": "0.6.0",
-  "description": "Redpill AI for Pi with verified ACI transport and per-response receipt verification",
+  "description": "RedPill AI for Pi with verified ACI transport and per-response receipt verification",
   "keywords": [
     "ai-provider",
     "attestation",

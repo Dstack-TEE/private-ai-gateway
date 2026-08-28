@@ -9,7 +9,7 @@ audit semantics.
 
 Host adapters such as Pi and OpenCode supply their native configuration and UI.
 Applications normally install a host adapter rather than this package directly.
-Shared Redpill and Phala Cloud profiles are exported from
+Shared RedPill and Phala Cloud profiles are exported from
 `@phala/aci-provider/profiles`. Phala Cloud's account API and device
 authorization flow are isolated under `@phala/aci-provider/phala-cloud`; they
 are not part of the ACI protocol or verifier.
@@ -75,5 +75,5 @@ const accountAuth = createPhalaCloudAccountAuth({
 ```
 
 This product authentication contract is separate from ACI verification.
-Redpill currently has no account authorization implementation and remains
+RedPill currently has no account authorization implementation and remains
 API-key-only.

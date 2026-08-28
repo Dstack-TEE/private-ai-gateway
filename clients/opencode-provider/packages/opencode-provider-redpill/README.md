@@ -12,14 +12,14 @@ pickers:
 
 ```text
 /connect
-# search for Redpill AI and enter the API key
+# search for RedPill AI and enter the API key
 /models
 # search for redpill/ and select a model
 ```
 
 OpenCode persists the plugin entry and credential in its own configuration and
 auth store. `REDPILL_AI_API_KEY` is also supported for the current process, but
-environment variables are not copied into the auth store. Redpill does not
+environment variables are not copied into the auth store. RedPill does not
 currently expose account OAuth. Select `redpill/<model-id>` in OpenCode. The
 plugin discovers current TEE models and sends
 inference only through an attested, TLS-pinned connection. Every response

@@ -25,7 +25,7 @@ def verify_report_data(
         report_data[0:32] = SHA256(signing_address || tls_cert_fingerprint)
         report_data[32:64] = nonce (32 bytes)
 
-    This is a shared helper used by dstack-based verifiers (Redpill, NearAI).
+    This is a shared helper used by dstack-based verifiers (RedPill, NearAI).
 
     Args:
         tdx_report_data_hex: The 64-byte report_data from TDX quote (hex string)

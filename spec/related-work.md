@@ -11,7 +11,7 @@ comparison:
    intended for independent implementation.
 2. **Per-request signed receipts are rare.** Big-tech systems bind responses
    only implicitly to an attested session; among public APIs, only the
-   dstack lineage (Phala vllm-proxy, NEAR AI, 0G, Redpill) and Nillion sign
+   dstack lineage (Phala vllm-proxy, NEAR AI, 0G, RedPill) and Nillion sign
    individual responses. ACI's structured receipt — event log, upstream
    verification, session references — has no published counterpart.
 
