@@ -136,7 +136,7 @@ NODE
       "$repo_root/clients/node_modules/.bin/opencode" models "$provider_id"
   )"
 
-  if ! rg -q "^$provider_id/" <<<"$models"; then
+  if ! grep -q "^$provider_id/" <<<"$models"; then
     echo "OpenCode did not load any $provider_id models" >&2
     exit 1
   fi
