@@ -45,6 +45,9 @@ pub(super) async fn forward_to_backend(
     // still needs them to finalize the receipt the error response cites.
     let user_model = input.context.user_model.clone();
     let requester = input.requester.clone();
+    // Kept out of `context` moves below: the timeout envelope cites it on the
+    // surfaces whose shape carries a request id.
+    let request_id = input.context.request_id.clone();
     if input.stream {
         let request_id = input.context.request_id.clone();
         let result = service
@@ -130,7 +133,11 @@ pub(super) async fn forward_to_backend(
                 routing_error_response(message)
             }
             Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
-                gateway_timeout_response(message)
+                gateway_timeout_response(
+                    surface_for_path(input.endpoint_path),
+                    Some(&request_id),
+                    message,
+                )
             }
             Err(other) => internal_error_response(other),
         };
@@ -179,9 +186,11 @@ pub(super) async fn forward_to_backend(
         Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
             routing_error_response(message)
         }
-        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
-            gateway_timeout_response(message)
-        }
+        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
+            surface_for_path(input.endpoint_path),
+            Some(&request_id),
+            message,
+        ),
         Err(other) => internal_error_response(other),
     }
 }

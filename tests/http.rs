@@ -1594,3 +1594,39 @@ async fn direct_mode_upstream_timeout_is_a_504() {
     let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(value["error"]["type"], "timeout_error");
 }
+
+#[tokio::test]
+async fn direct_messages_timeout_is_an_anthropic_504() {
+    // The /v1/messages surface answers in the Anthropic envelope shape — a
+    // top-level "type":"error" carrying the request id — not the OpenAI shape.
+    let keys = Arc::new(StaticKeyProvider::default());
+    let svc = AciService::new(
+        keys,
+        Arc::new(StubQuoter::default()),
+        Arc::new(TimingOutStubUpstream),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let app = build_router(Arc::new(svc));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["error"]["type"], "timeout_error");
+    assert!(value["request_id"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("req_"));
+}

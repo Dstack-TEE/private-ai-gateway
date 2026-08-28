@@ -35,9 +35,10 @@ pub struct MiddlewareConfig {
     /// and heartbeated until the upstream responds; a later forward failure
     /// arrives as the surface's in-band error event. Off by default because a
     /// response committed this early carries no `x-receipt-id` header (spec
-    /// §5.2 puts a receipt on every inference response; here the receipt is
-    /// still issued and fetchable by the response id, but header-driven
-    /// clients cannot see it). Requests carrying an ACI constraint
+    /// §5.2 puts a receipt on every inference response): when the upstream
+    /// does answer and the stream finalizes, the receipt is issued and
+    /// fetchable by the response id, but an early-committed stream whose
+    /// forward fails never drafts one. Requests carrying an ACI constraint
     /// (`provider.aci_verified` / pinned session ids) are never committed
     /// early even when enabled, preserving refusal-receipt semantics.
     #[serde(default)]

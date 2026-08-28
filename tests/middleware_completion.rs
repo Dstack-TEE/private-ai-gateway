@@ -2712,3 +2712,88 @@ async fn aci_constrained_requests_are_never_committed_early() {
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
     assert_eq!(report["selectedRouteId"], json!("tee-hang:gpt-test"));
 }
+
+// First streaming forward times out, every later one serves a normal SSE 200 —
+// the shape of a failover where the serving candidate is not the first.
+struct FailoverScriptedUpstream {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamBackend for FailoverScriptedUpstream {
+    fn name(&self) -> &str {
+        "failover-scripted-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://failover-scripted-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Transport("buffered path unused".to_string()))
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Transport("unused".to_string()))
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(UpstreamError::Timeout("read timeout".to_string()));
+        }
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers,
+            body: Box::pin(futures_util::stream::once(async {
+                Ok(Bytes::from("data: [DONE]\n\n"))
+            })),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn in_flight_tracks_the_serving_candidate_across_failover() {
+    // The late-finalizer failure report reads the serving candidate back from
+    // the journal; if `in_flight` were stuck on attempt 0, that report would
+    // collide with the first attempt's own row under the control plane's
+    // (request_id, attempt, status) dedupe and be dropped.
+    let service = build_service_with_backend(Arc::new(FailoverScriptedUpstream {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let journal = MiddlewareReceiptJournal::default();
+    let result = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("a:gpt-test"), plain_candidate("b:gpt-test")],
+            true,
+            journal.clone(),
+        )
+        .await
+        .unwrap();
+    match result {
+        MiddlewareForwardResult::Stream(stream) => {
+            assert_eq!(
+                attempts(&stream.failed_attempts),
+                vec![("a:gpt-test".to_string(), 504)]
+            );
+            let in_flight = journal.in_flight().expect("serving candidate published");
+            assert_eq!(in_flight.route_id, "b:gpt-test");
+            assert_eq!(
+                in_flight.attempt_index, 1,
+                "a late report keyed on attempt 0 would collide with the failed attempt's row"
+            );
+        }
+        other => panic!(
+            "second candidate must serve the stream, got {}",
+            match other {
+                MiddlewareForwardResult::Forwarded(_) => "Forwarded",
+                MiddlewareForwardResult::UpstreamError(_) => "UpstreamError",
+                MiddlewareForwardResult::AllFailed(_) => "AllFailed",
+                MiddlewareForwardResult::Stream(_) => unreachable!(),
+            }
+        ),
+    }
+}

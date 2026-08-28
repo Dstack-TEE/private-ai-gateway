@@ -147,15 +147,27 @@ pub(super) fn error_response(
 }
 
 /// A deadline the gateway's own upstream client enforced expired before the
-/// upstream answered: 504, so the recorded and client-facing status say what
-/// actually happened instead of a generic internal error.
-pub(super) fn gateway_timeout_response(message: String) -> Response {
+/// upstream answered: 504, in the requesting surface's envelope shape, so the
+/// recorded and client-facing status say what actually happened instead of a
+/// generic internal error.
+pub(super) fn gateway_timeout_response(
+    surface: crate::middleware::errors::Surface,
+    request_id: Option<&str>,
+    message: String,
+) -> Response {
     tracing::warn!(error = %message, "upstream timed out");
-    error_response(
-        StatusCode::GATEWAY_TIMEOUT,
-        "timeout_error",
-        "The upstream provider timed out",
-    )
+    let body = crate::middleware::errors::envelope_bytes(
+        surface,
+        crate::middleware::errors::error_type(surface, 504),
+        crate::middleware::errors::upstream_message(504),
+        request_id,
+    );
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::GATEWAY_TIMEOUT, headers, body).into_response()
 }
 
 pub(super) fn internal_error_response(err: ServiceError) -> Response {
