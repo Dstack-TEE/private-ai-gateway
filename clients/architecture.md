@@ -63,7 +63,7 @@ flowchart LR
   channel -->|verified, SPKI-pinned TLS| api
   backend --> provider[TEE or private model provider]:::external
 
-  pipeline[Redpill and Phala release pipeline<br/>publish reviewed compose hashes<br/>product work still pending]:::pending
+  pipeline[RedPill and Phala release pipeline<br/>publish reviewed compose hashes<br/>product work still pending]:::pending
   pipeline -. supplies policy .-> release
 ```
 
@@ -97,12 +97,12 @@ were hardened in place:
 | Direct OpenCode integration through its provider `options.fetch` hook | Current refactor |
 | Fail-closed OpenCode provider ownership, live model discovery, end-of-stream receipt audit and read-only inspection tool | Current OpenCode work |
 | Coding-agent integration guide around the shared transport boundary | Current refactor |
-| Reviewed compose publication from Redpill and Phala release pipelines | Pending product work |
+| Reviewed compose publication from RedPill and Phala release pipelines | Pending product work |
 
-Account authentication is outside the ACI trust protocol. Redpill adapters
+Account authentication is outside the ACI trust protocol. RedPill adapters
 currently accept API keys only. Phala Cloud's device authorization and account
 metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
-attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
+attached only by the Phala Cloud adapters. A future RedPill Clerk OAuth flow
 should be added when that product endpoint exists, without changing the
 verifier.
 
@@ -122,9 +122,9 @@ attestation, receipt verification, device polling, credential storage, or
 another model catalog.
 
 Account authorization is a product capability, not part of ACI. Phala Cloud
-currently implements `AccountApiKeyAuth` with its device grant. Redpill does
+currently implements `AccountApiKeyAuth` with its device grant. RedPill does
 not advertise account authorization, so both hosts expose only its API-key
-method. A future Redpill Clerk integration should implement the same shared
+method. A future RedPill Clerk integration should implement the same shared
 contract once its real authorization endpoints exist; Pi and OpenCode adapters
 will not need brand-specific login code.
 
@@ -186,7 +186,7 @@ hash is the value bound into RTMR3 and is therefore the value a verifier pins.
 Clients obtain accepted compose hashes from authenticated release metadata.
 
 The neutral SDK may intentionally use hardware-bound mode for self-hosted and
-development deployments. A production Redpill or Phala branded client should
+development deployments. A production RedPill or Phala branded client should
 ship or securely obtain a reviewed compose allowlist and use reviewed-release
 mode by default.
 
@@ -205,7 +205,7 @@ deployment release process must still close the trust loop:
 
 The repository can publish all eight npm packages in dependency order from a
 signed GitHub Release. Publishing alone does not create a reviewed-release
-claim: the Redpill and Phala deployment pipelines still need to supply the
+claim: the RedPill and Phala deployment pipelines still need to supply the
 independently reviewed compose hashes consumed by the branded policies.
 
 The local agent sees plaintext prompts and responses. This architecture covers

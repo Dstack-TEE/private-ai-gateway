@@ -2,7 +2,7 @@
 
 Attested AI for Pi, powered by [private-ai-gateway].
 
-A thin, Redpill-branded distribution of the vendor-neutral
+A thin, RedPill-branded distribution of the vendor-neutral
 [`@phala/pi-provider-aci`](https://www.npmjs.com/package/@phala/pi-provider-aci): standard
 chat plus **attested TLS (SPKI) pinning** — the prompt and reply are readable
 only by the attested workload. Every response receipt is verified before Pi
@@ -20,7 +20,7 @@ connection, then save a default model from the native model picker:
 
 ```text
 /login redpill
-# paste the Redpill API key and wait for the footer to show aci-verified
+# paste the RedPill API key and wait for the footer to show aci-verified
 /model
 # search for redpill/, select a model, and press Ctrl+S
 ```

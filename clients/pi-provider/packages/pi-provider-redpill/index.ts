@@ -1,9 +1,9 @@
 /**
- * pi-provider-redpill — Redpill AI branded distribution of the
+ * pi-provider-redpill — RedPill AI branded distribution of the
  * vendor-neutral private-ai-gateway (ACI) Pi provider.
  *
  * This package is a thin skin: it imports the core `@phala/pi-provider-aci` and
- * registers it with the Redpill identity (provider id, endpoint, env vars).
+ * registers it with the RedPill identity (provider id, endpoint, env vars).
  * All protocol logic — attestation, TLS SPKI pinning,
  * model discovery — lives in the core.
  *

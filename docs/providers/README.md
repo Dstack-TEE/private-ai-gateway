@@ -33,11 +33,11 @@ merged. The framework and cross-cutting reviews:
 As observed on 2026-07-13, Private AI Gateway does not guarantee per-tenant
 prefix-cache partitioning for the active Kimi-K2.6 providers. The gateway
 preserves a caller's `cache_salt` but does not derive one from the authenticated
-Redpill tenant.
+RedPill tenant.
 
 - Tinfoil [replaces `cache_salt`](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.118/cache_salt.go)
-  with a value derived from Redpill's shared upstream credential. The gateway
-  does not set `user_cache_secret`, so Redpill tenants share one namespace.
+  with a value derived from RedPill's shared upstream credential. The gateway
+  does not set `user_cache_secret`, so RedPill tenants share one namespace.
 - Chutes passes `cache_salt` to vLLM but does not generate it. Unsalted requests
   share the serving instance's namespace.
 
@@ -45,7 +45,7 @@ Tinfoil's behavior is attestation-backed. Chutes configuration is control-plane
 evidence and is not bound by its current attestation. The intended interface is
 caller-controlled: preserve `cache_salt` for Chutes and translate it to
 `user_cache_secret` for Tinfoil. The gateway should not derive or override the
-partition from Redpill tenant identity.
+partition from RedPill tenant identity.
 
 ## The shared verification model
 

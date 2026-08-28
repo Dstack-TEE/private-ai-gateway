@@ -19,8 +19,8 @@ class PhalaCloudVerifier(Verifier):
     Internal verifier for Phala Cloud Apps.
     Verifies dstack TEE environment (App/KMS/Gateway components) and optionally GPU.
 
-    This is an internal class used by RedpillVerifier. Users should call
-    RedpillVerifier directly for Redpill model verification.
+    This is an internal class used by RedPillVerifier. Users should call
+    RedPillVerifier directly for RedPill model verification.
     """
 
     def __init__(

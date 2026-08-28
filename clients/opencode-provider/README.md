@@ -8,7 +8,7 @@
   supplies the Phala Cloud endpoint and identity.
 
 Both branded packages support direct API keys. Only the Phala Cloud package
-adds its device login; Redpill does not currently expose account OAuth. All
+adds its device login; RedPill does not currently expose account OAuth. All
 packages use OpenCode's v1 server-plugin manifest and run on Bun. The provider
 is created by the plugin, so plugin installation or initialization failure
 cannot leave a separately configured ordinary HTTPS provider behind.
@@ -20,9 +20,9 @@ opencode plugin opencode-provider-redpill --global
 opencode plugin opencode-provider-phala-cloud --global
 ```
 
-Restart OpenCode after installing. Run `/connect`, select Redpill AI or Phala
+Restart OpenCode after installing. Run `/connect`, select RedPill AI or Phala
 Cloud, then run `/models` and select a `redpill/` or `phala/` model. Phala Cloud
-offers both its account device flow and manual API-key entry; Redpill currently
+offers both its account device flow and manual API-key entry; RedPill currently
 offers API-key entry. OpenCode persists the plugin entry and credential in its
 own stores. No hand-written provider block or adapter-owned credential file is
 required.

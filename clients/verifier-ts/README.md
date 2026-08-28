@@ -165,7 +165,7 @@ await aci.close();
 
 Install the two ESM packages with `npm install openai @phala/aci-verifier`.
 Run the same source under Node 20.18.1+ or Bun 1.4.0+; the `/runtime` export
-selects the matching pinned transport. Set `ACI_API_KEY` to the Redpill key.
+selects the matching pinned transport. Set `ACI_API_KEY` to the RedPill key.
 The SDK adds it to the inference request; `aci.fetch` retains that request's
 authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.

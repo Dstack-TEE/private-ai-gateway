@@ -154,7 +154,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   baseline commit in `VENDOR.md`.
 - Deferred: standalone / self-hosted Phala dstack-vLLM node verification through the
   deep verifier and the live harness. The bridge today only dispatches
-  `tinfoil`/`near-ai`/`chutes`, and the vendored verifier's Phala/Redpill paths go
+  `tinfoil`/`near-ai`/`chutes`, and the vendored verifier's Phala/RedPill paths go
   through the hosted `api.redpill.ai` / `cloud-api.phala.network` endpoints, not a raw
   node's `/v1/attestation/report`. The gateway already verifies first-party
   ACI-service workers natively in Rust (`AciServiceUpstreamVerifier`); the follow-up is a `phala`
@@ -200,7 +200,7 @@ backend-owned `response.received`, frontend-owned `response.returned`).
   hashes. Verifiers should not compare `request.received.body_hash` with the
   original encrypted HTTP body.
 - Write neutral docs with `{API_KEY_ENV_VAR}` and product wrappers that render
-  `REDPILL_AI_API_KEY` for Redpill and `PHALA_AI_API_KEY` for Phala.
+  `REDPILL_AI_API_KEY` for RedPill and `PHALA_AI_API_KEY` for Phala.
 
 ### P1: Local Backend Proxy Mode
 

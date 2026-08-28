@@ -3,15 +3,15 @@ import time
 import asyncio
 from typing import List, Optional
 from .types import AttestationReport, VerificationResult
-from .providers import TinfoilProvider, RedpillProvider, NearaiProvider, ChutesProvider
-from .verifiers import NvidiaGpuVerifier, NearAICloudVerifier, RedpillVerifier, ChutesVerifier
+from .providers import TinfoilProvider, RedPillProvider, NearaiProvider, ChutesProvider
+from .verifiers import NvidiaGpuVerifier, NearAICloudVerifier, RedPillVerifier, ChutesVerifier
 
 
 class TeeVerifier:
     def __init__(self, chutes_api_key: Optional[str] = None):
         self.providers = {
             "tinfoil": TinfoilProvider(),
-            "redpill": RedpillProvider(),
+            "redpill": RedPillProvider(),
             "nearai": NearaiProvider(),
         }
         # Chutes requires API key, only add if available
@@ -21,7 +21,7 @@ class TeeVerifier:
 
         self.nvidia_verifier = NvidiaGpuVerifier()
         self.nearai_verifier = NearAICloudVerifier()
-        self.redpill_verifier = RedpillVerifier()
+        self.redpill_verifier = RedPillVerifier()
         self.chutes_verifier = ChutesVerifier()
 
     async def fetch_report(
@@ -54,7 +54,7 @@ class TeeVerifier:
                 model_id=report.model_id,
             )
 
-        # Special handling for Redpill which uses PhalaCloudVerifier internally
+        # Special handling for RedPill which uses PhalaCloudVerifier internally
         if provider_name == "redpill":
             if not report.raw:
                 return VerificationResult(
@@ -63,7 +63,7 @@ class TeeVerifier:
                     timestamp=time.time(),
                     hardware_type=["INTEL_TDX"],
                     claims={},
-                    error="Missing raw report data for Redpill verification",
+                    error="Missing raw report data for RedPill verification",
                 )
             # Build report data with all required fields
             report_data = {

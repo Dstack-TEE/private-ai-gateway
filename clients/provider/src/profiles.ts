@@ -2,7 +2,7 @@ import type { AciProviderProfile } from "./profile.ts";
 
 export const REDPILL_ACI_PROFILE = {
   providerId: "redpill",
-  label: "Redpill AI",
+  label: "RedPill AI",
   defaultBaseURL: "https://tee.redpill.ai/v1",
   apiKeyEnv: "REDPILL_AI_API_KEY",
   envPrefix: "REDPILL",

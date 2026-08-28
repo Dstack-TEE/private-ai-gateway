@@ -6,12 +6,12 @@ from .base import ServiceProvider
 from ..types import AttestationReport
 
 
-class RedpillProvider(ServiceProvider):
+class RedPillProvider(ServiceProvider):
     """
-    Provider for Redpill AI models.
+    Provider for RedPill AI models.
 
-    Redpill models are Phala Cloud apps. The SDK handles verification
-    specially using RedpillVerifier which uses PhalaCloudVerifier internally.
+    RedPill models are Phala Cloud apps. The SDK handles verification
+    specially using RedPillVerifier which uses PhalaCloudVerifier internally.
     """
 
     def __init__(self):
@@ -21,7 +21,7 @@ class RedpillProvider(ServiceProvider):
         url = f"{self.api_base}/attestation/report"
         nonce = secrets.token_hex(32)
         print(
-            f"[Redpill] Fetching from {url} for model {model_id} with nonce {nonce[:8]}..."
+            f"[RedPill] Fetching from {url} for model {model_id} with nonce {nonce[:8]}..."
         )
 
         response = requests.get(url, params={"model": model_id, "nonce": nonce})
@@ -34,7 +34,7 @@ class RedpillProvider(ServiceProvider):
             intel_quote = model_atts[0].get("intel_quote")
 
         if not intel_quote:
-            raise Exception("Redpill report missing intel_quote")
+            raise Exception("RedPill report missing intel_quote")
 
         nvidia_payload = data.get("nvidia_payload")
         if isinstance(nvidia_payload, str):
@@ -57,7 +57,7 @@ class RedpillProvider(ServiceProvider):
 
     def list_models(self) -> List[str]:
         url = f"{self.api_base}/models"
-        print(f"[Redpill] Fetching models from {url}")
+        print(f"[RedPill] Fetching models from {url}")
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()

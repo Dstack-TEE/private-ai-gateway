@@ -32,7 +32,7 @@ Then use Pi's native login and model picker:
 
 ```text
 /login redpill
-# paste the Redpill API key
+# paste the RedPill API key
 
 # or
 /login phala
@@ -54,7 +54,7 @@ credential store; use `/login` when the key must survive a restart.
 
 The provider-scoped commands expose ACI-specific state that Pi does not know
 about: settings, attestation, retained receipts, and content-addressed sessions.
-For example, Redpill registers `/redpill-settings`, `/redpill-attestation`,
+For example, RedPill registers `/redpill-settings`, `/redpill-attestation`,
 `/redpill-receipts`, `/redpill-receipt`, and `/redpill-session`.
 
 Pi keeps the latest 32 receipt-bearing wire digests by default. That local audit
@@ -76,7 +76,7 @@ native TUI flow:
 
 ```text
 /connect
-# select Redpill AI or Phala Cloud and complete login
+# select RedPill AI or Phala Cloud and complete login
 /models
 # select a redpill/ or phala/ model
 ```
@@ -86,7 +86,7 @@ The plugin command persists the plugin entry in OpenCode configuration, and
 separate provider block: the plugin owns the provider, verified fetch, live
 models, and auth loader.
 
-Redpill currently supports API keys only. Phala Cloud offers both its device
+RedPill currently supports API keys only. Phala Cloud offers both its device
 account flow and an API-key method. The device flow returns the issued
 Confidential AI key through OpenCode's documented browser-authorization hook;
 the plugin does not create a parallel OAuth token lifecycle or credential file.
@@ -103,7 +103,7 @@ The branded plugins register matching inspection commands:
 /phala-session <session-id>
 ```
 
-Replace `phala` with `redpill` for Redpill. These OpenCode custom commands
+Replace `phala` with `redpill` for RedPill. These OpenCode custom commands
 use OpenCode's official prompt-command mechanism to ask the selected model to
 call the provider-scoped read-only inspect tool. The tool itself performs the
 local inspection; no second verifier is involved. Pi can render the same data
@@ -168,7 +168,7 @@ lifecycle, credentials, and dynamic models. Create one `AciProvider`, map its
 reuse `inspectAciProvider()` for audit UI. If a product supplies an
 `AccountApiKeyAuth`, map its authorization presentation and returned key into
 the host's native auth API; manual API-key entry and all persistence stay in
-the host. Phala Cloud already supplies this contract. Redpill should add one
+the host. Phala Cloud already supplies this contract. RedPill should add one
 only after its Clerk endpoints are defined. If the host cannot inject a
 per-provider fetch, changing only its base URL cannot provide ACI channel
 binding.
