@@ -9,6 +9,7 @@ mod common;
 
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     body::{to_bytes, Body},
     extract::{RawQuery, State},
     http::{HeaderMap, Request, StatusCode},
@@ -1450,4 +1451,90 @@ async fn chat_unconstrained_forwards_and_signs_receipt_with_failed_event() {
         payload_event(&receipt, "request.received")["body_hash"],
         private_ai_gateway::aci::digest::sha256_hex(&request_bytes)
     );
+}
+
+#[tokio::test]
+async fn oversized_body_is_a_json_413_with_request_id() {
+    // A body past the 32 MiB inference limit must be a proper JSON 413 carrying
+    // the request id, not the extractor's bare connection reset.
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+    let oversize = vec![b'a'; 33 * 1024 * 1024];
+    let len = oversize.len();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("content-length", len.to_string())
+                .body(Body::from(oversize))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = body_bytes(resp.into_body()).await;
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["type"], "invalid_request_error");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("32 MiB"));
+}
+
+#[tokio::test]
+async fn oversized_body_on_messages_surface_carries_the_request_id() {
+    // The Anthropic surface envelope carries the request id, so the 413 there
+    // proves the id reaches the client body (the OpenAI envelope omits it, but
+    // the same id is on the server-side request_outcome line either way).
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+    let oversize = vec![b'a'; 33 * 1024 * 1024];
+    let len = oversize.len();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("content-length", len.to_string())
+                .body(Body::from(oversize))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(value["type"], "error");
+    assert!(value["request_id"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("req_"));
+}
+
+#[tokio::test]
+async fn oversized_chunked_body_without_content_length_is_still_a_413() {
+    // No content-length: the fast reject cannot fire, so this exercises the
+    // limited read itself — the error must be recognized as the length limit
+    // wherever it sits in the wrapper chain, not fall back to a 400.
+    let h = make_harness();
+    let app = build_router(h.service.clone());
+    let chunks: Vec<Result<Bytes, std::io::Error>> = (0..33)
+        .map(|_| Ok(Bytes::from(vec![b'a'; 1024 * 1024])))
+        .collect();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let value: Value = serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
+    assert_eq!(value["error"]["type"], "invalid_request_error");
 }

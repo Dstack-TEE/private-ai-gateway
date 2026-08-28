@@ -544,7 +544,7 @@ pub(super) fn encrypt_e2ee_final_response(
     Ok(out)
 }
 
-pub(super) fn is_sse_content_type(content_type: Option<&str>) -> bool {
+pub fn is_sse_content_type(content_type: Option<&str>) -> bool {
     content_type
         .and_then(|value| value.split(';').next())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))

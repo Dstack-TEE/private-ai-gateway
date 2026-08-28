@@ -94,10 +94,27 @@ pub enum UpstreamError {
     Routing(String),
     #[error("upstream transport error: {0}")]
     Transport(String),
+    /// A deadline the gateway's own HTTP client enforced (connect or read
+    /// timeout) expired before the upstream answered. Kept apart from
+    /// `Transport` because callers record it as 504 rather than 502: the
+    /// upstream was reachable but did not answer in time.
+    #[error("upstream timed out: {0}")]
+    Timeout(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
     #[error("upstream rejected request with status {status}: {body}")]
     Upstream { status: u16, body: String },
+}
+
+/// Classify a reqwest failure. `is_timeout` walks the error's source chain,
+/// so it covers the connect deadline, a `send()` that never got headers, and a
+/// read deadline surfaced through a `bytes_stream()` chunk alike.
+pub(crate) fn transport_error(err: reqwest::Error) -> UpstreamError {
+    if err.is_timeout() {
+        UpstreamError::Timeout(err.to_string())
+    } else {
+        UpstreamError::Transport(err.to_string())
+    }
 }
 
 /// Forward an OpenAI-compatible request to one upstream.

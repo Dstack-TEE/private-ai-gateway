@@ -79,7 +79,7 @@ use tower_http::cors::CorsLayer;
 /// with an extractor-level 413 that reached clients as a connection reset.
 /// Bodies are buffered in memory, so the cap stays bounded rather than
 /// unlimited.
-const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 use crate::aggregator::service::AciService;
 use crate::aggregator::upstream_config::UpstreamConfigManager;

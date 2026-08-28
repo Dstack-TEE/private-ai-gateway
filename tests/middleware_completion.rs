@@ -18,10 +18,10 @@ use private_ai_gateway::aci::upstream::{
     UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, ChatCompletionRequest, FixedClock, ForwardCandidate,
-    GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult, MiddlewareReceiptJournal,
-    ServiceError, ServiceResponseStream, UpstreamVerificationError, UpstreamVerificationRequest,
-    UpstreamVerifier,
+    AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
+    ForwardCandidate, GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult,
+    MiddlewareReceiptJournal, ServiceError, ServiceResponseStream, UpstreamVerificationError,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
@@ -450,6 +450,15 @@ fn middleware(control_url: String) -> Middleware {
         tee_only_domains: Vec::new(),
     })
     .unwrap()
+}
+
+/// The (route, status) view of a failover chain; per-attempt timing is not
+/// deterministic and is asserted separately where it matters.
+fn attempts(chain: &[FailedAttempt]) -> Vec<(String, u16)> {
+    chain
+        .iter()
+        .map(|a| (a.route_id.clone(), a.status))
+        .collect()
 }
 
 fn chat_input() -> CompletionInput {
@@ -1892,7 +1901,7 @@ async fn capacity_retry_gives_non_preemptible_traffic_a_delayed_second_pass() {
         MiddlewareForwardResult::Forwarded(forward) => {
             // The first attempt's 429 stays observable behind the commit.
             assert_eq!(
-                forward.failed_attempts,
+                attempts(&forward.failed_attempts),
                 vec![("plain:gpt-test".to_string(), 429)]
             );
         }
@@ -1922,7 +1931,7 @@ async fn capacity_retry_covers_preemptible_traffic_too() {
     match result {
         MiddlewareForwardResult::Forwarded(forward) => {
             assert_eq!(
-                forward.failed_attempts,
+                attempts(&forward.failed_attempts),
                 vec![("plain:gpt-test".to_string(), 429)]
             );
         }
@@ -1954,7 +1963,7 @@ async fn capacity_retry_replays_only_the_capacity_rejections() {
         MiddlewareForwardResult::Forwarded(forward) => {
             assert_eq!(forward.selected_route, "b:gpt-test");
             assert_eq!(
-                forward.failed_attempts,
+                attempts(&forward.failed_attempts),
                 vec![
                     ("a:gpt-test".to_string(), 500),
                     ("b:gpt-test".to_string(), 429)
@@ -1993,7 +2002,7 @@ async fn capacity_retry_triggers_regardless_of_candidate_order() {
         MiddlewareForwardResult::Forwarded(forward) => {
             assert_eq!(forward.selected_route, "a:gpt-test");
             assert_eq!(
-                forward.failed_attempts,
+                attempts(&forward.failed_attempts),
                 vec![
                     ("a:gpt-test".to_string(), 429),
                     ("b:gpt-test".to_string(), 500)
@@ -2066,7 +2075,7 @@ async fn capacity_retry_covers_the_recognized_5xx_capacity_signal() {
     match result {
         MiddlewareForwardResult::Forwarded(forward) => {
             assert_eq!(
-                forward.failed_attempts,
+                attempts(&forward.failed_attempts),
                 vec![("plain:gpt-test".to_string(), 520)]
             );
         }
@@ -2096,7 +2105,7 @@ async fn capacity_retry_streaming_replays_and_commits_the_final_429() {
             assert_eq!(err.selected_route, "plain:gpt-test");
             // The pass-1 429 stays observable behind the terminal report.
             assert_eq!(
-                err.failed_attempts,
+                attempts(&err.failed_attempts),
                 vec![("plain:gpt-test".to_string(), 429)]
             );
         }
@@ -2121,7 +2130,7 @@ async fn capacity_retry_streaming_second_pass_commits_the_stream() {
         MiddlewareForwardResult::Stream(stream) => {
             assert_eq!(stream.upstream_status, 200);
             assert_eq!(
-                stream.failed_attempts,
+                attempts(&stream.failed_attempts),
                 vec![("plain:gpt-test".to_string(), 429)]
             );
         }
@@ -2199,5 +2208,396 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
     assert!(
         pre.get("request").is_none(),
         "unexpected request field: {pre}"
+    );
+}
+
+// A mock upstream whose forward never resolves: it stands in for a provider
+// that accepted the connection but has not answered (a long prefill queue),
+// so a client that gives up disconnects before any response header.
+struct HangingUpstream;
+
+#[async_trait]
+impl UpstreamBackend for HangingUpstream {
+    fn name(&self) -> &str {
+        "hang-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://hang-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+    async fn forward_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        std::future::pending().await
+    }
+}
+
+// A mock upstream that waits, then reports a gateway-enforced read timeout —
+// the reqwest deadline the real client applies, surfaced as `Timeout`.
+struct TimingOutUpstream {
+    delay: Duration,
+}
+
+#[async_trait]
+impl UpstreamBackend for TimingOutUpstream {
+    fn name(&self) -> &str {
+        "timeout-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://timeout-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        tokio::time::sleep(self.delay).await;
+        Err(UpstreamError::Timeout("read timeout".to_string()))
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Timeout("read timeout".to_string()))
+    }
+    async fn forward_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        tokio::time::sleep(self.delay).await;
+        Err(UpstreamError::Timeout("read timeout".to_string()))
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        tokio::time::sleep(self.delay).await;
+        Err(UpstreamError::Timeout("read timeout".to_string()))
+    }
+}
+
+fn build_service_with_backend(backend: Arc<dyn UpstreamBackend>) -> Arc<AciService> {
+    Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            backend,
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn client_disconnect_before_upstream_response_reports_499_with_route() {
+    // The upstream never answers; the client gives up. Dropping the handler
+    // future (as hyper does on a closed connection) must still leave exactly
+    // one usage report: a 499 attributed to the candidate in flight, with no
+    // TTFT because no byte ever arrived.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "mock:hang", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_backend(Arc::new(HangingUpstream));
+    let mut input = chat_input();
+    input.stream = true;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        mw.handle_completion(&service, input),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the handler must still be waiting on the upstream"
+    );
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
+    assert_eq!(report["selectedRouteId"], json!("mock:hang"));
+    assert_eq!(report["attemptIndex"], json!(0));
+    assert_eq!(report["isStreaming"], json!(true));
+    assert!(report.get("ttftMs").map(Value::is_null).unwrap_or(true));
+    assert!(report
+        .get("errorSource")
+        .map(Value::is_null)
+        .unwrap_or(true));
+    assert!(report["errorMessage"]
+        .as_str()
+        .unwrap_or("")
+        .contains("before upstream response"));
+
+    // Exactly one report for this request: the drop must not race a second row.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let count = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["requestId"] == json!("req-1"))
+        .count();
+    assert_eq!(count, 1, "the guard fires once, not per poll");
+}
+
+#[tokio::test]
+async fn upstream_timeout_is_recorded_as_504_per_attempt_and_summary() {
+    // Two candidates, both timing out: the client sees a 504 timeout envelope,
+    // each attempt is recorded as 504 with its own elapsed time, and the
+    // request-level summary is a 504 attributed to the upstream.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_backend(Arc::new(TimingOutUpstream {
+        delay: Duration::from_millis(20),
+    }));
+
+    let (status, _, body) =
+        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 504);
+    assert_eq!(body["error"]["type"], json!("timeout_error"));
+
+    for (index, route) in [(0, "a:gpt-test"), (1, "b:gpt-test")] {
+        let report = wait_for_post(&posts, move |r| {
+            r["attemptIndex"].as_i64() == Some(index) && r["selectedRouteId"] == json!(route)
+        })
+        .await;
+        assert_eq!(
+            report["status"].as_i64(),
+            Some(504),
+            "attempt {index} status"
+        );
+        assert!(
+            report["durationMs"].as_i64().unwrap_or(0) >= 20,
+            "attempt {index} must record how long it was waited for"
+        );
+    }
+    let summary = wait_for_post(&posts, |r| {
+        r["attemptIndex"].as_i64() == Some(2) && r["status"].as_i64() == Some(504)
+    })
+    .await;
+    assert_eq!(summary["errorSource"], json!("upstream"));
+    assert_eq!(summary["selectedRouteId"], Value::Null);
+}
+
+#[tokio::test]
+async fn mid_stream_read_timeout_settles_504_with_message() {
+    // A streaming response that begins, then the upstream read deadline fires
+    // mid-body. The client already has 200 headers, so only the usage report
+    // carries the failure: 504, with the timeout's own words.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let control = ControlClient::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+        send_request_features: None,
+        prefix_hash_secret: None,
+        tee_only_domains: Vec::new(),
+    })
+    .unwrap();
+    let report = StreamReport {
+        control,
+        request_id: "r-readtimeout".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        request_model: "gpt".to_string(),
+        pricing: None,
+        spend_mode: None,
+        user_id: None,
+        virtual_key_id: None,
+        selected_route_id: Some("openai:gpt".to_string()),
+        attempt_index: 0,
+        upstream_status: 200,
+        prefix_hash: None,
+        started: std::time::Instant::now(),
+        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let events: Vec<Result<Bytes, ServiceError>> = vec![
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        )),
+        Err(ServiceError::Upstream(UpstreamError::Timeout(
+            "upstream timed out".to_string(),
+        ))),
+    ];
+    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
+    while metered.next().await.is_some() {}
+
+    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-readtimeout")).await;
+    assert_eq!(report["status"], json!(504));
+    assert!(report["errorMessage"]
+        .as_str()
+        .unwrap_or("")
+        .contains("timed out"));
+}
+
+// A mock upstream that waits before returning a normal streaming success —
+// long enough for the pre-first-byte keep-alive to have committed the 200.
+struct SlowStreamUpstream {
+    delay: Duration,
+}
+
+#[async_trait]
+impl UpstreamBackend for SlowStreamUpstream {
+    fn name(&self) -> &str {
+        "slow-stream-upstream"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://slow-stream-upstream.example")
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!("streaming test uses forward_stream_verified_prepared")
+    }
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Transport("n/a".to_string()))
+    }
+    async fn forward_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!("streaming test uses forward_stream_verified_prepared")
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        tokio::time::sleep(self.delay).await;
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers,
+            body: Box::pin(futures_util::stream::once(
+                async move { Ok(Bytes::from(body)) },
+            )),
+            served_instance_id: None,
+        })
+    }
+}
+
+fn middleware_with_keepalive(control_url: String, ms: u64) -> Middleware {
+    Middleware::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: Some(ms),
+        send_request_features: None,
+        prefix_hash_secret: None,
+        tee_only_domains: Vec::new(),
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn early_keepalive_commits_200_before_upstream_headers() {
+    // The upstream takes longer than the keep-alive interval to answer. The
+    // gateway must commit a 200 SSE body first, heartbeat, then splice in the
+    // real stream once it arrives — and still meter the request as a success.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "openai:gpt", "format": "openai" }],
+            "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+        }),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 100);
+    let service = build_service_with_backend(Arc::new(SlowStreamUpstream {
+        delay: Duration::from_millis(400),
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+
+    let started = std::time::Instant::now();
+    let response = mw.handle_completion(&service, input).await;
+    // Committed well before the upstream's 400ms; do not wait for the body.
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "must commit early"
+    );
+    let (headers, body) = raw_body(response).await;
+    assert_eq!(headers.get("content-type").unwrap(), "text/event-stream");
+    assert!(body.starts_with(": PROCESSING"), "body: {body}");
+    assert!(body.contains("\"content\":\"hi\""), "body: {body}");
+    assert!(body.contains("data: [DONE]"), "body: {body}");
+
+    let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(200)).await;
+    assert_eq!(report["isStreaming"], json!(true));
+    assert!(report["ttftMs"].as_i64().unwrap_or(0) >= 400);
+}
+
+#[tokio::test]
+async fn early_keepalive_turns_forward_failure_into_in_band_error() {
+    // The upstream is slow, so the 200 commits; then it times out. The failure
+    // must reach the client in-band as a 504 error event, and the usage report
+    // must record 504 (not a 499 — the client did not leave).
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 100);
+    let service = build_service_with_backend(Arc::new(TimingOutUpstream {
+        delay: Duration::from_millis(300),
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+
+    let response = mw.handle_completion(&service, input).await;
+    let (_, body) = raw_body(response).await;
+    assert!(body.starts_with(": PROCESSING"), "body: {body}");
+    assert!(body.contains("\"code\":504"), "body: {body}");
+    assert!(body.contains("data: [DONE]"), "body: {body}");
+
+    // The serving route's attempt is recorded as 504.
+    let attempt = wait_for_post(&posts, |r| {
+        r["status"].as_i64() == Some(504) && r["selectedRouteId"] == json!("openai:gpt")
+    })
+    .await;
+    assert_eq!(attempt["attemptIndex"], json!(0));
+    // The request-level summary is a 504 attributed to the upstream.
+    let summary = wait_for_post(&posts, |r| {
+        r["status"].as_i64() == Some(504) && r["errorSource"] == json!("upstream")
+    })
+    .await;
+    assert_eq!(summary["selectedRouteId"], Value::Null);
+    // No client-disconnect row: the client stayed, the upstream failed.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !posts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["status"].as_i64() == Some(499)),
+        "a slow upstream failure is not a client disconnect"
     );
 }

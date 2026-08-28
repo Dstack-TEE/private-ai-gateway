@@ -37,6 +37,7 @@ mod clock;
 mod config;
 mod e2ee;
 mod e2ee_crypto;
+pub use e2ee_crypto::is_sse_content_type;
 mod errors;
 mod forward;
 mod helpers;
@@ -54,12 +55,13 @@ pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
 pub use wire::{
     ChatCompletionRequest, E2eePreparedRequest, E2eeRequestContext, E2eeRequestParts,
-    E2eeResponseInfo, ForwardCandidate, ForwardResult, GatewayRequestContext,
-    LegacySignatureResult, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
-    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
-    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
-    MiddlewareUpstreamError, ServiceResponseStream, StreamingForwardResult, StreamingForwardStream,
-    StreamingUpstreamError, UpstreamVerificationRequest, UpstreamVerifier,
+    E2eeResponseInfo, FailedAttempt, ForwardCandidate, ForwardResult, GatewayRequestContext,
+    InFlightAttempt, LegacySignatureResult, MiddlewareAllFailed, MiddlewareForwardResult,
+    MiddlewareForwarded, MiddlewareGeneratedFinalization, MiddlewareReceiptDraft,
+    MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
+    MiddlewareStreamingForwarded, MiddlewareUpstreamError, ServiceResponseStream,
+    StreamingForwardResult, StreamingForwardStream, StreamingUpstreamError,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
 
 pub struct AciService {

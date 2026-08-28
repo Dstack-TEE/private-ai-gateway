@@ -86,10 +86,25 @@ pub enum MiddlewareForwardResult {
     AllFailed(Box<MiddlewareAllFailed>),
 }
 
+/// One candidate the failover walk abandoned.
+///
+/// `status` is the upstream's HTTP status when it answered (e.g. 429, after
+/// the quota reclassification in `recorded_attempt_status`), 504 when a
+/// deadline the gateway's own client enforces (connect or read timeout)
+/// expired first, and 502 for any other non-HTTP failure (prepare,
+/// verification, transport). `duration_ms` is the attempt's own wall time,
+/// from preparing the candidate to abandoning it, so a timed-out attempt
+/// records how long it was waited for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedAttempt {
+    pub route_id: String,
+    pub status: u16,
+    pub duration_ms: u64,
+}
+
 pub struct MiddlewareAllFailed {
-    /// Every candidate attempted, as (route_id, status), in the order tried.
-    /// Non-HTTP failures (prepare/verification/transport) record 502; HTTP
-    /// failures record the upstream status (e.g. 429).
+    /// Every candidate attempted, in the order tried. See [`FailedAttempt`]
+    /// for how each status is chosen.
     ///
     /// Usage-report consumers: the caller reports these as attempt rows
     /// 0..N-1, and MAY additionally report one request-level summary row at
@@ -97,7 +112,7 @@ pub struct MiddlewareAllFailed {
     /// empty route and a gateway/upstream error source. A row with no route
     /// and a non-empty error source is a request-level summary, not an
     /// attempt; attempt counting must only consider rows that carry a route.
-    pub failed_attempts: Vec<(String, u16)>,
+    pub failed_attempts: Vec<FailedAttempt>,
     /// The highest-priority underlying failure across the attempts.
     pub error: ServiceError,
 }
@@ -112,10 +127,10 @@ pub struct MiddlewareForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
-    /// Failed-over candidates as (route_id, status), in the order tried. The
+    /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
-    pub failed_attempts: Vec<(String, u16)>,
+    pub failed_attempts: Vec<FailedAttempt>,
     pub session_id: Option<String>,
 }
 
@@ -128,10 +143,10 @@ pub struct MiddlewareStreamingForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
-    /// Failed-over candidates as (route_id, status), in the order tried. The
+    /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
-    pub failed_attempts: Vec<(String, u16)>,
+    pub failed_attempts: Vec<FailedAttempt>,
     pub session_id: Option<String>,
 }
 
@@ -143,6 +158,20 @@ pub struct MiddlewareReceiptDraft {
     pub(super) response_model: Option<String>,
 }
 
+/// The candidate whose upstream response the forwarder is waiting for.
+///
+/// Published so a request abandoned while that wait is in progress — the
+/// client hung up before the upstream answered — can still be attributed to
+/// the route that was serving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlightAttempt {
+    pub route_id: String,
+    pub attempt_index: u32,
+}
+
+/// Per-request channel between the forwarder and the completion handler:
+/// the reserved receipt id, the receipt draft handed over at end of stream,
+/// and the candidate currently in flight.
 #[derive(Clone, Default)]
 pub struct MiddlewareReceiptJournal {
     inner: Arc<Mutex<MiddlewareReceiptJournalState>>,
@@ -152,9 +181,28 @@ pub struct MiddlewareReceiptJournal {
 struct MiddlewareReceiptJournalState {
     receipt_id: Option<String>,
     draft: Option<MiddlewareReceiptDraft>,
+    in_flight: Option<InFlightAttempt>,
 }
 
 impl MiddlewareReceiptJournal {
+    pub fn set_in_flight(&self, route_id: &str, attempt_index: u32) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .in_flight = Some(InFlightAttempt {
+            route_id: route_id.to_string(),
+            attempt_index,
+        });
+    }
+
+    pub fn in_flight(&self) -> Option<InFlightAttempt> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .in_flight
+            .clone()
+    }
+
     pub fn reserve_receipt_id(&self, receipt_id: String) {
         self.inner
             .lock()
@@ -245,9 +293,9 @@ pub struct MiddlewareUpstreamError {
     pub error: StreamingUpstreamError,
     /// The route that produced the non-2xx (the last one tried).
     pub selected_route: String,
-    /// Candidates failed over before this one, as (route_id, status), in the
-    /// order tried. Same contract as the sibling variants' field.
-    pub failed_attempts: Vec<(String, u16)>,
+    /// Candidates failed over before this one, in the order tried. Same
+    /// contract as the sibling variants' field (see [`FailedAttempt`]).
+    pub failed_attempts: Vec<FailedAttempt>,
 }
 
 #[derive(Debug, Clone)]

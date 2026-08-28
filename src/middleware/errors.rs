@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 pub use crate::error_payload::{error_type, upstream_message, Surface};
 pub use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, sse_protocol,
-    stream_error_tail, SseProtocol,
+    stream_error_event, stream_error_tail, SseProtocol,
 };
 
 use crate::error_payload::envelope;
