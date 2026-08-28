@@ -141,7 +141,10 @@ await Promise.all([
 ]);
 NODE
 
-printf '%s\n' '{"type":"get_state"}' '{"type":"get_commands"}' | \
+printf '%s\n' \
+  '{"type":"get_state"}' \
+  '{"type":"get_available_models"}' \
+  '{"type":"get_commands"}' | \
   PI_CODING_AGENT_DIR="$scratch/pi-agent" \
   "$repo_root/clients/node_modules/.bin/pi" \
   --mode rpc \
@@ -164,12 +167,25 @@ const records = (await readFile(process.argv[2], "utf8"))
 const state = records.find(
   (record) => record.type === "response" && record.command === "get_state",
 );
+const available = records.find(
+  (record) => record.type === "response" && record.command === "get_available_models",
+);
+const availableModels = available?.data?.models;
+if (
+  !available?.success ||
+  !Array.isArray(availableModels) ||
+  !availableModels.some((model) => model.provider === "phala" && model.id === "smoke/model")
+) {
+  throw new Error(`Pi did not restore its stored dynamic catalog: ${JSON.stringify(available)}`);
+}
 if (
   !state?.success ||
   state.data?.model?.provider !== "phala" ||
   state.data?.model?.id !== "smoke/model"
 ) {
-  throw new Error("Pi did not restore its stored dynamic catalog and default model offline");
+  throw new Error(
+    `Pi did not restore its stored dynamic catalog and default model offline: ${JSON.stringify({ state, available })}`,
+  );
 }
 const response = records.find(
   (record) => record.type === "response" && record.command === "get_commands",
@@ -181,6 +197,7 @@ const commands = new Set(response.data.commands.map((command) => command.name));
 for (const command of [
   "phala-settings",
   "phala-attestation",
+  "phala-receipts",
   "phala-receipt",
   "phala-session",
 ]) {

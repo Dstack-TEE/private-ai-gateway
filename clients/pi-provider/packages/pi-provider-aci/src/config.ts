@@ -5,7 +5,7 @@
 //            -> project (cwd/.pi/providers/<id>/config.json, gated by
 //              project trust)
 //            -> env (<PREFIX>_* variables, or brand aliases)
-//            -> runtime (programmatic override via createProvider(profile, patch))
+//            -> runtime (programmatic override via createProvider({ config }))
 //
 // Validation runs after merge so a malformed layer never produces a
 // partially-applied config.

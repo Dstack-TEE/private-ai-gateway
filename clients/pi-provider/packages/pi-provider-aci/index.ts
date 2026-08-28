@@ -14,7 +14,6 @@
  *   src/config.ts        — layered config (default/home/project/env/runtime)
  *   src/project-trust.ts — project-scope config trust gate
  *   src/models.ts        — /v1/models discovery + thinkingFormat inference
- *   src/audit.ts         — concise receipt/session audit display
  *   src/settings-ui.ts   — SettingsList helpers for the settings command
  */
 
@@ -30,8 +29,18 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import { createAciProvider, type AciProvider } from "@phala/aci-provider";
+import {
+  createAciProvider,
+  formatAciInspection,
+  inspectAciProvider,
+  type AccountApiKeyAuth,
+  type AciModel,
+  type AciInspectionRequest,
+  type AciProvider,
+  type AciProviderProfile,
+} from "@phala/aci-provider";
 import os from "node:os";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   type AciCloudConfig,
@@ -46,9 +55,8 @@ import {
 import { createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
-import { type AciServerModel, discoverAciModels, mapAciServerModel } from "./src/models.ts";
+import { mapAciModelToPi } from "./src/models.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
-import { summarizeReceipt, summarizeSession } from "./src/audit.ts";
 import {
   closeAciProvider,
   ensureAciConnection,
@@ -66,7 +74,15 @@ import {
 interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
   config: AciCloudConfig;
+  accountAuth: AccountApiKeyAuth | undefined;
   overrides?: AciCloudConfigPatch;
+}
+
+export interface CreatePiAciProviderOptions {
+  profile?: Partial<AciProviderProfile>;
+  accountAuth?: AccountApiKeyAuth;
+  config?: AciCloudConfigPatch;
+  footerKey?: string;
 }
 
 type OpenAICompletionsApi = ReturnType<
@@ -114,34 +130,26 @@ function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
 async function refreshAciModels(
   state: AciRuntimeState,
   signal: AbortSignal,
-): Promise<AciServerModel[]> {
+): Promise<readonly AciModel[]> {
   await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
   if (!state.provider) {
     throw new Error(
       `${state.profile.logPrefix} model discovery blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
     );
   }
-  const discovered = await discoverAciModels(state.config, {
-    baseUrl: state.config.baseUrl,
-    fetch: providerFetch(state),
-    signal,
-  });
-  return discovered.raw;
+  return state.provider.discoverModels({ signal });
 }
 
 function toPiModels(
   state: AciRuntimeState,
-  rawModels: readonly AciServerModel[],
+  models: readonly AciModel[],
 ): Model<"openai-completions">[] {
-  return rawModels
-    .map((model) => mapAciServerModel(model, state.config))
-    .filter((model): model is NonNullable<typeof model> => model !== null)
-    .map((model) => ({
-      ...model,
-      api: "openai-completions",
-      provider: state.profile.providerId,
-      baseUrl: state.config.baseUrl,
-    }));
+  return models.map((model) => ({
+    ...mapAciModelToPi(model),
+    api: "openai-completions",
+    provider: state.profile.providerId,
+    baseUrl: state.config.baseUrl,
+  }));
 }
 
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
@@ -151,7 +159,7 @@ function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
-    auth: { apiKey: createApiKeyAuth(state.profile) },
+    auth: { apiKey: createApiKeyAuth(state.profile, state.accountAuth) },
     models: [],
     async fetchModels({ signal }) {
       return toPiModels(state, await refreshAciModels(state, signal));
@@ -174,7 +182,7 @@ function applyEffectiveConfig(
   cwd: string,
   projectTrusted: boolean,
 ): void {
-  state.config = loadAciCloudConfig(
+  const config = loadAciCloudConfig(
     {
       cwd,
       home: os.homedir(),
@@ -183,6 +191,8 @@ function applyEffectiveConfig(
     },
     state.overrides,
   );
+  if (isDeepStrictEqual(config, state.config)) return;
+  state.config = config;
   registerAciProvider(pi, state);
 }
 
@@ -328,139 +338,37 @@ async function openSettingsMenu(
   if (dirty) await ctx.reload();
 }
 
-/** Verify and show the latest recorded receipt, or a given receipt id. */
-async function runReceiptCommand(
+async function runInspectionCommand(
   ctx: ExtensionCommandContext,
   state: AciRuntimeState,
-  args: string,
+  request: AciInspectionRequest,
 ): Promise<void> {
-  if (!state.provider) {
-    ctx.ui.notify(
-      `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
-      "error",
-    );
-    return;
-  }
-  const receiptId = args.trim() || state.provider.receipts()[0]?.receiptId;
-  if (!receiptId) {
-    ctx.ui.notify(
-      "No receipt id given and no x-receipt-id seen yet; send a message first or pass an id",
-      "error",
-    );
-    return;
-  }
   try {
-    const audit = await state.provider.verifyReceipt(receiptId);
-    const checks = audit.transcript.lines.map((line) => {
-      const detail = line.detail ? `: ${line.detail}` : "";
-      return `${line.status.toUpperCase()} ${line.id}${detail}`;
-    });
-    ctx.ui.notify(
-      [
-        ...summarizeReceipt(audit.receipt),
-        `Verdict: ${audit.transcript.verdict.line}`,
-        ...checks,
-      ].join("\n"),
-      audit.transcript.verdict.verified ? "info" : "error",
-    );
+    await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
+    if (!state.provider) {
+      throw new Error(state.connectionError ?? "no verified connection is available");
+    }
+    const result = await inspectAciProvider(state.provider, request);
+    ctx.ui.notify(formatAciInspection(result, { providerLabel: state.profile.label }), "info");
   } catch (error) {
     ctx.ui.notify(
-      `Receipt ${receiptId} verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      `ACI inspection failed: ${error instanceof Error ? error.message : String(error)}`,
       "error",
     );
   }
-}
-
-/** Fetch, verify, and summarize an attested session document on request. */
-async function runSessionCommand(
-  ctx: ExtensionCommandContext,
-  state: AciRuntimeState,
-  args: string,
-): Promise<void> {
-  await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
-  if (!state.provider) {
-    ctx.ui.notify(
-      `ACI connection unavailable: ${state.connectionError ?? "not verified"}`,
-      "error",
-    );
-    return;
-  }
-  const sessionId = args.trim();
-  if (!sessionId) {
-    ctx.ui.notify(`Usage: /${state.profile.providerId}-session <session-id>`, "error");
-    return;
-  }
-  try {
-    const audit = await state.provider.verifySession(sessionId);
-    const checks = audit.checks.map(
-      (check) => `${check.ok ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`,
-    );
-    ctx.ui.notify(
-      [...summarizeSession(audit.session, sessionId), ...checks].join("\n"),
-      audit.verified ? "info" : "error",
-    );
-  } catch (error) {
-    ctx.ui.notify(
-      `Session ${sessionId} verification failed: ${error instanceof Error ? error.message : String(error)}`,
-      "error",
-    );
-  }
-}
-
-async function runAttestationCommand(
-  ctx: ExtensionCommandContext,
-  state: AciRuntimeState,
-): Promise<void> {
-  await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
-  if (!state.provider) {
-    ctx.ui.notify(
-      `Attestation validation failed: ${state.connectionError ?? "no verified connection"}`,
-      "error",
-    );
-    return;
-  }
-  const identity = state.provider.status().identity;
-  if (!identity) {
-    ctx.ui.notify("Attestation validation failed: verified identity unavailable", "error");
-    return;
-  }
-  const report = identity.report;
-  const keyset = identity.keyset;
-  const e2eeKeys = keyset.e2ee_public_keys;
-  const receiptKeys = keyset.receipt_signing_keys;
-  const notAfter = keyset.not_after;
-  const releasePolicy = state.config.trust.acceptedComposeHashes?.length
-    ? "accepted"
-    : "measurement verified, not pinned";
-  const keySummary = (keys: Array<{ key_id?: unknown; algo?: unknown }>) =>
-    keys.length === 0
-      ? "none"
-      : keys.map((k) => `${String(k.key_id)} (${String(k.algo)})`).join(", ");
-  const lines = [
-    `${state.profile.label} attestation`,
-    `API version: ${String(report.api_version)}`,
-    `Keyset digest: ${identity.workloadKeysetDigest}`,
-    `Compose hash: ${identity.composeHash}`,
-    `Release policy: ${releasePolicy}`,
-    `Report binding: verified`,
-    `TLS SPKI pins: ${identity.tlsSpkiPins.join(", ")}`,
-    `Keyset not_after: ${notAfter !== undefined ? new Date(notAfter * 1000).toISOString() : "unknown"}`,
-    `Encryption keys (${e2eeKeys.length}): ${keySummary(e2eeKeys)}`,
-    `Receipt signing keys (${receiptKeys.length}): ${keySummary(receiptKeys)}`,
-  ];
-  ctx.ui.notify(lines.join("\n"), "info");
 }
 
 /**
- * Create the provider extension for the given brand profile (and optional
- * runtime config patch). The neutral default profile ("aci") is used when no
- * profile is supplied; branded shells pass their own identity.
+ * Create a Pi extension from a shared brand profile and optional account auth.
+ * The neutral default profile ("aci") is used when no profile is supplied.
  */
-export function createProvider(
-  profileOverride?: Partial<ProviderProfile>,
-  overrides?: AciCloudConfigPatch,
-): ExtensionFactory {
-  const providerProfile = resolveProfile(profileOverride);
+export function createProvider({
+  profile: profileOverride,
+  accountAuth,
+  config: overrides,
+  footerKey,
+}: CreatePiAciProviderOptions = {}): ExtensionFactory {
+  const providerProfile = resolveProfile({ ...profileOverride, footerKey });
   return async (pi: ExtensionAPI) => {
     const cwd = process.cwd();
     const config = loadAciCloudConfig(
@@ -470,6 +378,7 @@ export function createProvider(
     const state: AciRuntimeState = {
       profile: providerProfile,
       config,
+      accountAuth,
       provider: undefined,
       providerConfigKey: undefined,
       connectionSetup: undefined,
@@ -501,6 +410,7 @@ export function createProvider(
 
     const settingsCommand = `${state.profile.providerId}-settings`;
     const attestationCommand = `${state.profile.providerId}-attestation`;
+    const receiptsCommand = `${state.profile.providerId}-receipts`;
     const receiptCommand = `${state.profile.providerId}-receipt`;
     const sessionCommand = `${state.profile.providerId}-session`;
     pi.registerCommand(settingsCommand, {
@@ -517,21 +427,37 @@ export function createProvider(
     pi.registerCommand(attestationCommand, {
       description: "Show the cached/current attestation report status",
       handler: async (_args, ctx) => {
-        await runAttestationCommand(ctx, state);
+        await runInspectionCommand(ctx, state, { action: "attestation" });
+      },
+    });
+
+    pi.registerCommand(receiptsCommand, {
+      description: "List signed ACI receipts retained by this process",
+      handler: async (_args, ctx) => {
+        await runInspectionCommand(ctx, state, { action: "receipts" });
       },
     });
 
     pi.registerCommand(receiptCommand, {
       description: "Verify the latest (or a given) signed ACI receipt",
       handler: async (args, ctx) => {
-        await runReceiptCommand(ctx, state, args ?? "");
+        const id = args?.trim();
+        await runInspectionCommand(ctx, state, {
+          action: "receipt",
+          ...(id ? { id } : {}),
+        });
       },
     });
 
     pi.registerCommand(sessionCommand, {
       description: "Show an attested session document (audit trail)",
       handler: async (args, ctx) => {
-        await runSessionCommand(ctx, state, args ?? "");
+        const id = args?.trim();
+        if (!id) {
+          ctx.ui.notify(`Usage: /${sessionCommand} <session-id>`, "error");
+          return;
+        }
+        await runInspectionCommand(ctx, state, { action: "session", id });
       },
     });
   };
@@ -543,5 +469,10 @@ export const PROVIDER_ID = DEFAULT_PROFILE.providerId;
 export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
-export { discoverAciModels, mapAciServerModel, inferThinkingFormat } from "./src/models.ts";
+export {
+  discoverAciModels,
+  inferThinkingFormat,
+  mapAciModelToPi,
+  mapAciServerModel,
+} from "./src/models.ts";
 export { createAciProvider } from "@phala/aci-provider";

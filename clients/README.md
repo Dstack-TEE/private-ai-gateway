@@ -67,7 +67,8 @@ and native coding-agent integrations:
   shared branded profiles. It verifies every receipt before the response stream
   completes, so a failed audit stops the generation/tool loop, and adds a
   provider-scoped read-only inspection tool for connection, attestation,
-  receipt, and session status.
+  receipt, and session status. Provider-scoped OpenCode commands expose those
+  inspections without adding a second verifier or credential store.
 
 SDKs that accept a function can use `connectAci().fetch` directly. Native Pi
 and OpenCode integrations use their official provider and plugin APIs through

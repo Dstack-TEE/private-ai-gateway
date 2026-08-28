@@ -85,8 +85,8 @@ were hardened in place:
 | Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Existing upstream |
 | TypeScript quote, nonce/keyset, compose and expiry checks | Existing upstream |
 | Pi provider, branded packages, model discovery and initial Pi TLS pinning | Original PR |
-| Framework-neutral model, lifecycle, policy, status, receipt and session provider core | Current OpenCode work |
-| Native OpenCode v1 plugin plus RedPill and Phala Cloud distributions | Current OpenCode work |
+| Framework-neutral model, lifecycle, policy, account-to-key contract, and structured inspection core | Current OpenCode work |
+| Native OpenCode v1 plugin, provider-scoped inspection commands, plus RedPill and Phala Cloud distributions | Current OpenCode work |
 | `connectAci()` framework-neutral, instance-scoped runtime client | Current refactor |
 | Node adapter using the supported undici dispatcher hook | Current refactor |
 | Bun adapter using the supported `fetch({ tls, proxy })` hooks | Current refactor |
@@ -105,6 +105,28 @@ metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
 attached only by the Phala Cloud adapters. A future Redpill Clerk OAuth flow
 should be added when that product endpoint exists, without changing the
 verifier.
+
+The shared provider exposes four host-neutral integration contracts above the
+verified transport:
+
+| Contract | Shared responsibility | Host responsibility |
+| --- | --- | --- |
+| Provider lifecycle | Resolve policy, establish the verified connection, expose one scoped `fetch`, and fail closed | Create and close the provider through native lifecycle hooks |
+| Model catalog | Discover `/v1/models` once and normalize filtering, capabilities, pricing, and thinking format into `AciModel` | Map `AciModel` into the host's model type and let the host persist selection/catalog state |
+| Account authorization | Describe one browser/device flow with `AccountApiKeyAuth` and return one API key plus optional metadata | Map the flow into native auth UI and persist the key |
+| ACI inspection | Return structured status, attestation, receipt, and session results and format them for text UIs | Register native commands/tools and render the result |
+
+This is the extension boundary for another coding agent. A new adapter should
+map these contracts into official host APIs. It should not implement
+attestation, receipt verification, device polling, credential storage, or
+another model catalog.
+
+Account authorization is a product capability, not part of ACI. Phala Cloud
+currently implements `AccountApiKeyAuth` with its device grant. Redpill does
+not advertise account authorization, so both hosts expose only its API-key
+method. A future Redpill Clerk integration should implement the same shared
+contract once its real authorization endpoints exist; Pi and OpenCode adapters
+will not need brand-specific login code.
 
 Pi and OpenCode integrate through their official host APIs. Pi owns credentials,
 dynamic-catalog persistence, default-model persistence, and the provider

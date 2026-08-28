@@ -19,21 +19,29 @@ then save a default model from the native model picker:
 
 ```text
 /login phala
-# approve the device login and wait for the footer to show aci-verified
+# choose Phala Cloud account or Phala Cloud API key
+# complete login and wait for the footer to show aci-verified
 /model
 # search for phala/, select a model, and press Ctrl+S
 ```
 
-The device flow issues a Confidential AI API key and returns it to Pi's official
-API-key auth interface. Pi stores the credential in `~/.pi/agent/auth.json`, the
-refreshed catalog in `~/.pi/agent/models-store.json`, and the saved default in
+The account flow issues a Confidential AI API key; the manual method accepts an
+existing key. Both return the same native API-key credential to Pi. Pi stores it
+in `~/.pi/agent/auth.json`, the refreshed catalog in
+`~/.pi/agent/models-store.json`, and the saved default in
 `~/.pi/agent/settings.json`. These values survive a restart and the cached
 catalog remains available offline. As an alternative for one process, set
 `PHALA_AI_API_KEY`; Pi does not copy environment variables into its credential
 store.
 
 Config: `/phala-settings` · Attestation status: `/phala-attestation` · Receipt
-history and audit: `/phala-receipt` · Session inspection: `/phala-session`
+history: `/phala-receipts` · Receipt audit: `/phala-receipt` · Session
+inspection: `/phala-session`
+
+Attestation and every response receipt are verified automatically. The commands
+only display the evidence or rerun an audit. The local wire-digest history keeps
+the latest 32 receipt-bearing requests by default and is cleared when Pi exits;
+gateway receipt and session artifacts have their own server-side retention.
 
 Interchangeable with `pi-provider-redpill` — both share the same
 protocol core and pin the same attested workload. If you operate your own private-ai-gateway, use the neutral

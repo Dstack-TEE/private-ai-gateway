@@ -49,7 +49,7 @@ export function inferThinkingFormat(modelId: string): InferredThinking {
   return piThinking(modelId, inferAciThinkingFormat(modelId));
 }
 
-function toPiModel(model: AciModel): AciPiModel {
+export function mapAciModelToPi(model: AciModel): AciPiModel {
   const thinking = piThinking(model.id, model.thinkingFormat);
   return {
     id: model.id,
@@ -74,7 +74,7 @@ export function mapAciServerModel(
   config: AciCloudConfig,
 ): AciPiModel | null {
   const mapped = mapAciModel(model, toAciProviderConfig(config));
-  return mapped ? toPiModel(mapped) : null;
+  return mapped ? mapAciModelToPi(mapped) : null;
 }
 
 export interface DiscoverAciModelsOptions {
@@ -101,7 +101,7 @@ export async function discoverAciModels(
   });
   return {
     raw: [...catalog.raw],
-    models: catalog.models.map(toPiModel),
+    models: catalog.models.map(mapAciModelToPi),
   };
 }
 

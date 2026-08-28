@@ -16,7 +16,7 @@ import { REDPILL_ACI_PROFILE } from "@phala/aci-provider/profiles";
 import { createProvider } from "@phala/pi-provider-aci";
 
 export default createProvider({
-  ...REDPILL_ACI_PROFILE,
+  profile: REDPILL_ACI_PROFILE,
   footerKey: "redpill",
 });
 

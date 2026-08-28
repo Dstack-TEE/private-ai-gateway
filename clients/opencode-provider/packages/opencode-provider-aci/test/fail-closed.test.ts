@@ -42,6 +42,12 @@ test("keeps an existing provider blocked when configuration fails", async () => 
     ),
   ).rejects.toThrow("not connected to a verified gateway");
   const config: Config = {
+    command: {
+      "aci-attestation": {
+        description: "User command",
+        template: "Keep this command",
+      },
+    },
     provider: {
       aci: {
         npm: "@ai-sdk/openai-compatible",
@@ -52,6 +58,12 @@ test("keeps an existing provider blocked when configuration fails", async () => 
   };
 
   await expect(hooks.config?.(config)).rejects.toThrow("expected an https URL");
+  expect(config.command?.["aci-attestation"]?.template).toBe("Keep this command");
+  expect(config.command?.["aci-receipts"]?.template).toContain(
+    'aci_inspect tool exactly once with action "receipts"',
+  );
+  expect(config.command?.["aci-receipt"]?.template).toContain('If "$1" is empty, omit id');
+  expect(config.command?.["aci-session"]?.template).toContain('Pass "$1" exactly as id');
   expect(config.provider?.aci?.env).toEqual(["ACI_API_KEY"]);
   const fetch = config.provider?.aci?.options?.fetch;
   expect(typeof fetch).toBe("function");

@@ -31,10 +31,17 @@ environment variables into its credential store.
 The provider fails closed when workload or channel verification fails. For a
 production reviewed-release claim, configure `ACI_ACCEPTED_COMPOSE_HASHES` with
 the comma-separated compose hashes published by the deployment operator.
-`/aci-receipt [id]` displays or re-verifies a recorded exchange's signed
-receipt, exact wire body hashes, and cited attested session. `/aci-session <id>`
-fetches the public session artifact over the pinned connection and validates it
-locally; it does not require an inference API key.
+`/aci-receipts` lists retained exchanges. `/aci-receipt [id]` displays or
+re-verifies the latest or selected exchange's signed receipt, exact wire body
+hashes, and cited attested session. `/aci-session <id>` fetches the public
+session artifact over the pinned connection and validates it locally; it does
+not require an inference API key.
+
+The local wire-digest history retains the latest 32 receipt-bearing requests by
+default and is cleared when Pi exits. Credential, model-catalog, and
+default-model persistence are independent of that audit history. Gateway
+receipt and session artifacts remain subject to the deployment's server-side
+retention policy.
 
 See the [full client documentation](https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider)
 for configuration, trust boundaries, and branded packages.

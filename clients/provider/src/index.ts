@@ -5,6 +5,14 @@ export {
   type AciProviderPhase,
   type AciProviderStatus,
 } from "./provider.ts";
+export type {
+  AccountApiKeyAuth,
+  AccountApiKeyAuthorization,
+  AccountApiKeyAuthorizationPresentation,
+  AccountApiKeyCredential,
+  CompleteAccountApiKeyAuthorizationOptions,
+  StartAccountApiKeyAuthorizationOptions,
+} from "./account-auth.ts";
 export {
   aciProviderConfigInputFromEnv,
   AciProviderConfigError,
@@ -32,6 +40,14 @@ export {
   type AciSessionAudit,
   type AciSessionCheck,
 } from "./session.ts";
+export {
+  formatAciInspection,
+  inspectAciProvider,
+  type AciInspectionRequest,
+  type AciInspectionResult,
+  type FormatAciInspectionOptions,
+  type InspectAciProviderOptions,
+} from "./inspection.ts";
 export {
   DEFAULT_ACI_PROVIDER_PROFILE,
   resolveAciProviderProfile,

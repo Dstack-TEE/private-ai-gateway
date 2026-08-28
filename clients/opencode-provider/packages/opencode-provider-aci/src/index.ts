@@ -2,6 +2,7 @@ import {
   createAciProvider,
   resolveAciProviderConfig,
   resolveAciProviderProfile,
+  type AccountApiKeyAuth,
   type AciModel,
   type AciFetch,
   type AciProvider,
@@ -15,6 +16,7 @@ import { createAciInspectTool } from "./inspect.ts";
 const OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible";
 
 type OpenCodeProviderConfig = NonNullable<Config["provider"]>[string];
+type OpenCodeCommandConfig = NonNullable<Config["command"]>[string];
 
 export interface OpenCodeModelConfig {
   name: string;
@@ -48,6 +50,7 @@ export type OpenCodeAciAuthMethod = AuthHook["methods"][number];
 export interface CreateOpenCodeAciPluginOptions {
   profile?: Partial<AciProviderProfile>;
   defaults?: OpenCodeAciPluginOptions;
+  accountAuth?: AccountApiKeyAuth;
   authMethods?: readonly OpenCodeAciAuthMethod[];
 }
 
@@ -97,13 +100,75 @@ function modelMap(models: readonly AciModel[]): Record<string, OpenCodeModelConf
   return Object.fromEntries(models.map((model) => [model.id, mapOpenCodeModel(model)]));
 }
 
+function registerInspectCommands(config: Config, providerId: string, toolName: string): void {
+  const command = (
+    action: "attestation" | "receipts" | "receipt" | "session",
+    description: string,
+    id?: "optional" | "required",
+  ): OpenCodeCommandConfig => ({
+    description,
+    template: [
+      `Call the ${toolName} tool exactly once with action "${action}".`,
+      ...(id === "optional"
+        ? ['If "$1" is empty, omit id; otherwise pass "$1" exactly as id.']
+        : id === "required"
+          ? ['Pass "$1" exactly as id.']
+          : []),
+      "Return the tool output verbatim without commentary and do not call any other tool.",
+    ].join(" "),
+  });
+  const commands: Record<string, OpenCodeCommandConfig> = {
+    [`${providerId}-attestation`]: command(
+      "attestation",
+      `Show the verified ${providerId} ACI workload identity`,
+    ),
+    [`${providerId}-receipts`]: command("receipts", `List retained ${providerId} ACI receipts`),
+    [`${providerId}-receipt`]: command(
+      "receipt",
+      `Verify the latest or selected ${providerId} ACI receipt`,
+      "optional",
+    ),
+    [`${providerId}-session`]: command("session", `Verify a ${providerId} ACI session`, "required"),
+  };
+
+  config.command ??= {};
+  for (const [name, value] of Object.entries(commands)) config.command[name] ??= value;
+}
+
+export function createOpenCodeAccountAuthMethod(account: AccountApiKeyAuth): OpenCodeAciAuthMethod {
+  return {
+    type: "oauth",
+    label: account.label,
+    async authorize() {
+      const authorization = await account.start();
+      return {
+        url: authorization.url,
+        instructions: authorization.instructions ?? `Continue in ${authorization.url}`,
+        method: "auto",
+        async callback() {
+          const credential = await authorization.complete();
+          return {
+            type: "success",
+            key: credential.apiKey,
+            ...(credential.metadata ? { metadata: credential.metadata } : {}),
+          };
+        },
+      };
+    },
+  };
+}
+
 export function createOpenCodeAciPlugin({
   profile: profileInput = {},
   defaults = {},
+  accountAuth,
   authMethods = [],
 }: CreateOpenCodeAciPluginOptions = {}): Plugin {
   const profile = resolveAciProviderProfile(profileInput);
-  const methods = [...authMethods];
+  const methods = [
+    ...(accountAuth ? [createOpenCodeAccountAuthMethod(accountAuth)] : []),
+    ...authMethods,
+  ];
   if (!methods.some((method) => method.type === "api")) {
     methods.push({ type: "api", label: `${profile.label} API key` });
   }
@@ -122,7 +187,7 @@ export function createOpenCodeAciPlugin({
 
     return {
       tool: {
-        [inspectToolName]: createAciInspectTool(() => active),
+        [inspectToolName]: createAciInspectTool(() => active, profile.label),
       },
       async config(config) {
         const baseURL = options.baseURL ?? defaults.baseURL;
@@ -140,6 +205,7 @@ export function createOpenCodeAciPlugin({
           models: {},
         };
         config.provider[profile.providerId] = owned;
+        registerInspectCommands(config, profile.providerId, inspectToolName);
 
         const previous = active;
         active = undefined;

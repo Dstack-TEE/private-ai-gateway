@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { createPhalaCloudAccountAuth } from "@phala/aci-provider/phala-cloud";
+import { createOpenCodeAccountAuthMethod } from "@phala/opencode-provider-aci";
 
-import { createPhalaCloudDeviceAuthMethod } from "../index.ts";
-
-test("maps a device authorization grant into an OpenCode API credential", async () => {
+test("maps the shared Phala account flow into OpenCode native auth", async () => {
   const responses = [
     Response.json({
       device_code: "device-secret",
@@ -18,15 +18,17 @@ test("maps a device authorization grant into an OpenCode API credential", async 
       workspace: { name: "Confidential AI", slug: "confidential-ai" },
     }),
   ];
-  const method = createPhalaCloudDeviceAuthMethod({
-    baseURL: "https://cloud.example",
-    clientId: "opencode",
-    fetch: async () => {
-      const response = responses.shift();
-      if (!response) throw new Error("unexpected request");
-      return response;
-    },
-  });
+  const method = createOpenCodeAccountAuthMethod(
+    createPhalaCloudAccountAuth({
+      baseURL: "https://cloud.example",
+      clientId: "opencode",
+      fetch: async () => {
+        const response = responses.shift();
+        if (!response) throw new Error("unexpected request");
+        return response;
+      },
+    }),
+  );
   if (method.type !== "oauth") throw new Error("expected an OAuth method");
 
   const authorization = await method.authorize();
