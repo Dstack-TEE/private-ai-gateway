@@ -198,16 +198,30 @@ export async function auditResponse(
     await verify();
     return response;
   }
-  const body = response.body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-      },
-      async flush() {
-        await verify();
-      },
-    }),
-  );
+  const reader = response.body.getReader();
+  let verification: Promise<void> | undefined;
+  const verifyOnce = () => {
+    verification ??= Promise.resolve()
+      .then(verify)
+      .then(() => undefined);
+    return verification;
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (!done) {
+        controller.enqueue(value);
+        return;
+      }
+      await verifyOnce();
+      controller.close();
+    },
+    async cancel(reason) {
+      const [cancelled, verified] = await Promise.allSettled([reader.cancel(reason), verifyOnce()]);
+      if (verified.status === "rejected") throw verified.reason;
+      if (cancelled.status === "rejected") throw cancelled.reason;
+    },
+  });
   return new Response(body, {
     status: response.status,
     statusText: response.statusText,
