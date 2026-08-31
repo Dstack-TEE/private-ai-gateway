@@ -72,6 +72,12 @@ These boundaries are present in the current code and should inform deployment de
 - Define a durable receipt-store interface and retention policy suitable for process restarts and multiple replicas.
 - Evaluate hash chaining or external witnessing for session transparency.
 - Document backup, recovery, file permissions, storage growth, and multi-replica ownership for production state.
+- Add provider-verification and Chutes nonce-pool metrics for cache health,
+  refresh results, binding mismatches, and pool depletion.
+- Replace the runtime apt and rustup bootstrap with a pinned, gateway-owned
+  runner image or reviewed prebuilt binary.
+- Define multi-region identity and state behavior, including KMS application
+  identity, receipt locality, failover, and session availability.
 - Add deployment health, readiness, and alerting guidance based on concrete service-level objectives.
 
 ### API and client coverage
@@ -81,6 +87,13 @@ These boundaries are present in the current code and should inform deployment de
   supported API requests can also opt into receipt and session-policy checks.
 - Define or reject a native Anthropic Messages E2EE profile at the API boundary.
 - Expand Responses API conformance and streaming interoperability tests.
+- Expand live provider coverage for streaming, tools, structured output,
+  multimodal input, context limits, cache behavior, and strict release
+  provenance without treating unsupported capabilities as passes.
+- Decide whether to ship the planned backend-only local proxy that reuses the
+  provider verifiers and transports without claiming a local TEE-backed ACI
+  service identity. This is distinct from `aci serve`, which verifies and
+  proxies an existing remote ACI service.
 
 ### Middleware and control plane
 

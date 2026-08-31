@@ -148,6 +148,36 @@ A receipt proves what the attested gateway recorded. A deep session audit lets
 the relying party reappraise the provider evidence instead of accepting the
 gateway's `verified` label alone.
 
+### Audit the receipt
+
+Given an established workload keyset and the exact request and response bytes,
+a relying party checks:
+
+1. The receipt `signature` verifies over the JCS form of the document without
+   its `signature` member, using the `receipt_signing_keys` entry named by
+   `key_id`.
+2. `api_version` is `aci/1`, and `workload_keyset_digest` matches the
+   established gateway identity.
+3. `request.received.body_hash` matches the plaintext request wire body. For
+   E2EE v2, it instead matches the compact JSON body reconstructed after
+   replacing encrypted fields with their decrypted values.
+4. `response.returned.body_hash` matches the exact bytes received from the
+   wire, including ordered SSE framing and any encrypted response fields.
+5. A required aggregated request has an `upstream.verified` event with
+   `required: true`, `result: "verified"`, and a `session_id`.
+6. The full session hashes to that ID, its evidence hashes to
+   `evidence.digest`, the receipt's `served_at` falls inside its validity
+   window, and its claims satisfy local policy.
+
+Compare `request.forwarded.body_hash` with `request.received.body_hash` to
+detect a gateway rewrite. Whether that rewrite is acceptable remains local
+policy. A missing or failed required check makes the response unacceptable.
+
+Fail-closed verification and session-pin refusals also carry `X-Receipt-Id`.
+Their receipts commit to the original request, the failed upstream event, and
+the exact error body, so a client can verify that the attested gateway refused
+before forwarding.
+
 ## Proof layers
 
 | Layer | Artifact | What it proves | What it does not prove by itself |

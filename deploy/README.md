@@ -1,6 +1,6 @@
 # Deploy with git-launcher
 
-This directory contains the reference dstack deployment for Private AI Gateway. It uses `git-launcher` to check out an exact gateway commit, then runs the repository-owned `entrypoint.sh` inside the confidential VM.
+This directory contains the reference dstack deployment for Private AI Gateway. It uses the versioned [`git-launcher`](https://github.com/Dstack-TEE/dstack-examples/tree/git-launcher-v0.3.0/git-launcher) source to check out an exact gateway commit, then runs the repository-owned `entrypoint.sh` inside the confidential VM.
 
 The checked-in manifest is an auditable starting point. It is not a complete production platform. Authentication, rate limiting, external TLS termination, secret delivery, monitoring, backup, and availability remain deployment responsibilities.
 
@@ -20,6 +20,12 @@ The compose pins this launcher image by digest:
 docker.io/dstacktee/git-launcher@sha256:4437dce18ec713b0991d34bd926d324966b1a0b90fad485b8ddb3f4ed2af138b
 ```
 
+That digest comes from the
+[`git-launcher-v0.3.0` release](https://github.com/Dstack-TEE/dstack-examples/releases/tag/git-launcher-v0.3.0).
+Its
+[`VERIFY.md`](https://github.com/Dstack-TEE/dstack-examples/blob/git-launcher-v0.3.0/git-launcher/VERIFY.md)
+documents the Sigstore provenance and deployment-verification chain.
+
 Review the launcher image, gateway commit, complete compose content, and runtime policy together. The launcher image alone does not identify the deployed workload.
 
 ## Prepare the deployment
@@ -34,6 +40,11 @@ The checked-in upstream seed is empty. Before deployment, either:
 [`upstreams.example.json`](upstreams.example.json) demonstrates current Anthropic, Tinfoil, NEAR AI, Chutes, and Phala-direct entries. It contains placeholders, not production policy.
 
 Do not place plaintext credentials in measured compose content. Supply secrets through the deployment's encrypted environment, KMS, or mounted secret mechanism. Keep only secret-variable references in the manifest.
+
+dstack measures the raw manifest into `compose_hash` and publishes its
+`app_compose` preimage in the attestation report. In this manifest, the
+gateway commit and admin token remain variable references; their encrypted
+values are neither published in `app_compose` nor bound by that preimage.
 
 ## One-Command Deploy
 
@@ -57,7 +68,13 @@ Liveness only proves that the process is serving requests. It does not prove pro
 
 ## Ownership boundary
 
-The launcher is build-system agnostic. It performs four operations: clone the repository, check out `COMMIT_SHA`, preserve the container environment, and run `bash entrypoint.sh` from the pinned checkout. The compose does not set `REPO_SUBDIR` because the gateway entrypoint is at the repository root.
+The launcher is build-system agnostic. It parses rather than sources its
+config, requires a full commit ID, checks out that commit in detached mode,
+resets and cleans the checkout, and verifies that `HEAD` equals `COMMIT_SHA`.
+It then preserves the container environment and runs `bash entrypoint.sh`
+from the pinned checkout. It does not fall back to a branch, tag, short hash,
+or another commit. The compose does not set `REPO_SUBDIR` because the gateway
+entrypoint is at the repository root.
 
 The gateway repository owns everything after that boundary:
 
@@ -88,7 +105,7 @@ See [Configuration reference](../docs/configuration-reference.md) for every fiel
 
 | Volume | Mount | Contents |
 | --- | --- | --- |
-| `gateway-checkout` | `/var/lib/git-launcher` | Launcher-owned source checkout. It is scrubbed on boot. |
+| `gateway-checkout` | `/var/lib/git-launcher` | Launcher-owned source checkout. Every boot runs `git reset --hard <commit>` and `git clean -ffdx`, then verifies `HEAD`. |
 | `gateway-state` | `/var/lib/private-ai-gateway` | Active upstream config, sessions, and the build/toolchain cache. |
 
 The gateway state directory contains:
@@ -126,7 +143,7 @@ curl --fail --silent --show-error \
   http://<gateway-host>:8086/v1/admin/upstreams
 ```
 
-The gateway validates the complete array, writes the active file atomically, swaps runtime routing state, and starts verification prewarm. The admin response redacts provider credentials.
+The gateway validates the complete array, writes the active file atomically, swaps runtime routing state, and starts verification prewarm. The admin response redacts provider credentials and returns the active JCS SHA-256 `config_digest`.
 
 Supported provider values are:
 
@@ -167,12 +184,20 @@ Before accepting inference, a relying party should check:
 | Layer | Required comparison |
 | --- | --- |
 | Compose | Exact services, image digests, mounts, ports, configs, and secret references match reviewed policy. |
-| Launcher | `REPO_URL` and the full `COMMIT_SHA` identify reviewed gateway source. |
+| Launcher image | The attested digest matches the reviewed release, and its Sigstore provenance identifies the expected `Dstack-TEE/dstack-examples` workflow, ref, and commit. |
+| Gateway source | `REPO_URL` and the full `COMMIT_SHA` identify reviewed gateway source. |
 | Gateway static config | Bind address, state paths, dstack endpoint, TLS bindings, admin posture, and middleware settings match policy. |
 | Initial upstream seed | Routes, credentials delivery, provider types, model mappings, verification pins, and refresh settings match policy. |
 | Hardware report | Quote, freshness, nonce, `report_data`, event log, measured compose, and key custody satisfy the verifier profile. |
 | TLS | The client-observed leaf SPKI matches the selected report binding. |
 | Request | The request explicitly requires ACI verification or arrives on a reviewed TEE-only route. |
+
+The gateway reports the `REPO_URL` and `COMMIT_SHA` it observed in the launcher
+config. A verifier must independently approve those values and the launcher
+image; reporting them does not make them trustworthy. It must also hash the
+published `app_compose` and match it to the pre-`system-ready` `compose-hash`
+event replayed into RTMR3. That proves the manifest was measured, not that its
+images, source, compiler, or dependencies are acceptable.
 
 Use [Verify an attested inference](../docs/attested-confidential-inference.md) for the artifact flow. The legacy `/v1/attestation/report` endpoint is retained for compatibility; new deployment verification should use `/v1/aci/attestation`.
 

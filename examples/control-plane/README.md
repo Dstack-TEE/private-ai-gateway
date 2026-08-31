@@ -110,6 +110,20 @@ Point the gateway at the server:
 
 The public gateway `GET /v1/models` request is relayed to this server as `GET /models`.
 
+## Data boundary
+
+The gateway does not send prompts, responses, raw bearer tokens, or provider
+credentials to the control plane. Pre-consult receives the bearer-token hash,
+public model, the caller's provider-routing object, the TEE-only flag, and
+optional derived features such as token estimates, closed-enum modalities,
+reasoning intent, and a prefix hash. Post-consult receives status, route,
+timing, usage, pricing, and bounded operational error detail.
+
+Treat the caller's provider-routing object and post-consult error detail as
+sensitive metadata. The provider object is forwarded without schema reduction,
+and provider error text can contain request fragments. Do not place prompts or
+secrets in routing fields, and restrict control-plane logs and retention.
+
 ## Authenticate a remote connection
 
 Set a bearer token on both sides:

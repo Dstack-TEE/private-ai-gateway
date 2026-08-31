@@ -11,14 +11,14 @@ Do not use a dated review as a substitute for the living verification page or cu
 
 ## Provider matrix
 
-| Provider | Attested boundary | Enforced binding | Living reference | Dated audit |
+| Provider | Attested boundary | Enforced binding | Living reference | Dated audit decision |
 | --- | --- | --- | --- | --- |
 | ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
-| Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Review](chutes/review.md) |
-| NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Review](near-ai/review.md) |
-| Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Review](phala-direct/review.md) |
-| SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Review](secret-ai/review.md) |
-| Tinfoil | Confidential model router | `tls_spki_sha256` | [Verification](tinfoil/verification.md) | [Review](tinfoil/review.md) |
+| Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Accepted for limited traffic](chutes/review.md), 2026-05-18 |
+| NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Acceptable with conditions](near-ai/review.md), 2026-05-18 |
+| Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md), updated 2026-07-05 |
+| SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Acceptable with conditions](secret-ai/review.md), 2026-05-22 |
+| Tinfoil | Confidential model router | `tls_spki_sha256` | [Verification](tinfoil/verification.md) | [Acceptable with conditions](tinfoil/review.md), 2026-05-18 |
 
 `openai-compatible` and `anthropic` are supported transport adapters, but they do not create verified TEE sessions.
 
@@ -66,9 +66,28 @@ The full client flow is in [Verify an attested inference](../attested-confidenti
 
 ## Prefix-cache isolation observation
 
-The following is a dated operational observation, not a protocol guarantee: as observed on 2026-07-13, the gateway preserved caller-supplied `cache_salt` but did not derive a tenant-specific cache partition for the active Tinfoil and Chutes routes. Tinfoil and Chutes applied their own provider behavior after forwarding.
+The following is a dated operational observation, not a protocol guarantee. As
+observed on 2026-07-13, the gateway preserved caller-supplied `cache_salt` but
+did not derive a tenant-specific cache partition for the active Tinfoil and
+Chutes routes:
 
-Revalidate provider code and deployment configuration before relying on cache partitioning. Attestation can bind a provider implementation, but it does not turn an unreviewed cache policy into tenant isolation.
+- Tinfoil
+  [replaced `cache_salt`](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.118/cache_salt.go)
+  with a value derived from RedPill's shared upstream credential. Because the
+  gateway did not set `user_cache_secret`, RedPill tenants shared one provider
+  cache namespace.
+- Chutes passed `cache_salt` to vLLM but did not generate one. Unsalted
+  requests shared the serving instance's namespace.
+
+At that revision, Tinfoil's behavior was attestation-backed. The observed
+Chutes behavior came from control-plane evidence and was not bound by its
+current attestation. The intended caller-controlled interface was to preserve
+`cache_salt` for Chutes and translate it to `user_cache_secret` for Tinfoil,
+without deriving or overriding it from RedPill tenant identity in the gateway.
+
+Revalidate provider code and deployment configuration before relying on cache
+partitioning. Attestation can bind a provider implementation, but it does not
+turn an unreviewed cache policy into tenant isolation.
 
 ## Updating a provider page
 

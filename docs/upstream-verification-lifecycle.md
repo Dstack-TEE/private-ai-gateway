@@ -95,6 +95,35 @@ The refresh job obtains the verified provider event, refreshes model session non
 
 This provider-session refresh is separate from the general verifier cache refresh. One maintains instance discovery and nonces; the other renews the attestation result used to authorize those instances.
 
+Provider-session material is subordinate to the verification result. A pooled
+nonce cannot extend trust after verification expires, and every selected
+instance must still match a current verified E2EE-key binding.
+
+For each request, the Chutes backend:
+
+1. Resolves the provider model to a chute ID, with a five-minute local cache.
+2. Removes one unexpired, single-use nonce whose instance ID and E2EE public-key
+   digest match the current verified binding set.
+3. Refills the pool through verified instance discovery when no matching nonce
+   remains.
+4. Encapsulates to the selected ML-KEM-768 key, derives the request key with
+   HKDF-SHA256, encrypts with ChaCha20-Poly1305, and calls `/e2e/invoke`.
+5. Decrypts the buffered or streaming provider response before normal receipt
+   finalization.
+
+The pool uses the provider's `nonce_expires_in` value when present and a
+55-second fallback otherwise. Expired entries are discarded, and selecting a
+nonce removes it from the pool. The model cache and nonce pools are in memory;
+a process restart rebuilds them through prewarm, refresh, or the next request.
+
+A dated live probe on 2026-05-18 observed roughly 138 to 145 seconds for cold
+Chutes evidence verification and roughly one second for warmed small prompts.
+A short 120 requests-per-minute stage and a 25-request burst completed without
+provider `429` responses. These measurements are a lower bound from one model
+and account, not a current latency or throughput guarantee. They explain why
+prewarm and background session refresh keep evidence discovery off the normal
+request path.
+
 ## Failover interaction
 
 Middleware mode can evaluate several candidate routes. Verification failure on a route required to be attested makes that candidate ineligible. The router can try another eligible candidate without forwarding the prompt to the failed one.
