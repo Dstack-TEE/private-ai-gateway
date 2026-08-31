@@ -1,221 +1,145 @@
-# ACI client product architecture
+# ACI client architecture
 
-## Product goal
+This page is for maintainers building a new client or host adapter. It defines
+the product boundary, component ownership, and the security contract every
+supported integration must preserve.
 
-An ACI client must verify the remote confidential workload before it sends any
-model request bytes. Pi is one consumer of that capability, not the product
-boundary. The same verified connection must work for SDK applications and for
-standalone coding agents without duplicating verification in every framework.
+## Design goal
 
-In plain terms, normal HTTPS proves which domain a client reached. ACI adds
-proof of which TEE workload is behind that domain, which workload keys it owns,
-which compose was measured at launch, and whether the channel actually used is
-bound to those keys.
+An ACI client verifies the remote confidential workload before sending model
+request bytes. That capability belongs in a shared transport and verifier, not
+inside Pi, OpenCode, or any one SDK integration.
 
-## Architecture and ownership
+Normal HTTPS authenticates a domain. The ACI client additionally checks which
+TEE workload is behind that domain, which keys it owns, which compose was
+measured at launch, and whether the connection carrying plaintext is bound to
+an attested key.
+
+## Layers
 
 ```mermaid
 flowchart LR
-  classDef upstream fill:#e8f3ff,stroke:#2878b5,color:#102a43
-  classDef host fill:#fff4d6,stroke:#b7791f,color:#4a2c0a
-  classDef client fill:#e8f8ee,stroke:#25855a,color:#123c2b
-  classDef pending fill:#ffe9e7,stroke:#c4473a,color:#541e18
-  classDef external fill:#f3f4f6,stroke:#6b7280,color:#1f2937
-
-  subgraph local[Client machine]
-    pi[Native Pi provider<br/>packages]:::host
-    ocadapter[Native OpenCode<br/>provider plugin]:::client
-    core[Shared @phala/aci-provider<br/>kernel]:::client
-    sdk[OpenAI, Agents, LangChain,<br/>Vercel AI SDK]:::external
-    opencode[OpenCode on Bun]:::external
-    connect[connectAci shared<br/>runtime client]:::client
-    node[Node fetch adapter]:::client
-    bun[Bun fetch adapter]:::client
-
-    pi --> core
-    opencode --> ocadapter --> core
-    core --> connect
-    sdk --> connect
-    connect -->|Node host| node
-    connect -->|Bun host| bun
-  end
-
-  subgraph trust[Shared trust contract]
-    identity[Quote, nonce, keyset,<br/>compose and expiry]:::upstream
-    release[Reviewed compose allowlist<br/>shared client policy]:::client
-    audit[Verified serving, wire digests,<br/>automatic receipt/session checks]:::client
-    channel[Hostname and attested<br/>TLS SPKI binding]:::client
-    identity --> release --> audit --> channel
-  end
-
-  node --> identity
-  bun --> identity
-
-  subgraph tee[Private AI Gateway inside the TEE]
-    api[OpenAI, Responses and<br/>Anthropic API surfaces]:::upstream
-    frontend[ACI frontend<br/>attestation and receipts]:::upstream
-    routing[Optional control-plane<br/>auth and routing]:::upstream
-    backend[Verified provider backend]:::upstream
-
-    api --> frontend --> routing --> backend
-  end
-
-  channel -->|verified, SPKI-pinned TLS| api
-  backend --> provider[TEE or private model provider]:::external
-
-  pipeline[RedPill and Phala release pipeline<br/>publish reviewed compose hashes<br/>product work still pending]:::pending
-  pipeline -. supplies policy .-> release
+  app[SDK application] --> runtime[connectAci runtime]
+  pi[Pi adapter] --> provider[ACI provider kernel]
+  oc[OpenCode adapter] --> provider
+  provider --> runtime
+  runtime --> verifier[ACI verifier]
+  verifier --> transport[Node or Bun pinned transport]
+  transport --> gateway[Attested gateway]
+  gateway --> upstream[Verified model provider]
 ```
 
-Legend:
-
-- Blue: gateway protocol and Rust verification capabilities.
-- Yellow: released Pi-specific product surface.
-- Green: released framework-neutral transport, provider, and trust-policy
-  capabilities.
-- Red: work still required to complete the production product.
-- Gray: external client or provider software.
-
-Component ownership and release status:
-
-| Component or behavior | Owner or status |
-| --- | --- |
-| ACI protocol, gateway surfaces, attestation, receipts and sessions | Gateway implementation |
-| Rust `aci` verifier, `aci serve`, TLS channel binding and `--accept-compose` | Rust client |
-| TypeScript quote, nonce/keyset, compose and expiry checks | TypeScript verifier |
-| Pi provider, branded packages, model discovery and Pi TLS pinning | Released Pi adapter |
-| Framework-neutral model, lifecycle, policy, account-to-key contract, and structured inspection core | Released client stack |
-| Native OpenCode v1 plugin, provider-scoped inspection commands, plus RedPill and Phala Cloud distributions | Released client stack |
-| `connectAci()` framework-neutral, instance-scoped runtime client | Released client stack |
-| Node adapter using the supported undici dispatcher hook | Released client stack |
-| Bun adapter using the supported `fetch({ tls, proxy })` hooks | Released client stack |
-| Quote-before-pin enforcement, no verification downgrade, origin isolation and safe multi-SPKI rotation | Released client stack |
-| TypeScript/Pi `acceptedComposeHashes` aligned with Rust policy | Released client stack |
-| Streaming wire-digest capture and automatic response-completion receipt/session verification in Pi and OpenCode | Released client stack |
-| Compiled ESM npm packages, declaration maps, package lint, clean-install smoke and OIDC release workflow | Released client stack |
-| Direct OpenCode integration through its provider `options.fetch` hook | Released client stack |
-| Fail-closed OpenCode provider ownership, live model discovery, cancellation-safe receipt audit, and read-only inspection tool | Released client stack |
-| Coding-agent integration guide around the shared transport boundary | Released client stack |
-| Reviewed compose publication from RedPill and Phala release pipelines | Pending product work |
-
-Account authentication is outside the ACI trust protocol. RedPill adapters
-currently accept API keys only. Phala Cloud's device authorization and account
-metadata live in the explicit `@phala/aci-provider/phala-cloud` subpath and are
-attached only by the Phala Cloud adapters. A future RedPill Clerk OAuth flow
-should be added when that product endpoint exists, without changing the
-verifier.
-
-The shared provider exposes four host-neutral integration contracts above the
-verified transport:
-
-| Contract | Shared responsibility | Host responsibility |
+| Layer | Responsibility | Must not own |
 | --- | --- | --- |
-| Provider lifecycle | Resolve policy, establish the verified connection, expose one scoped `fetch`, and fail closed | Create and close the provider through native lifecycle hooks |
-| Model catalog | Strictly validate `/v1/models` and map its declared capabilities, pricing, limits, and modalities into `AciModel` | Map `AciModel` into the host's model type and let the host persist selection/catalog state |
-| Account authorization | Describe one browser/device flow with `AccountApiKeyAuth` and return one API key plus optional metadata | Map the flow into native auth UI and persist the key |
-| ACI inspection | Return structured status, attestation, receipt, and session results and format them for text UIs | Register native commands/tools and render the result |
+| `@phala/aci-verifier` | Quote, nonce, keyset, measurement, expiry, channel, wire-digest, receipt, and session verification | Host auth UI, model persistence, or provider branding |
+| `connectAci()` runtime | One origin-scoped verified connection and fetch implementation | Global TLS state or cross-origin pins |
+| `@phala/aci-provider` | Connection lifecycle, catalog validation, TEE filtering, capabilities, receipt history, response verification, and structured inspection | Host credential storage or host-specific UI |
+| Pi adapter | Pi Provider/Auth APIs, settings, commands, footer state, and native persistence | Independent verification or credential storage |
+| OpenCode adapter | Server-plugin config, auth loader, models, commands, tools, and disposal | Independent verification or credential storage |
+| Branded package | Provider ID, label, endpoint, environment names, accepted release policy, and optional account flow | A fork of the shared trust logic |
 
-This is the extension boundary for another coding agent. A new adapter should
-map these contracts into official host APIs. It should not implement
-attestation, receipt verification, device polling, credential storage, or
-another model catalog.
+Applications that accept a custom `fetch` can use `connectAci()` directly.
+Applications with a provider lifecycle should use the provider kernel. A host
+that exposes neither boundary needs a local verified proxy; changing only its
+base URL is not a native ACI integration.
 
-Model metadata has one authority: the gateway catalog. `supported_features`
-drives reasoning and tool support, while `supported_sampling_parameters`
-drives temperature support. Empty capability arrays are treated conservatively
-and never expanded from a model id. Required limits, modalities, base prices,
-and capability arrays are validated instead of replaced with client defaults.
-Optional cache prices remain absent.
-Provider-specific reasoning dialects remain a gateway routing concern; clients
-use the gateway's public reasoning fields.
+## Shared trust contract
 
-Account authorization is a product capability, not part of ACI. Phala Cloud
-currently implements `AccountApiKeyAuth` with its device grant. RedPill does
-not advertise account authorization, so both hosts expose only its API-key
-method. A future RedPill Clerk integration should implement the same shared
-contract once its real authorization endpoints exist; Pi and OpenCode adapters
-will not need brand-specific login code.
+Every supported runtime path must:
 
-Pi and OpenCode integrate through their official host APIs. Pi owns credentials,
-dynamic-catalog persistence, default-model persistence, and the provider
-lifecycle. OpenCode owns plugin configuration and credential persistence; its
-server plugin supplies the provider config, auth loader, verified fetch, tools,
-and disposal hook. Neither adapter maintains a parallel host state store.
+1. Fetch a fresh nonce-bound report before model traffic.
+2. Verify the hardware quote and the keyset digest bound into `report_data`.
+3. Verify `sha256(app_compose)` against the RTMR3 `compose-hash` event.
+4. Apply any configured accepted-compose policy.
+5. Reject expired keysets.
+6. Validate the destination hostname and require its observed TLS SPKI to
+   appear in the attested keyset.
+7. Apply `aci_verified` and accepted-session constraints before forwarding.
+8. Capture the exact request and response wire digests needed for receipt
+   verification.
+9. Verify the signed receipt and cited session before completing a response
+   when the host promises automatic response verification.
+10. Fail closed on every required check, including cancellation races.
 
-`connectAci()` is the runtime client for applications that accept a custom
-`fetch`. Node and Bun expose the same public API and differ only in how their
-native `fetch` receives the TLS identity callback.
+Pi and OpenCode enable response-completion receipt verification. The generic
+provider defaults to on-demand verification so an embedding host can choose
+the point at which it waits for the audit. `connectAci()` exposes the lower-level
+transport and audit primitives without adding provider lifecycle.
 
-## One trust contract, host-native integrations
+Rust names reviewed compose hashes with repeatable `--accept-compose` flags.
+TypeScript calls the same policy `acceptedComposeHashes`. Conformance tests
+must keep those semantics aligned.
 
-Pi and OpenCode inject the shared verified fetch through their official provider
-extension points. Other fetch-aware Node and Bun applications inject
-`connectAci().fetch` directly. A base URL alone cannot inject the attested TLS
-transport, so clients without a supported custom-fetch or provider-plugin
-boundary are not native ACI integrations in this release. Every supported path
-enforces the same security meaning:
+## Provider contracts
 
-1. Verify a fresh TDX quote and its nonce-bound workload keyset.
-2. Verify that `sha256(app_compose)` is measured into the quote's RTMR3.
-3. When an allowlist is configured, require the measured compose hash to be one
-   of the reviewed releases.
-4. Reject expired identities.
-5. Send inference traffic only over hostname-validated TLS whose observed SPKI
-   is in the attested keyset.
-6. Apply verified-serving and session constraints before forwarding.
-7. Retain exact wire digests and verify signed receipts/sessions on demand.
-8. Fail closed on any required check.
+The provider kernel exposes four host-neutral contracts:
 
-Implementations may use different languages while sharing policy semantics and
-conformance tests. Rust exposes the release policy as repeatable
-`--accept-compose` flags. TypeScript exposes it as
-`acceptedComposeHashes` and Pi passes the same policy through its brand profile
-or deployment configuration.
+| Contract | Shared provider owns | Host adapter owns |
+| --- | --- | --- |
+| Lifecycle | Resolve policy, establish the verified connection, expose scoped fetch, and close it | Create and dispose the provider through native hooks |
+| Model catalog | Validate `/v1/models`, filter, and map declared capabilities, prices, limits, and modalities | Convert `AciModel` into the host model type and persist selection |
+| Account authorization | Describe a browser or device flow and return one API key plus optional metadata | Present the flow and persist the resulting credential |
+| Inspection | Return structured status, attestation, receipt, and session results | Register native commands or tools and render the result |
 
-Within TypeScript, all quote, keyset, policy, rotation, request constraint,
-digest, receipt, and session logic is shared. The Node adapter uses undici's
-scoped dispatcher; the Bun adapter uses Bun's native TLS and proxy fetch
-options. Conditional npm exports select the adapter.
+A new adapter maps these contracts into official host APIs. It must not
+reimplement attestation, device polling, receipt semantics, model inference, or
+credential persistence.
 
-## Hardware proof versus release acceptance
+## Catalog authority
 
-These are deliberately separate claims:
+The gateway catalog is the only source of model capabilities:
 
-- **Hardware-bound mode:** with no compose allowlist, the client proves that a
-  genuine TDX workload owns the attested keys and reports the measured compose.
-  It does not claim that the workload release was reviewed.
-- **Reviewed-release mode:** an operator or branded distribution supplies
-  reviewed compose hashes. A different deployment fails before inference bytes
-  are sent.
+- `supported_features` controls reasoning and tool support;
+- `supported_sampling_parameters` controls temperature support;
+- required limits, modalities, prices, and capability arrays must validate;
+- missing optional cache prices remain absent; and
+- clients do not infer a model family or request dialect from the model ID.
 
-`source_provenance.repo_url` and `repo_commit` are useful labels, but they are
-self-declared by the report. They are not the release trust anchor. The compose
-hash is the value bound into RTMR3 and is therefore the value a verifier pins.
-Clients obtain accepted compose hashes from authenticated release metadata.
+Provider-specific reasoning dialects remain a gateway routing concern. Clients
+use the gateway's normalized public reasoning fields.
 
-The neutral SDK may intentionally use hardware-bound mode for self-hosted and
-development deployments. A production RedPill or Phala branded client should
-ship or securely obtain a reviewed compose allowlist and use reviewed-release
-mode by default.
+## Runtime isolation
 
-## Remaining product work
+`connectAci()` is instance-scoped. Multiple providers can coexist without
+sharing pins, connection state, credentials, model catalogs, or receipt
+history.
 
-The transport and npm release mechanics are no longer the main blockers. The
-deployment release process must still close the trust loop:
+Node uses an undici dispatcher scoped to the connection. Bun uses its native
+TLS and proxy fetch options. Conditional package exports select the adapter;
+all verification and policy logic above the TLS hook is shared.
 
-1. Review the gateway source and complete deployment compose.
-2. Produce the deterministic compose hash for the approved release.
-3. Publish the hash through an authenticated release channel.
-4. Ship it in the branded client policy, allowing an explicit overlap window
-   during controlled release rotation.
-5. Exercise both Rust and TypeScript clients against the same accepted and
-   rejected measurements.
+Pi owns credentials, dynamic-catalog persistence, default-model persistence,
+and provider lifecycle through its native APIs. OpenCode owns plugin
+configuration and credential persistence. Neither adapter maintains a parallel
+host state store.
 
-The release workflow publishes all eight npm packages in dependency order from
-a signed GitHub Release. Publishing alone does not create a reviewed-release
-claim: the RedPill and Phala deployment pipelines still need to supply the
-independently reviewed compose hashes consumed by the branded policies.
+## Release acceptance
 
-The local agent sees plaintext prompts and responses. This architecture covers
-the remote model HTTP path; MCP servers, tools, browser automation, shell
-commands, WebSockets, extensions, and telemetry have separate trust boundaries.
+Hardware proof does not identify an approved product release by itself:
+
+- In **hardware-bound mode**, the client proves a genuine TDX workload owns
+  the attested keys and reports its measured compose.
+- In **reviewed-release mode**, the client also requires that compose hash to
+  appear in a reviewed allowlist.
+
+The report's repository and commit fields are self-declared labels. The compose
+hash is the RTMR3-bound release anchor. RedPill and Phala deployment pipelines
+must publish reviewed compose hashes through an authenticated channel and
+allow a controlled overlap during rotation.
+
+The remaining release loop is:
+
+1. Review the source and complete deployment compose.
+2. Produce the deterministic compose hash.
+3. Publish it through an authenticated release channel.
+4. Ship it in the branded client policy.
+5. Exercise accepted and rejected measurements in Rust and TypeScript.
+
+Publishing the npm packages does not, by itself, establish a reviewed-release
+claim.
+
+## Boundary of this architecture
+
+The local host sees plaintext. This architecture protects the remote model
+HTTP path. MCP servers, tools, browser automation, shell commands, WebSockets,
+extensions, and host telemetry require their own threat models.

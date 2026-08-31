@@ -1,6 +1,12 @@
 # Chutes E2EE Review
 
 Date: 2026-05-18 UTC.
+
+> [!NOTE]
+> This is a point-in-time admissions audit. It preserves the evidence and
+> decision from the date above. Use [verification.md](verification.md) for the
+> current adapter algorithm, claims, and limitations.
+
 Provider endpoint: `https://api.chutes.ai`.
 Trust boundary: verified Chutes model instance reached through Chutes E2EE
 transport.

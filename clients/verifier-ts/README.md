@@ -74,7 +74,7 @@ evidence) exactly as observed.
   does not reconstruct MRTD/RTMR0-2 from a dstack OS image. A
   `requireProductionOs` pass is meaningful only together with a dstack
   verifier result for the same quote, event log, and VM configuration. See
-  [How the OS image is classified](../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+  [Phala-direct verification algorithm](../../docs/providers/phala-direct/verification.md#verification-algorithm).
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
   implemented in either in-tree verifier; both report an honest skip
   (conformance gaps item 1).

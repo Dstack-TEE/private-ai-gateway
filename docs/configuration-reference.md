@@ -156,7 +156,7 @@ control plane over HTTP or HTTPS and then calls the ACI service in-process.
 | `middleware.control_token` | string | unset | Optional bearer token sent to the control plane. Blank strings are treated as unset. |
 | `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
 | `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
-| `middleware.sse_keepalive_ms` | integer | `5000` | SSE interval measured from the start of the upstream forward. If an unconstrained, non-E2EE streaming request has no upstream response headers after one interval, the gateway commits `200 text/event-stream` and emits `: PROCESSING` comments until the upstream answers. A later failure is sent as the surface's in-band error event, while the usage report keeps the real status. The early response has no `X-Receipt-Id`; after a successful stream the receipt is available by response `id`, while a forward failure drafts no receipt. Requests with `provider.aci_verified`, pinned session IDs, E2EE, or a candidate already failed in the same request are never committed early. After the stream opens, the same interval drives idle heartbeats. Zero disables both early commit and heartbeats. |
+| `middleware.sse_keepalive_ms` | integer | `5000` | Interval for pre-header processing comments and post-header idle heartbeats. Zero disables both. See [Streaming keepalives and early commit](#streaming-keepalives-and-early-commit). |
 | `middleware.prefix_hash_secret` | string | unset | HMAC key for the consult prefix hash. After trimming, it must contain at least 32 bytes. Every replica must share the same value. When unset, the gateway uses plain SHA-256, which leaves prefix equality linkable. |
 | `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash. No prompt text is sent. Set false to restore the featureless consult body. |
 | `middleware.tee_only_domains` | string array | `[]` | Hostnames whose catalog queries force `tee=true` and whose inference requests require an ACI-verified route. Matching uses the normalized HTTP `Host`. |
@@ -167,6 +167,25 @@ deny non-TEE models when a pre-consult contains `tee: true` if the deployment
 expects a `404` at the catalog and authorization layer. The gateway still
 enforces successful upstream verification before serving any request on a
 TEE-only hostname.
+
+### Streaming keepalives and early commit
+
+The interval starts when the gateway begins forwarding to an upstream. If an
+eligible stream has no upstream response headers after one interval, the
+gateway commits `200 text/event-stream` and emits `: PROCESSING` comments until
+the upstream answers. After the response opens, the same interval drives idle
+heartbeats.
+
+Only unconstrained, non-E2EE requests are eligible. The gateway does not commit
+early when the request carries `provider.aci_verified`, pinned session IDs, or
+E2EE headers, or after a candidate has already failed during the same request.
+
+An early-committed response cannot carry `X-Receipt-Id` because the upstream
+has not yet been selected. After a successful stream, the receipt is available
+by response `id`. If forwarding fails after the early commit, the gateway sends
+the surface's in-band error event and drafts no receipt. The control-plane usage
+report still records the real failure status rather than the HTTP `200` already
+sent to the client.
 
 ### Request outcome logs
 

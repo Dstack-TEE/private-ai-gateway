@@ -99,15 +99,15 @@ pi -e clients/pi-provider/packages/pi-provider-aci
 The adapter creates an instance-scoped `@phala/aci-provider`. That shared
 provider uses the Node ACI transport to:
 
-- recomputes the keyset digest from the served keyset (not trusted from the
+- recompute the keyset digest from the served keyset rather than trust the
   report),
-- checks `report_data` binds our fresh nonce,
-- checks `not_after`,
-- verifies the TDX quote to the Intel root and confirms it binds the same
+- check that `report_data` binds the fresh nonce,
+- check `not_after`,
+- verify the TDX quote to the Intel root and confirm it binds the same
   `report_data`, and
-- verifies `sha256(app_compose)` is measured into RTMR3 and, when configured,
-  belongs to the reviewed compose allowlist, and
-- opens a normal hostname-validated TLS connection whose peer SPKI must match
+- verify that `sha256(app_compose)` is measured into RTMR3 and, when configured,
+  belongs to the reviewed compose allowlist; and
+- open a hostname-validated TLS connection whose peer SPKI must match
   `workload_keyset.tls_public_keys`.
 
 Only a report that passes both binding and hardware verification yields an

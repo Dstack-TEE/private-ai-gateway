@@ -95,7 +95,8 @@ stores a SHA-256 digest of that token as the receipt owner. Receipt lookup then
 requires the same bearer token:
 
 - a missing token returns `401`,
-- a different token returns `403`, and
+- a different token returns `404` so the lookup does not reveal another
+  tenant's receipt, and
 - an inference request without a bearer token creates a public receipt.
 
 The incoming bearer token is used for receipt ownership and middleware API-key

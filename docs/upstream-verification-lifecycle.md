@@ -50,7 +50,9 @@ applies the fail-closed gate.
 
 The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
 
-The ACI-service verifier also limits its cached result to the attestation report's `stale_after` timestamp. Its usable lifetime is the earlier of that timestamp and the configured cache deadline.
+The ACI-service verifier also limits its cached result to the workload keyset's
+`not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and
+the configured cache deadline.
 
 Cache lifetime is not a promise that a connection remains safe for that duration. Every forward still enforces the cached channel binding against the connection it uses.
 

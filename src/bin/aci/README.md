@@ -87,7 +87,7 @@ verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
 RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
 dstack verifier over the same quote, event log, and VM configuration, and
 require `is_valid: true`; that result establishes `os_image_hash` from those
-boot measurements. See [How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+boot measurements. See the [Phala-direct verification algorithm](../../../docs/providers/phala-direct/verification.md#verification-algorithm).
 
 ## Where verification lives
 

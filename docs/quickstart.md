@@ -65,7 +65,7 @@ aci curl "$ACI_URL/v1/models" --accept-compose 7c1e...40db -- --silent
 For a production deployment, first run a dstack verifier over the report's
 quote, event log, and VM configuration. Require it to reproduce the boot
 measurements (MRTD and RTMR0-2), establish `os_image_hash`, and return
-`is_valid: true`. The [Phala direct verification path](providers/phala-direct/verification.md#how-the-os-image-is-classified)
+`is_valid: true`. The [Phala-direct verification algorithm](providers/phala-direct/verification.md#verification-algorithm)
 implements this check. Then appraise that hash with the ACI client's production
 allowlist:
 

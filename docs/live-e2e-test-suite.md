@@ -4,6 +4,13 @@ The live suite starts a local gateway, calls real provider APIs, verifies return
 
 The implementation lives in `scripts/live_e2e/`. This page documents the code that exists today.
 
+> [!WARNING]
+> The full provider matrix is not yet compatible with the simplified ACI
+> receipt schema. The lifecycle and embeddings cases still assert the removed
+> `transparency.request_modified` event. Use the preflight and targeted cases
+> for diagnosis, but do not treat a full-matrix failure at those assertions as
+> a gateway regression until the cases are migrated.
+
 ## What the main runner covers
 
 `scripts/live_e2e/run.py` performs these phases in order:
@@ -16,12 +23,9 @@ The implementation lives in `scripts/live_e2e/`. This page documents the code th
 6. Run structured-output fidelity cases for `full` and `strict-release` profiles.
 7. Write `summary.json` and stop the gateway.
 
-The lifecycle and embeddings cases are intended to check inference, receipt
-retrieval, artifact verification, the `upstream.verified` event, and the cited
-attested-session record. Their request-modification assertions still expect the
-removed `transparency.request_modified` event and must be migrated before the
-full live matrix is considered compatible with the simplified ACI receipt
-schema. They also exercise the legacy report and receipt-wrapper routes as
+The lifecycle and embeddings cases check inference, receipt retrieval, artifact
+verification, the `upstream.verified` event, and the cited attested-session
+record. They also exercise the legacy report and receipt-wrapper routes as
 explicit compatibility surfaces while checking canonical ACI session artifacts.
 
 The suite does not run load tests, availability measurements, browser verification, or every auxiliary smoke script in `scripts/live_e2e/`.
@@ -99,6 +103,11 @@ uv run python scripts/live_e2e/run.py \
   --env-file .env \
   --profile quick
 ```
+
+The runner writes its terminal result to `summary.json` in the artifact
+directory printed at startup. Treat the run as successful only when the
+selected cases are marked passed and the process exits with status 0, subject
+to the schema-migration warning above.
 
 Select one or more entries with repeated `--provider` arguments. A selector can match the entry name, provider type, or public model alias:
 
