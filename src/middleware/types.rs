@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
@@ -159,7 +158,7 @@ pub struct RateLimit {
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationScope {
     pub organization_id: i64,
-    pub workspace_id: Uuid,
+    pub workspace_id: i64,
 }
 
 /// Pre-request consult response. On `allow: false`, `status` and `message` carry
@@ -207,7 +206,7 @@ struct PreConsultWire {
     #[serde(default)]
     organization_id: Option<i64>,
     #[serde(default)]
-    workspace_id: Option<Uuid>,
+    workspace_id: Option<i64>,
     #[serde(default)]
     virtual_key_id: Option<i64>,
     #[serde(default)]
@@ -223,12 +222,18 @@ impl TryFrom<PreConsultWire> for PreConsult {
 
     fn try_from(wire: PreConsultWire) -> Result<Self, Self::Error> {
         let organization = match (wire.organization_id, wire.workspace_id) {
-            (Some(organization_id), Some(workspace_id)) => Some(OrganizationScope {
-                organization_id,
-                workspace_id,
-            }),
+            (Some(organization_id), Some(workspace_id))
+                if organization_id > 0 && workspace_id > 0 =>
+            {
+                Some(OrganizationScope {
+                    organization_id,
+                    workspace_id,
+                })
+            }
             (None, None) => None,
-            _ => return Err("organizationId and workspaceId must be provided together"),
+            _ => {
+                return Err("organizationId and workspaceId must be positive and provided together")
+            }
         };
 
         Ok(Self {
@@ -318,7 +323,7 @@ mod tests {
             "allow": true,
             "userId": 7,
             "organizationId": 11,
-            "workspaceId": "018f3e7c-8d2d-7e5a-9f23-31d2a7c48810",
+            "workspaceId": 13,
             "virtualKeyId": 3
         }))
         .unwrap();
@@ -334,12 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_workspace_id_is_rejected_at_the_wire_boundary() {
+    fn non_positive_workspace_id_is_rejected_at_the_wire_boundary() {
         let result = serde_json::from_value::<PreConsult>(serde_json::json!({
             "allow": true,
             "userId": 7,
             "organizationId": 11,
-            "workspaceId": "not-a-uuid",
+            "workspaceId": 0,
             "virtualKeyId": 3
         }));
 

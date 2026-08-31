@@ -611,7 +611,7 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "message": "This model does not support image input.",
             "userId": 7,
             "organizationId": 11,
-            "workspaceId": "018f3e7c-8d2d-7e5a-9f23-31d2a7c48810",
+            "workspaceId": 13,
             "virtualKeyId": 3
         }),
     )
@@ -626,10 +626,7 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     assert_eq!(report["errorSource"], json!("control"));
     assert_eq!(report["userId"], json!(7));
     assert_eq!(report["organizationId"], json!(11));
-    assert_eq!(
-        report["workspaceId"],
-        json!("018f3e7c-8d2d-7e5a-9f23-31d2a7c48810")
-    );
+    assert_eq!(report["workspaceId"], json!(13));
     assert!(report.get("billingOwnerType").is_none());
     assert!(report.get("billingOwnerId").is_none());
     assert_eq!(report["virtualKeyId"], json!(3));
