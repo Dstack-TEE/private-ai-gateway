@@ -1,6 +1,6 @@
 {
   "name": "opencode-provider-phala-cloud",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Phala Cloud provider for OpenCode with verified ACI transport and per-response receipt verification",
   "keywords": [
     "aci",
@@ -53,8 +53,8 @@
     "prepublishOnly": "npm run check && npm test && npm run lint && npm run format:check"
   },
   "dependencies": {
-    "@phala/aci-provider": "^0.7.2",
-    "@phala/opencode-provider-aci": "^0.7.2"
+    "@phala/aci-provider": "^0.7.3",
+    "@phala/opencode-provider-aci": "^0.7.3"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.18.23 <2"

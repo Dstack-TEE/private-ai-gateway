@@ -1,6 +1,6 @@
 {
   "name": "private-ai-gateway-clients",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "description": "ACI TypeScript clients and coding-agent providers",
   "license": "MIT",
