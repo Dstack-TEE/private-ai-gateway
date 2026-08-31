@@ -612,8 +612,6 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "userId": 7,
             "organizationId": 11,
             "workspaceId": "018f3e7c-8d2d-7e5a-9f23-31d2a7c48810",
-            "billingOwnerType": "organization",
-            "billingOwnerId": 11,
             "virtualKeyId": 3
         }),
     )
@@ -632,8 +630,8 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
         report["workspaceId"],
         json!("018f3e7c-8d2d-7e5a-9f23-31d2a7c48810")
     );
-    assert_eq!(report["billingOwnerType"], json!("organization"));
-    assert_eq!(report["billingOwnerId"], json!(11));
+    assert!(report.get("billingOwnerType").is_none());
+    assert!(report.get("billingOwnerId").is_none());
     assert_eq!(report["virtualKeyId"], json!(3));
     assert!(report["selectedRouteId"].is_null());
     assert!(report["usage"].is_null());
@@ -647,8 +645,6 @@ async fn empty_candidates_is_reported_as_a_control_failure() {
             "allow": true,
             "candidates": [],
             "userId": 7,
-            "billingOwnerType": "user",
-            "billingOwnerId": 7,
             "virtualKeyId": 3
         }),
     )
@@ -915,8 +911,6 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
             "candidates": [{ "routeId": "anthropic:claude", "format": "anthropic" }],
             "pricing": { "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" },
             "userId": 7,
-            "billingOwnerType": "user",
-            "billingOwnerId": 7,
             "virtualKeyId": 3
         }),
     )
@@ -978,10 +972,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
         spend_mode: None,
         user_id: Some(9),
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1656,10 +1647,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1724,10 +1712,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2474,10 +2459,7 @@ async fn mid_stream_read_timeout_settles_504_with_message() {
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2675,10 +2657,7 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2986,10 +2965,7 @@ async fn in_band_stream_error_message_reaches_the_usage_report() {
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,

@@ -192,17 +192,7 @@ impl ControlClient {
                     return fail_closed();
                 }
                 match serde_json::from_str::<PreConsult>(&text) {
-                    Ok(mut consult) => {
-                        consult.normalize_legacy_user_billing_identity();
-                        if consult.has_consistent_billing_identity() {
-                            consult
-                        } else {
-                            tracing::error!(
-                                "consult_pre returned an inconsistent billing identity"
-                            );
-                            fail_closed()
-                        }
-                    }
+                    Ok(consult) => consult,
                     Err(err) => {
                         tracing::error!(
                             error = %err,
@@ -270,10 +260,7 @@ fn fail_closed() -> PreConsult {
         pricing: None,
         candidates: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         spend_mode: None,
         user_tier: None,

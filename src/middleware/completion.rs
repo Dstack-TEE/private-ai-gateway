@@ -21,7 +21,6 @@ use std::pin::Pin;
 
 use futures_util::StreamExt;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
@@ -39,7 +38,7 @@ use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
 use super::types::{
-    BillingOwnerType, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode,
+    ErrorSource, OrganizationScope, PostReport, ProviderFormat, RouteCandidate, SpendMode,
 };
 use super::{pricing, response_transform, stream_transform};
 
@@ -369,10 +368,7 @@ pub async fn run(
         pricing: consult.pricing.clone(),
         spend_mode: consult.spend_mode,
         user_id: consult.user_id,
-        organization_id: consult.organization_id,
-        workspace_id: consult.workspace_id,
-        billing_owner_type: consult.billing_owner_type,
-        billing_owner_id: consult.billing_owner_id,
+        organization: consult.organization,
         virtual_key_id: consult.virtual_key_id,
         prefix_hash: request_features
             .as_ref()
@@ -1180,10 +1176,7 @@ struct Meter {
     pricing: Option<Value>,
     spend_mode: Option<SpendMode>,
     user_id: Option<i64>,
-    organization_id: Option<i64>,
-    workspace_id: Option<Uuid>,
-    billing_owner_type: Option<BillingOwnerType>,
-    billing_owner_id: Option<i64>,
+    organization: Option<OrganizationScope>,
     virtual_key_id: Option<i64>,
     /// Echoed on every report so billing can key cache affinity; see
     /// `PostReport::prefix_hash`.
@@ -1500,10 +1493,7 @@ fn empty_report(request_id: &str, endpoint_path: &str) -> PostReport {
         pricing: None,
         spend_mode: None,
         user_id: None,
-        organization_id: None,
-        workspace_id: None,
-        billing_owner_type: None,
-        billing_owner_id: None,
+        organization: None,
         virtual_key_id: None,
         error_source: None,
         error_message: None,
@@ -1608,10 +1598,7 @@ impl Meter {
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             user_id: self.user_id,
-            organization_id: self.organization_id,
-            workspace_id: self.workspace_id,
-            billing_owner_type: self.billing_owner_type,
-            billing_owner_id: self.billing_owner_id,
+            organization: self.organization,
             virtual_key_id: self.virtual_key_id,
             selected_route_id: Some(selected_route_id),
             attempt_index,
@@ -1638,10 +1625,7 @@ impl Meter {
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             user_id: self.user_id,
-            organization_id: self.organization_id,
-            workspace_id: self.workspace_id,
-            billing_owner_type: self.billing_owner_type,
-            billing_owner_id: self.billing_owner_id,
+            organization: self.organization,
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,
