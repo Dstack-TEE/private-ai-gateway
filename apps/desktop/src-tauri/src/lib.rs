@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
 };
 
-use contracts::{GatewayState, ReceiptSummary, StartGatewayConfig};
+use contracts::{GatewayState, StartGatewayConfig};
 use gateway::GatewayManager;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -35,11 +35,6 @@ fn stop_gateway(
 }
 
 #[tauri::command]
-async fn list_receipts(manager: State<'_, GatewayManager>) -> Result<Vec<ReceiptSummary>, String> {
-    manager.list_receipts().await
-}
-
-#[tauri::command]
 fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() || text.len() > 4_096 {
         return Err("Invalid clipboard text".to_string());
@@ -59,7 +54,6 @@ pub fn run() {
             get_gateway_state,
             start_gateway,
             stop_gateway,
-            list_receipts,
             copy_text
         ])
         .setup(|app| {

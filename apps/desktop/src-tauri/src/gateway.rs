@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Map, Value};
@@ -14,8 +14,8 @@ use tokio::sync::mpsc::Receiver;
 use url::Url;
 
 use crate::contracts::{
-    GatewayIdentity, GatewayState, RawReceiptSummary, ReceiptSummary, RequestActivity,
-    SourceProvenance, StartGatewayConfig, VerificationCheck,
+    GatewayIdentity, GatewayState, RequestActivity, SourceProvenance, StartGatewayConfig,
+    VerificationCheck,
 };
 
 const EVENT_SCHEMA_VERSION: u64 = 1;
@@ -25,7 +25,6 @@ const MAX_EVENT_BYTES: usize = 1_048_576;
 
 pub struct GatewayManager {
     inner: Mutex<RuntimeState>,
-    client: reqwest::Client,
 }
 
 struct RuntimeState {
@@ -46,7 +45,6 @@ impl Default for GatewayManager {
                 diagnostic: VecDeque::with_capacity(MAX_DIAGNOSTIC_BYTES),
                 state: GatewayState::default(),
             }),
-            client: reqwest::Client::new(),
         }
     }
 }
@@ -80,6 +78,7 @@ impl GatewayManager {
             "--control".to_string(),
             "127.0.0.1:0".to_string(),
             "--json-events".to_string(),
+            "--verify-receipts".to_string(),
         ]);
 
         let command = app
@@ -127,41 +126,6 @@ impl GatewayManager {
         }
         publish_state(app, &state);
         Ok(state)
-    }
-
-    pub async fn list_receipts(&self) -> Result<Vec<ReceiptSummary>, String> {
-        let control_url = self
-            .lock()?
-            .state
-            .control_url
-            .clone()
-            .ok_or_else(|| "Gateway is not running".to_string())?;
-        let url = Url::parse(&format!("{control_url}/receipts"))
-            .map_err(|_| "Gateway control endpoint is invalid".to_string())?;
-        let response = self
-            .client
-            .get(url)
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-            .map_err(|error| format!("Cannot read receipt records: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Receipt endpoint returned HTTP {}",
-                response.status().as_u16()
-            ));
-        }
-        let receipts = response
-            .json::<Vec<RawReceiptSummary>>()
-            .await
-            .map_err(|_| "Receipt endpoint returned invalid data".to_string())?;
-        if receipts
-            .iter()
-            .any(|receipt| receipt.receipt_id.is_empty() || receipt.path.is_empty())
-        {
-            return Err("Receipt endpoint returned invalid data".to_string());
-        }
-        Ok(receipts.into_iter().map(ReceiptSummary::from).collect())
     }
 
     fn handle_stdout(&self, app: &AppHandle, generation: u64, bytes: &[u8]) -> Result<(), String> {
@@ -420,24 +384,34 @@ fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> 
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| "ACI emitted an invalid request event".to_string())?;
-    state.activity.insert(
-        0,
-        RequestActivity {
-            method: required_string(event, "method")?,
-            path: required_string(event, "path")?,
-            status,
-            streamed: event
-                .get("streamed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            verified: event.get("verified").and_then(Value::as_bool),
-            detail: optional_string(event, "detail").unwrap_or_default(),
-            at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        },
-    );
+    let receipt_id = optional_string(event, "receipt_id");
+    let activity = RequestActivity {
+        method: required_string(event, "method")?,
+        path: required_string(event, "path")?,
+        status,
+        streamed: event
+            .get("streamed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        receipt_id: receipt_id.clone(),
+        verified: event.get("verified").and_then(Value::as_bool),
+        detail: optional_string(event, "detail").unwrap_or_default(),
+        at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    if let Some(existing) = receipt_id.and_then(|id| {
+        state
+            .activity
+            .iter_mut()
+            .find(|item| item.receipt_id.as_deref() == Some(id.as_str()))
+    }) {
+        let at = existing.at;
+        *existing = RequestActivity { at, ..activity };
+    } else {
+        state.activity.insert(0, activity);
+    }
     state.activity.truncate(MAX_ACTIVITY);
     Ok(())
 }
@@ -525,14 +499,28 @@ mod tests {
             "path": "/v1/chat/completions",
             "status": 200,
             "streamed": true,
+            "receipt_id": "rcpt-1",
             "verified": true,
             "detail": "receipt verified"
         });
         apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
 
+        let updated_request = json!({
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "status": 200,
+            "streamed": true,
+            "receipt_id": "rcpt-1",
+            "verified": false,
+            "detail": "receipt failed"
+        });
+        apply_request_event(&mut state, updated_request.as_object().unwrap()).unwrap();
+
         assert_eq!(state.status, "verified");
         assert_eq!(state.identity.unwrap().tee_type, "tdx");
         assert_eq!(state.checks.len(), 1);
-        assert_eq!(state.activity[0].verified, Some(true));
+        assert_eq!(state.activity.len(), 1);
+        assert_eq!(state.activity[0].receipt_id.as_deref(), Some("rcpt-1"));
+        assert_eq!(state.activity[0].verified, Some(false));
     }
 }

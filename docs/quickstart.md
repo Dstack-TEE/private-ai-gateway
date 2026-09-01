@@ -131,7 +131,7 @@ cargo run --bin aci -- audit --report report.json --nonce "$NONCE"
 ## 3. Use it as a local endpoint
 
 ```bash
-cargo run --bin aci -- serve "$ACI_URL"
+cargo run --bin aci -- serve "$ACI_URL" --verify-receipts
 ```
 
 `aci serve` verifies the service first, prints the transcript, and refuses
@@ -172,8 +172,10 @@ What the proxy does:
   id and body digests are recorded (the last 256 exchanges), and a 2xx
   inference response with no receipt header is flagged immediately
   ([aci.md](../spec/aci.md) §5.2).
-- Verification runs on demand from the control endpoint on
-  `127.0.0.1:4181`, not per request:
+- With `--verify-receipts`, verification runs after each POST response
+  completes, using that request's bearer credential without retaining it.
+  The control endpoint on `127.0.0.1:4181` also supports inspection and
+  explicit re-verification:
 
   ```bash
   curl -sS http://127.0.0.1:4181/receipts        # recent exchanges

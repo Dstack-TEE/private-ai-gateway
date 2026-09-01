@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   DesktopApi,
   GatewayState,
-  ReceiptSummary,
   StartGatewayConfig,
 } from "../shared/contracts";
 
@@ -14,9 +13,6 @@ export const desktopApi: DesktopApi = {
   },
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");
-  },
-  listReceipts(): Promise<ReceiptSummary[]> {
-    return invoke("list_receipts");
   },
   onStateChange(listener: (state: GatewayState) => void): () => void {
     let disposed = false;

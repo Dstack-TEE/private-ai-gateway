@@ -42,21 +42,11 @@ pub struct RequestActivity {
     pub path: String,
     pub status: u16,
     pub streamed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
     pub verified: Option<bool>,
     pub detail: String,
     pub at: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReceiptSummary {
-    pub receipt_id: String,
-    pub path: String,
-    pub status: u16,
-    pub streamed: bool,
-    pub truncated: bool,
-    pub at: u64,
-    pub verified: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,29 +87,4 @@ impl Default for GatewayState {
 pub struct StartGatewayConfig {
     pub remote_url: String,
     pub require_production_os: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawReceiptSummary {
-    pub receipt_id: String,
-    pub path: String,
-    pub status: u16,
-    pub streamed: bool,
-    pub truncated: bool,
-    pub at: u64,
-    pub verified: Option<bool>,
-}
-
-impl From<RawReceiptSummary> for ReceiptSummary {
-    fn from(value: RawReceiptSummary) -> Self {
-        Self {
-            receipt_id: value.receipt_id,
-            path: value.path,
-            status: value.status,
-            streamed: value.streamed,
-            truncated: value.truncated,
-            at: value.at,
-            verified: value.verified,
-        }
-    }
 }

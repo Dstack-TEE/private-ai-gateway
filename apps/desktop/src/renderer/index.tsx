@@ -1,14 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Activity,
   Check,
   CheckCircle2,
   CircleStop,
   Clipboard,
   LoaderCircle,
-  MessageSquareText,
   Play,
-  RefreshCw,
   ShieldCheck,
   ShieldX,
 } from "lucide-react";
@@ -16,7 +15,6 @@ import {
 import { desktopApi } from "./desktop-api";
 import type {
   GatewayState,
-  ReceiptSummary,
   RequestActivity,
   VerificationCheck,
 } from "../shared/contracts";
@@ -25,26 +23,34 @@ import "./styles.css";
 const DEFAULT_REMOTE_URL = "https://tee.redpill.ai";
 const INITIAL_STATE: GatewayState = { status: "stopped", checks: [], activity: [] };
 
-type AuditTab = "verification" | "messages";
+type AuditTab = "requests" | "checks";
+
+const CHECK_TITLES: Record<string, string> = {
+  "id-1": "Hardware attestation is genuine",
+  "id-2": "Attestation is bound to this session",
+  "id-3": "Service keys are current",
+  "id-4": "Service is built from public source",
+  "id-5": "Private key stays inside the enclave",
+  "id-6": "Connection uses the attested key",
+  "policy-os": "Production OS image",
+  "receipt-1": "Receipt signature",
+  "receipt-2": "Receipt matches verified service",
+  "receipt-3": "Request bytes match receipt",
+  "receipt-4": "Response bytes match receipt",
+  "receipt-note": "Service request rewrite",
+  "upstream-1": "Upstream inference was verified",
+  "upstream-2": "Upstream session evidence",
+};
 
 function App(): React.JSX.Element {
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
   const [remoteUrl, setRemoteUrl] = useState(DEFAULT_REMOTE_URL);
   const [requireProductionOs, setRequireProductionOs] = useState(false);
-  const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
-  const [activeTab, setActiveTab] = useState<AuditTab>("verification");
+  const [activeTab, setActiveTab] = useState<AuditTab>("requests");
   const [actionError, setActionError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const busy = state.status === "verifying";
   const running = state.status === "verified" || state.status === "blocked";
-
-  const refreshReceipts = useCallback(async () => {
-    try {
-      setReceipts(await desktopApi.listReceipts());
-    } catch (error) {
-      setActionError(errorMessage(error));
-    }
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -62,16 +68,6 @@ function App(): React.JSX.Element {
       unsubscribe();
     };
   }, []);
-
-  useEffect(() => {
-    if (!running) {
-      setReceipts([]);
-      return undefined;
-    }
-    void refreshReceipts();
-    const timer = window.setInterval(() => void refreshReceipts(), 3_000);
-    return () => window.clearInterval(timer);
-  }, [refreshReceipts, running]);
 
   const start = async () => {
     setActionError(undefined);
@@ -114,7 +110,7 @@ function App(): React.JSX.Element {
         <div className="brand-mark" aria-hidden="true"><ShieldCheck size={18} /></div>
         <div className="brand-copy">
           <h1>Private AI Gateway</h1>
-          <span>Local ACI proxy</span>
+          <span>Verified endpoint for coding agents</span>
         </div>
         <div className={`status-badge status-${state.status}`}>
           <StatusIcon size={14} className={busy ? "spin" : undefined} />
@@ -122,9 +118,9 @@ function App(): React.JSX.Element {
         </div>
       </header>
 
-      <section className="connection-section" aria-label="Gateway connection">
+      <section className="connection-section" aria-label="AI service connection">
         <label className="url-field">
-          <span>Gateway URL</span>
+          <span>AI service</span>
           <input
             value={remoteUrl}
             onChange={(event) => setRemoteUrl(event.target.value)}
@@ -141,7 +137,7 @@ function App(): React.JSX.Element {
               disabled={busy || running}
             />
             <span className="toggle-track" aria-hidden="true"><span /></span>
-            Production OS
+            Require production OS
           </label>
           {running ? (
             <button className="command-button stop-button" onClick={() => void stop()}>
@@ -150,7 +146,7 @@ function App(): React.JSX.Element {
           ) : (
             <button className="command-button start-button" onClick={() => void start()} disabled={busy}>
               {busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
-              {busy ? "Verifying" : "Start"}
+              {busy ? "Verifying..." : "Start"}
             </button>
           )}
         </div>
@@ -163,61 +159,60 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      <section className="endpoint-section" aria-label="Local endpoints">
-        <SectionHeading title="Local endpoints" meta={state.proxyUrl ? "Ready" : "Unavailable"} />
-        <EndpointRow label="OpenAI" value={state.proxyUrl} copied={copied} onCopy={copy} />
+      <section className="endpoint-section" aria-label="Coding agent endpoints">
+        <SectionHeading title="Point your agent here" meta={state.proxyUrl ? "Ready" : "Off"} />
+        <EndpointRow label="OpenAI" value={openAiEndpoint(state.proxyUrl)} copied={copied} onCopy={copy} />
         <EndpointRow label="Anthropic" value={state.proxyUrl} copied={copied} onCopy={copy} />
       </section>
 
-      <section className="identity-section" aria-label="ACI identity">
-        <SectionHeading title="ACI identity" meta={state.identity?.teeType.toUpperCase()} />
+      <section className="identity-section" aria-label="Verified service identity">
+        <SectionHeading title="Verified service" meta={remoteHost(state.remoteUrl ?? remoteUrl)} />
         {state.identity
           ? <IdentitySummary state={state} />
-          : <EmptyState text={busy ? "Verification in progress" : "Not verified"} />}
+          : <EmptyState text={busy ? "Verifying the service..." : "Start to verify the service"} />}
       </section>
 
       <section className="audit-section">
         <div className="tabs" role="tablist" aria-label="Gateway audit data">
           <button
+            id="requests-tab"
             role="tab"
-            aria-selected={activeTab === "verification"}
-            className={activeTab === "verification" ? "active" : undefined}
-            onClick={() => setActiveTab("verification")}
+            aria-selected={activeTab === "requests"}
+            aria-controls="audit-panel"
+            className={activeTab === "requests" ? "active" : undefined}
+            onClick={() => setActiveTab("requests")}
           >
-            <ShieldCheck size={14} /> Verification <span>{state.checks.length}</span>
+            <Activity size={14} /> Requests <span>{state.activity.length}</span>
           </button>
           <button
+            id="checks-tab"
             role="tab"
-            aria-selected={activeTab === "messages"}
-            className={activeTab === "messages" ? "active" : undefined}
-            onClick={() => setActiveTab("messages")}
+            aria-selected={activeTab === "checks"}
+            aria-controls="audit-panel"
+            className={activeTab === "checks" ? "active" : undefined}
+            onClick={() => setActiveTab("checks")}
           >
-            <MessageSquareText size={14} /> Messages <span>{state.activity.length}</span>
+            <ShieldCheck size={14} /> Checks <span>{checkCount(state.checks)}</span>
           </button>
-          {activeTab === "messages" && (
-            <button
-              className="refresh-button"
-              onClick={() => void refreshReceipts()}
-              disabled={!running}
-              aria-label="Refresh receipt records"
-              title="Refresh receipt records"
-            >
-              <RefreshCw size={14} />
-            </button>
-          )}
         </div>
 
-        <div className="audit-content" role="tabpanel">
-          {activeTab === "verification" ? (
+        <div
+          id="audit-panel"
+          className="audit-content"
+          role="tabpanel"
+          aria-labelledby={`${activeTab}-tab`}
+          tabIndex={0}
+        >
+          {activeTab === "checks" ? (
             state.checks.length > 0 ? (
               <div className="check-list">
                 {state.checks.map((check) => <CheckRow key={check.id} check={check} />)}
               </div>
             ) : (
-              <EmptyState text={busy ? "Verification in progress" : "No verification run"} />
+              <EmptyState text={busy ? "Running service checks..." : "Start to run checks"} />
             )
           ) : (
-            <MessageAudit activity={state.activity} receipts={receipts} running={running} />
+            <RequestAudit activity={state.activity} running={running} />
           )}
         </div>
       </section>
@@ -248,7 +243,7 @@ function EndpointRow({
   return (
     <div className="endpoint-row">
       <span>{label}</span>
-      <code title={value}>{value ?? "Unavailable"}</code>
+      <code title={value}>{value ?? "-"}</code>
       <button
         className="icon-button"
         disabled={!value}
@@ -265,19 +260,28 @@ function EndpointRow({
 function IdentitySummary({ state }: { state: GatewayState }): React.JSX.Element {
   const identity = state.identity;
   if (!identity) {
-    return <EmptyState text="Not verified" />;
+    return <EmptyState text="Start to verify the service" />;
   }
   return (
-    <div className="identity-grid">
-      <Detail label="Trust" value={identity.trustLevel.replaceAll("_", " ")} />
-      <Detail label="Serving" value={identity.serving} />
-      <Detail
-        label="Source"
-        value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 13) : "Unknown"}
-        mono
-      />
-      <Detail label="Expires" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
-      <Detail label="Keyset" value={identity.keysetDigest} mono wide />
+    <div className="identity-summary">
+      <div className="identity-grid">
+        <Detail label="Hardware" value={hardwareName(identity.teeType)} />
+        <Detail label="Trust" value={trustName(identity.trustLevel)} />
+        <Detail
+          label="Source"
+          value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"}
+          mono
+        />
+        <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
+      </div>
+      <details className="technical-details">
+        <summary>Technical details</summary>
+        <div>
+          <Detail label="Serving" value={identity.serving} />
+          <Detail label="E2EE" value={identity.supportedE2eeVersions.join(", ") || "None"} mono />
+          <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
+        </div>
+      </details>
     </div>
   );
 }
@@ -302,85 +306,57 @@ function Detail({
 }
 
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
+  const title = CHECK_TITLES[check.id] ?? check.title;
   return (
-    <div className="check-row">
+    <div className="check-row" title={`${check.title}: ${check.detail}`}>
       <span className={`check-icon check-${check.status}`}>
         {check.status === "pass" && <Check size={12} />}
       </span>
       <div className="check-copy">
-        <div><strong>{check.title}</strong><code>{check.id}</code></div>
-        <p title={check.detail}>{check.detail}</p>
+        <strong>{title}</strong>
       </div>
-      <span className={`result result-${check.status}`}>{check.status}</span>
+      <span className={`result result-${check.status}`}>{checkStatusLabel(check.status)}</span>
     </div>
   );
 }
 
-function MessageAudit({
+function RequestAudit({
   activity,
-  receipts,
   running,
 }: {
   activity: RequestActivity[];
-  receipts: ReceiptSummary[];
   running: boolean;
 }): React.JSX.Element {
-  if (activity.length === 0 && receipts.length === 0) {
-    return <EmptyState text={running ? "No message activity yet" : "Gateway stopped"} />;
+  if (activity.length === 0) {
+    return (
+      <EmptyState
+        text={running ? "No requests yet - point an agent at the endpoint above" : "Start the gateway to see requests"}
+      />
+    );
   }
   return (
-    <div className="message-audit">
-      {activity.length > 0 && (
-        <div className="audit-group">
-          <h3>Request events</h3>
-          {activity.map((item, index) => (
-            <ActivityRow key={`${item.at}-${item.path}-${index}`} activity={item} />
-          ))}
-        </div>
-      )}
-      {receipts.length > 0 && (
-        <div className="audit-group">
-          <h3>Receipt records</h3>
-          {receipts.map((receipt) => <ReceiptRow key={receipt.receiptId} receipt={receipt} />)}
-        </div>
-      )}
+    <div className="request-audit">
+      {activity.map((item, index) => (
+        <ActivityRow key={item.receiptId ?? `${item.at}-${item.path}-${index}`} activity={item} />
+      ))}
     </div>
   );
 }
 
 function ActivityRow({ activity }: { activity: RequestActivity }): React.JSX.Element {
-  const audit = auditStatus(activity.verified);
+  const audit = auditStatus(activity);
   return (
-    <article className="audit-row">
+    <article className="audit-row" title={activity.detail}>
       <div className="audit-mainline">
         <span className="method">{activity.method}</span>
         <code title={activity.path}>{activity.path}</code>
-        <span className={`audit-state audit-${audit}`}>{audit}</span>
+        <span className={`audit-state audit-${audit.tone}`}>{audit.label}</span>
       </div>
-      <p title={activity.detail}>{activity.detail || "Request completed"}</p>
       <div className="audit-meta">
-        <span>HTTP {activity.status}</span>
-        <span>{activity.streamed ? "Stream" : "Buffered"}</span>
+        {activity.receiptId && <code title={activity.receiptId}>{shorten(activity.receiptId, 24)}</code>}
+        {(activity.status < 200 || activity.status >= 300) && <span>HTTP {activity.status}</span>}
+        {activity.streamed && <span>Streamed</span>}
         <time>{formatTimestamp(activity.at * 1_000)}</time>
-      </div>
-    </article>
-  );
-}
-
-function ReceiptRow({ receipt }: { receipt: ReceiptSummary }): React.JSX.Element {
-  const audit = auditStatus(receipt.verified);
-  return (
-    <article className="audit-row">
-      <div className="audit-mainline">
-        <code title={receipt.receiptId}>{shorten(receipt.receiptId, 22)}</code>
-        <span className={`audit-state audit-${audit}`}>{audit}</span>
-      </div>
-      <p title={receipt.path}>{receipt.path}</p>
-      <div className="audit-meta">
-        <span>HTTP {receipt.status}</span>
-        <span>{receipt.streamed ? "Stream" : "Buffered"}</span>
-        {receipt.truncated && <span className="danger-text">Truncated</span>}
-        <time>{formatTimestamp(receipt.at * 1_000)}</time>
       </div>
     </article>
   );
@@ -395,16 +371,60 @@ function statusPresentation(status: GatewayState["status"]): {
   icon: typeof ShieldCheck;
 } {
   switch (status) {
-    case "verifying": return { label: "Verifying", icon: LoaderCircle };
+    case "verifying": return { label: "Verifying...", icon: LoaderCircle };
     case "verified": return { label: "Verified", icon: ShieldCheck };
     case "blocked": return { label: "Blocked", icon: ShieldX };
-    case "error": return { label: "Error", icon: ShieldX };
-    case "stopped": return { label: "Stopped", icon: CircleStop };
+    case "error": return { label: "Failed", icon: ShieldX };
+    case "stopped": return { label: "Off", icon: CircleStop };
   }
 }
 
-function auditStatus(value: boolean | null): "verified" | "failed" | "recorded" {
-  return value === true ? "verified" : value === false ? "failed" : "recorded";
+function auditStatus(activity: RequestActivity): {
+  label: "Verified" | "Failed" | "Unverified" | "No receipt";
+  tone: "verified" | "failed" | "unverified" | "neutral";
+} {
+  if (activity.verified === true) {
+    return { label: "Verified", tone: "verified" };
+  }
+  if (activity.verified === false) {
+    return { label: "Failed", tone: "failed" };
+  }
+  return activity.receiptId
+    ? { label: "Unverified", tone: "unverified" }
+    : { label: "No receipt", tone: "neutral" };
+}
+
+function checkStatusLabel(status: VerificationCheck["status"]): string {
+  switch (status) {
+    case "pass": return "Pass";
+    case "fail": return "Fail";
+    case "skip": return "Skipped";
+    case "info": return "Note";
+  }
+}
+
+function checkCount(checks: VerificationCheck[]): string {
+  return `${checks.filter((check) => check.status === "pass").length}/${checks.length}`;
+}
+
+function openAiEndpoint(proxyUrl?: string): string | undefined {
+  return proxyUrl ? `${proxyUrl.replace(/\/+$/, "")}/v1` : undefined;
+}
+
+function remoteHost(value: string): string | undefined {
+  try {
+    return new URL(value).host;
+  } catch {
+    return undefined;
+  }
+}
+
+function hardwareName(value: string): string {
+  return value.toLowerCase() === "tdx" ? "Intel TDX" : value.toUpperCase();
+}
+
+function trustName(value: string): string {
+  return value === "hardware_verified" ? "Hardware verified" : value.replaceAll("_", " ");
 }
 
 function shorten(value: string, length: number): string {
@@ -423,10 +443,11 @@ function formatTimestamp(value: number, date = false): string {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (!message || /undefined|invoke|__TAURI_INTERNALS__/i.test(message)) {
+    return "Desktop bridge unavailable";
   }
-  return typeof error === "string" && error.length > 0 ? error : "Unexpected desktop error";
+  return message;
 }
 
 const root = document.getElementById("root");

@@ -1,12 +1,16 @@
 # Private AI Gateway Desktop
 
-Tauri v2 menu bar GUI for the bundled `aci serve` local verifying proxy.
+Tauri v2 menu bar GUI for the bundled `aci serve` local verifying gateway.
+
+> Every request goes to a hardware-verified private AI service, and every
+> response is checked against its signed receipt.
 
 The app has no Dock icon. Clicking the shield icon in the macOS menu bar opens
 a compact controller beneath it, and clicking elsewhere hides it. The popup
 starts or stops the gateway, copies the local OpenAI/Anthropic-compatible
-endpoint, shows the verified workload identity, and keeps verification checks,
-request events, and receipt records visible in one place. The tray asset is a
+endpoints, shows the verified workload identity, and keeps startup checks and
+per-request receipt verdicts visible in one place. OpenAI clients use the local
+`/v1` base URL; Anthropic clients use the bare local URL. The tray asset is a
 macOS template image and the controller follows the system light or dark
 appearance without requiring a restart.
 
@@ -32,8 +36,10 @@ runner produces `Private AI Gateway.app`, a DMG, and a ZIP artifact.
 
 The MVP does not store API keys. Coding agents send their existing
 `Authorization` headers to the local endpoint and `aci serve` forwards those
-headers unchanged over the verified channel. OAuth, Clerk-backed RedPill login,
-and CCSwitch-style agent configuration projection remain out of scope for this
+headers unchanged over the verified channel. After each response completes,
+the sidecar uses that request's bearer credential once to fetch and verify the
+signed receipt, then discards it. OAuth, Clerk-backed RedPill login, and
+CCSwitch-style agent configuration projection remain out of scope for this
 first package.
 
 The `Desktop macOS` GitHub Actions workflow builds an unsigned DMG and ZIP on

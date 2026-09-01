@@ -37,19 +37,10 @@ export interface RequestActivity {
   path: string;
   status: number;
   streamed: boolean;
+  receiptId?: string;
   verified: boolean | null;
   detail: string;
   at: number;
-}
-
-export interface ReceiptSummary {
-  receiptId: string;
-  path: string;
-  status: number;
-  streamed: boolean;
-  truncated: boolean;
-  at: number;
-  verified: boolean | null;
 }
 
 export interface GatewayState {
@@ -71,7 +62,6 @@ export interface StartGatewayConfig {
 export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getState(): Promise<GatewayState>;
-  listReceipts(): Promise<ReceiptSummary[]>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   start(config: StartGatewayConfig): Promise<GatewayState>;
   stop(): Promise<GatewayState>;

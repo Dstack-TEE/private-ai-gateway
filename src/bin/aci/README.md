@@ -14,11 +14,11 @@ cargo run --bin aci -- <command> --help
 | `audit` | The same checks offline, over saved artifacts (report, receipt, bodies, session). |
 | `sessions <url>` | Audit the service's current attested sessions (spec 9.2), optionally under a `--require-claim` policy. The accepted ids are what you pin (spec 5.3). |
 | `send <url>` | One verified chat completion end to end: verify, send over the pinned channel, then verify the receipt and its cited session. |
-| `serve <url>` | Local verifying proxy. Forwards every method and path over the pinned channel, records each POST exchange's digests, and verifies receipts on demand from a control endpoint (default `127.0.0.1:4181`). |
+| `serve <url>` | Local verifying proxy. Forwards every method and path over the pinned channel, records each POST exchange's digests, and verifies receipts on demand from a control endpoint (default `127.0.0.1:4181`). `--verify-receipts` verifies each receipt promptly with the request's transient bearer credential. |
 
 `serve --json-events` is the desktop/process-integration mode. Its stdout is
 JSON Lines only: `ready` after verification and both listeners are bound,
-`request_complete` for request activity, `blocked` when forwarding fails
+`request_complete` for request activity and its optional `receipt_id`, `blocked` when forwarding fails
 closed, `identity_updated` after successful re-verification, and `fatal` before
 an unsuccessful exit. Human diagnostics remain on stderr.
 

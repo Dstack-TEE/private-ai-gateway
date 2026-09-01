@@ -5,8 +5,9 @@
 //! the verdict is VERIFIED. The proxy exposes a plaintext local API, rejects
 //! E2EE request headers, and forwards accepted traffic over the SPKI-pinned
 //! channel. Each POST response streams through byte-exact while its receipt id
-//! and body digests are recorded — bodies are never stored — and a local control
-//! endpoint fetches and verifies any recorded receipt on demand (spec 9.3, 9.2).
+//! and body digests are recorded — bodies are never stored. Receipts can be
+//! verified automatically after the stream or later through a local control
+//! endpoint (spec 9.3, 9.2).
 //! No bodies are logged.
 
 use std::collections::VecDeque;
@@ -80,8 +81,10 @@ pub struct RequestOutcome {
     pub path: String,
     pub status: u16,
     pub streamed: bool,
-    /// `Some` for inference requests (receipt verified/failed); `None` for
-    /// passthrough GETs and for responses that carried no receipt to check.
+    /// Receipt associated with this inference response, when one was returned.
+    pub receipt_id: Option<String>,
+    /// `Some` when receipt checks reached a verdict; `None` when no receipt
+    /// applies or its verification could not be completed.
     pub verified: Option<bool>,
     /// The one-line detail printed after the request line, e.g.
     /// `receipt rcpt-1: signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)`.
@@ -123,7 +126,7 @@ pub struct RecordedExchange {
     /// The client's §5.3 pinned session ids from the request body.
     pub pinned_sessions: Vec<String>,
     pub at: u64,
-    /// Verdict of the last on-demand verification, when one ran.
+    /// Verdict of the last verification, when one reached a verdict.
     pub verified: Option<bool>,
 }
 
@@ -144,6 +147,8 @@ pub struct ProxyState {
     accepted_composes: Vec<String>,
     /// Apply the production dstack OS-image policy on startup and re-verification.
     require_production_os: bool,
+    /// Verify each recorded receipt as soon as its response stream completes.
+    verify_receipts: bool,
     trusted: Mutex<TrustedIdentity>,
     /// Set when an upstream response advertised a keyset digest other than the
     /// trusted one; blocks inference forwards until a fresh verify passes.
@@ -173,6 +178,7 @@ impl ProxyState {
         enforce_verified: bool,
         accepted_composes: Vec<String>,
         require_production_os: bool,
+        verify_receipts: bool,
         fixed_pins: Vec<String>,
         required_claims: Vec<RequiredClaim>,
         report: AttestationReport,
@@ -188,6 +194,7 @@ impl ProxyState {
             enforce_verified,
             accepted_composes,
             require_production_os,
+            verify_receipts,
             trusted: Mutex::new(TrustedIdentity {
                 report: Arc::new(report),
                 keyset_digest,
@@ -356,6 +363,7 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         !args.allow_unverified,
         args.accepted_composes.clone(),
         require_production_os,
+        args.verify_receipts,
         args.sessions.clone(),
         args.require_claims.clone(),
         report,
@@ -412,12 +420,18 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         });
         write_json_event(&event)?;
     } else {
+        let receipt_mode = if args.verify_receipts {
+            "each POST receipt is verified after its response completes using the request's \
+             transient bearer credential."
+        } else {
+            "POST receipt verification is available on demand."
+        };
         println!();
         println!("aci serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
-             body digests recorded.\n\
+             body digests recorded; {receipt_mode}\n\
              verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
              POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
              if the receipt fetch needs it).\n{}",
@@ -499,6 +513,7 @@ async fn proxy_passthrough(
         path,
         status,
         streamed: false,
+        receipt_id: None,
         verified: None,
         detail: String::new(),
     });
@@ -626,10 +641,13 @@ async fn proxy_inference(
         }
     }
 
-    // On stream end, record the exchange as digests for on-demand
-    // verification via the control endpoint. Nothing is fetched per request.
+    // On stream end, record only digests. Automatic mode verifies promptly with
+    // the request's transient bearer; otherwise the control endpoint can verify
+    // the same record later. Request and response bodies are never retained.
     let hook_state = state.clone();
     let hook_path = path.clone();
+    let hook_trusted = trusted.clone();
+    let hook_bearer = bearer_token(&headers);
     let request_digest = BodyDigest::of(&request_body);
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
@@ -641,40 +659,40 @@ async fn proxy_inference(
             // reach the report rather than vanish.
             StreamEnd::Errored { partial, error } => (partial, Some(error)),
         };
-        let outcome = |verified: Option<bool>, detail: String| RequestOutcome {
-            method: Method::POST,
-            path: hook_path.clone(),
-            status,
-            streamed,
-            verified,
-            detail,
-        };
-        let outcome = match (&receipt_id, &truncation) {
-            (Some(id), None) => outcome(None, format!("receipt {id} recorded; verify on demand")),
-            (Some(id), Some(error)) => outcome(
-                Some(false),
-                format!(
-                    "upstream stream errored after {} bytes: {error}; receipt {id} recorded — \
-                     verification will surface the truncation",
-                    response.len
-                ),
+        let outcome =
+            |receipt_id: Option<String>, verified: Option<bool>, detail: String| RequestOutcome {
+                method: Method::POST,
+                path: hook_path.clone(),
+                status,
+                streamed,
+                receipt_id,
+                verified,
+                detail,
+            };
+        let outcome = match &receipt_id {
+            Some(id) => outcome(
+                Some(id.clone()),
+                None,
+                format!("receipt {id} recorded; verification available on demand"),
             ),
             // A 2xx POST completion with no receipt header can never be
             // audited: fail loudly (spec 5.2 puts a receipt on every
             // inference response). Non-2xx responses legitimately carry none.
-            (None, _) if (200..300).contains(&status) => outcome(
+            None if (200..300).contains(&status) => outcome(
+                None,
                 Some(false),
                 "no X-Receipt-Id on a 2xx POST response (spec 5.2); nothing recorded".to_string(),
             ),
-            (None, _) => outcome(
+            None => outcome(
+                None,
                 None,
                 "no X-Receipt-Id returned; nothing to verify".to_string(),
             ),
         };
         if let Some(receipt_id) = receipt_id {
-            hook_state.record(RecordedExchange {
+            let exchange = RecordedExchange {
                 receipt_id,
-                path: hook_path,
+                path: hook_path.clone(),
                 status,
                 streamed,
                 request: request_digest,
@@ -683,7 +701,17 @@ async fn proxy_inference(
                 pinned_sessions,
                 at: crate::checks::now_secs(),
                 verified: None,
-            });
+            };
+            hook_state.record(exchange.clone());
+            if hook_state.verify_receipts {
+                verify_recorded_in_background(
+                    hook_state,
+                    hook_trusted,
+                    exchange,
+                    hook_bearer,
+                );
+                return;
+            }
         }
         (hook_state.reporter)(outcome);
     });
@@ -749,6 +777,7 @@ async fn control_verify(
             path: exchange.path.clone(),
             status: exchange.status,
             streamed: exchange.streamed,
+            receipt_id: Some(exchange.receipt_id.clone()),
             verified,
             detail,
         });
@@ -773,10 +802,64 @@ async fn control_verify(
         }
         Err(e) => {
             let detail = format!("receipt {id}: {e}");
-            report(Some(false), detail.clone());
+            let mut recorded = state.recorded.lock().expect("recorded ring poisoned");
+            if let Some(entry) = recorded
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.receipt_id == id)
+            {
+                entry.verified = None;
+            }
+            drop(recorded);
+            report(None, detail.clone());
             json_response(StatusCode::BAD_GATEWAY, json!({ "error": detail }))
         }
     }
+}
+
+fn verify_recorded_in_background(
+    state: Arc<ProxyState>,
+    trusted: TrustedIdentity,
+    exchange: RecordedExchange,
+    bearer: Option<String>,
+) {
+    tokio::spawn(async move {
+        let receipt_id = exchange.receipt_id.clone();
+        let (verified, detail) = match verify_exchange(
+            &state,
+            &trusted,
+            &exchange,
+            bearer.as_deref(),
+        )
+        .await
+        {
+            Ok((transcript, detail)) => {
+                let verified = transcript.verified();
+                let mut recorded = state.recorded.lock().expect("recorded ring poisoned");
+                if let Some(entry) = recorded
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.receipt_id == receipt_id)
+                {
+                    entry.verified = Some(verified);
+                }
+                (Some(verified), detail)
+            }
+            Err(error) => (
+                None,
+                format!("receipt {receipt_id}: verification unavailable: {error}"),
+            ),
+        };
+        (state.reporter)(RequestOutcome {
+            method: Method::POST,
+            path: exchange.path,
+            status: exchange.status,
+            streamed: exchange.streamed,
+            receipt_id: Some(receipt_id),
+            verified,
+            detail,
+        });
+    });
 }
 
 /// Fetch and check the receipt (§9.3) plus the cited-session audit (§9.2)
@@ -982,6 +1065,7 @@ fn request_outcome_event(outcome: RequestOutcome) -> Value {
         "path": outcome.path,
         "status": outcome.status,
         "streamed": outcome.streamed,
+        "receipt_id": outcome.receipt_id,
         "verified": outcome.verified,
         "detail": outcome.detail,
     })
@@ -1153,6 +1237,7 @@ fn send_error(state: &ProxyState, method: Method, path: String, err: reqwest::Er
         path,
         status: 502,
         streamed: false,
+        receipt_id: None,
         verified: Some(false),
         detail: format!("upstream connection failed (possible TLS pin mismatch): {err}"),
     });
@@ -1227,6 +1312,7 @@ mod tests {
             path: "/v1/messages".to_string(),
             status: 200,
             streamed: true,
+            receipt_id: Some("rcpt-1".to_string()),
             verified: Some(true),
             detail: "receipt verified".to_string(),
         };
@@ -1235,6 +1321,7 @@ mod tests {
         assert_eq!(event["type"], "request_complete");
         assert_eq!(event["schema_version"], 1);
         assert_eq!(event["method"], "POST");
+        assert_eq!(event["receipt_id"], "rcpt-1");
         assert_eq!(event["verified"], true);
     }
 
@@ -1268,6 +1355,7 @@ mod tests {
             false,
             Vec::new(),
             false,
+            true,
             Vec::new(),
             Vec::new(),
             vector_report(),
@@ -1452,6 +1540,7 @@ mod tests {
             true,
             Vec::new(),
             false,
+            false,
             Vec::new(),
             vec![crate::checks::RequiredClaim::parse("tee_attested").unwrap()],
             vector_report(),
@@ -1493,9 +1582,9 @@ mod tests {
 
     /// Hermetic end-to-end: a mock upstream serving fixture artifacts, the
     /// proxy in front of it. Asserts byte-exact passthrough, that any POST
-    /// path gets its exchange recorded (an Anthropic-style `/v1/messages`
-    /// included), that the control endpoint verifies a recorded receipt on
-    /// demand, and that a receiptless 2xx POST fails loudly.
+    /// path gets its exchange verified with the request's transient bearer
+    /// (an Anthropic-style `/v1/messages` included), that the control endpoint
+    /// can re-verify a record, and that a receiptless 2xx POST fails loudly.
     #[tokio::test]
     async fn proxy_forwards_and_verifies_receipt() {
         let inference = || {
@@ -1520,7 +1609,10 @@ mod tests {
             )
             .route(
                 "/v1/aci/receipts/:id",
-                get(|| async { Json(vector_receipt_envelope()) }),
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(header_str(&headers, "authorization"), Some("Bearer test-key"));
+                    Json(vector_receipt_envelope())
+                }),
             )
             .route(
                 // Sessions are served as their exact sealed bytes (§8).
@@ -1546,10 +1638,11 @@ mod tests {
         let http = reqwest::Client::new();
 
         // Inference forward: byte-exact passthrough + receipt header surfaced;
-        // the exchange is recorded, nothing fetched per request.
+        // the exchange is verified after the response completes.
         let resp = http
             .post(format!("{proxy}/v1/chat/completions"))
             .header("content-type", "application/json")
+            .bearer_auth("test-key")
             .body(REQUEST_BODY.to_vec())
             .send()
             .await
@@ -1568,14 +1661,16 @@ mod tests {
         let outcome = rx.recv().await.expect("inference outcome reported");
         assert_eq!(outcome.method, "POST");
         assert_eq!(outcome.path, "/v1/chat/completions");
-        assert_eq!(outcome.verified, None);
-        assert!(outcome.detail.contains("recorded"), "{}", outcome.detail);
+        assert_eq!(outcome.receipt_id.as_deref(), Some("rcpt-0001"));
+        assert_eq!(outcome.verified, Some(true));
+        assert!(outcome.detail.contains("signature ok"), "{}", outcome.detail);
 
         // Any POST path is inference-capable: an Anthropic-style /v1/messages
         // forward is recorded the same way without being enumerated.
         let resp = http
             .post(format!("{proxy}/v1/messages"))
             .header("content-type", "application/json")
+            .bearer_auth("test-key")
             .body(REQUEST_BODY.to_vec())
             .send()
             .await
@@ -1584,7 +1679,7 @@ mod tests {
         assert_eq!(resp.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
         let outcome = rx.recv().await.expect("messages outcome reported");
         assert_eq!(outcome.path, "/v1/messages");
-        assert_eq!(outcome.verified, None);
+        assert_eq!(outcome.verified, Some(true));
 
         // The control endpoint lists both recorded exchanges, newest first.
         let listed: Value = http
@@ -1597,12 +1692,13 @@ mod tests {
             .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 2);
         assert_eq!(listed[0]["path"], "/v1/messages");
-        assert_eq!(listed[0]["verified"], Value::Null);
+        assert_eq!(listed[0]["verified"], Value::Bool(true));
 
         // On-demand verification runs the full receipt + session audit
         // against the recorded digests.
         let resp = http
             .post(format!("{control}/receipts/rcpt-0001/verify"))
+            .bearer_auth("test-key")
             .send()
             .await
             .unwrap();
