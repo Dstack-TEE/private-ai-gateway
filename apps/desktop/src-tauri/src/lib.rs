@@ -2,6 +2,11 @@ mod contracts;
 mod gateway;
 mod tray;
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use contracts::{GatewayState, ReceiptSummary, StartGatewayConfig};
 use gateway::GatewayManager;
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -65,13 +70,19 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
             let window_for_events = window.clone();
+            let was_focused = Arc::new(AtomicBool::new(false));
             window.on_window_event(move |event| match event {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
+                    was_focused.store(false, Ordering::SeqCst);
                     let _ = window_for_events.hide();
                 }
-                WindowEvent::Focused(false) => {
-                    let _ = window_for_events.hide();
+                WindowEvent::Focused(focused) => {
+                    if *focused {
+                        was_focused.store(true, Ordering::SeqCst);
+                    } else if was_focused.swap(false, Ordering::SeqCst) {
+                        let _ = window_for_events.hide();
+                    }
                 }
                 _ => {}
             });
