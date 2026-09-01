@@ -97,7 +97,6 @@ pub fn run() {
             let manager = app.state::<GatewayManager>();
             let _ = manager.stop(app);
         }
-        tauri::RunEvent::Ready => tray::show_popup(app, None),
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => tray::show_popup(app, None),
         _ => {}

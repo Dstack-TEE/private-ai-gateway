@@ -88,7 +88,7 @@ jobs:
             "https://tee.redpill.ai" \
             "test-results/live-service.json"
 
-      - name: Launch tray popup and capture desktop
+      - name: Launch tray app and capture menu bar
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -103,7 +103,7 @@ jobs:
             cat test-results/app.stderr.log || true
             exit 1
           fi
-          screencapture -x test-results/macos-tray-popup.png
+          screencapture -x test-results/macos-menu-bar.png
           osascript -e 'tell application "Private AI Gateway" to quit' || kill -TERM "$app_pid"
 
       - name: Inspect macOS artifacts
@@ -170,5 +170,5 @@ jobs:
             apps/desktop/release/*.zip
             apps/desktop/release/macos-inspection.txt
             apps/desktop/test-results/live-service.json
-            apps/desktop/test-results/macos-tray-popup.png
+            apps/desktop/test-results/macos-menu-bar.png
             apps/desktop/test-results/app.*.log

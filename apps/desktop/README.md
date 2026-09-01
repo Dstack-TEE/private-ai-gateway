@@ -2,12 +2,11 @@
 
 Tauri v2 menu bar GUI for the bundled `aci serve` local verifying proxy.
 
-Launching the app opens a compact controller beneath the macOS menu bar. The
-app has no Dock icon; clicking the shield tray icon toggles the controller and
-clicking elsewhere hides it. The popup starts or stops the gateway, copies the
-local OpenAI/Anthropic-compatible endpoint, shows the verified workload
-identity, and keeps verification checks, request events, and receipt records
-visible in one place.
+The app has no Dock icon. Clicking the shield icon in the macOS menu bar opens
+a compact controller beneath it, and clicking elsewhere hides it. The popup
+starts or stops the gateway, copies the local OpenAI/Anthropic-compatible
+endpoint, shows the verified workload identity, and keeps verification checks,
+request events, and receipt records visible in one place.
 
 ## Development
 
