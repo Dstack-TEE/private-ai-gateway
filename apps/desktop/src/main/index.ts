@@ -26,14 +26,6 @@ let lastStartConfig: StartGatewayConfig = {
   requireProductionOs: false,
 };
 
-const TRAY_ICON_SVG = `
-<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24">
-  <path fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-    d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3v8Z"/>
-  <path fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-    d="m9 12 2 2 4-4"/>
-</svg>`;
-
 function resolveAciExecutable(): string {
   const executableName = process.platform === "win32" ? "aci.exe" : "aci";
   if (!app.isPackaged) {
@@ -93,12 +85,17 @@ function showMainWindow(): void {
 }
 
 function createTrayIcon(): Electron.NativeImage {
-  const dataUrl = `data:image/svg+xml;base64,${Buffer.from(TRAY_ICON_SVG).toString("base64")}`;
-  const image = nativeImage.createFromDataURL(dataUrl).resize({ width: 18, height: 18 });
+  const iconRoot = app.isPackaged
+    ? path.join(process.resourcesPath, "tray")
+    : path.join(app.getAppPath(), "assets/tray");
+  const image = nativeImage.createFromPath(path.join(iconRoot, "trayTemplate.png"));
+  if (image.isEmpty()) {
+    throw new Error("System menu bar icon is missing or invalid");
+  }
   if (process.platform === "darwin") {
     image.setTemplateImage(true);
   }
-  return image;
+  return image.resize({ width: 18, height: 18 });
 }
 
 function startFromTray(): void {

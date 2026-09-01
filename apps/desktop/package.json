@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:native": "node scripts/bundle-native.mjs",
+    "generate:icons": "node scripts/generate-icons.mjs",
     "check": "tsc --noEmit",
     "dev": "npm run build && electron .",
     "test": "tsx --test test/*.test.ts",
@@ -32,10 +33,18 @@
       {
         "from": "resources/native",
         "to": "native"
+      },
+      {
+        "from": "assets/tray",
+        "to": "tray",
+        "filter": [
+          "*.png"
+        ]
       }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "assets/app-icon.png",
       "target": [
         "dmg",
         "zip"
@@ -43,6 +52,7 @@
     },
     "linux": {
       "category": "Development",
+      "icon": "assets/app-icon.png",
       "target": [
         "AppImage"
       ]
@@ -58,6 +68,7 @@
   },
   "packageManager": "npm@11.16.0",
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
     "@types/node": "26.4.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",

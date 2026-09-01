@@ -14,3 +14,4 @@ clients/pi-provider/packages/*/dist/
 /apps/desktop/resources/native/
 /apps/desktop/release/
 /apps/desktop/test-results/
+/ci-artifacts/
