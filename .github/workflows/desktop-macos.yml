@@ -53,6 +53,9 @@ jobs:
         working-directory: apps/desktop
         run: npm run build:native
 
+      - name: Test ACI sidecar
+        run: cargo test --bin aci
+
       - name: Test Tauri backend
         run: |
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
