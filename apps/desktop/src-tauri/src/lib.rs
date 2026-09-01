@@ -30,9 +30,7 @@ fn stop_gateway(
 }
 
 #[tauri::command]
-async fn list_receipts(
-    manager: State<'_, GatewayManager>,
-) -> Result<Vec<ReceiptSummary>, String> {
+async fn list_receipts(manager: State<'_, GatewayManager>) -> Result<Vec<ReceiptSummary>, String> {
     manager.list_receipts().await
 }
 

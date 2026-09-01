@@ -164,12 +164,7 @@ impl GatewayManager {
         Ok(receipts.into_iter().map(ReceiptSummary::from).collect())
     }
 
-    fn handle_stdout(
-        &self,
-        app: &AppHandle,
-        generation: u64,
-        bytes: &[u8],
-    ) -> Result<(), String> {
+    fn handle_stdout(&self, app: &AppHandle, generation: u64, bytes: &[u8]) -> Result<(), String> {
         let lines = {
             let mut runtime = self.lock()?;
             if runtime.generation != generation {
@@ -177,7 +172,11 @@ impl GatewayManager {
             }
             if runtime.stdout.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES {
                 drop(runtime);
-                self.fail(app, generation, "ACI emitted an oversized event".to_string())?;
+                self.fail(
+                    app,
+                    generation,
+                    "ACI emitted an oversized event".to_string(),
+                )?;
                 return Ok(());
             }
             runtime.stdout.extend_from_slice(bytes);
@@ -201,12 +200,7 @@ impl GatewayManager {
         Ok(())
     }
 
-    fn handle_line(
-        &self,
-        app: &AppHandle,
-        generation: u64,
-        line: &str,
-    ) -> Result<(), String> {
+    fn handle_line(&self, app: &AppHandle, generation: u64, line: &str) -> Result<(), String> {
         let event: Value = serde_json::from_str(line)
             .map_err(|_| "ACI emitted invalid JSON event data".to_string())?;
         let object = event
@@ -234,8 +228,8 @@ impl GatewayManager {
                 );
             }
             "fatal" => {
-                let message = optional_string(object, "message")
-                    .unwrap_or_else(|| "ACI failed".to_string());
+                let message =
+                    optional_string(object, "message").unwrap_or_else(|| "ACI failed".to_string());
                 runtime.state.status = "error".to_string();
                 runtime.state.error = Some(message);
             }
@@ -269,11 +263,10 @@ impl GatewayManager {
         }
         runtime.child = None;
         if runtime.state.status != "error" {
-            let diagnostic = String::from_utf8_lossy(
-                &runtime.diagnostic.iter().copied().collect::<Vec<_>>(),
-            )
-            .trim()
-            .to_string();
+            let diagnostic =
+                String::from_utf8_lossy(&runtime.diagnostic.iter().copied().collect::<Vec<_>>())
+                    .trim()
+                    .to_string();
             runtime.state.status = "error".to_string();
             runtime.state.error = Some(if diagnostic.is_empty() {
                 "ACI stopped unexpectedly".to_string()
@@ -318,11 +311,9 @@ fn spawn_event_reader(app: AppHandle, generation: u64, mut receiver: Receiver<Co
             let result = match event {
                 CommandEvent::Stdout(bytes) => manager.handle_stdout(&app, generation, &bytes),
                 CommandEvent::Stderr(bytes) => manager.append_diagnostic(generation, &bytes),
-                CommandEvent::Error(error) => manager.fail(
-                    &app,
-                    generation,
-                    format!("ACI process error: {error}"),
-                ),
+                CommandEvent::Error(error) => {
+                    manager.fail(&app, generation, format!("ACI process error: {error}"))
+                }
                 CommandEvent::Terminated(_) => manager.terminated(&app, generation),
                 _ => Ok(()),
             };
@@ -365,12 +356,8 @@ fn apply_identity_event(
 }
 
 fn parse_identity(event: &Map<String, Value>) -> Result<GatewayIdentity, String> {
-    let source = event
-        .get("source_provenance")
-        .and_then(Value::as_object);
-    let capabilities = event
-        .get("service_capabilities")
-        .and_then(Value::as_object);
+    let source = event.get("source_provenance").and_then(Value::as_object);
+    let capabilities = event.get("service_capabilities").and_then(Value::as_object);
 
     Ok(GatewayIdentity {
         tee_type: required_string(event, "tee_type")?,
@@ -427,10 +414,7 @@ fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
         .collect()
 }
 
-fn apply_request_event(
-    state: &mut GatewayState,
-    event: &Map<String, Value>,
-) -> Result<(), String> {
+fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> Result<(), String> {
     let status = event
         .get("status")
         .and_then(Value::as_u64)

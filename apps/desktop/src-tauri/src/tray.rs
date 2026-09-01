@@ -12,9 +12,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .separator()
         .text("quit", "Quit Private AI Gateway")
         .build()?;
-    let icon = tauri::image::Image::from_bytes(include_bytes!(
-        "../../assets/tray/trayTemplate@2x.png"
-    ))?;
+    let icon =
+        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
 
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
