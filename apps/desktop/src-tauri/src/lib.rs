@@ -87,7 +87,6 @@ pub fn run() {
                 _ => {}
             });
             tray::setup(app.handle())?;
-            tray::show_popup(app.handle(), None);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -98,6 +97,7 @@ pub fn run() {
             let manager = app.state::<GatewayManager>();
             let _ = manager.stop(app);
         }
+        tauri::RunEvent::Ready => tray::show_popup(app, None),
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => tray::show_popup(app, None),
         _ => {}
