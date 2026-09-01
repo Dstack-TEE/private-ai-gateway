@@ -32,6 +32,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -87,16 +94,19 @@ jobs:
         run: |
           set -euo pipefail
           app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
-          executable="$app_bundle/Contents/MacOS/Private AI Gateway"
-          "$executable" >test-results/app.stdout.log 2>test-results/app.stderr.log &
-          app_pid=$!
+          open "$app_bundle" --stdout test-results/app.stdout.log --stderr test-results/app.stderr.log
           sleep 5
-          kill -0 "$app_pid"
+          app_pid="$(pgrep -x 'Private AI Gateway' | head -1 || true)"
+          if [[ -z "$app_pid" ]]; then
+            cat test-results/app.stdout.log || true
+            cat test-results/app.stderr.log || true
+            exit 1
+          fi
           screencapture -x test-results/macos-tray-popup.png
-          kill -TERM "$app_pid"
-          wait "$app_pid" || true
+          osascript -e 'tell application "Private AI Gateway" to quit' || kill -TERM "$app_pid"
 
       - name: Inspect macOS artifacts
+        if: always()
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -145,6 +155,7 @@ jobs:
           } 2>&1 | tee "$report"
 
       - name: Upload macOS package and evidence
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: private-ai-gateway-tauri-macos-${{ runner.arch }}
