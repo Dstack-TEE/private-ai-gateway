@@ -1,10 +1,13 @@
 # Private AI Gateway Desktop
 
-Electron GUI for the bundled `aci serve` local verifying proxy.
+Tauri v2 menu bar GUI for the bundled `aci serve` local verifying proxy.
 
-The app stays available from the system menu bar. Closing the main window hides
-it without stopping the verified proxy; use the tray menu to reopen the window,
-start or stop the gateway, copy local endpoints, or quit the app.
+Launching the app opens a compact controller beneath the macOS menu bar. The
+app has no Dock icon; clicking the shield tray icon toggles the controller and
+clicking elsewhere hides it. The popup starts or stops the gateway, copies the
+local OpenAI/Anthropic-compatible endpoint, shows the verified workload
+identity, and keeps verification checks, request events, and receipt records
+visible in one place.
 
 ## Development
 
@@ -17,20 +20,22 @@ npm ci
 npm run dev
 ```
 
-`ACI_DESKTOP_CLI=/absolute/path/to/aci` overrides the development executable.
-Packaged builds never honor this override.
+Tauri launches the target-triple-specific `aci` binary as an external sidecar.
+The development command builds a debug sidecar; packaged builds always compile
+and bundle a release sidecar from this repository.
 
 ## Packaging
 
-`npm run dist` builds the host-platform release binary, places it under the
-Electron resources directory, and runs `electron-builder`. A macOS runner
-produces `Private AI Gateway.app` inside the DMG/ZIP artifacts.
+`npm run dist` builds the release `aci` sidecar and runs `tauri build`. A macOS
+runner produces `Private AI Gateway.app`, a DMG, and a ZIP artifact.
 
 The MVP does not store API keys. Coding agents send their existing
 `Authorization` headers to the local endpoint and `aci serve` forwards those
-headers unchanged over the verified channel.
+headers unchanged over the verified channel. OAuth, Clerk-backed RedPill login,
+and CCSwitch-style agent configuration projection remain out of scope for this
+first package.
 
 The `Desktop macOS` GitHub Actions workflow builds an unsigned DMG and ZIP on
-`macos-latest`, launches the packaged app against `https://tee.redpill.ai`,
-checks the verified local `/v1/models` path, and uploads a screenshot plus
-codesign and Gatekeeper inspection output with the packages.
+`macos-latest`, launches the packaged tray popup, runs the bundled sidecar
+against `https://tee.redpill.ai`, checks the verified local `/v1/models` path,
+and uploads a screenshot plus codesign, Gatekeeper, and size inspection output.

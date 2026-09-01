@@ -2,84 +2,38 @@
   "name": "private-ai-gateway-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop GUI for the ACI local verifying proxy",
+  "description": "Tauri menu bar GUI for the ACI local verifying proxy",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "dist/main/index.cjs",
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "vite build",
     "build:native": "node scripts/bundle-native.mjs",
+    "build:native:debug": "node scripts/bundle-native.mjs --debug",
+    "dev": "npm run build:native:debug && tauri dev",
+    "dev:web": "vite --host 127.0.0.1 --port 1420",
     "generate:icons": "node scripts/generate-icons.mjs",
     "check": "tsc --noEmit",
-    "dev": "npm run build && electron .",
-    "test": "tsx --test test/*.test.ts",
-    "test:smoke": "npm run build && xvfb-run -a node test/smoke.mjs",
-    "test:smoke:macos-packaged": "node test/macos-packaged-smoke.mjs",
-    "dist": "npm run build && npm run build:native && electron-builder",
-    "dist:dir": "npm run build && npm run build:native && electron-builder --dir"
-  },
-  "build": {
-    "appId": "ai.redpill.private-ai-gateway",
-    "productName": "Private AI Gateway",
-    "asar": true,
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/native",
-        "to": "native"
-      },
-      {
-        "from": "assets/tray",
-        "to": "tray",
-        "filter": [
-          "*.png"
-        ]
-      }
-    ],
-    "mac": {
-      "category": "public.app-category.developer-tools",
-      "icon": "assets/app-icon.png",
-      "target": [
-        "dmg",
-        "zip"
-      ]
-    },
-    "linux": {
-      "category": "Development",
-      "icon": "assets/app-icon.png",
-      "target": [
-        "AppImage"
-      ]
-    },
-    "win": {
-      "target": [
-        "nsis"
-      ]
-    }
+    "tauri": "tauri",
+    "dist": "npm run build:native && tauri build"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "packageManager": "npm@11.16.0",
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "lucide-react": "1.38.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
   "devDependencies": {
     "@resvg/resvg-js": "2.6.2",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "26.4.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
-    "electron": "44.1.0",
-    "electron-builder": "26.15.3",
-    "esbuild": "0.28.2",
-    "lucide-react": "1.38.0",
-    "playwright-core": "1.62.1",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "tsx": "4.23.13",
-    "typescript": "7.0.2"
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
   }
 }
