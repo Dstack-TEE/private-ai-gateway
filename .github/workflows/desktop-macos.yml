@@ -1,0 +1,112 @@
+name: Desktop macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/private-ai-gateway-desktop-mvp
+    paths:
+      - '.github/workflows/desktop-macos.yml'
+      - 'apps/desktop/**'
+      - 'src/aci/**'
+      - 'src/bin/aci/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Verify desktop source
+        working-directory: apps/desktop
+        run: |
+          npm run check
+          npm test
+          npm run build
+
+      - name: Package DMG and ZIP
+        working-directory: apps/desktop
+        run: npm run dist
+
+      - name: Run packaged live-service smoke
+        working-directory: apps/desktop
+        run: node test/macos-packaged-smoke.mjs
+
+      - name: Inspect macOS artifacts
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="release/macos-inspection.txt"
+          app_bundle="$(find release -type d -name 'Private AI Gateway.app' -print -quit)"
+          dmg="$(find release -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          zip="$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          aci="$app_bundle/Contents/Resources/native/darwin-$runner_arch/aci"
+
+          test -d "$app_bundle"
+          test -x "$aci"
+          test -n "$dmg"
+          test -n "$zip"
+
+          {
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "app_bundle=$app_bundle"
+            echo "dmg=$dmg"
+            echo "zip=$zip"
+            file "$app_bundle/Contents/MacOS/Private AI Gateway"
+            file "$aci"
+            "$aci" --help | sed -n '1,12p'
+            hdiutil verify "$dmg"
+            unzip -tq "$zip"
+
+            mount_dir="$(mktemp -d)"
+            hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg"
+            test -d "$mount_dir/Private AI Gateway.app"
+            test -L "$mount_dir/Applications"
+            hdiutil detach "$mount_dir"
+            rmdir "$mount_dir"
+
+            echo
+            echo "codesign verification:"
+            codesign --verify --deep --strict --verbose=2 "$app_bundle" || true
+            codesign -dvvv "$app_bundle" || true
+
+            echo
+            echo "Gatekeeper assessment:"
+            spctl --assess --type execute --verbose=4 "$app_bundle" || true
+          } 2>&1 | tee "$report"
+
+      - name: Upload macOS package and evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: private-ai-gateway-macos-${{ runner.arch }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/macos-inspection.txt
+            apps/desktop/test-results/macos-packaged-verified.png
+            apps/desktop/test-results/macos-desktop-menubar.png

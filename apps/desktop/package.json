@@ -1,0 +1,74 @@
+{
+  "name": "private-ai-gateway-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop GUI for the ACI local verifying proxy",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/main/index.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:native": "node scripts/bundle-native.mjs",
+    "check": "tsc --noEmit",
+    "dev": "npm run build && electron .",
+    "test": "tsx --test test/*.test.ts",
+    "test:smoke": "npm run build && xvfb-run -a node test/smoke.mjs",
+    "test:smoke:macos-packaged": "node test/macos-packaged-smoke.mjs",
+    "dist": "npm run build && npm run build:native && electron-builder",
+    "dist:dir": "npm run build && npm run build:native && electron-builder --dir"
+  },
+  "build": {
+    "appId": "ai.redpill.private-ai-gateway",
+    "productName": "Private AI Gateway",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/native",
+        "to": "native"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "target": [
+        "AppImage"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@11.16.0",
+  "devDependencies": {
+    "@types/node": "26.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "electron": "44.1.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "lucide-react": "1.38.0",
+    "playwright-core": "1.62.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}

@@ -10,6 +10,7 @@
 //! No bodies are logged.
 
 use std::collections::VecDeque;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -88,6 +89,7 @@ pub struct RequestOutcome {
 }
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
+type EventSink = Arc<dyn Fn(Value) + Send + Sync>;
 
 /// The attested identity the proxy currently trusts. Replaced wholesale when a
 /// keyset rotation forces a fresh verify.
@@ -128,6 +130,7 @@ pub struct RecordedExchange {
 /// Recorded exchanges kept for on-demand verification (a bounded ring;
 /// oldest evicted first).
 const RECORDED_CAP: usize = 256;
+const SERVE_EVENT_SCHEMA_VERSION: u32 = 1;
 
 pub struct ProxyState {
     client: AciClient,
@@ -158,6 +161,7 @@ pub struct ProxyState {
     /// service refuses a pinned forward with 412 `session_not_accepted`.
     policy_pins: Mutex<Vec<String>>,
     reporter: Reporter,
+    event_sink: EventSink,
 }
 
 impl ProxyState {
@@ -174,6 +178,7 @@ impl ProxyState {
         report: AttestationReport,
         identity: EstablishedIdentity,
         reporter: Reporter,
+        event_sink: EventSink,
     ) -> Self {
         let keyset_digest = report.workload_keyset_digest.clone();
         Self {
@@ -196,6 +201,7 @@ impl ProxyState {
             required_claims,
             policy_pins: Mutex::new(Vec::new()),
             reporter,
+            event_sink,
         }
     }
 
@@ -251,10 +257,18 @@ impl ProxyState {
         if let Some(spki) = &verification.observed_spki {
             self.client.pin(&self.host, spki);
         }
+        let verification_summary = verification.transcript.to_json(false);
         let keyset_digest = verification.report.workload_keyset_digest.clone();
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
+        let identity_event = identity_event(
+            "identity_updated",
+            &verification.report,
+            &identity,
+            verification.observed_spki.as_deref(),
+            verification_summary,
+        );
         *self.trusted.lock().expect("trusted identity poisoned") = TrustedIdentity {
             report: Arc::new(verification.report),
             keyset_digest,
@@ -262,12 +276,29 @@ impl ProxyState {
             identity: Arc::new(identity),
         };
         self.blocked.store(false, Ordering::SeqCst);
+        (self.event_sink)(identity_event);
         eprintln!("aci serve: re-verified after keyset change; resuming forwards");
         Ok(())
     }
 }
 
 pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
+    let json_events = args.json_events;
+    match run_inner(args, require_production_os).await {
+        Ok(code) => Ok(code),
+        Err(error) if json_events => {
+            write_json_event(&json!({
+                "type": "fatal",
+                "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+                "message": error,
+            }))?;
+            Ok(1)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
     let verification = verify_service(
         &args.base_url,
         None,
@@ -276,14 +307,17 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
         false,
     )
     .await?;
-    println!("== service verification: {} ==", verification.base_url);
-    print!("{}", verification.transcript.render_human(false));
+    if !args.json_events {
+        println!("== service verification: {} ==", verification.base_url);
+        print!("{}", verification.transcript.render_human(false));
+    }
     if !verification.transcript.verified() {
         return Err(
             "service verification failed; refusing to start the proxy (fail closed)".to_string(),
         );
     }
 
+    let verification_summary = verification.transcript.to_json(false);
     let ServiceVerification {
         report,
         identity,
@@ -294,10 +328,27 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
         ..
     } = verification;
     let identity = identity.ok_or("verified run carried no established identity")?;
+    let ready_identity = identity_event(
+        "ready",
+        &report,
+        &identity,
+        observed_spki.as_deref(),
+        verification_summary,
+    );
     // Pin the just-verified TLS key on every future hop to this host.
     if let Some(spki) = &observed_spki {
         client.pin(&host, spki);
     }
+    let reporter: Reporter = if args.json_events {
+        Arc::new(json_reporter)
+    } else {
+        Arc::new(default_reporter)
+    };
+    let event_sink: EventSink = if args.json_events {
+        Arc::new(json_event_sink)
+    } else {
+        Arc::new(|_| {})
+    };
     let state = Arc::new(ProxyState::new(
         client,
         base_url.clone(),
@@ -309,7 +360,8 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
         args.require_claims.clone(),
         report,
         identity,
-        Arc::new(default_reporter),
+        reporter,
+        event_sink,
     ));
     // §5.3 prevention: a claims policy derives the pin set from the current
     // attested sessions before any traffic — and nothing acceptable to pin
@@ -323,9 +375,11 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
                     .to_string(),
             );
         }
-        println!("policy-accepted sessions pinned ({}):", pins.len());
-        for pin in &pins {
-            println!("  {pin}");
+        if !args.json_events {
+            println!("policy-accepted sessions pinned ({}):", pins.len());
+            for pin in &pins {
+                println!("  {pin}");
+            }
         }
         *state.policy_pins.lock().expect("policy pins poisoned") = pins;
     }
@@ -345,33 +399,48 @@ pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, St
         .local_addr()
         .map_err(|e| format!("cannot read control address: {e}"))?;
 
-    println!();
-    println!("aci serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
-    println!(
-        "forwarding every method and path; Authorization passed through unchanged; every \
-         upstream hop pinned to the attested TLS key; each POST response's receipt id and \
-         body digests recorded.\n\
-         verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
-         POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
-         if the receipt fetch needs it).\n{}",
-        if args.allow_unverified {
-            "verified serving NOT demanded (--allow-unverified)."
-        } else {
-            "every inference demands verified serving \
-             (provider.aci_verified, spec 5.3)."
-        }
-    );
-    println!();
+    if args.json_events {
+        let mut event = ready_identity;
+        event["proxy_url"] = json!(format!("http://{local}"));
+        event["control_url"] = json!(format!("http://{control_local}"));
+        event["remote_url"] = json!(base_url);
+        event["policy"] = json!({
+            "enforce_verified": !args.allow_unverified,
+            "require_production_os": require_production_os,
+            "accepted_composes": args.accepted_composes,
+            "pinned_sessions": state.active_pins(),
+        });
+        write_json_event(&event)?;
+    } else {
+        println!();
+        println!("aci serve: proxying {base_url} on http://{local} (plain HTTP, localhost)");
+        println!(
+            "forwarding every method and path; Authorization passed through unchanged; every \
+             upstream hop pinned to the attested TLS key; each POST response's receipt id and \
+             body digests recorded.\n\
+             verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
+             POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
+             if the receipt fetch needs it).\n{}",
+            if args.allow_unverified {
+                "verified serving NOT demanded (--allow-unverified)."
+            } else {
+                "every inference demands verified serving \
+                 (provider.aci_verified, spec 5.3)."
+            }
+        );
+        println!();
+    }
 
     let control_server = axum::serve(control_listener, build_control_router(state.clone()));
-    tokio::spawn(async move {
-        if let Err(e) = control_server.await {
-            eprintln!("aci serve: control server error: {e}");
+    let proxy_server = axum::serve(listener, build_proxy_router(state));
+    tokio::select! {
+        result = control_server => {
+            result.map_err(|e| format!("control server error: {e}"))?;
         }
-    });
-    axum::serve(listener, build_proxy_router(state))
-        .await
-        .map_err(|e| format!("proxy server error: {e}"))?;
+        result = proxy_server => {
+            result.map_err(|e| format!("proxy server error: {e}"))?;
+        }
+    }
     Ok(0)
 }
 
@@ -468,6 +537,11 @@ async fn proxy_inference(
         state.blocked.store(true, Ordering::SeqCst);
     }
     if let Err(reason) = state.ensure_unblocked().await {
+        (state.event_sink)(json!({
+            "type": "blocked",
+            "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+            "reason": reason,
+        }));
         eprintln!("!! POST {path} -> 503 blocked: {reason}");
         return text_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -862,6 +936,68 @@ fn default_reporter(outcome: RequestOutcome) {
     }
 }
 
+fn json_reporter(outcome: RequestOutcome) {
+    let event = request_outcome_event(outcome);
+    if let Err(error) = write_json_event(&event) {
+        eprintln!("aci serve: cannot write JSON event: {error}");
+    }
+}
+
+fn json_event_sink(event: Value) {
+    if let Err(error) = write_json_event(&event) {
+        eprintln!("aci serve: cannot write JSON event: {error}");
+    }
+}
+
+fn identity_event(
+    event_type: &str,
+    report: &AttestationReport,
+    identity: &EstablishedIdentity,
+    observed_spki: Option<&str>,
+    verification: Value,
+) -> Value {
+    json!({
+        "type": event_type,
+        "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+        "trust_level": "hardware_verified",
+        "tee_type": report.attestation.tee_type,
+        "keyset_digest": report.workload_keyset_digest,
+        "keyset_not_after": identity.keyset.not_after,
+        "tls_spki": observed_spki,
+        "source_provenance": {
+            "repo_url": report.attestation.source_provenance.repo_url,
+            "repo_commit": report.attestation.source_provenance.repo_commit,
+            "image_digest": report.attestation.source_provenance.image_digest,
+        },
+        "service_capabilities": report.service_capabilities,
+        "verification": verification,
+    })
+}
+
+fn request_outcome_event(outcome: RequestOutcome) -> Value {
+    json!({
+        "type": "request_complete",
+        "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+        "method": outcome.method.as_str(),
+        "path": outcome.path,
+        "status": outcome.status,
+        "streamed": outcome.streamed,
+        "verified": outcome.verified,
+        "detail": outcome.detail,
+    })
+}
+
+fn write_json_event(event: &Value) -> Result<(), String> {
+    let line = serde_json::to_string(event)
+        .map_err(|error| format!("failed to serialize serve event: {error}"))?;
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writeln!(writer, "{line}").map_err(|error| format!("failed to write serve event: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush serve event: {error}"))
+}
+
 /// Keyset-rotation gate (§3.4): a response advertising a digest other than
 /// the trusted one blocks further inference forwards until a fresh verify
 /// re-establishes trust.
@@ -869,6 +1005,14 @@ fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) 
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
         if observed != trusted_digest {
             state.blocked.store(true, Ordering::SeqCst);
+            let reason = format!(
+                "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
+            );
+            (state.event_sink)(json!({
+                "type": "blocked",
+                "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+                "reason": reason,
+            }));
             eprintln!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
                  blocking further inference forwards until re-verify"
@@ -1076,6 +1220,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_outcome_event_is_stable_json() {
+        let outcome = RequestOutcome {
+            method: Method::POST,
+            path: "/v1/messages".to_string(),
+            status: 200,
+            streamed: true,
+            verified: Some(true),
+            detail: "receipt verified".to_string(),
+        };
+        let event = request_outcome_event(outcome);
+
+        assert_eq!(event["type"], "request_complete");
+        assert_eq!(event["schema_version"], 1);
+        assert_eq!(event["method"], "POST");
+        assert_eq!(event["verified"], true);
+    }
+
+    #[test]
+    fn identity_event_carries_the_verified_workload_summary() {
+        let report = vector_report();
+        let identity = crate::checks::established_identity(&report).unwrap();
+        let event = identity_event(
+            "ready",
+            &report,
+            &identity,
+            Some("sha256:observed"),
+            json!({ "checks": [] }),
+        );
+
+        assert_eq!(event["type"], "ready");
+        assert_eq!(event["schema_version"], 1);
+        assert_eq!(event["tee_type"], "tdx");
+        assert_eq!(event["keyset_digest"], report.workload_keyset_digest);
+        assert_eq!(event["tls_spki"], "sha256:observed");
+    }
+
     fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Arc<ProxyState> {
         let host = host_of(&base_url).unwrap();
         // Byte-exact passthrough harness: enforcement off so fixture-pinned
@@ -1094,6 +1275,7 @@ mod tests {
             Arc::new(move |outcome| {
                 let _ = tx.send(outcome);
             }),
+            Arc::new(|_| {}),
         ))
     }
 
@@ -1277,6 +1459,7 @@ mod tests {
             Arc::new(move |outcome| {
                 let _ = tx.send(outcome);
             }),
+            Arc::new(|_| {}),
         ));
         // A stale pin, as if the pinned session was superseded after startup.
         *state.policy_pins.lock().unwrap() = vec!["f".repeat(64)];

@@ -9,3 +9,8 @@ __pycache__/
 *.py[cod]
 .DS_Store
 clients/pi-provider/packages/*/dist/
+/apps/desktop/dist/
+/apps/desktop/node_modules/
+/apps/desktop/resources/native/
+/apps/desktop/release/
+/apps/desktop/test-results/

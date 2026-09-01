@@ -16,6 +16,12 @@ cargo run --bin aci -- <command> --help
 | `send <url>` | One verified chat completion end to end: verify, send over the pinned channel, then verify the receipt and its cited session. |
 | `serve <url>` | Local verifying proxy. Forwards every method and path over the pinned channel, records each POST exchange's digests, and verifies receipts on demand from a control endpoint (default `127.0.0.1:4181`). |
 
+`serve --json-events` is the desktop/process-integration mode. Its stdout is
+JSON Lines only: `ready` after verification and both listeners are bound,
+`request_complete` for request activity, `blocked` when forwarding fails
+closed, `identity_updated` after successful re-verification, and `fatal` before
+an unsuccessful exit. Human diagnostics remain on stderr.
+
 `serve` pins sessions two ways, both opt-in: `--session <id>` defines a
 fixed accepted set, composed with request pins by intersection, and
 `--require-claim <name[=source]>` derives the pin set from the audited

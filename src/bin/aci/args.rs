@@ -274,6 +274,12 @@ pub struct ServeArgs {
     )]
     pub control: Option<String>,
     #[arg(
+        long = "json-events",
+        help = "Emit the serve lifecycle and request activity as JSON Lines on stdout. \
+                Human-readable diagnostics remain on stderr."
+    )]
+    pub json_events: bool,
+    #[arg(
         long = "allow-unverified",
         help = "Drop the default provider.aci_verified demand (spec 5.3)."
     )]
@@ -331,5 +337,15 @@ mod tests {
         );
         let err = session_id("not-hex").unwrap_err();
         assert!(err.contains("spec 5.3"), "{err}");
+    }
+
+    #[test]
+    fn serve_accepts_json_events_mode() {
+        let cli =
+            Cli::try_parse_from(["aci", "serve", "https://example.test", "--json-events"]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve command");
+        };
+        assert!(args.json_events);
     }
 }
