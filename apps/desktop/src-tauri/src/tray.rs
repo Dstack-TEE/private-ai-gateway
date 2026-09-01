@@ -54,8 +54,7 @@ pub fn show_popup(app: &AppHandle, tray_rect: Option<Rect>) {
     } else {
         position_at_top_right(&window);
     }
-    let _ = window.show();
-    let _ = window.set_focus();
+    present(&window);
 }
 
 fn position_at_top_right(window: &WebviewWindow) {
@@ -80,10 +79,29 @@ fn toggle_popup(app: &AppHandle, tray_rect: Rect) {
         let _ = window.hide();
     } else {
         position_below_tray(&window, tray_rect);
-        let _ = window.show();
-        let _ = window.set_focus();
+        present(&window);
     }
 }
+
+fn present(window: &WebviewWindow) {
+    let _ = window.show();
+    activate_app();
+    let _ = window.set_focus();
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn activate_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    if let Some(marker) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(marker).activateIgnoringOtherApps(true);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_app() {}
 
 fn position_below_tray(window: &WebviewWindow, rect: Rect) {
     let Ok(scale_factor) = window.scale_factor() else {
