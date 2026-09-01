@@ -94,9 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_bundle/Contents/Info.plist")"
           open "$app_bundle" --stdout test-results/app.stdout.log --stderr test-results/app.stderr.log
           sleep 5
-          app_pid="$(pgrep -x 'Private AI Gateway' | head -1 || true)"
+          app_pid="$(pgrep -x "$executable_name" | head -1 || true)"
           if [[ -z "$app_pid" ]]; then
             cat test-results/app.stdout.log || true
             cat test-results/app.stderr.log || true
@@ -116,8 +117,11 @@ jobs:
           dmg="$(find release -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           zip="$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
           aci="$(find "$app_bundle/Contents" -type f -name 'aci*' -perm -111 -print -quit)"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_bundle/Contents/Info.plist")"
+          executable="$app_bundle/Contents/MacOS/$executable_name"
 
           test -d "$app_bundle"
+          test -x "$executable"
           test -x "$aci"
           test -f "$dmg"
           test -f "$zip"
@@ -131,7 +135,7 @@ jobs:
             echo "app_bytes=$(du -sk "$app_bundle" | awk '{print $1 * 1024}')"
             echo "dmg_bytes=$(stat -f '%z' "$dmg")"
             echo "zip_bytes=$(stat -f '%z' "$zip")"
-            file "$app_bundle/Contents/MacOS/Private AI Gateway"
+            file "$executable"
             file "$aci"
             "$aci" --help | sed -n '1,12p'
             hdiutil verify "$dmg"
