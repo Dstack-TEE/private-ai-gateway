@@ -6,7 +6,9 @@ The app has no Dock icon. Clicking the shield icon in the macOS menu bar opens
 a compact controller beneath it, and clicking elsewhere hides it. The popup
 starts or stops the gateway, copies the local OpenAI/Anthropic-compatible
 endpoint, shows the verified workload identity, and keeps verification checks,
-request events, and receipt records visible in one place.
+request events, and receipt records visible in one place. The tray asset is a
+macOS template image and the controller follows the system light or dark
+appearance without requiring a restart.
 
 ## Development
 

@@ -6,6 +6,6 @@
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:event:default"
   ]
 }
