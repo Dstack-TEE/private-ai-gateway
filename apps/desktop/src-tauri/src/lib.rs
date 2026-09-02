@@ -1,5 +1,6 @@
 mod contracts;
 mod gateway;
+mod menu;
 mod tray;
 
 use std::sync::{Arc, Mutex};
@@ -11,20 +12,18 @@ use desktop_gateway::{
     lock,
     proxy::{self, ProxyEvent, ProxyState},
     secrets::{validate_api_key, KeyringStore, SecretStore, API_KEY_ENTRY},
-    tls,
     tokens::TokenSet,
 };
 use gateway::{GatewayManager, LOCAL_ADDR, LOCAL_ENDPOINT};
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-/// The OS credential store holding the RedPill API key, parked secrets, and
-/// the local CA.
+/// The OS credential store holding the RedPill API key and parked secrets.
 struct Secrets(Arc<dyn SecretStore>);
 
-/// What the launch established before the window: the bound endpoint and
-/// the TLS identity. `Err` means nothing may start or connect this launch;
-/// the window still opens to say so and to allow disconnecting agents.
+/// What the launch established before the window: the bound endpoint. `Err`
+/// means nothing may start or connect this launch; the window still opens to
+/// say so and to allow disconnecting agents.
 struct Launch(Mutex<Result<Option<Bound>, String>>);
 
 /// The primary-instance lock, held for the whole process lifetime whether or
@@ -34,16 +33,10 @@ struct Instance(#[allow(dead_code)] Option<lock::InstanceLock>);
 
 struct Bound {
     listener: std::net::TcpListener,
-    server_config: Arc<rustls::ServerConfig>,
-}
-
-/// Path of the installation CA certificate agents trust.
-fn ca_path() -> Result<std::path::PathBuf, String> {
-    Ok(app_data_dir()?.join(tls::CA_FILE))
 }
 
 /// The projection engine for this installation: agent configs reference the
-/// bundled console helper next to this executable and the CA certificate.
+/// bundled console helper next to this executable.
 fn projector(secrets: &Secrets) -> Result<Projector, String> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("Cannot locate the app executable: {error}"))?;
@@ -51,7 +44,7 @@ fn projector(secrets: &Secrets) -> Result<Projector, String> {
         .parent()
         .ok_or_else(|| "Cannot locate the app directory".to_string())?
         .join(helper_binary_name());
-    Projector::new(helper, ca_path()?, LOCAL_ENDPOINT, secrets.0.clone())
+    Projector::new(helper, LOCAL_ENDPOINT, secrets.0.clone())
 }
 
 #[tauri::command]
@@ -74,6 +67,15 @@ fn stop_gateway(
     manager: State<'_, GatewayManager>,
 ) -> Result<GatewayState, String> {
     manager.stop(&app)
+}
+
+/// Open the brand's support page in the system browser.
+#[tauri::command]
+fn open_support(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    app.shell()
+        .open(desktop_gateway::brand::SUPPORT_URL, None)
+        .map_err(|error| format!("Cannot open the support page: {error}"))
 }
 
 #[tauri::command]
@@ -236,9 +238,6 @@ fn connection_catalog(
     if let Some(error) = manager.snapshot()?.endpoint_error {
         return Err(format!("The local endpoint is unavailable: {error}"));
     }
-    if !agent.needs_catalog() {
-        return Ok(None);
-    }
     let session = proxy.session();
     match (session.verified, session.catalog) {
         (true, Some(catalog)) => Ok(Some(catalog)),
@@ -249,12 +248,10 @@ fn connection_catalog(
     }
 }
 
-/// Become the primary instance, claim the endpoint, and load the TLS identity,
-/// in that order, before the window exists. The instance lock is returned
-/// separately so it outlives any later failure.
-fn launch(
-    secrets: &dyn SecretStore,
-) -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
+/// Become the primary instance and claim the endpoint before the window
+/// exists. The instance lock is returned separately so it outlives any later
+/// failure.
+fn launch() -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
     let data_dir = match app_data_dir() {
         Ok(dir) => dir,
         Err(error) => return (None, Err(error)),
@@ -264,21 +261,14 @@ fn launch(
         Ok(None) => return (None, Ok(None)),
         Err(error) => return (None, Err(format!("Cannot take the instance lock: {error}"))),
     };
-    let bound = proxy::bind_std(LOCAL_ADDR).and_then(|listener| {
-        tls::load_or_create(&data_dir, secrets).map(|identity| {
-            Some(Bound {
-                listener,
-                server_config: identity.server_config,
-            })
-        })
-    });
+    let bound = proxy::bind_std(LOCAL_ADDR).map(|listener| Some(Bound { listener }));
     (Some(instance), bound)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-    let (instance, launched) = launch(secrets.as_ref());
+    let (instance, launched) = launch();
     let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
     let proxy = ProxyState::new(events);
 
@@ -298,6 +288,7 @@ pub fn run() {
             start_gateway,
             stop_gateway,
             copy_text,
+            open_support,
             set_api_key,
             clear_api_key,
             refresh_catalog,
@@ -313,6 +304,9 @@ pub fn run() {
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
+            // The tracked config keeps the window geometry; the brand owns the
+            // title, applied here while the window is still hidden.
+            window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
             // Closing the window only hides it; the tray keeps the app alive.
             let window_for_events = window.clone();
             window.on_window_event(move |event| {
@@ -322,6 +316,7 @@ pub fn run() {
                 }
             });
             tray::setup(app.handle())?;
+            menu::setup(app.handle())?;
 
             let handle = app.handle().clone();
             let manager = app.state::<GatewayManager>();
@@ -339,11 +334,7 @@ pub fn run() {
                     let serve_handle = handle.clone();
                     let serve_proxy = proxy.clone();
                     tauri::async_runtime::spawn(async move {
-                        let Bound {
-                            listener,
-                            server_config,
-                        } = bound;
-                        let result = proxy::serve_tls(serve_proxy, listener, server_config).await;
+                        let result = proxy::serve(serve_proxy, bound.listener).await;
                         if let Err(error) = result {
                             let manager = serve_handle.state::<GatewayManager>();
                             manager.set_endpoint(&serve_handle, Err(error));
@@ -352,10 +343,10 @@ pub fn run() {
                 }
                 Ok(None) => manager.set_endpoint(
                     &handle,
-                    Err(
-                        "Another instance of Private AI Gateway is the primary instance"
-                            .to_string(),
-                    ),
+                    Err(format!(
+                        "Another instance of {} is the primary instance",
+                        desktop_gateway::brand::PRODUCT_NAME
+                    )),
                 ),
                 Err(error) => manager.set_endpoint(&handle, Err(error)),
             }
@@ -370,7 +361,7 @@ pub fn run() {
                 Err(error) => manager.report_error(&handle, error),
             }
             // Startup maintenance (under the config lock) before authorizing
-            // any token: connections this build no longer supports are disabled.
+            // any token.
             let store = Secrets(secrets.clone());
             match projector(&store).and_then(|projector| {
                 projector.migrate_legacy()?;

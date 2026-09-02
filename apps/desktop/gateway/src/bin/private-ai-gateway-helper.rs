@@ -24,7 +24,12 @@ fn main() -> ExitCode {
         .and_then(|agent| agents::app_data_dir().map(|dir| (agent, dir)))
         .and_then(|(agent, dir)| TokenFiles::new(&dir).read(agent.id()))
         .and_then(|token| {
-            token.ok_or_else(|| "This agent is not connected in Private AI Gateway".to_string())
+            token.ok_or_else(|| {
+                format!(
+                    "This agent is not connected in {}",
+                    desktop_gateway::brand::PRODUCT_NAME
+                )
+            })
         });
     match token {
         Ok(token) => {

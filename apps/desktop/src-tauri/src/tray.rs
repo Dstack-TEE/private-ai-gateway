@@ -4,9 +4,9 @@ use tauri::{
     AppHandle, Manager, Wry,
 };
 
-use crate::{contracts::GatewayState, gateway::GatewayManager};
+use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
 
-const APP_NAME: &str = "Private AI Gateway";
+use crate::{contracts::GatewayState, gateway::GatewayManager};
 
 /// Live handles to the two menu rows that mirror gateway state.
 pub struct TrayMenu {

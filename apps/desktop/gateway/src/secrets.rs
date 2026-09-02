@@ -6,8 +6,8 @@
 
 use std::{collections::HashMap, sync::Mutex};
 
-const SERVICE: &str = "ai.redpill.private-ai-gateway";
-pub const API_KEY_ENTRY: &str = "redpill-api-key";
+const SERVICE: &str = crate::brand::APP_IDENTIFIER;
+pub const API_KEY_ENTRY: &str = "service-api-key";
 const MAX_KEY_LEN: usize = 512;
 
 /// A named-entry secret store. Entry names are app-chosen, never user input.

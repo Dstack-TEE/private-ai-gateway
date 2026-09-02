@@ -3,13 +3,12 @@
 //! before, and put them back on disconnect. Credential fields a connection
 //! takes over are parked in the OS credential store and referenced opaquely;
 //! configs reference a machine-local agent token (through the bundled helper)
-//! and the installation's CA certificate, never the RedPill key.
+//! never the RedPill key.
 //!
-//! Only Claude Code can be connected in this version: Codex needs per-model
-//! metadata the service does not publish, and OpenCode has no
-//! configuration-level way to trust the local certificate. Disconnecting
-//! never depends on support, the endpoint, or the catalog, so a connection
-//! made by an older version can always be restored.
+//! Codex, Claude Code, and OpenCode are projected through their documented
+//! custom-provider settings. Disconnecting never depends on the endpoint or
+//! the catalog, so a connection made by an older version can always be
+//! restored.
 
 use std::{
     collections::BTreeMap,
@@ -23,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    catalog::{Catalog, Surface},
+    brand::PRODUCT_NAME,
+    catalog::Catalog,
     config_doc::{ConfigDoc, ConfigValue, Format},
     lock,
     secrets::SecretStore,
@@ -32,21 +32,10 @@ use crate::{
 
 /// Test-only override for the home directory (and the app data directory).
 pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_GATEWAY_HOME";
-/// Bundle identifier; names the per-user app data directory on every platform.
-pub const APP_IDENTIFIER: &str = "ai.redpill.private-ai-gateway";
+pub use crate::brand::APP_IDENTIFIER;
 const STORE_FILE: &str = "agent-connections.json";
-const CODEX_UNSUPPORTED: &str = "The verified service publishes no Codex model metadata; Codex's \
-                                 strict catalog needs per-model instructions it ships only for \
-                                 its own models, so this version cannot connect Codex honestly";
-const OPENCODE_UNSUPPORTED: &str = "OpenCode has no configuration-level way to trust the local \
-                                    gateway certificate (only a shell-exported \
-                                    NODE_EXTRA_CA_CERTS would, which the app cannot verify), so \
-                                    this version cannot connect OpenCode";
 const HELPER_MISSING: &str = "The credential helper is missing from this installation, so \
-                              Claude Code cannot be connected";
-const MESSAGES_UNDECLARED: &str = "The service does not publish a capability declaration \
-                                   (aci_capabilities v1) for the Messages API; connecting \
-                                   Claude Code stays disabled until it does";
+                              agents cannot be connected";
 
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {
@@ -71,16 +60,7 @@ pub struct AgentStatus {
     /// The proxy would authorize this agent's token right now: recorded,
     /// enabled, config readable and still exactly the app's projection.
     pub authorized: bool,
-    /// The wire surface the agent speaks to the local gateway.
-    pub surface: Surface,
-    /// Whether this build can connect the agent. Disconnecting never depends
-    /// on it.
-    pub supported: bool,
-    /// Why it cannot be connected, when `supported` is false.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Something the user must act on (removed model, incomplete disconnect,
-    /// a connection this version no longer supports).
+    /// Something the user must act on (removed model, incomplete disconnect).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,7 +93,7 @@ pub struct AgentPreview {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectOptions {
-    /// Claude Code: the catalog model written to `ANTHROPIC_MODEL`.
+    /// Catalog model selected for the agent.
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -151,28 +131,6 @@ impl Agent {
         }
     }
 
-    pub fn surface(self) -> Surface {
-        match self {
-            Agent::Codex => Surface::Responses,
-            Agent::ClaudeCode => Surface::Messages,
-            Agent::OpenCode => Surface::ChatCompletions,
-        }
-    }
-
-    /// Whether connecting needs the verified catalog (a model choice).
-    pub fn needs_catalog(self) -> bool {
-        matches!(self, Agent::ClaudeCode)
-    }
-
-    /// Why this build cannot connect the agent at all, independent of state.
-    fn static_unsupported(self) -> Option<&'static str> {
-        match self {
-            Agent::Codex => Some(CODEX_UNSUPPORTED),
-            Agent::OpenCode => Some(OPENCODE_UNSUPPORTED),
-            Agent::ClaudeCode => None,
-        }
-    }
-
     /// The official CLI executable name, for install detection on PATH.
     fn cli_name(self) -> &'static str {
         self.id()
@@ -207,17 +165,22 @@ impl Agent {
 
     fn note(self, connect: bool) -> &'static str {
         if !connect {
-            return "Only fields written by Private AI Gateway are restored; credentials taken \
+            return "Only fields written by this app are restored; credentials taken \
                     over at connect come back from the system credential store; edits made \
                     since are left in place. The agent's local token is revoked.";
         }
         match self {
-            Agent::Codex => CODEX_UNSUPPORTED,
-            Agent::OpenCode => OPENCODE_UNSUPPORTED,
+            Agent::Codex => {
+                "Codex will use its official custom model provider with the Responses API and \
+                 command-backed authentication. Restart Codex after applying."
+            }
+            Agent::OpenCode => {
+                "OpenCode will use its OpenAI-compatible provider with the selected verified \
+                 model and a file-backed machine-local token. Restart OpenCode after applying."
+            }
             Agent::ClaudeCode => {
-                "Claude Code will trust the installation's local certificate, authenticate \
-                 through apiKeyHelper with a machine-local token, and use the selected model. \
-                 Credentials set in this settings file are taken over and restored on \
+                "Claude Code will authenticate through apiKeyHelper with a machine-local token \
+                 and use the selected model. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway."
@@ -230,48 +193,114 @@ impl Agent {
 struct Inputs<'a> {
     endpoint: &'a str,
     helper_exe: &'a Path,
-    ca_path: &'a Path,
+    token_path: &'a Path,
     catalog: Option<&'a Catalog>,
     options: &'a ConnectOptions,
 }
 
 /// The fields this app owns for the agent and the values a connection writes.
 fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
-    if let Some(reason) = agent.static_unsupported() {
-        return Err(reason.to_string());
-    }
     let model = inputs
         .options
         .model
         .as_deref()
         .filter(|model| !model.trim().is_empty())
-        .ok_or_else(|| "Choose a model from the verified list for Claude Code".to_string())?;
+        .ok_or_else(|| format!("Choose a model from the verified list for {}", agent.name()))?;
     let catalog = inputs
         .catalog
         .ok_or_else(|| "The verified model list is not available".to_string())?;
-    if !catalog.declares(Surface::Messages) {
-        return Err(MESSAGES_UNDECLARED.to_string());
-    }
     if catalog.get(model).is_none() {
         return Err(format!("`{model}` is not in the verified model list"));
     }
-    Ok(vec![
-        set(&["env", "ANTHROPIC_BASE_URL"], inputs.endpoint),
-        set(
-            &["env", "NODE_EXTRA_CA_CERTS"],
-            inputs.ca_path.display().to_string(),
-        ),
-        set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
-        set(&["env", "ANTHROPIC_MODEL"], model),
-        set(
-            &["apiKeyHelper"],
-            helper_command(inputs.helper_exe, "claude-code")?,
-        ),
-        // These outrank apiKeyHelper in Claude Code's precedence, so a
-        // connection takes them over (parked in the credential store).
-        absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
-        absent(&["env", "ANTHROPIC_API_KEY"]),
-    ])
+    let base = inputs.endpoint.trim_end_matches('/');
+    Ok(match agent {
+        Agent::Codex => vec![
+            set(&["model"], model),
+            set(&["model_provider"], "private_ai_gateway"),
+            set(
+                &["model_providers", "private_ai_gateway", "name"],
+                PRODUCT_NAME,
+            ),
+            set(
+                &["model_providers", "private_ai_gateway", "base_url"],
+                format!("{base}/v1"),
+            ),
+            set(
+                &["model_providers", "private_ai_gateway", "wire_api"],
+                "responses",
+            ),
+            set(
+                &["model_providers", "private_ai_gateway", "auth", "command"],
+                inputs.helper_exe.display().to_string(),
+            ),
+            list(
+                &["model_providers", "private_ai_gateway", "auth", "args"],
+                &["--agent-token", "codex"],
+            ),
+            number(
+                &[
+                    "model_providers",
+                    "private_ai_gateway",
+                    "auth",
+                    "timeout_ms",
+                ],
+                5_000,
+            ),
+            number(
+                &[
+                    "model_providers",
+                    "private_ai_gateway",
+                    "auth",
+                    "refresh_interval_ms",
+                ],
+                0,
+            ),
+        ],
+        Agent::ClaudeCode => vec![
+            set(&["env", "ANTHROPIC_BASE_URL"], base),
+            set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+            set(&["env", "ANTHROPIC_MODEL"], model),
+            set(
+                &["apiKeyHelper"],
+                helper_command(inputs.helper_exe, "claude-code")?,
+            ),
+            absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
+            absent(&["env", "ANTHROPIC_API_KEY"]),
+        ],
+        Agent::OpenCode => {
+            let provider = "private-ai-gateway";
+            let mut fields = vec![
+                set(&["model"], format!("{provider}/{model}")),
+                set(&["provider", provider, "npm"], "@ai-sdk/openai-compatible"),
+                set(&["provider", provider, "name"], PRODUCT_NAME),
+                set(
+                    &["provider", provider, "options", "baseURL"],
+                    format!("{base}/v1"),
+                ),
+                set(
+                    &["provider", provider, "options", "apiKey"],
+                    format!("{{file:{}}}", inputs.token_path.display()),
+                ),
+                set(
+                    &["provider", provider, "models", model, "name"],
+                    catalog.get(model).unwrap().display_name(),
+                ),
+            ];
+            let remote = &catalog.get(model).unwrap().remote;
+            if let (Some(context), Some(output)) = (remote.context_length, remote.max_output_length)
+            {
+                fields.push(number(
+                    &["provider", provider, "models", model, "limit", "context"],
+                    context,
+                ));
+                fields.push(number(
+                    &["provider", provider, "models", model, "limit", "output"],
+                    output,
+                ));
+            }
+            fields
+        }
+    })
 }
 
 struct Field {
@@ -284,6 +313,22 @@ fn set(path: &[&str], value: impl Into<String>) -> Field {
     Field {
         path: owned(path),
         value: Some(ConfigValue::Str(value.into())),
+    }
+}
+
+fn number(path: &[&str], value: u64) -> Field {
+    Field {
+        path: owned(path),
+        value: Some(ConfigValue::Number(value)),
+    }
+}
+
+fn list(path: &[&str], values: &[&str]) -> Field {
+    Field {
+        path: owned(path),
+        value: Some(ConfigValue::List(
+            values.iter().map(|value| (*value).to_string()).collect(),
+        )),
     }
 }
 
@@ -334,8 +379,7 @@ fn is_sensitive(path: &[String]) -> bool {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Connection {
     fields: Vec<OwnedField>,
-    /// The agent is not authorized (disconnect in progress, or a connection
-    /// this version no longer supports).
+    /// The agent is not authorized (disconnect in progress).
     #[serde(default)]
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,
@@ -383,7 +427,6 @@ pub struct Projector {
     home: PathBuf,
     data_dir: PathBuf,
     helper_exe: PathBuf,
-    ca_path: PathBuf,
     endpoint: String,
     tool_env: bool,
     tokens: TokenFiles,
@@ -393,7 +436,6 @@ pub struct Projector {
 impl Projector {
     pub fn new(
         helper_exe: PathBuf,
-        ca_path: PathBuf,
         endpoint: &str,
         secrets: Arc<dyn SecretStore>,
     ) -> Result<Self, String> {
@@ -402,7 +444,6 @@ impl Projector {
             home,
             app_data_dir()?,
             helper_exe,
-            ca_path,
             endpoint,
             true,
             secrets,
@@ -413,7 +454,6 @@ impl Projector {
         home: PathBuf,
         data_dir: PathBuf,
         helper_exe: PathBuf,
-        ca_path: PathBuf,
         endpoint: &str,
         tool_env: bool,
         secrets: Arc<dyn SecretStore>,
@@ -423,7 +463,6 @@ impl Projector {
             tokens: TokenFiles::new(&data_dir),
             data_dir,
             helper_exe,
-            ca_path,
             endpoint: endpoint.to_string(),
             tool_env,
             secrets,
@@ -454,30 +493,12 @@ impl Projector {
         Ok((statuses, tokens))
     }
 
-    /// Startup maintenance, under the apply lock: disable connections recorded
-    /// for agents this build no longer supports so their tokens are never
-    /// authorized again (the config stays until the user disconnects).
-    /// Returns whether anything changed.
+    /// Startup permission maintenance under the apply lock.
     pub fn migrate_legacy(&self) -> Result<bool, String> {
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()?;
-            let mut store = self.load_store()?;
-            let mut changed = false;
-            for agent in Agent::ALL {
-                if agent.static_unsupported().is_none() {
-                    continue;
-                }
-                if let Some(record) = store.get_mut(agent.id()) {
-                    if !record.disabled {
-                        record.disabled = true;
-                        changed = true;
-                    }
-                }
-            }
-            if changed {
-                self.save_store(&store)?;
-            }
-            Ok(changed)
+            let _ = self.load_store()?;
+            Ok(false)
         })
     }
 
@@ -492,7 +513,7 @@ impl Projector {
     ) -> Result<AgentPreview, String> {
         let store = self.load_store()?;
         if connect {
-            self.require_connectable(agent, &store, catalog)?;
+            self.require_helper()?;
         }
         let (text, read_error) = self.config_text(agent);
         if connect {
@@ -549,7 +570,7 @@ impl Projector {
                 if let Some(error) = read_error {
                     return Err(error);
                 }
-                self.require_connectable(agent, &store, catalog)?;
+                self.require_helper()?;
                 self.connect(agent, &mut store, text, catalog, options)?;
             } else {
                 self.disconnect(agent, &mut store)?;
@@ -725,16 +746,13 @@ impl Projector {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn require_connectable(
-        &self,
-        agent: Agent,
-        store: &Store,
-        catalog: Option<&Catalog>,
-    ) -> Result<(), String> {
-        let status = self.status(agent, store, catalog);
-        match (status.supported, status.reason) {
-            (true, _) => Ok(()),
-            (false, reason) => Err(reason.unwrap_or_else(|| "Unsupported".to_string())),
+    /// Connecting references the bundled helper; an installation without it
+    /// cannot issue agent credentials.
+    fn require_helper(&self) -> Result<(), String> {
+        if self.helper_exe.exists() {
+            Ok(())
+        } else {
+            Err(HELPER_MISSING.to_string())
         }
     }
 
@@ -753,7 +771,7 @@ impl Projector {
                 .ok_or_else(|| format!("{} is not connected", agent.name()))?;
             return restore(doc, record, self.secrets.as_ref());
         }
-        if agent.needs_catalog() && catalog.is_none() {
+        if catalog.is_none() {
             return Err(format!(
                 "Start the gateway and wait until it is verified; the model list for {} comes \
                  from it",
@@ -763,7 +781,7 @@ impl Projector {
         let inputs = Inputs {
             endpoint: &self.endpoint,
             helper_exe: &self.helper_exe,
-            ca_path: &self.ca_path,
+            token_path: &self.tokens.path(agent.id()),
             catalog,
             options,
         };
@@ -784,21 +802,11 @@ impl Projector {
             connected: false,
             recorded: record.is_some(),
             authorized: false,
-            surface: agent.surface(),
-            supported: true,
-            reason: None,
             attention: None,
             error: None,
         };
-        if let Some(reason) = agent.static_unsupported() {
-            status.supported = false;
-            status.reason = Some(reason.to_string());
-        } else if !self.helper_exe.exists() {
-            status.supported = false;
-            status.reason = Some(HELPER_MISSING.to_string());
-        } else if catalog.is_some_and(|catalog| !catalog.declares(Surface::Messages)) {
-            status.supported = false;
-            status.reason = Some(MESSAGES_UNDECLARED.to_string());
+        if !self.helper_exe.exists() {
+            status.error = Some(HELPER_MISSING.to_string());
         }
         // A broken config is reported, never hidden behind "not connected";
         // the record, the attention line, and Disconnect all stay available.
@@ -827,20 +835,16 @@ impl Projector {
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
         status.connected = managed && token;
-        status.authorized =
-            !record.disabled && agent.static_unsupported().is_none() && managed && token;
+        status.authorized = !record.disabled && managed && token;
         if record.cleanup_pending {
             status.attention = Some(
                 "Disconnect did not complete; this agent's access is disabled until Disconnect \
                  is retried"
                     .to_string(),
             );
-        } else if record.disabled || agent.static_unsupported().is_some() {
-            status.attention = Some(
-                "Connected by an earlier version that this build no longer supports; access is \
-                 disabled. Disconnect to restore your config"
-                    .to_string(),
-            );
+        } else if record.disabled {
+            status.attention =
+                Some("This connection is disabled; Disconnect to restore your config".to_string());
         } else if !managed {
             status.attention = Some(
                 "The config no longer matches what the app wrote (edited outside the app, or \
@@ -853,12 +857,8 @@ impl Projector {
                 "This agent's access is revoked; retry Disconnect to restore its config"
                     .to_string(),
             );
-        } else if status.connected && agent == Agent::ClaudeCode {
-            if let (Some(catalog), Some(model)) = (
-                catalog,
-                doc.as_ref()
-                    .and_then(|doc| doc.get_str(&["env", "ANTHROPIC_MODEL"])),
-            ) {
+        } else if status.connected {
+            if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
                 if catalog.get(&model).is_none() {
                     status.attention = Some(format!(
                         "`{model}` is no longer served; choose another model and reconnect"
@@ -1129,6 +1129,19 @@ fn refs(path: &[String]) -> Vec<&str> {
     path.iter().map(String::as_str).collect()
 }
 
+fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
+    let doc = doc?;
+    match agent {
+        Agent::Codex => doc.get_str(&["model"]),
+        Agent::ClaudeCode => doc.get_str(&["env", "ANTHROPIC_MODEL"]),
+        Agent::OpenCode => doc.get_str(&["model"]).and_then(|value| {
+            value
+                .strip_prefix("private-ai-gateway/")
+                .map(str::to_string)
+        }),
+    }
+}
+
 /// Whether the agent's official CLI is on PATH (platform executable names).
 fn cli_on_path(name: &str) -> bool {
     let Some(paths) = env::var_os("PATH") else {
@@ -1162,8 +1175,8 @@ fn home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Cannot determine the home directory".to_string())
 }
 
-/// The per-user app data directory (tokens, connection record, CA
-/// certificate, locks), resolved the same way by the desktop shell and the
+/// The per-user app data directory (tokens, connection record, locks),
+/// resolved the same way by the desktop shell and the
 /// bundled helper.
 pub fn app_data_dir() -> Result<PathBuf, String> {
     if let Some(home) = env_path(HOME_OVERRIDE_ENV) {
@@ -1253,7 +1266,7 @@ mod tests {
     use crate::secrets::MemoryStore;
     use serde_json::json;
 
-    const ENDPOINT: &str = "https://127.0.0.1:4180";
+    const ENDPOINT: &str = "http://127.0.0.1:4180";
 
     fn catalog() -> Catalog {
         Catalog::from_remote(
@@ -1261,18 +1274,11 @@ mod tests {
                 "data": [
                     { "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "context_length": 131072 },
                     { "id": "phala/qwen" }
-                ],
-                "aci_capabilities": { "version": 1, "surfaces": {
-                    "chat_completions": "all", "messages": "all", "responses": "undeclared"
-                }}
+                ]
             }),
             1,
         )
         .unwrap()
-    }
-
-    fn undeclared_catalog() -> Catalog {
-        Catalog::from_remote(&json!({ "data": [{ "id": "openai/gpt-oss-20b" }] }), 1).unwrap()
     }
 
     struct Sandbox {
@@ -1288,7 +1294,7 @@ mod tests {
     }
 
     /// A fresh home directory under the system temp dir with a fake helper
-    /// binary and CA file; tool env overrides are ignored so no real config is
+    /// binary; tool env overrides are ignored so no real config is
     /// touched.
     fn sandbox(name: &str) -> Sandbox {
         let home = env::temp_dir().join(format!("pag-agents-{}-{name}", std::process::id()));
@@ -1298,17 +1304,11 @@ mod tests {
             .join("Private AI Gateway.app")
             .join(helper_binary_name());
         write(&helper, "#!/bin/sh\n");
-        let ca = home.join("state").join("local-gateway-ca.pem");
-        write(
-            &ca,
-            "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
-        );
         let secrets = Arc::new(MemoryStore::default());
         let projector = Projector::at(
             home.clone(),
             home.join("state"),
             helper,
-            ca,
             ENDPOINT,
             false,
             secrets.clone(),
@@ -1370,68 +1370,74 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_opencode_are_unsupported_but_legacy_connections_disconnect() {
-        let sandbox = sandbox("unsupported");
-        let statuses = sandbox.projector.scan(None).unwrap().0;
-        assert!(!statuses[0].supported && statuses[0].reason.is_some());
-        assert!(
-            !statuses[2].supported
-                && statuses[2]
-                    .reason
-                    .as_deref()
-                    .unwrap()
-                    .contains("certificate")
-        );
-        assert!(sandbox
+    fn codex_and_opencode_use_official_custom_provider_configs() {
+        let sandbox = sandbox("providers");
+        let catalog = catalog();
+        let options = claude_options();
+
+        let preview = sandbox
             .projector
-            .preview(
+            .preview(Agent::Codex, true, Some(&catalog), &options)
+            .unwrap();
+        let status = sandbox
+            .projector
+            .apply(
+                Agent::Codex,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &options,
+            )
+            .unwrap();
+        assert!(status.connected);
+        let codex = doc(&sandbox, Agent::Codex);
+        assert_eq!(
+            codex.get_str(&["model_provider"]).as_deref(),
+            Some("private_ai_gateway")
+        );
+        assert_eq!(
+            codex
+                .get_str(&["model_providers", "private_ai_gateway", "wire_api"])
+                .as_deref(),
+            Some("responses")
+        );
+        assert_eq!(
+            codex
+                .get_str(&["model_providers", "private_ai_gateway", "base_url"])
+                .as_deref(),
+            Some("http://127.0.0.1:4180/v1")
+        );
+        disconnect(&sandbox, Agent::Codex);
+
+        let preview = sandbox
+            .projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &options)
+            .unwrap();
+        let status = sandbox
+            .projector
+            .apply(
                 Agent::OpenCode,
                 true,
-                Some(&catalog()),
-                &ConnectOptions::default()
+                &preview.revision,
+                Some(&catalog),
+                &options,
             )
-            .is_err());
-
-        // A record left by an earlier version: token present, config projected.
-        let path = sandbox.home.join(".codex").join("config.toml");
-        write(&path, "model_provider = \"private_ai_gateway\"\n");
-        sandbox.projector.tokens.ensure("codex").unwrap();
-        let record = Connection {
-            fields: vec![OwnedField {
-                path: owned(&["model_provider"]),
-                value: Some(ConfigValue::Str("private_ai_gateway".into())),
-                previous: Some(Previous::Plain(ConfigValue::Str("openai".into()))),
-            }],
-            disabled: false,
-            cleanup_pending: false,
-        };
-        let mut store = Store::new();
-        store.insert("codex".into(), record);
-        sandbox.projector.save_store(&store).unwrap();
-
-        // Reading never writes: a scan leaves the record untouched,
-        // yet the unsupported agent's token is not authorized either way.
-        let before = fs::read(sandbox.projector.store_path()).unwrap();
-        assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
-        let status = &sandbox.projector.scan(None).unwrap().0[0];
-        assert!(status.connected, "the config still carries the projection");
-        assert!(!status.supported);
-        assert!(status.attention.as_deref().unwrap().contains("Disconnect"));
-        assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), before);
-        // The explicit startup migration disables it on disk, once.
-        assert!(sandbox.projector.migrate_legacy().unwrap());
-        assert!(!sandbox.projector.migrate_legacy().unwrap());
-        assert!(sandbox.projector.load_store().unwrap()["codex"].disabled);
-
-        // Disconnect works without support, endpoint, or catalog.
-        let status = disconnect(&sandbox, Agent::Codex);
-        assert!(!status.connected);
+            .unwrap();
+        assert!(status.connected);
+        let opencode = doc(&sandbox, Agent::OpenCode);
         assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "model_provider = \"openai\"\n"
+            opencode
+                .get_str(&["provider", "private-ai-gateway", "npm"])
+                .as_deref(),
+            Some("@ai-sdk/openai-compatible")
         );
-        assert!(sandbox.projector.tokens.read("codex").unwrap().is_none());
-        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert_eq!(
+            opencode
+                .get_str(&["provider", "private-ai-gateway", "options", "baseURL"])
+                .as_deref(),
+            Some("http://127.0.0.1:4180/v1")
+        );
+        disconnect(&sandbox, Agent::OpenCode);
     }
 
     #[test]
@@ -1466,10 +1472,6 @@ mod tests {
             doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
             Some(ENDPOINT)
         );
-        assert!(doc
-            .get_str(&["env", "NODE_EXTRA_CA_CERTS"])
-            .unwrap()
-            .ends_with("local-gateway-ca.pem"));
         assert_eq!(
             doc.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
             Some("openai/gpt-oss-20b")
@@ -1500,7 +1502,7 @@ mod tests {
         disconnect(&sandbox, Agent::ClaudeCode);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"ANTHROPIC_AUTH_TOKEN\": \"sk-old-secret\""));
-        assert!(!text.contains("apiKeyHelper") && !text.contains("NODE_EXTRA_CA_CERTS"));
+        assert!(!text.contains("apiKeyHelper"));
         assert!(sandbox.secrets.is_empty(), "restore entry released");
         assert!(sandbox
             .projector
@@ -1512,29 +1514,8 @@ mod tests {
     }
 
     #[test]
-    fn claude_needs_a_declared_messages_surface_and_a_catalog_model() {
+    fn agents_require_a_verified_catalog_model() {
         let sandbox = sandbox("claude-gate");
-        let status = &sandbox
-            .projector
-            .scan(Some(&undeclared_catalog()))
-            .unwrap()
-            .0[1];
-        assert!(!status.supported);
-        assert!(status
-            .reason
-            .as_deref()
-            .unwrap()
-            .contains("aci_capabilities"));
-        assert!(sandbox
-            .projector
-            .preview(
-                Agent::ClaudeCode,
-                true,
-                Some(&undeclared_catalog()),
-                &claude_options()
-            )
-            .unwrap_err()
-            .contains("aci_capabilities"));
         assert!(sandbox
             .projector
             .preview(
@@ -1557,9 +1538,18 @@ mod tests {
             )
             .unwrap_err()
             .contains("not in the verified model list"));
-        // Without the helper binary, Claude Code is unsupported too.
+        // Without the bundled helper, agents cannot authenticate.
         fs::remove_file(&sandbox.projector.helper_exe).unwrap();
-        assert!(!sandbox.projector.scan(Some(&catalog())).unwrap().0[1].supported);
+        let status = &sandbox.projector.scan(Some(&catalog())).unwrap().0[1];
+        assert!(status
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("helper")));
+        assert!(sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+            .unwrap_err()
+            .contains("helper"));
     }
 
     #[test]
@@ -1720,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_all_restores_every_agent_without_support() {
+    fn disconnect_all_restores_every_agent() {
         let sandbox = sandbox("emergency");
         write(
             &sandbox.home.join(".claude").join("settings.json"),
@@ -2079,12 +2069,7 @@ mod tests {
             .route(
                 "/v1/models",
                 get(|| async {
-                    Json(serde_json::json!({
-                        "data": [{ "id": "openai/gpt-oss-20b" }],
-                        "aci_capabilities": { "version": 1, "surfaces": {
-                            "chat_completions": "all", "messages": "all", "responses": "undeclared"
-                        }}
-                    }))
+                    Json(serde_json::json!({ "data": [{ "id": "openai/gpt-oss-20b" }] }))
                 }),
             );
         let sidecar_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

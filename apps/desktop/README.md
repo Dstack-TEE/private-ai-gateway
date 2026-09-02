@@ -1,29 +1,41 @@
 # Private AI Gateway Desktop
 
 Tauri v2 menu bar app that turns the bundled `aci serve` verifier into a local
-agent gateway for Claude Code (Codex and OpenCode are reported as unsupported; see below).
+gateway for Codex, Claude Code, and OpenCode.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
 
 ## Architecture
 
-- **Primary instance, then endpoint, then identity.** At launch the app takes
-  a per-user OS file lock (`fd-lock`) to become the primary instance, binds
-  `127.0.0.1:4180` synchronously and exclusively, and loads the TLS identity;
-  any failure is shown in the window and blocks starting the gateway and
-  connecting agents for that launch. Disconnecting agents never depends on
-  it. A second instance hands off to the first (the Tauri single-instance
-  plugin only focuses the window; the lock decides).
-- **Local endpoint `https://127.0.0.1:4180`** is served over TLS with a
-  per-installation identity: a local CA generated once (key and certificate
-  in the OS credential store; the certificate also written owner-only to the
-  app data directory), and a server certificate for `127.0.0.1`/`localhost`
-  issued from it on every launch whose key never leaves memory. An agent that
-  trusts the CA refuses anything else on the port, running or not:
-  `tests/tls_identity.rs` proves a rustls client and the installed Claude Code
-  CLI both fail before sending credentials against a plain-HTTP or
-  foreign-certificate listener.
+```
+Codex / Claude Code / OpenCode
+        │  the agent's own API, a machine-local token
+        ▼
+http://127.0.0.1:4180   in-process Rust proxy: agent tokens, catalog check,
+        │               limits, revocation gate, activity; relays unchanged
+        ▼
+127.0.0.1:<dynamic>     bundled `aci serve`: TEE identity, pinned channel,
+        │               policy, forwarding, receipt verification
+        ▼
+https://tee.redpill.ai
+```
+
+The desktop app converts nothing. Whatever an agent sends on
+`/v1/chat/completions`, `/v1/messages`, or `/v1/responses` (and the
+`count_tokens` / `responses/compact` helpers) reaches the verified service with
+the same method, path, query, body, and streaming; the service's status,
+headers, and bytes come back the same way. Whether the service answers a
+protocol is the service's own response, shown as such.
+
+- **Primary instance, then endpoint.** At launch the app takes a per-user OS
+  file lock (`fd-lock`) to become the primary instance and binds
+  `127.0.0.1:4180` synchronously and exclusively; a failure is shown in the
+  window and blocks starting and connecting for that launch. Disconnecting
+  agents never depends on it. A second instance hands off to the first (the
+  Tauri single-instance plugin only focuses the window; the lock decides).
+- **Local endpoint `http://127.0.0.1:4180`** is loopback-only HTTP. The app
+  claims the port before agent connections are available.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity
@@ -40,92 +52,100 @@ agent gateway for Claude Code (Codex and OpenCode are reported as unsupported; s
   forward when a re-verification changed the service identity mid-request.
 - **Agent tokens** are random per-agent secrets in owner-only files under the
   app data directory. A token is a capability for that agent's endpoints
-  (Claude Code: Messages and `count_tokens`; Codex: Responses; OpenCode: Chat
-  Completions; `/v1/models` for all) plus an attribution label. It does not
+  (Claude Code: Messages and `count_tokens`; Codex: Responses and
+  `responses/compact`; OpenCode: Chat Completions; `/v1/models` for all) plus
+  an attribution label the proxy sends as `x-aci-tag`, which the sidecar
+  copies into its receipt event and strips before forwarding. It does not
   defend against other software running as the same OS user, which can read
-  the same files or run the helper; server identity is what the TLS
-  certificate provides. Claude Code obtains its token through the bundled
-  console helper (`private-ai-gateway-helper --agent-token claude-code`).
-- **RedPill API key**, the local CA key, and any credential a connection
-  takes over live only in the OS credential store (`keyring` 4). Previews
-  show `Existing secret` / `Managed local credential` in place of values; the
-  connection record stores an opaque `secret_ref`. Record, tokens, CA file,
-  and temp files are owner-only (0600/0700; on Windows they inherit the
-  per-user profile ACL) and tightened when read; config writes hold a
-  cross-process file lock from the revision check to the final rename.
+  the same files or run the helper. Codex and Claude Code obtain their token
+  through the bundled console helper
+  (`private-ai-gateway-helper --agent-token <agent>`); OpenCode reads the
+  token file through its `{file:...}` reference.
+- **RedPill API key** and any credential a connection takes over live only in
+  the OS credential store (`keyring` 4). The key is loaded into the proxy's
+  memory and swapped for the agent token on the way to the sidecar; it never
+  reaches the window. Previews show `Existing secret` /
+  `Managed local credential` in place of values; the connection record stores
+  an opaque `secret_ref`. Record, tokens, and temp files are owner-only
+  (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
+  when read; config writes hold a cross-process file lock from the revision
+  check to the final rename.
 - **Model catalog** is the verified service's `GET /v1/models`, read through
-  the sidecar and published atomically with the identity. It proves
-  availability only. A surface is used solely when the service publishes the
-  versioned `aci_capabilities` declaration (`{"version":1,"surfaces":{...:"all"}}`)
-  for it; this repository's service emits it (chat completions and Messages
-  `all` with the control-plane middleware, Responses `undeclared`; everything
-  `undeclared` in direct-upstream mode). Against a deployed service that
-  predates the declaration every surface is undeclared, requests are refused,
-  and no agent can be connected.
+  the sidecar and published atomically with the identity. It is the single
+  source of model truth: agents choose from it, the proxy serves it on
+  `/v1/models`, and a request whose `model` is not listed is refused before
+  it leaves the machine. Models that disappear on a refresh are reported,
+  never replaced.
 - **What a receipt proves.** The verifier applies its ACI policy to inference
   bodies (`provider.aci_verified`, pinned sessions) and re-serializes them;
-  the receipt binds those bytes, shown as `ACI policy applied locally`, not
-  the agent's original request. A service-side rewrite recorded in the
-  receipt shows as `Rewritten by service`.
+  the receipt binds those bytes, shown as `Policy applied`, not the agent's
+  original request. A service-side rewrite recorded in the receipt shows as
+  `Rewritten by service`.
 - **Proxy limits.** Request bodies are buffered (32 MiB, the same limit the
-  sidecar enforces, 60 s read timeout) so the model can be checked against
-  the catalog; responses stream. At most 64 requests are in flight (`429`);
-  upstream connect 5 s, idle read 300 s (`504`). Standard hop-by-hop headers
-  plus any named by `Connection`, `Proxy-Connection`, the agent credential,
-  and the attribution tag are removed in both directions by both proxies.
-  `count_tokens` (Messages) and `responses/compact` (Responses) are
-  capability-gated helpers: the same token scope, verified session, declared
-  surface, and catalog model check as inference (both protocols require
-  `model`, so a body without one is refused). No agent fallback behaviour is
-  claimed. TLS handshakes are bounded (64 pending) and each must complete
-  within 10 s, so half-open connections cannot pin the listener.
+  sidecar enforces, 60 s read timeout) only so the `model` can be checked
+  against the catalog; nothing else in the body is read, and responses
+  stream. At most 64 requests are in flight (`429`); upstream connect 5 s,
+  idle read 300 s (`504`). Standard hop-by-hop headers plus any named by
+  `Connection`, `Proxy-Connection`, the agent credential, and the attribution
+  tag are removed in both directions by both proxies. The helper endpoints
+  are gated exactly like inference: token scope, verified session, and a
+  catalog model (both protocols require `model`).
 
 ## Agents
 
-| Agent | Status in this build | Config written | Credential reference |
-| --- | --- | --- | --- |
-| Claude Code | **Enabled** when the bundled helper is present and the service declares the Messages surface | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, `env.NODE_EXTRA_CA_CERTS` (the installation CA; an official Claude Code setting, honoured from the `env` block), `env.ANTHROPIC_MODEL` (a model you pick from the verified list), `env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, `apiKeyHelper`; `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY` are taken over (they outrank `apiKeyHelper`) and restored on disconnect | helper command |
-| Codex | **Unsupported.** Codex's strict catalog loader requires per-model instructions Codex ships only for its own models; the verified service publishes no such metadata. | none | none |
-| OpenCode | **Unsupported.** OpenCode (Bun) has no configuration-level way to trust the local certificate; only a shell-exported `NODE_EXTRA_CA_CERTS` would, which the app cannot verify, and falling back to plain HTTP is not acceptable. | none | none |
+| Agent | Config written | Credential reference |
+| --- | --- | --- |
+| Codex | `~/.codex/config.toml`: selected `model`, `model_provider`, and a `model_providers.private_ai_gateway` entry (`base_url`, `wire_api = "responses"`, command-backed `auth`) | helper command |
+| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, selected `env.ANTHROPIC_MODEL`, `apiKeyHelper`; `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY` are taken over (they outrank `apiKeyHelper`) and restored on disconnect | helper command |
+| OpenCode | `opencode.json`: an `@ai-sdk/openai-compatible` provider with the local `baseURL`, the selected model's name and limits, and a `{file:...}` token reference | token file |
 
-Connections recorded by an earlier version for an unsupported agent are
-disabled on load (their tokens are never authorized again) and shown as
-`Needs attention` until disconnected; `Disconnect` and `Restore all` work
-without support, endpoint, or gateway. `Connect` previews the exact fields
-with a revision of the inputs; `Apply` refuses if any moved. Token, parked
-secrets, config, and record are applied as one transaction and rolled back
-together. `Disconnect` tombstones the record (disabled, cleanup pending),
-restores only fields that still hold what the app wrote, then removes token,
-parked secrets, and record; any failure keeps the tombstone for an idempotent
-retry, and a new connection never reuses a leftover token. A model that
-disappears from the catalog shows `Needs attention`; nothing is switched for
-you. Claude Code reloads its settings on change. Shell-exported
-`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` are invisible to the app and would
-still outrank the helper; the preview says so.
+Every agent needs a model from the verified list, so `Connect` is available
+once the gateway is verified. `Connect` previews the exact fields with a
+revision of the inputs; `Apply` refuses if any moved. Token, parked secrets,
+config, and record are applied as one transaction and rolled back together.
+`Disconnect` and `Restore all` work without endpoint or gateway.
+`Disconnect` tombstones the record (disabled, cleanup pending), deletes the
+token file before any record or config is touched, and syncs the removal to
+the parent directory (on Windows, a directory-handle flush) before anything
+else runs: revoking the capability itself is durable, so no later failure can
+leave an agent authorized, while the record stays visible for an idempotent
+retry. A failed sync fails the disconnect closed. `Disconnect` removes token,
+record, and consumed parked secrets and leaves an unreadable config untouched.
+Install detection (config directory or CLI on `PATH`) is informational only
+and never gates Connect; connecting creates the official config file from
+scratch. The `apiKeyHelper` command line is parsed by a POSIX `sh` on every
+platform (Git's sh on Windows), so the path is quoted uniformly with `shlex`.
+Record and token files are read through `O_NOFOLLOW` descriptors and reads
+never change permissions; owner-only permissions are restored only by explicit
+maintenance under the apply lock.
 
-An agent row separates three facts: *recorded* (a connection record exists),
-*managed* (the config still holds exactly what the app wrote), and
-*authorized* (the proxy would accept the agent's token now: recorded, enabled,
-and managed). Statuses and authority come from one scan: listing or
-refreshing the agents republishes exactly the token set those statuses
-authorize (cancelling admitted-but-unsent deliveries), and startup takes the
-same path, so a config that was edited, corrupted, or removed outside the app
-stops opening the proxy in the same operation that reports `Needs attention`.
-`Disconnect` and `Restore all` delete the agents' token files before any
-record or config is touched, and the removal is synced to the parent
-directory (on Windows, a directory-handle flush; NTFS metadata journaling is
-the strongest guarantee available there) before anything else runs: revoking
-the capability itself is durable, so no later failure — not even a crash or
-power loss — can leave an agent authorized, while the record stays visible
-for an idempotent retry. A failed sync fails the disconnect closed.
-`Disconnect` removes token, record, and consumed parked secrets and leaves
-an unreadable config untouched. Install detection (config directory or CLI
-on `PATH`) is informational only and never gates Connect; connecting creates
-the official config file from scratch. The `apiKeyHelper` command line is
-parsed by a POSIX `sh` on every platform (Git's sh on Windows), so the path
-is quoted uniformly with `shlex`. Record and token files are read through
-`O_NOFOLLOW` descriptors and reads never change permissions; owner-only
-permissions are restored only by explicit maintenance under the apply lock.
+## Branding
+
+`brand/<id>/brand.json` is the single source of truth for everything that
+names or draws the product: product and organization names, tagline, support
+and homepage URLs, the default service URL and key label, the bundle
+identifier, category, and descriptions, the accent colours, and the official
+asset files next to it. `npm run prepare:brand` (run automatically by
+`check`, `build`, `dev`, and `dist`; `PRIVATE_AI_GATEWAY_BRAND=<id>` selects a
+brand, default `dstack`) projects it into `src/renderer/generated/` (the
+`brand.ts` module plus the light and dark wordmark SVGs, imported as Vite
+assets so they ship self-hosted under the production CSP),
+`gateway/src/brand.rs`, the five desktop icons in `src-tauri/icons`, the
+template tray icon in `assets/tray`, and an ignored
+`src-tauri/tauri.brand.conf.json` overlay (product name, identifier, bundle
+metadata only) that `dev`, `dist`, and CI pass to the Tauri CLI as
+`--config`; the tracked `tauri.conf.json` keeps the window list and stays
+neutral, and the window title is set at run time from `brand.rs`. The
+committed outputs are for the default brand; CI regenerates them and fails on
+drift. The script validates everything before writing anything and fails fast
+on a missing field, a missing asset, or a changed asset digest.
+
+The default brand uses the official Dstack logo kit from
+[Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
+`982621521b435cc10b535cb8646efecb8c3fc255` (`docs/assets/dstack-logo-kit/`),
+with the source paths, licence, and SHA-256 digests recorded in
+`brand/dstack/brand.json`. `brand/redpill` and `brand/phala` are templates:
+add the official assets they reference before selecting them.
 
 ## Development
 
@@ -142,6 +162,11 @@ Tauri launches the target-triple-specific `aci` binary as an external sidecar.
 The development command builds a debug sidecar; packaged builds always compile
 and bundle a release sidecar from this repository.
 
+Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
+covers the proxy (token scope, fail-closed session, revocation gate, and a
+relay check proving that each inference path carries method, path, query,
+body, status, and streamed bytes through unchanged), the projections
+(round-trip per agent, stale revision, restore all), and the catalog.
 `npm run test:renderer` runs a Playwright smoke against the built renderer and
 the stateful in-page mock (`?mock=interactive`): start/stop with cancel and a
 failed-verification retry, key save and delete, connect, Restore all, the

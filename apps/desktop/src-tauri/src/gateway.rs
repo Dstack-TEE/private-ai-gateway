@@ -30,9 +30,8 @@ use crate::contracts::{
     StartGatewayConfig, VerificationCheck,
 };
 
-/// The stable local endpoint agents are configured with; served over TLS
-/// with the installation's identity.
-pub const LOCAL_ENDPOINT: &str = "https://127.0.0.1:4180";
+/// The stable loopback HTTP endpoint agents are configured with.
+pub const LOCAL_ENDPOINT: &str = "http://127.0.0.1:4180";
 pub const LOCAL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4180);
 const EVENT_SCHEMA_VERSION: u64 = 1;
 const MAX_ACTIVITY: usize = 50;
@@ -253,7 +252,6 @@ impl GatewayManager {
                     detail: event.detail,
                     at: event.at,
                     agent: event.agent,
-                    route: None,
                     locally_constrained: None,
                     rewritten: None,
                 },
@@ -388,7 +386,7 @@ impl GatewayManager {
             .as_object()
             .ok_or_else(|| "ACI emitted an invalid event".to_string())?;
         if object.get("schema_version").and_then(Value::as_u64) != Some(EVENT_SCHEMA_VERSION) {
-            return Err("ACI emitted an unsupported event schema".to_string());
+            return Err("ACI emitted an unknown event schema".to_string());
         }
 
         let event_type = required_string(object, "type")?;
@@ -658,13 +656,6 @@ fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> 
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| "ACI emitted an invalid request event".to_string())?;
     let receipt_id = optional_string(event, "receipt_id");
-    // The local proxy tags each forwarded request as `<agent> <route>`.
-    let (agent, route) = optional_string(event, "tag")
-        .map(|tag| match tag.split_once(' ') {
-            Some((agent, route)) => (Some(agent.to_string()), Some(route.to_string())),
-            None => (Some(tag), None),
-        })
-        .unwrap_or((None, None));
     let activity = RequestActivity {
         method: required_string(event, "method")?,
         path: required_string(event, "path")?,
@@ -677,8 +668,8 @@ fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> 
         verified: event.get("verified").and_then(Value::as_bool),
         detail: optional_string(event, "detail").unwrap_or_default(),
         at: now_secs(),
-        agent,
-        route,
+        // The local proxy tags each forwarded request with its agent.
+        agent: optional_string(event, "tag"),
         locally_constrained: event.get("locally_constrained").and_then(Value::as_bool),
         rewritten: event.get("rewritten").and_then(Value::as_bool),
     };
@@ -764,21 +755,20 @@ mod tests {
         let request = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": null,
-            "detail": "receipt rcpt-1 recorded", "tag": "claude-code declared"
+            "detail": "receipt rcpt-1 recorded", "tag": "claude-code"
         });
         apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
         let verdict = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
             "locally_constrained": true,
-            "detail": "receipt verified", "tag": "claude-code declared"
+            "detail": "receipt verified", "tag": "claude-code"
         });
         apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
 
         assert_eq!(state.activity.len(), 1);
         let item = &state.activity[0];
         assert_eq!(item.agent.as_deref(), Some("claude-code"));
-        assert_eq!(item.route.as_deref(), Some("declared"));
         assert_eq!(item.verified, Some(true));
         assert_eq!(item.rewritten, Some(true));
         assert_eq!(item.locally_constrained, Some(true));

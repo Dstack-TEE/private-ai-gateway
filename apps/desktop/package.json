@@ -6,16 +6,16 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "prepare:brand": "node scripts/prepare-brand.mjs",
+    "build": "npm run prepare:brand && vite build",
     "build:native": "node scripts/bundle-native.mjs",
     "build:native:debug": "node scripts/bundle-native.mjs --debug",
-    "dev": "npm run build:native:debug && tauri dev",
-    "dev:web": "vite --host 127.0.0.1 --port 1420",
-    "generate:icons": "node scripts/generate-icons.mjs",
-    "check": "tsc --noEmit",
-    "tauri": "tauri",
-    "dist": "npm run build:native && tauri build",
+    "check": "npm run prepare:brand && tsc --noEmit",
+    "dev": "npm run prepare:brand && npm run build:native:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
+    "dev:web": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
+    "dist": "npm run prepare:brand && npm run build:native && tauri build --config src-tauri/tauri.brand.conf.json",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "tauri": "tauri",
     "test:renderer": "playwright test"
   },
   "engines": {

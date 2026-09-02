@@ -18,27 +18,15 @@ export const desktopApi: DesktopApi = {
     return invoke("get_gateway_state");
   },
   onStateChange(listener: (state: GatewayState) => void): () => void {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    try {
-      void listen<GatewayState>("gateway://state", (event) => listener(event.payload)).then(
-        (nextUnlisten) => {
-          if (disposed) {
-            nextUnlisten();
-          } else {
-            unlisten = nextUnlisten;
-          }
-        },
-        () => undefined,
-      );
-    } catch {
-      return () => undefined;
-    }
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+    return subscribe("gateway://state", listener);
   },
+  onNavigate(listener: (section: "settings") => void): () => void {
+    return subscribe("gateway://navigate", listener);
+  },
+  openSupport(): Promise<void> {
+    return invoke("open_support");
+  },
+
   start(config: StartGatewayConfig): Promise<GatewayState> {
     return invoke("start_gateway", { config });
   },
@@ -72,3 +60,26 @@ export const desktopApi: DesktopApi = {
     return invoke("apply_agent_connection", { agentId, connect, revision, options });
   },
 };
+
+function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
+  let disposed = false;
+  let unlisten: (() => void) | undefined;
+  try {
+    void listen<T>(event, (received) => listener(received.payload)).then(
+      (nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      },
+      () => undefined,
+    );
+  } catch {
+    return () => undefined;
+  }
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}

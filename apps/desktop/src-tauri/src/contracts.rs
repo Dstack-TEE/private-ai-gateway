@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConfigChange, ConnectOptions};
-use desktop_gateway::catalog::{Catalog, Support};
+use desktop_gateway::catalog::Catalog;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -58,9 +58,6 @@ pub struct RequestActivity {
     /// The connected agent that sent it, when it presented a token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Route label: `declared` (surface declared by the service) or `relayed`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route: Option<String>,
     /// Whether the verifier applied its ACI policy to the body before
     /// forwarding; the receipt binds those bytes, not the agent's original.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,9 +74,6 @@ pub struct ModelSummary {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
-    pub chat_completions: Support,
-    pub messages: Support,
-    pub responses: Support,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,9 +95,6 @@ impl CatalogSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),
                 context_length: model.remote.context_length,
-                chat_completions: model.chat_completions.clone(),
-                messages: model.messages.clone(),
-                responses: model.responses.clone(),
             })
             .collect();
         // Carry forward ids that disappeared until the service lists them
@@ -189,7 +180,7 @@ pub struct StartGatewayConfig {
 impl Default for StartGatewayConfig {
     fn default() -> Self {
         Self {
-            remote_url: "https://tee.redpill.ai".to_string(),
+            remote_url: desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string(),
             require_production_os: false,
         }
     }

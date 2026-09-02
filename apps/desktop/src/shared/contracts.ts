@@ -32,9 +32,6 @@ export interface GatewayIdentity {
   supportedE2eeVersions: string[];
 }
 
-/** Route label the local gateway attached: the surface is declared by the service for every catalog model. */
-export type Route = "declared";
-
 export interface RequestActivity {
   method: string;
   path: string;
@@ -45,29 +42,15 @@ export interface RequestActivity {
   detail: string;
   at: number;
   agent?: string;
-  route?: Route;
   /** The verifier applied its ACI policy to the body; the receipt binds those bytes. */
   locallyConstrained?: boolean;
   rewritten?: boolean;
 }
 
-export type Surface = "chat_completions" | "messages" | "responses";
-
-/**
- * What the service declares for every catalog model on a surface through its
- * versioned `aci_capabilities` extension; absent means undeclared and refused.
- */
-export type Support =
-  | { level: "declared"; version: number }
-  | { level: "undeclared" };
-
 export interface ModelSummary {
   id: string;
   name: string;
   contextLength?: number;
-  chatCompletions: Support;
-  messages: Support;
-  responses: Support;
 }
 
 export interface CatalogSummary {
@@ -110,11 +93,6 @@ export interface AgentStatus {
   recorded: boolean;
   /** The proxy would authorize this agent's token right now. */
   authorized: boolean;
-  surface: Surface;
-  /** Whether this build can connect the agent at all. */
-  supported: boolean;
-  /** Why it cannot be connected, when `supported` is false. */
-  reason?: string;
   /** Something the user must act on (removed model, incomplete disconnect). */
   attention?: string;
   error?: string;
@@ -133,7 +111,7 @@ export interface ConfigChange {
 
 /** User choices a connection is projected with. */
 export interface ConnectOptions {
-  /** Claude Code: the catalog model written to ANTHROPIC_MODEL. */
+  /** Catalog model selected for the agent. */
   model?: string;
 }
 
@@ -150,6 +128,10 @@ export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
+  /** A native menu asked the window to show a section (macOS Settings…). */
+  onNavigate(listener: (section: "settings") => void): () => void;
+  /** Open the brand's support page in the system browser. */
+  openSupport(): Promise<void>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
   stop(): Promise<GatewayState>;
   setApiKey(key: string): Promise<GatewayState>;

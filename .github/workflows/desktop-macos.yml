@@ -64,6 +64,14 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      # Branding is generated from apps/desktop/brand/<id>/brand.json; the
+      # committed outputs must match what the script produces.
+      - name: Verify brand generation is up to date
+        working-directory: apps/desktop
+        run: |
+          npm run prepare:brand
+          git diff --exit-code -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico assets/tray
+
       - name: Verify desktop source
         run: |
           npm --prefix apps/desktop run check
@@ -92,7 +100,7 @@ jobs:
 
       - name: Package Tauri app and DMG
         working-directory: apps/desktop
-        run: npm run tauri build
+        run: npm run tauri build -- --config src-tauri/tauri.brand.conf.json
 
       - name: Stage macOS packages
         working-directory: apps/desktop
@@ -100,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release test-results
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
+          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
           dmg="$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           test -d "$app_bundle"
           test -f "$dmg"
@@ -116,7 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
+          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
           aci="$(find "$app_bundle/Contents" -type f -name 'aci*' -perm -111 -print -quit)"
           test -x "$aci"
           node scripts/live-sidecar-smoke.mjs \
@@ -130,7 +138,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
+          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
           executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_bundle/Contents/Info.plist")"
           open "$app_bundle" --stdout test-results/app.stdout.log --stderr test-results/app.stderr.log
           sleep 5
@@ -141,7 +149,7 @@ jobs:
             exit 1
           fi
           screencapture -x test-results/macos-menu-bar.png
-          osascript -e 'tell application "Private AI Gateway" to quit' || kill -TERM "$app_pid"
+          kill -TERM "$app_pid"
 
       - name: Inspect macOS artifacts
         working-directory: apps/desktop
@@ -149,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           report="release/macos-inspection.txt"
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name 'Private AI Gateway.app' -print -quit)"
+          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
           dmg="$(find release -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           zip="$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
           aci="$(find "$app_bundle/Contents" -type f -name 'aci*' -perm -111 -print -quit)"
@@ -180,7 +188,7 @@ jobs:
 
             mount_dir="$(mktemp -d)"
             hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg"
-            test -d "$mount_dir/Private AI Gateway.app"
+            test -n "$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
             test -L "$mount_dir/Applications"
             hdiutil detach "$mount_dir"
             rmdir "$mount_dir"

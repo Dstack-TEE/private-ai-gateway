@@ -1,29 +1,30 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Ban,
   Check,
-  CheckCircle2,
-  CircleStop,
   Clipboard,
-  KeyRound,
+  Laptop,
   LoaderCircle,
-  Play,
+  Lock,
+  LockOpen,
   RefreshCw,
+  Server,
   ShieldCheck,
   ShieldX,
+  TriangleAlert,
 } from "lucide-react";
 
 import { desktopApi as liveApi } from "./desktop-api";
+import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
 import type {
   AgentPreview,
   AgentStatus,
-  ConnectOptions,
   DesktopApi,
   GatewayState,
   ModelSummary,
   RequestActivity,
-  Surface,
   VerificationCheck,
 } from "../shared/contracts";
 import "./styles.css";
@@ -36,7 +37,7 @@ const INITIAL_STATE: GatewayState = {
   status: "stopped",
   checks: [],
   activity: [],
-  config: { remoteUrl: "", requireProductionOs: false },
+  config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: false },
   apiKeySaved: false,
 };
 
@@ -57,11 +58,25 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-const SURFACE_LABEL: Record<Surface, string> = {
-  responses: "Responses API",
-  messages: "Messages API",
-  chat_completions: "Chat Completions",
-};
+const AGENT_MARKS: Record<string, string> = { codex: "CX", "claude-code": "CC", opencode: "OC" };
+
+type View = "overview" | "activity" | "settings";
+type Tone = "success" | "warning" | "danger" | "neutral";
+const VIEWS: { id: View; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "activity", label: "Activity" },
+  { id: "settings", label: "Settings" },
+];
+
+/** A connect or disconnect in progress: the sheet's state. */
+interface Pending {
+  agent: AgentStatus;
+  connect: boolean;
+  model: string;
+  preview?: AgentPreview;
+  error?: string;
+  loading: boolean;
+}
 
 /** Native modal dialog: `showModal()` gives browser-native focus
  * containment, Escape handling, and an inert background. Focus returns to
@@ -92,6 +107,7 @@ function useModalDialog(onClose: () => void): React.RefObject<HTMLDialogElement 
 }
 
 function App(): React.JSX.Element {
+  const [view, setView] = useState<View>("overview");
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
   const [remoteUrl, setRemoteUrl] = useState(INITIAL_STATE.config.remoteUrl);
   const [requireProductionOs, setRequireProductionOs] = useState(false);
@@ -101,17 +117,22 @@ function App(): React.JSX.Element {
   const [actionError, setActionError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [claudeModel, setClaudeModel] = useState("");
-  const [preview, setPreview] = useState<AgentPreview>();
-  const [previewOptions, setPreviewOptions] = useState<ConnectOptions>({});
+  const [pending, setPending] = useState<Pending>();
   const [applying, setApplying] = useState(false);
   const [confirmRestoreAll, setConfirmRestoreAll] = useState(false);
   const busy = state.status === "verifying";
   const running = state.status === "verified" || state.status === "blocked";
   const verified = state.status === "verified";
   const endpointDown = Boolean(state.endpointError);
-  const verdict = presentation(state);
-  const VerdictIcon = verdict.icon;
+  const models = state.catalog?.models ?? [];
+  const catalogReady = verified && models.length > 0;
+
+  useEffect(() => {
+    document.title = brand.productName;
+    const root = document.documentElement.style;
+    root.setProperty("--accent-light", brand.theme.accentLight);
+    root.setProperty("--accent-dark", brand.theme.accentDark);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -120,6 +141,7 @@ function App(): React.JSX.Element {
         setState(nextState);
       }
     });
+    const unsubscribeNavigate = desktopApi.onNavigate((section) => active && setView(section));
     void desktopApi.getState().then(
       (nextState) => active && setState(nextState),
       (error: unknown) => active && setActionError(errorMessage(error)),
@@ -127,6 +149,7 @@ function App(): React.JSX.Element {
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeNavigate();
     };
   }, []);
 
@@ -165,6 +188,11 @@ function App(): React.JSX.Element {
     }
   };
 
+  const toggleGateway = () =>
+    void run(() =>
+      running || busy ? desktopApi.stop() : desktopApi.start({ remoteUrl, requireProductionOs }),
+    );
+
   const saveApiKey = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!apiKeyDraft.trim()) {
@@ -196,22 +224,41 @@ function App(): React.JSX.Element {
     });
   };
 
-  const openPreview = (agent: AgentStatus, connect: boolean) => {
-    const options: ConnectOptions = agent.id === "claude-code" && connect ? { model: claudeModel } : {};
-    return run(async () => {
-      setPreviewOptions(options);
-      setPreview(await desktopApi.previewAgent(agent.id, connect, options));
-    });
+  // A preview is fetched once the inputs are known: immediately for a
+  // disconnect, after the model choice for a connect.
+  const loadPreview = async (agent: AgentStatus, connect: boolean, model: string) => {
+    setPending({ agent, connect, model, loading: true });
+    try {
+      const preview = await desktopApi.previewAgent(agent.id, connect, connect ? { model } : {});
+      setPending((current) =>
+        current?.agent.id === agent.id ? { ...current, preview, error: undefined, loading: false } : current,
+      );
+    } catch (error) {
+      setPending((current) =>
+        current?.agent.id === agent.id
+          ? { ...current, preview: undefined, error: errorMessage(error), loading: false }
+          : current,
+      );
+    }
   };
 
-  const confirmPreview = async () => {
-    if (!preview) {
+  const openPending = (agent: AgentStatus, connect: boolean) => {
+    if (connect) {
+      setPending({ agent, connect, model: "", loading: false });
+    } else {
+      void loadPreview(agent, false, "");
+    }
+  };
+
+  const confirmPending = async () => {
+    if (!pending?.preview) {
       return;
     }
+    const { agent, connect, model, preview } = pending;
     setApplying(true);
     await run(async () => {
-      await desktopApi.applyAgent(preview.agent.id, preview.connect, preview.revision, previewOptions);
-      setPreview(undefined);
+      await desktopApi.applyAgent(agent.id, connect, preview.revision, connect ? { model } : {});
+      setPending(undefined);
       await loadAgents();
     });
     setApplying(false);
@@ -226,242 +273,637 @@ function App(): React.JSX.Element {
     setApplying(false);
   };
 
-  const models = state.catalog?.models ?? [];
-  const connectedAgents = agents.filter((agent) => agent.connected).length;
   const anyRecorded = agents.some((agent) => agent.recorded);
+  const problem = actionError ?? state.error;
+  const locked = Boolean(pending) || applying;
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-mark" aria-hidden="true"><ShieldCheck size={18} /></div>
-        <div className="brand-copy">
-          <h1>Private AI Gateway</h1>
-          <span>Verified local endpoint for coding agents</span>
-        </div>
-        <div className={`status-badge status-${verdict.tone}`}>
-          <VerdictIcon size={14} className={busy ? "spin" : undefined} />
-          {verdict.label}
-        </div>
-      </header>
+    <main className="window">
+      <div className="toolbar">
+        <SegmentedControl value={view} onChange={setView} />
+      </div>
 
-      <section className="verdict-bar" aria-label="Gateway status">
-        <p className={`verdict verdict-${verdict.tone}`} aria-live="polite">
-          <VerdictIcon size={15} className={busy ? "spin" : undefined} />
-          <span>{verdict.summary}</span>
-        </p>
-        {running || busy ? (
-          <button className="command-button stop-button" onClick={() => void run(() => desktopApi.stop())}>
-            <CircleStop size={15} /> {busy ? "Cancel" : "Stop"}
-          </button>
-        ) : (
-          <button
-            className="command-button start-button"
-            onClick={() => void run(() => desktopApi.start({ remoteUrl, requireProductionOs }))}
-            disabled={endpointDown}
-            title={endpointDown ? state.endpointError : undefined}
-          >
-            <Play size={15} /> Start
-          </button>
-        )}
-      </section>
-
-      {state.endpointError && (
-        <div className="error-banner" role="alert">
-          <ShieldX size={16} />
-          <span>
-            {state.endpointError}. Nothing can start or connect until the app is relaunched with the
-            endpoint free; agents can still be disconnected below.
-          </span>
-        </div>
-      )}
-      {(actionError || state.error) && (
-        <div className="error-banner" role="alert">
-          <ShieldX size={16} />
-          <span>{actionError ?? state.error}</span>
-        </div>
-      )}
-
-      <section className="setup-section" aria-label="Service setup">
-        <SectionHeading title="Service" meta={remoteHost(state.remoteUrl ?? remoteUrl)} />
-        <div className="setup-body">
-          <label className="url-field">
-            <span>AI service</span>
-            <input
-              value={remoteUrl}
-              onChange={(event) => setRemoteUrl(event.target.value)}
-              disabled={busy || running}
-              spellCheck={false}
-            />
-          </label>
-          <label className="policy-toggle">
-            <input
-              type="checkbox"
-              checked={requireProductionOs}
-              onChange={(event) => setRequireProductionOs(event.target.checked)}
-              disabled={busy || running}
-            />
-            <span className="toggle-track" aria-hidden="true"><span /></span>
-            Require production OS
-          </label>
-        </div>
-        <div className="key-row">
-          <div className={`key-status ${state.apiKeySaved ? "key-saved" : ""}`}>
-            <KeyRound size={14} />
-            <div>
-              <strong>{state.apiKeySaved ? "API key saved in the system credential store" : "No API key saved"}</strong>
-              <span>Used only inside this app. Agents get their own local tokens, never this key.</span>
-            </div>
-          </div>
-          <form className="key-form" onSubmit={(event) => void saveApiKey(event)}>
-            <input
-              type="password"
-              value={apiKeyDraft}
-              onChange={(event) => setApiKeyDraft(event.target.value)}
-              placeholder={state.apiKeySaved ? "Replace with a new key" : "RedPill API key"}
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="RedPill API key"
-            />
-            <button type="submit" className="small-button" disabled={savingKey || !apiKeyDraft.trim()}>
-              {savingKey ? "Saving..." : state.apiKeySaved ? "Replace" : "Save"}
-            </button>
-            {state.apiKeySaved && (
-              <button
-                type="button"
-                className="small-button danger-button"
-                onClick={() => void run(() => desktopApi.clearApiKey())}
-                disabled={savingKey}
-              >
-                Delete
-              </button>
-            )}
-          </form>
-        </div>
-      </section>
-
-      <section className="endpoint-section" aria-label="Local endpoint">
-        <SectionHeading title="Point your agent here" meta={state.proxyUrl ? "Bound" : "Unavailable"} />
-        <EndpointRow label="OpenAI-style" value={openAiEndpoint(state.proxyUrl)} copied={copied} onCopy={copy} />
-        <EndpointRow label="Anthropic-style" value={state.proxyUrl} copied={copied} onCopy={copy} />
-        <p className="section-note">
-          Served over TLS with this installation's own certificate, so an agent can tell this app apart
-          from anything else on the port; connected agents trust it through NODE_EXTRA_CA_CERTS.
-        </p>
-      </section>
-
-      <section className="agents-section" aria-label="Connected agents">
-        <div className="section-heading">
-          <h2>Connected agents</h2>
-          <span>{`${connectedAgents}/${agents.length || 3}`}</span>
-          {anyRecorded && (
-            <button
-              className="small-button danger-button"
-              disabled={applying || Boolean(preview)}
-              onClick={() => setConfirmRestoreAll(true)}
-              title="Revoke every agent token and restore every agent config, even when an agent is unsupported or the endpoint is down"
-            >
-              Restore all
-            </button>
-          )}
-        </div>
-        <p className="section-note">
-          Each agent gets a revocable local token that only opens its own endpoints and labels its
-          requests; tokens do not protect against other software running as you. Model choices are
-          yours; OAuth logins are not converted.
-        </p>
-        {confirmRestoreAll && (
-          <RestoreAllDialog
-            applying={applying}
-            onCancel={() => setConfirmRestoreAll(false)}
-            onConfirm={() => void restoreAll()}
+      <div className="content" role="tabpanel" id={`panel-${view}`} aria-labelledby={`tab-${view}`} key={view}>
+        {view === "overview" && (
+          <Overview
+            state={state}
+            agents={agents}
+            busy={busy}
+            running={running}
+            endpointDown={endpointDown}
+            catalogReady={catalogReady}
+            problem={problem}
+            locked={locked}
+            onToggle={toggleGateway}
+            onSettings={() => setView("settings")}
+            onSelect={openPending}
           />
         )}
-        {agents.length === 0 && <EmptyState text="Agent configs unavailable" />}
-        {agents.map((agent) => (
-          <React.Fragment key={agent.id}>
-            <AgentRow
-              agent={agent}
-              models={models}
-              claudeModel={claudeModel}
-              onClaudeModel={setClaudeModel}
-              disabled={Boolean(preview) || applying}
-              connectBlocked={endpointDown}
-              catalogReady={verified && models.length > 0}
-              onSelect={(connect) => void openPreview(agent, connect)}
-            />
-            {preview?.agent.id === agent.id && (
-              <PreviewPanel
-                preview={preview}
-                applying={applying}
-                onCancel={() => setPreview(undefined)}
-                onConfirm={() => void confirmPreview()}
-              />
-            )}
-          </React.Fragment>
-        ))}
-      </section>
-
-      <section className="models-section" aria-label="Models">
-        <div className="section-heading">
-          <h2>Models</h2>
-          <span>{state.catalog ? `${models.length} from verified service` : "Not loaded"}</span>
-          <button
-            className="icon-button"
-            onClick={() => void refreshCatalog()}
-            disabled={!verified || refreshing}
-            aria-label="Refresh the model list from the verified service"
-            title="Refresh from the verified service"
-          >
-            <RefreshCw size={14} className={refreshing ? "spin" : undefined} />
-          </button>
-        </div>
-        {state.catalog && state.catalog.removed.length > 0 && (
-          <p className="section-warning">
-            No longer served: {state.catalog.removed.join(", ")}. Agents set to these models need a
-            new choice; nothing is switched for you.
-          </p>
+        {view === "activity" && <ActivityView state={state} running={running} problem={problem} />}
+        {view === "settings" && (
+          <SettingsView
+            state={state}
+            busy={busy}
+            running={running}
+            verified={verified}
+            remoteUrl={remoteUrl}
+            requireProductionOs={requireProductionOs}
+            apiKeyDraft={apiKeyDraft}
+            savingKey={savingKey}
+            refreshing={refreshing}
+            copied={copied}
+            anyRecorded={anyRecorded}
+            locked={locked}
+            problem={problem}
+            onRemoteUrl={setRemoteUrl}
+            onPolicy={setRequireProductionOs}
+            onApiKeyDraft={setApiKeyDraft}
+            onSaveKey={saveApiKey}
+            onClearKey={() => void run(() => desktopApi.clearApiKey())}
+            onRefresh={refreshCatalog}
+            onCopy={copy}
+            onRestoreAll={() => setConfirmRestoreAll(true)}
+            onSupport={() => void run(() => desktopApi.openSupport())}
+          />
         )}
-        {models.length > 0 ? (
-          <>
-            <p className="section-note">
-              Availability comes from the verified service's model list. A surface is used only when the
-              service declares it for every listed model (aci_capabilities v1); undeclared surfaces are refused.
-            </p>
-            <div className="model-list">
-              {models.map((model) => <ModelRow key={model.id} model={model} />)}
-            </div>
-          </>
-        ) : (
-          <EmptyState text={busy ? (state.progress ?? "Verifying...") : "The model list comes from the verified service; it is empty while the gateway is not verified"} />
-        )}
-      </section>
+      </div>
 
-      <section className="requests-section" aria-label="Recent requests">
-        <SectionHeading title="Recent requests" meta={String(state.activity.length)} />
-        <RequestAudit activity={state.activity} running={running} />
-      </section>
-
-      <details className="technical-details">
-        <summary>
-          Technical details
-          {state.checks.length > 0 && <span>{checkCount(state.checks)} checks passed</span>}
-        </summary>
-        {state.identity ? (
-          <IdentityDetails state={state} />
-        ) : (
-          <EmptyState text="Verification details appear once the service is verified" />
-        )}
-      </details>
+      {pending && (
+        <ConnectSheet
+          pending={pending}
+          models={models}
+          catalogReady={catalogReady}
+          applying={applying}
+          onModel={(model) => void loadPreview(pending.agent, true, model)}
+          onCancel={() => setPending(undefined)}
+          onConfirm={() => void confirmPending()}
+        />
+      )}
+      {confirmRestoreAll && (
+        <RestoreAllSheet
+          applying={applying}
+          onCancel={() => setConfirmRestoreAll(false)}
+          onConfirm={() => void restoreAll()}
+        />
+      )}
     </main>
   );
 }
 
-function SectionHeading({ title, meta }: { title: string; meta?: string }): React.JSX.Element {
+/** Toolbar view switcher: a tab list with arrow-key movement. */
+function SegmentedControl({ value, onChange }: { value: View; onChange(view: View): void }): React.JSX.Element {
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const index = VIEWS.findIndex((entry) => entry.id === value);
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (step === 0) {
+      return;
+    }
+    event.preventDefault();
+    const next = VIEWS[(index + step + VIEWS.length) % VIEWS.length]?.id ?? value;
+    onChange(next);
+    (event.currentTarget.querySelector(`#tab-${next}`) as HTMLElement | null)?.focus();
+  };
   return (
-    <div className="section-heading">
-      <h2>{title}</h2>
-      {meta && <span>{meta}</span>}
+    <div className="segmented" role="tablist" aria-label="View" onKeyDown={onKeyDown}>
+      {VIEWS.map((entry) => (
+        <button
+          key={entry.id}
+          id={`tab-${entry.id}`}
+          role="tab"
+          aria-selected={value === entry.id}
+          aria-controls={`panel-${entry.id}`}
+          tabIndex={value === entry.id ? 0 : -1}
+          onClick={() => onChange(entry.id)}
+        >
+          {entry.label}
+        </button>
+      ))}
     </div>
+  );
+}
+
+function Overview({
+  state,
+  agents,
+  busy,
+  running,
+  endpointDown,
+  catalogReady,
+  problem,
+  locked,
+  onToggle,
+  onSettings,
+  onSelect,
+}: {
+  state: GatewayState;
+  agents: AgentStatus[];
+  busy: boolean;
+  running: boolean;
+  endpointDown: boolean;
+  catalogReady: boolean;
+  problem?: string;
+  locked: boolean;
+  onToggle(): void;
+  onSettings(): void;
+  onSelect(agent: AgentStatus, connect: boolean): void;
+}): React.JSX.Element {
+  const verdict = presentation(state);
+  const connected = agents.filter((agent) => agent.connected).length;
+  return (
+    <>
+      <section className={`hero tone-${verdict.tone}`} aria-label="Protection status">
+        <Tunnel tone={verdict.tone} busy={busy} />
+        <h1 aria-live="polite">{verdict.title}</h1>
+        <p>{verdict.detail}</p>
+        {problem && (
+          <p className="hero-problem" role="alert">
+            <TriangleAlert size={14} aria-hidden="true" /> {problem}
+          </p>
+        )}
+        <div className="hero-actions">
+          {running || busy ? (
+            <button className="button large" onClick={onToggle}>
+              {busy ? "Cancel" : "Stop"}
+            </button>
+          ) : (
+            <button
+              className="button primary large"
+              onClick={onToggle}
+              disabled={endpointDown}
+              title={endpointDown ? state.endpointError : undefined}
+            >
+              Start
+            </button>
+          )}
+          {verdict.settings && (
+            <button className="link" onClick={onSettings}>
+              {verdict.settings}
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="group" aria-labelledby="agents-title">
+        <h2 className="group-title" id="agents-title">
+          Agents
+          <span>{agents.length ? `${connected} of ${agents.length} connected` : ""}</span>
+        </h2>
+        <div className="inset">
+          {agents.length === 0 && <EmptyState text="Agent configs unavailable" />}
+          {agents.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              disabled={locked}
+              connectBlocked={endpointDown || !catalogReady}
+              onSelect={(connect) => onSelect(agent, connect)}
+            />
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** Device to verified private AI: the path a request takes, and its state. */
+function Tunnel({ tone, busy }: { tone: Tone; busy: boolean }): React.JSX.Element {
+  const Link = tone === "success" ? Lock : busy ? LoaderCircle : LockOpen;
+  return (
+    <div className={`tunnel tunnel-${tone}`} aria-hidden="true">
+      <div className="tunnel-node">
+        <Laptop size={22} />
+        <span>This device</span>
+      </div>
+      <div className="tunnel-link">
+        <span className="tunnel-line" />
+        <span className="tunnel-lock">
+          <Link size={14} className={busy ? "spin" : undefined} />
+        </span>
+        <span className="tunnel-line" />
+      </div>
+      <div className="tunnel-node">
+        <Server size={22} />
+        <span>Verified private AI</span>
+      </div>
+    </div>
+  );
+}
+
+function AgentRow({
+  agent,
+  disabled,
+  connectBlocked,
+  onSelect,
+}: {
+  agent: AgentStatus;
+  disabled: boolean;
+  /** Connecting needs the verified catalog and a bound endpoint; disconnecting never does. */
+  connectBlocked: boolean;
+  onSelect(connect: boolean): void;
+}): React.JSX.Element {
+  const presence = agent.attention
+    ? { label: "Needs attention", tone: "warning" as Tone, icon: TriangleAlert }
+    : agent.error
+      ? { label: "Error", tone: "danger" as Tone, icon: TriangleAlert }
+      : agent.connected
+        ? { label: "Connected", tone: "success" as Tone, icon: ShieldCheck }
+        : agent.installed
+          ? { label: "Not connected", tone: "neutral" as Tone, icon: undefined }
+          : { label: "CLI not found", tone: "neutral" as Tone, icon: undefined };
+  const disconnecting = agent.recorded;
+  const actionable = disconnecting || (!connectBlocked && !agent.error);
+  const note = agent.attention ?? agent.error;
+  return (
+    <div className="agent-block row" title={agent.configPath}>
+      <span className={`mark ${agent.connected ? "mark-on" : ""}`} aria-hidden="true">
+        {AGENT_MARKS[agent.id] ?? agent.name.slice(0, 2).toUpperCase()}
+      </span>
+      <div className="row-main">
+        <span className="row-title">{agent.name}</span>
+        <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />
+        {note && <p className="row-note">{note}</p>}
+      </div>
+      <button
+        className="button"
+        disabled={disabled || !actionable}
+        title={!disconnecting && connectBlocked ? "Start protection first; models come from the verified service" : undefined}
+        onClick={() => onSelect(!disconnecting)}
+      >
+        {disconnecting ? "Disconnect" : "Connect"}
+      </button>
+    </div>
+  );
+}
+
+/** Text plus a tone icon, so no state relies on colour alone. */
+function StateLabel({
+  tone,
+  icon: Icon,
+  text,
+}: {
+  tone: Tone;
+  icon?: typeof ShieldCheck;
+  text: string;
+}): React.JSX.Element {
+  return (
+    <span className={`state state-${tone}`}>
+      {Icon ? <Icon size={13} aria-hidden="true" /> : <span className="dot" aria-hidden="true" />}
+      {text}
+    </span>
+  );
+}
+
+function ActivityView({
+  state,
+  running,
+  problem,
+}: {
+  state: GatewayState;
+  running: boolean;
+  problem?: string;
+}): React.JSX.Element {
+  const [selected, setSelected] = useState<string>();
+  const keyOf = (item: RequestActivity, index: number) => item.receiptId ?? `${item.at}-${item.path}-${index}`;
+  const current = state.activity.map((item, index) => [keyOf(item, index), item] as const).find(([key]) => key === selected)?.[1];
+  const outcomes = summarize(state.activity);
+  return (
+    <div className="split">
+      {problem && <p className="banner" role="alert">{problem}</p>}
+      <section className="group" aria-labelledby="activity-title">
+        <h2 className="group-title" id="activity-title">
+          Recent requests
+          <span>
+            {state.activity.length
+              ? `${outcomes.protected} protected${outcomes.blocked ? `, ${outcomes.blocked} blocked` : ""}${outcomes.failed ? `, ${outcomes.failed} failed proof` : ""}`
+              : ""}
+          </span>
+        </h2>
+        <div className="inset list">
+          {state.activity.length === 0 && (
+            <EmptyState
+              text={running ? "No requests yet. Send one from a connected agent." : "Start protection to see requests and their proofs."}
+            />
+          )}
+          {state.activity.length > 0 && (
+            <ul className="list-items" aria-label="Recent requests">
+              {state.activity.map((item, index) => {
+                const key = keyOf(item, index);
+                const outcome = outcomeOf(item);
+                return (
+                  <li key={key}>
+                    <button
+                      className="row list-row"
+                      aria-pressed={selected === key}
+                      onClick={() => setSelected((value) => (value === key ? undefined : key))}
+                    >
+                      <div className="row-main">
+                        <span className="row-title">{agentName(item.agent)}</span>
+                        <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
+                        <p className="row-note">
+                          <code>{item.path}</code>
+                        </p>
+                      </div>
+                      <time className="row-side">{formatTimestamp(item.at * 1_000)}</time>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </section>
+      <aside className="inspector" aria-live="polite" aria-label="Request details">
+        {current ? <Evidence activity={current} /> : <p className="inspector-hint">Select a request to see its proof.</p>}
+      </aside>
+    </div>
+  );
+}
+
+function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {
+  const outcome = outcomeOf(activity);
+  const failed = activity.status < 200 || activity.status >= 300;
+  const notes = [
+    activity.streamed ? "Streamed response." : undefined,
+    activity.locallyConstrained
+      ? "The verifier applied its routing policy before sending; the receipt binds those bytes."
+      : undefined,
+    activity.rewritten ? "The service rewrote the request before inference; the receipt records it." : undefined,
+  ].filter(Boolean);
+  return (
+    <dl className="evidence">
+      <dt>Request</dt>
+      <dd>
+        {agentName(activity.agent)} <code>{activity.method} {activity.path}</code>
+      </dd>
+      <dt>Outcome</dt>
+      <dd>
+        <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
+        {failed && <span className="dim"> HTTP {activity.status}</span>}
+        {activity.detail && <span className="dim"> · {activity.detail}</span>}
+      </dd>
+      {activity.receiptId && (
+        <>
+          <dt>Proof</dt>
+          <dd>
+            {activity.verified === true
+              ? "Signed receipt verified: request and response bytes match what this app sent and received."
+              : activity.verified === false
+                ? "Signed receipt did not verify."
+                : "Receipt not checked yet."}
+            <code>{activity.receiptId}</code>
+          </dd>
+        </>
+      )}
+      {notes.length > 0 && (
+        <>
+          <dt>Notes</dt>
+          <dd>{notes.join(" ")}</dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
+function SettingsView({
+  state,
+  busy,
+  running,
+  verified,
+  remoteUrl,
+  requireProductionOs,
+  apiKeyDraft,
+  savingKey,
+  refreshing,
+  copied,
+  anyRecorded,
+  locked,
+  problem,
+  onRemoteUrl,
+  onPolicy,
+  onApiKeyDraft,
+  onSaveKey,
+  onClearKey,
+  onRefresh,
+  onCopy,
+  onRestoreAll,
+  onSupport,
+}: {
+  state: GatewayState;
+  busy: boolean;
+  running: boolean;
+  verified: boolean;
+  remoteUrl: string;
+  requireProductionOs: boolean;
+  apiKeyDraft: string;
+  savingKey: boolean;
+  refreshing: boolean;
+  copied?: string;
+  anyRecorded: boolean;
+  locked: boolean;
+  problem?: string;
+  onRemoteUrl(value: string): void;
+  onPolicy(value: boolean): void;
+  onApiKeyDraft(value: string): void;
+  onSaveKey(event: React.FormEvent): Promise<void>;
+  onClearKey(): void;
+  onRefresh(): Promise<void>;
+  onCopy(label: string, value: string): Promise<void>;
+  onRestoreAll(): void;
+  onSupport(): void;
+}): React.JSX.Element {
+  const models = state.catalog?.models ?? [];
+  const frozen = busy || running;
+  return (
+    <>
+      {problem && <p className="banner" role="alert">{problem}</p>}
+
+      <section className="group" aria-labelledby="general-title">
+        <h2 className="group-title" id="general-title">
+          General
+          {frozen && <span>Stop protection to change the service</span>}
+        </h2>
+        <div className="inset">
+          <label className="row field-row">
+            <span className="row-main">AI service</span>
+            <input value={remoteUrl} onChange={(event) => onRemoteUrl(event.target.value)} disabled={frozen} spellCheck={false} />
+          </label>
+          <label className="row toggle-row">
+            <span className="row-main">Require production OS</span>
+            <input type="checkbox" checked={requireProductionOs} onChange={(event) => onPolicy(event.target.checked)} disabled={frozen} />
+            <span className="toggle-track" aria-hidden="true"><span /></span>
+          </label>
+          <div className="row">
+            <span className="row-main">
+              {brand.service.keyLabel}
+              <span className="row-note">
+                {state.apiKeySaved ? "Saved in the system credential store; used only by this app." : "Not saved. Agents get their own local tokens; the key never reaches them."}
+              </span>
+            </span>
+            {state.apiKeySaved && (
+              <button type="button" className="button" onClick={onClearKey} disabled={savingKey}>
+                Delete
+              </button>
+            )}
+          </div>
+          <form className="row field-row" onSubmit={(event) => void onSaveKey(event)}>
+            <input
+              type="password"
+              value={apiKeyDraft}
+              onChange={(event) => onApiKeyDraft(event.target.value)}
+              placeholder={state.apiKeySaved ? "Replace with a new key" : `Paste your ${brand.service.keyLabel}`}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label={brand.service.keyLabel}
+            />
+            <button type="submit" className="button" disabled={savingKey || !apiKeyDraft.trim()}>
+              {savingKey ? "Saving…" : state.apiKeySaved ? "Replace" : "Save"}
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <PrivacyVerification state={state} verified={verified} />
+
+      {anyRecorded && (
+        <section className="group" aria-labelledby="agents-settings-title">
+          <h2 className="group-title" id="agents-settings-title">Agents</h2>
+          <div className="inset">
+            <div className="row">
+              <span className="row-main">
+                Restore all agent configs
+                <span className="row-note">Revokes every agent token and puts every config back, even while protection is off.</span>
+              </span>
+              <button className="button" disabled={locked} onClick={onRestoreAll}>
+                Restore All…
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <section className="group" aria-labelledby="advanced-title">
+        <h2 className="group-title" id="advanced-title">
+          Advanced
+          <span>{state.proxyUrl ? "Endpoint bound" : "Endpoint unavailable"}</span>
+        </h2>
+        <div className="inset">
+          {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
+          <EndpointRow label="OpenAI-style endpoint" value={openAiEndpoint(state.proxyUrl)} copied={copied} onCopy={onCopy} />
+          <EndpointRow label="Anthropic-style endpoint" value={state.proxyUrl} copied={copied} onCopy={onCopy} />
+          <p className="row-footnote">
+            On this device only: agents reach the app over a plain local connection that never
+            leaves the machine. Requests are relayed to the verified service as sent; the service
+            decides what it answers.
+          </p>
+          <div className="row">
+            <span className="row-main">
+              Models
+              <span className="row-note">{state.catalog ? `${models.length} from the verified service` : "Not loaded until the service is verified"}</span>
+            </span>
+            <button
+              className="button icon"
+              onClick={() => void onRefresh()}
+              disabled={!verified || refreshing}
+              aria-label="Refresh the model list from the verified service"
+              title="Refresh from the verified service"
+            >
+              <RefreshCw size={15} className={refreshing ? "spin" : undefined} />
+            </button>
+          </div>
+          {state.catalog && state.catalog.removed.length > 0 && (
+            <p className="row-warning">
+              No longer served: {state.catalog.removed.join(", ")}. Agents set to these models need a
+              new choice; nothing is switched for you.
+            </p>
+          )}
+          {models.map((model) => <ModelRow key={model.id} model={model} />)}
+        </div>
+      </section>
+
+      <section className="group" aria-label="About">
+        <h2 className="group-title">About</h2>
+        <div className="inset about">
+          <picture>
+            <source srcSet={brand.wordmark.dark} media="(prefers-color-scheme: dark)" />
+            <img src={brand.wordmark.light} alt={brand.organizationName} className="wordmark" />
+          </picture>
+          <p>
+            <strong>{brand.productName}</strong> by {brand.organizationName}. {brand.tagline}.
+          </p>
+          <button className="link" onClick={onSupport}>{brand.organizationName} Support</button>
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** The three facts behind "Protected", each shown only when it holds now. */
+function PrivacyVerification({ state, verified }: { state: GatewayState; verified: boolean }): React.JSX.Element {
+  const identity = state.identity;
+  const checks = state.checks;
+  const passed = (id: string) => checks.some((check) => check.id === id && check.status === "pass");
+  const proofs = state.activity.filter((item) => item.receiptId);
+  const provenProofs = proofs.filter((item) => item.verified === true).length;
+  const failedProofs = proofs.filter((item) => item.verified === false).length;
+  const facts: { ok: boolean; title: string; detail: string }[] = [
+    {
+      ok: verified && passed("id-6"),
+      title: "Encrypted outside this device",
+      detail: verified
+        ? "The connection leaving this device is encrypted to the service's own attested key, so the operator and anyone on the network see only ciphertext."
+        : "Not established while protection is off.",
+    },
+    {
+      ok: verified && identity?.trustLevel === "hardware_verified",
+      title: "Confidential service verified",
+      detail: identity
+        ? `Hardware attestation checked: ${hardwareName(identity.teeType)}, ${trustName(identity.trustLevel).toLowerCase()}, built from source ${identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "(unknown)"}.`
+        : "Not established while protection is off.",
+    },
+    {
+      ok: provenProofs > 0 && failedProofs === 0,
+      title: "Response proof verified",
+      detail: proofs.length
+        ? `${provenProofs} of ${proofs.length} recent answers came with a signed receipt this app verified${failedProofs ? `; ${failedProofs} failed` : ""}.`
+        : "Each answer from the service carries a signed receipt this app checks; none checked yet.",
+    },
+  ];
+  return (
+    <section className="group" aria-label="Privacy">
+      <h2 className="group-title">
+        Privacy
+        {checks.length > 0 && <span>{checkCount(checks)} checks passed</span>}
+      </h2>
+      <div className="inset">
+        {facts.map((fact) => (
+          <div className="row fact" key={fact.title}>
+            <span className={fact.ok ? "check-icon check-pass" : "check-icon check-skip"} aria-hidden="true">
+              {fact.ok ? <Check size={12} /> : <LockOpen size={11} />}
+            </span>
+            <span className="row-main">
+              {fact.title}
+              <span className="row-note">{fact.detail}</span>
+            </span>
+          </div>
+        ))}
+        {identity && (
+          <details className="disclosure">
+            <summary>Technical details</summary>
+            <div className="identity-grid">
+              <Detail label="Hardware" value={hardwareName(identity.teeType)} />
+              <Detail label="Trust" value={trustName(identity.trustLevel)} />
+              <Detail label="Source" value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"} mono />
+              <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
+              <Detail label="Serving" value={identity.serving} />
+              <Detail label="E2EE" value={identity.supportedE2eeVersions.join(", ") || "None"} mono />
+              <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
+              {identity.tlsSpki && <Detail label="TLS key" value={identity.tlsSpki} mono wide />}
+            </div>
+            {checks.map((check) => <CheckRow key={check.id} check={check} />)}
+          </details>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -477,301 +919,152 @@ function EndpointRow({
   onCopy(label: string, value: string): Promise<void>;
 }): React.JSX.Element {
   return (
-    <div className="endpoint-row">
-      <span>{label}</span>
-      <code title={value}>{value ?? "-"}</code>
+    <div className="row">
+      <span className="row-main">
+        {label}
+        <code className="row-note" title={value}>{value ?? "–"}</code>
+      </span>
       <button
-        className="icon-button"
+        className="button icon"
         disabled={!value}
         onClick={() => value && void onCopy(label, value)}
-        aria-label={`Copy ${label} endpoint`}
-        title={`Copy ${label} endpoint`}
+        aria-label={`Copy ${label}`}
+        title={`Copy ${label}`}
       >
-        {copied === label ? <CheckCircle2 size={15} /> : <Clipboard size={15} />}
+        {copied === label ? <Check size={15} className="copied" /> : <Clipboard size={15} />}
       </button>
     </div>
   );
 }
 
-function AgentRow({
-  agent,
-  models,
-  claudeModel,
-  onClaudeModel,
-  disabled,
-  connectBlocked,
-  catalogReady,
-  onSelect,
-}: {
-  agent: AgentStatus;
-  models: ModelSummary[];
-  claudeModel: string;
-  onClaudeModel(model: string): void;
-  disabled: boolean;
-  /** Connecting is blocked (endpoint down); disconnecting never is. */
-  connectBlocked: boolean;
-  catalogReady: boolean;
-  onSelect(connect: boolean): void;
-}): React.JSX.Element {
-  const presence = agent.attention && (agent.connected || !agent.supported)
-    ? { label: "Needs attention", tone: "unverified" }
-    : !agent.supported
-    ? { label: "Unsupported", tone: "neutral" }
-    : agent.error
-      ? { label: "Config error", tone: "failed" }
-      : agent.attention
-        ? { label: "Needs attention", tone: "unverified" }
-        : agent.connected
-          ? { label: "Connected", tone: "verified" }
-          : agent.installed
-            ? { label: "Not connected", tone: "neutral" }
-            : { label: "CLI not found", tone: "neutral" };
-  const needsModel = agent.id === "claude-code" && !agent.recorded;
-  const needsCatalog = agent.id !== "codex" && !agent.recorded && !catalogReady;
-  const disconnecting = agent.recorded;
-  // Disconnect must stay available whatever the config's state.
-  // A missing CLI is only a hint: connecting creates the official config
-  // from scratch. Disconnect stays available whatever the config's state.
-  const actionable = disconnecting
-    ? true
-    : !connectBlocked &&
-      agent.supported &&
-      !agent.error &&
-      !(needsModel && !claudeModel) &&
-      !needsCatalog;
-  const note =
-    agent.reason ??
-    agent.attention ??
-    agent.error ??
-    (!agent.installed && agent.supported
-      ? `The ${agent.name} CLI was not detected; connecting still writes its official config.`
-      : undefined);
+function ModelRow({ model }: { model: ModelSummary }): React.JSX.Element {
   return (
-    <div className="agent-block">
-      <div className="agent-row" title={agent.configPath}>
-        <div className="agent-name">
-          <span>{agent.name}</span>
-          <small>{SURFACE_LABEL[agent.surface]}</small>
-        </div>
-        <span className={`chip chip-${presence.tone}`}>{presence.label}</span>
-        <button
-          className="small-button"
-          disabled={disabled || !actionable}
-          title={needsCatalog && !disconnecting ? "Start the gateway; the model list comes from the verified service" : undefined}
-          onClick={() => onSelect(!disconnecting)}
-        >
-          {disconnecting ? "Disconnect" : "Connect"}
-        </button>
+    <div className="row model-row">
+      <span className="row-main">
+        <code title={model.id}>{model.id}</code>
+        {model.name !== model.id && <span className="row-note" title={model.name}>{model.name}</span>}
+      </span>
+      {model.contextLength && <span className="row-side">{formatContext(model.contextLength)} ctx</span>}
+    </div>
+  );
+}
+
+function ConnectSheet({
+  pending,
+  models,
+  catalogReady,
+  applying,
+  onModel,
+  onCancel,
+  onConfirm,
+}: {
+  pending: Pending;
+  models: ModelSummary[];
+  catalogReady: boolean;
+  applying: boolean;
+  onModel(model: string): void;
+  onCancel(): void;
+  onConfirm(): void;
+}): React.JSX.Element {
+  const { agent, connect, model, preview, error, loading } = pending;
+  const dialog = useModalDialog(onCancel);
+  return (
+    <dialog ref={dialog} className="sheet" aria-label={`${connect ? "Connect" : "Disconnect"} ${agent.name}`}>
+      <div className="sheet-heading">
+        <span className="mark" aria-hidden="true">{AGENT_MARKS[agent.id] ?? agent.name.slice(0, 2).toUpperCase()}</span>
+        <h2>{connect ? `Connect ${agent.name}` : `Disconnect ${agent.name}`}</h2>
       </div>
-      {needsModel && agent.supported && !agent.error && !disconnecting && (
-        <label className="agent-select">
-          <span>Model for Claude Code</span>
+      {connect && (
+        <label className="sheet-field">
+          <span>Model</span>
           <select
-            value={claudeModel}
-            onChange={(event) => onClaudeModel(event.target.value)}
-            disabled={disabled || !catalogReady}
+            aria-label={`Model for ${agent.name}`}
+            value={model}
+            onChange={(event) => onModel(event.target.value)}
+            disabled={applying || !catalogReady}
           >
-            <option value="">{catalogReady ? "Choose a verified model" : "Start the gateway to load models"}</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>{model.id}</option>
+            <option value="">Choose a verified model</option>
+            {models.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.contextLength ? `${entry.id} · ${formatContext(entry.contextLength)}` : entry.id}
+              </option>
             ))}
           </select>
         </label>
       )}
-      {note && <p className="agent-note">{note}</p>}
-    </div>
-  );
-}
-
-function RestoreAllDialog({
-  applying,
-  onCancel,
-  onConfirm,
-}: {
-  applying: boolean;
-  onCancel(): void;
-  onConfirm(): void;
-}): React.JSX.Element {
-  const dialog = useModalDialog(onCancel);
-  return (
-    <dialog ref={dialog} className="preview-panel" aria-label="Restore all agents">
-      <div className="preview-heading"><strong>Restore all agents</strong></div>
-      <p className="preview-note">
-        Revokes every agent token first, then restores every recorded agent config. Works even when
-        an agent is no longer supported, the endpoint is unavailable, or the gateway is stopped.
+      <p className="sheet-text">
+        {connect
+          ? `After you connect, ${agent.name}'s AI requests go through ${brand.productName} to the verified service${model ? ` using ${model}` : ""}. Your previous settings are kept and come back when you disconnect.`
+          : `${agent.name} goes back to its previous settings; its local token is revoked.`}
       </p>
-      <div className="preview-actions">
-        <button className="command-button ghost-button" onClick={onCancel} disabled={applying}>
+      {loading && <p className="sheet-text">Previewing changes…</p>}
+      {error && <p className="sheet-text error" role="alert">{error}</p>}
+      {preview && (
+        <details className="disclosure">
+          <summary>{preview.changes.length ? `Configuration changes (${preview.changes.length})` : "Configuration changes (none)"}</summary>
+          <code className="config-path" title={agent.configPath}>{agent.configPath}</code>
+          {preview.changes.length > 0 ? (
+            <ul className="change-list">
+              {preview.changes.map((change) => (
+                <li key={change.key} className={change.sensitive ? "sensitive" : undefined}>
+                  <code title={change.key}>{change.key}</code>
+                  <span title={change.sensitive ? "Value hidden" : change.before ?? undefined}>{change.before ?? "(not set)"}</span>
+                  <span aria-hidden="true">&rarr;</span>
+                  <span title={change.sensitive ? "Value hidden" : change.after ?? undefined}>{change.after ?? "(removed)"}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="sheet-text">
+              {connect
+                ? "The config already points at the gateway; nothing will change."
+                : "Nothing to restore; only the connection record will be cleared."}
+            </p>
+          )}
+          <p className="sheet-text">{preview.note}</p>
+        </details>
+      )}
+      {preview && agent.id === "opencode" && connect && (
+        <p className="sheet-text">Restart OpenCode after connecting so it reloads its config.</p>
+      )}
+      <div className="sheet-actions">
+        <button className="button" onClick={onCancel} disabled={applying}>
           Cancel
         </button>
-        <button className="command-button stop-button" onClick={onConfirm} disabled={applying}>
-          {applying ? "Restoring..." : "Restore all"}
+        <button className={connect ? "button primary" : "button destructive"} onClick={onConfirm} disabled={applying || !preview}>
+          {applying ? "Applying…" : connect ? "Connect" : "Disconnect"}
         </button>
       </div>
     </dialog>
   );
 }
 
-function PreviewPanel({
-  preview,
+function RestoreAllSheet({
   applying,
   onCancel,
   onConfirm,
 }: {
-  preview: AgentPreview;
   applying: boolean;
   onCancel(): void;
   onConfirm(): void;
 }): React.JSX.Element {
-  const verb = preview.connect ? "Connect" : "Disconnect";
   const dialog = useModalDialog(onCancel);
   return (
-    <dialog ref={dialog} className="preview-panel" aria-label={`${verb} ${preview.agent.name}`}>
-      <div className="preview-heading">
-        <strong>{verb} {preview.agent.name}</strong>
-        <code title={preview.agent.configPath}>{preview.agent.configPath}</code>
-      </div>
-      {preview.changes.length > 0 ? (
-        <ul className="change-list">
-          {preview.changes.map((change) => (
-            <li key={change.key} className={change.sensitive ? "sensitive" : undefined}>
-              <code title={change.key}>{change.key}</code>
-              <span title={change.sensitive ? "Value hidden" : change.before ?? undefined}>{change.before ?? "(not set)"}</span>
-              <span aria-hidden="true">&rarr;</span>
-              <span title={change.sensitive ? "Value hidden" : change.after ?? undefined}>{change.after ?? "(removed)"}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="preview-note">
-          {preview.connect
-            ? "The config already points at the gateway; nothing will change."
-            : "Nothing to restore; only the connection record will be cleared."}
-        </p>
-      )}
-      <p className="preview-note">{preview.note}</p>
-      {preview.agent.id === "opencode" && preview.connect && (
-        <p className="preview-note">Restart OpenCode after applying so it reloads its config.</p>
-      )}
-      <div className="preview-actions">
-        <button className="command-button ghost-button" onClick={onCancel} disabled={applying}>
+    <dialog ref={dialog} className="sheet" aria-label="Restore all agents">
+      <div className="sheet-heading"><h2>Restore all agents?</h2></div>
+      <p className="sheet-text">
+        Every agent token is revoked first, then every recorded agent config is put back. This works
+        even when the endpoint is unavailable or protection is off.
+      </p>
+      <div className="sheet-actions">
+        <button className="button" onClick={onCancel} disabled={applying}>
           Cancel
         </button>
-        <button className="command-button start-button" onClick={onConfirm} disabled={applying}>
-          {applying ? "Applying..." : preview.connect ? "Apply changes" : "Restore"}
+        <button className="button destructive" onClick={onConfirm} disabled={applying}>
+          {applying ? "Restoring…" : "Restore All"}
         </button>
       </div>
     </dialog>
-  );
-}
-
-function ModelRow({ model }: { model: ModelSummary }): React.JSX.Element {
-  const declared: string[] = [];
-  if (model.chatCompletions.level === "declared") declared.push("Chat Completions");
-  if (model.messages.level === "declared") declared.push("Messages");
-  if (model.responses.level === "declared") declared.push("Responses");
-  return (
-    <div className="model-row">
-      <div className="model-name">
-        <code title={model.id}>{model.id}</code>
-        <span>
-          {model.name !== model.id && <span>{model.name}</span>}
-          {model.contextLength && <span>{formatContext(model.contextLength)} context</span>}
-        </span>
-      </div>
-      <div className="model-support">
-        {declared.length > 0 ? (
-          <span className="chip chip-verified" title="Declared by the service's aci_capabilities v1 for every listed model">
-            Declared: {declared.join(", ")}
-          </span>
-        ) : (
-          <span className="chip chip-unverified" title="The service publishes no capability declaration; requests on every surface are refused">
-            Undeclared by service · not routed
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function RequestAudit({
-  activity,
-  running,
-}: {
-  activity: RequestActivity[];
-  running: boolean;
-}): React.JSX.Element {
-  if (activity.length === 0) {
-    return (
-      <EmptyState
-        text={running ? "No requests yet - send one from a connected agent" : "Start the gateway to see requests"}
-      />
-    );
-  }
-  return (
-    <div className="request-list">
-      {activity.map((item, index) => (
-        <ActivityRow key={item.receiptId ?? `${item.at}-${item.path}-${index}`} activity={item} />
-      ))}
-    </div>
-  );
-}
-
-function ActivityRow({ activity }: { activity: RequestActivity }): React.JSX.Element {
-  const audit = auditPresentation(activity);
-  const route = routePresentation(activity);
-  return (
-    <article className="audit-row" title={activity.detail}>
-      <div className="audit-mainline">
-        <span className="agent-label">{agentName(activity.agent)}</span>
-        <code title={activity.path}>{activity.path}</code>
-        <span className={`chip chip-${audit.tone}`}>{audit.label}</span>
-      </div>
-      <div className="audit-meta">
-        {route && <span className={`route route-${route.tone}`} title={route.title}>{route.label}</span>}
-        {activity.locallyConstrained && (
-          <span className="route route-info" title="The verifier added its ACI routing policy (provider.aci_verified, pinned sessions) and re-serialized the body; the receipt binds the bytes sent to the service, not the agent's original request.">
-            ACI policy applied locally
-          </span>
-        )}
-        {activity.rewritten && (
-          <span className="route route-warning" title="The service rewrote the request before inference; the receipt records that rewrite.">
-            Rewritten by service
-          </span>
-        )}
-        {(activity.status < 200 || activity.status >= 300) && <span>HTTP {activity.status}</span>}
-        {activity.streamed && <span>Streamed</span>}
-        <time>{formatTimestamp(activity.at * 1_000)}</time>
-      </div>
-    </article>
-  );
-}
-
-function IdentityDetails({ state }: { state: GatewayState }): React.JSX.Element | null {
-  const identity = state.identity;
-  if (!identity) {
-    return null;
-  }
-  return (
-    <>
-      <div className="identity-grid">
-        <Detail label="Hardware" value={hardwareName(identity.teeType)} />
-        <Detail label="Trust" value={trustName(identity.trustLevel)} />
-        <Detail
-          label="Source"
-          value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"}
-          mono
-        />
-        <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
-        <Detail label="Serving" value={identity.serving} />
-        <Detail label="E2EE" value={identity.supportedE2eeVersions.join(", ") || "None"} mono />
-        <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
-        {identity.tlsSpki && <Detail label="TLS key" value={identity.tlsSpki} mono wide />}
-      </div>
-      <div className="check-list">
-        {state.checks.map((check) => <CheckRow key={check.id} check={check} />)}
-      </div>
-    </>
   );
 }
 
@@ -797,13 +1090,11 @@ function Detail({
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
   return (
-    <div className="check-row" title={`${check.title}: ${check.detail}`}>
-      <span className={`check-icon check-${check.status}`}>
+    <div className="row check-row" title={`${check.title}: ${check.detail}`}>
+      <span className={`check-icon check-${check.status}`} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>
-      <div className="check-copy">
-        <strong>{title}</strong>
-      </div>
+      <span className="row-main">{title}</span>
       <span className={`result result-${check.status}`}>{checkStatusLabel(check.status)}</span>
     </div>
   );
@@ -813,55 +1104,64 @@ function EmptyState({ text }: { text: string }): React.JSX.Element {
   return <div className="empty-state">{text}</div>;
 }
 
-// Badge label, plain-language verdict line, and icon for the gateway state.
+// One headline, one line of detail, one tone: the protection status.
 function presentation(state: GatewayState): {
-  label: string;
-  summary: string;
-  tone: "success" | "warning" | "danger" | "neutral";
-  icon: typeof ShieldCheck;
+  title: string;
+  detail: string;
+  tone: Tone;
+  /** A Settings shortcut when the fix lives there. */
+  settings?: string;
 } {
   if (state.endpointError) {
-    return { label: "Endpoint busy", summary: "The local endpoint could not be claimed - free port 4180 and relaunch", tone: "danger", icon: ShieldX };
+    return {
+      title: "Not protected",
+      detail: "Port 4180 is in use, so agents cannot reach this app. Free it and relaunch.",
+      tone: "danger",
+    };
   }
   switch (state.status) {
     case "verifying":
-      return { label: "Verifying...", summary: state.progress ?? "Verifying the service...", tone: "warning", icon: LoaderCircle };
+      return { title: "Verifying…", detail: state.progress ?? "Checking the service before anything is sent.", tone: "warning" };
     case "blocked":
-      return { label: "Blocked", summary: "Requests blocked - service identity changed", tone: "danger", icon: ShieldX };
+      return { title: "Blocked", detail: "The service changed identity mid-session. Nothing is sent until it verifies again.", tone: "danger" };
     case "error":
-      return { label: "Failed", summary: "Verification failed - requests are blocked", tone: "danger", icon: ShieldX };
+      return { title: "Verification failed", detail: "Nothing was sent. Check the service address and start again.", tone: "danger", settings: "Open Settings" };
     case "stopped":
-      return { label: "Stopped", summary: "Start to verify the service", tone: "neutral", icon: CircleStop };
+      return { title: "Not protected", detail: "Start to verify the service and route your agents through it.", tone: "neutral" };
     case "verified":
       if (!state.apiKeySaved) {
-        return { label: "Key needed", summary: "Service verified - save your API key to send requests", tone: "warning", icon: ShieldCheck };
+        return { title: "API key needed", detail: `The service is verified. Add your ${brand.service.keyLabel} to start sending requests.`, tone: "warning", settings: "Add API key" };
       }
-      return { label: "Ready", summary: "Service verified - requests protected", tone: "success", icon: ShieldCheck };
+      return { title: "Protected", detail: "Your prompts stay private: encrypted to a verified confidential AI service, with a signed proof for every answer.", tone: "success" };
   }
 }
 
-function auditPresentation(activity: RequestActivity): { label: string; tone: string } {
+/** The plain-language outcome of one request. */
+function outcomeOf(activity: RequestActivity): { label: string; tone: Tone; icon: typeof ShieldCheck } {
   if (activity.verified === true) {
-    return { label: "Receipt verified", tone: "verified" };
+    return { label: "Protected", tone: "success", icon: ShieldCheck };
   }
   if (activity.verified === false) {
-    return { label: "Receipt failed", tone: "failed" };
+    return { label: "Verification failed", tone: "danger", icon: TriangleAlert };
   }
   if (activity.receiptId) {
-    return { label: "Receipt pending", tone: "unverified" };
+    return { label: "Checking proof", tone: "warning", icon: LoaderCircle };
   }
   return activity.status >= 400
-    ? { label: "Rejected locally", tone: "failed" }
-    : { label: "No receipt", tone: "neutral" };
+    ? { label: "Blocked", tone: "danger", icon: Ban }
+    : { label: "No proof", tone: "neutral", icon: ShieldX };
 }
 
-function routePresentation(activity: RequestActivity): { label: string; tone: string; title: string } | undefined {
-  switch (activity.route) {
-    case "declared":
-      return { label: "Declared surface", tone: "success", title: "The service declares this surface for every catalog model; helper endpoints are gated the same way. The receipt binds the bytes the verifier sent" };
-    default:
-      return undefined;
-  }
+function summarize(activity: RequestActivity[]): { protected: number; blocked: number; failed: number } {
+  return activity.reduce(
+    (totals, item) => {
+      if (item.verified === true) totals.protected += 1;
+      else if (item.verified === false) totals.failed += 1;
+      else if (!item.receiptId && item.status >= 400) totals.blocked += 1;
+      return totals;
+    },
+    { protected: 0, blocked: 0, failed: 0 },
+  );
 }
 
 function agentName(id?: string): string {
@@ -890,14 +1190,6 @@ function openAiEndpoint(proxyUrl?: string): string | undefined {
   return proxyUrl ? `${proxyUrl.replace(/\/+$/, "")}/v1` : undefined;
 }
 
-function remoteHost(value: string): string | undefined {
-  try {
-    return new URL(value).host;
-  } catch {
-    return undefined;
-  }
-}
-
 function hardwareName(value: string): string {
   return value.toLowerCase() === "tdx" ? "Intel TDX" : value.toUpperCase();
 }
@@ -923,7 +1215,7 @@ function shorten(value: string, length: number): string {
 function formatTimestamp(value: number, date = false): string {
   const options: Intl.DateTimeFormatOptions = date
     ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
-    : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
+    : { hour: "2-digit", minute: "2-digit" };
   return new Intl.DateTimeFormat(undefined, options).format(new Date(value));
 }
 

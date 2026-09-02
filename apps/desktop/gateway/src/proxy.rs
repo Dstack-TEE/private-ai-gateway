@@ -1,14 +1,15 @@
-//! The loopback application proxy on the stable local endpoint, served over
-//! TLS with the installation's identity. It admits only requests that carry an
-//! issued agent token for that agent's surfaces, forwards only while a
-//! verified session (identity + catalog, one generation and epoch) is
-//! published and the service declares the surface, and swaps the agent token
-//! for the RedPill key on the way to the sidecar. Request bodies are buffered
-//! (bounded, with a read timeout) so the model can be checked against the
-//! verified catalog; responses stream through. Credentials and the session
-//! are re-validated after the body is read, right before anything leaves the
-//! process. The proxy adds one attribution header the sidecar copies into its
-//! receipt event and strips before forwarding.
+//! The loopback application proxy on the stable local HTTP endpoint. It admits
+//! only requests that carry an issued agent token for that agent's paths,
+//! forwards only while a verified session (identity + catalog, one generation
+//! and epoch) is published, and swaps the agent token for the RedPill key on
+//! the way to the sidecar. It relays: method, path, query, body, status, and
+//! stream reach the sidecar and come back unchanged; nothing is converted.
+//! Request bodies are buffered (bounded, with a read timeout) only so the
+//! `model` can be checked against the verified catalog; responses stream
+//! through. Credentials and the session are re-validated after the body is
+//! read, right before anything leaves the process. The proxy adds one
+//! attribution header the sidecar copies into its receipt event and strips
+//! before forwarding.
 
 use std::{
     collections::HashSet,
@@ -22,20 +23,19 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::State,
+    extract::{RawQuery, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
-use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    brand::{PRODUCT_NAME, SERVICE_NAME},
     catalog::{Catalog, Surface},
     tokens::{agent_allows, TokenSet},
 };
@@ -48,7 +48,8 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle limit between upstream bytes; matches Claude Code's stream watchdog.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(300);
-/// Added on the way to the sidecar, which copies it into the receipt event.
+/// Attribution (the agent id) added on the way to the sidecar, which copies
+/// it into the receipt event and strips it before forwarding.
 pub const TAG_HEADER: &str = "x-aci-tag";
 const HOP_BY_HOP: [&str; 9] = [
     "connection",
@@ -245,7 +246,7 @@ impl ProxyState {
             Rejection::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "This endpoint accepts only agents connected through Private AI Gateway",
+                format!("This endpoint accepts only agents connected through {PRODUCT_NAME}"),
             )
         })?;
         let epoch = self.credential_epoch.load(Ordering::SeqCst);
@@ -257,7 +258,9 @@ impl ProxyState {
                 Rejection::new(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
-                    "The agent token is not recognized; reconnect the agent in Private AI Gateway",
+                    format!(
+                        "The agent token is not recognized; reconnect the agent in {PRODUCT_NAME}"
+                    ),
                 )
             })?;
         if !agent_allows(&agent, path) {
@@ -296,7 +299,7 @@ impl ProxyState {
             Rejection::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "api_key_missing",
-                "No RedPill API key is saved in Private AI Gateway",
+                format!("No {SERVICE_NAME} API key is saved in {PRODUCT_NAME}"),
             )
         })
     }
@@ -368,66 +371,12 @@ pub fn bind_std(addr: SocketAddr) -> Result<std::net::TcpListener, String> {
     Ok(listener)
 }
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_PENDING_HANDSHAKES: usize = 64;
-
-/// Serve the proxy over TLS on an already-bound listener until it fails. Each
-/// connection must complete a handshake against the installation identity
-/// before any HTTP is read; handshakes are bounded and timed so idle or slow
-/// connections release their permit and leak no task or socket.
-pub async fn serve_tls(
-    state: Arc<ProxyState>,
-    listener: std::net::TcpListener,
-    server_config: Arc<rustls::ServerConfig>,
-) -> Result<(), String> {
-    serve_tls_with(
-        state,
-        listener,
-        server_config,
-        HANDSHAKE_TIMEOUT,
-        MAX_PENDING_HANDSHAKES,
-    )
-    .await
-}
-
-async fn serve_tls_with(
-    state: Arc<ProxyState>,
-    listener: std::net::TcpListener,
-    server_config: Arc<rustls::ServerConfig>,
-    handshake_timeout: Duration,
-    max_pending_handshakes: usize,
-) -> Result<(), String> {
+pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> Result<(), String> {
     let listener = TcpListener::from_std(listener)
         .map_err(|error| format!("Cannot use the local listener: {error}"))?;
-    let acceptor = TlsAcceptor::from(server_config);
-    let service = TowerToHyperService::new(router(state));
-    let permits = Arc::new(Semaphore::new(max_pending_handshakes));
-    loop {
-        let permit = permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| "The local gateway stopped".to_string())?;
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|error| format!("The local gateway stopped: {error}"))?;
-        let acceptor = acceptor.clone();
-        let service = service.clone();
-        tokio::spawn(async move {
-            let tls = {
-                let _permit = permit;
-                match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(tls)) => tls,
-                    // Timeout or bad handshake: the stream and permit drop here.
-                    _ => return,
-                }
-            };
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(tls), service)
-                .await;
-        });
-    }
+    axum::serve(listener, router(state))
+        .await
+        .map_err(|error| format!("The local gateway stopped: {error}"))
 }
 
 async fn health(State(state): State<Arc<ProxyState>>) -> Response {
@@ -466,11 +415,13 @@ async fn models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Res
 async fn chat_completions(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
+        query,
         body,
         Surface::ChatCompletions,
         "/v1/chat/completions",
@@ -481,30 +432,50 @@ async fn chat_completions(
 async fn messages(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    body: Body,
-) -> Response {
-    relay(state, headers, body, Surface::Messages, "/v1/messages").await
-}
-
-async fn responses(
-    State(state): State<Arc<ProxyState>>,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
-    relay(state, headers, body, Surface::Responses, "/v1/responses").await
-}
-
-/// Helper endpoints belong to their surface and are gated exactly like
-/// inference: agent scope, verified session, declared surface, and a model
-/// present in the catalog (both protocols require `model`).
-async fn count_tokens(
-    State(state): State<Arc<ProxyState>>,
-    headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
+        query,
+        body,
+        Surface::Messages,
+        "/v1/messages",
+    )
+    .await
+}
+
+async fn responses(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        query,
+        body,
+        Surface::Responses,
+        "/v1/responses",
+    )
+    .await
+}
+
+/// Helper endpoints belong to their surface and are gated exactly like
+/// inference: agent scope, verified session, and a model present in the
+/// catalog (both protocols require `model`).
+async fn count_tokens(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        query,
         body,
         Surface::Messages,
         "/v1/messages/count_tokens",
@@ -515,11 +486,13 @@ async fn count_tokens(
 async fn responses_compact(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
+        query,
         body,
         Surface::Responses,
         "/v1/responses/compact",
@@ -532,13 +505,14 @@ async fn not_found() -> Response {
         Surface::ChatCompletions,
         StatusCode::NOT_FOUND,
         "not_found",
-        "Private AI Gateway serves /v1/models, /v1/chat/completions, /v1/messages, and /v1/responses",
+        &format!("{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, and /v1/responses"),
     )
 }
 
 async fn relay(
     state: Arc<ProxyState>,
     headers: HeaderMap,
+    query: Option<String>,
     body: Body,
     surface: Surface,
     path: &'static str,
@@ -586,12 +560,9 @@ async fn relay(
         }
     };
     let model = model_of(&bytes);
-    let decision = match check_catalog(&state, surface, model.as_deref()) {
-        Ok(label) => label,
-        Err(rejection) => {
-            return reject(&state, Some(agent), "POST", path, model, surface, rejection)
-        }
-    };
+    if let Err(rejection) = check_catalog(&state, model.as_deref()) {
+        return reject(&state, Some(agent), "POST", path, model, surface, rejection);
+    }
     // Take the delivery token first, then re-validate session and credentials:
     // a revocation after this point cancels the token, and the send below is
     // raced against it, so nothing admitted here can leave once revoked.
@@ -625,7 +596,7 @@ async fn relay(
         &agent,
         surface,
         path,
-        decision,
+        query.as_deref(),
         &headers,
         bytes,
         model,
@@ -634,11 +605,7 @@ async fn relay(
     .await
 }
 
-fn check_catalog(
-    state: &ProxyState,
-    surface: Surface,
-    model: Option<&str>,
-) -> Result<&'static str, Rejection> {
+fn check_catalog(state: &ProxyState, model: Option<&str>) -> Result<(), Rejection> {
     let model = model.ok_or_else(|| {
         Rejection::new(
             StatusCode::BAD_REQUEST,
@@ -654,26 +621,13 @@ fn check_catalog(
             "The verified model list is not available",
         )
     })?;
-    let entry = catalog.get(model).ok_or_else(|| {
+    catalog.get(model).map(|_| ()).ok_or_else(|| {
         Rejection::new(
             StatusCode::NOT_FOUND,
             "model_not_found",
             format!("`{model}` is not in the verified model list"),
         )
-    })?;
-    let support = entry.support(surface);
-    if support.allows_requests() {
-        Ok(support.label())
-    } else {
-        Err(Rejection::new(
-            StatusCode::BAD_REQUEST,
-            "surface_undeclared",
-            format!(
-                "The service does not declare {} support, so `{model}` is not forwarded on it",
-                surface.path()
-            ),
-        ))
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -684,14 +638,18 @@ async fn forward(
     agent: &str,
     surface: Surface,
     path: &str,
-    decision: &str,
+    query: Option<&str>,
     headers: &HeaderMap,
     body: Bytes,
     model: Option<String>,
     delivery: CancellationToken,
 ) -> Response {
     let dropped = hop_by_hop_names(headers);
-    let mut request = state.client.post(format!("{base_url}{path}"));
+    let target = match query {
+        Some(query) => format!("{base_url}{path}?{query}"),
+        None => format!("{base_url}{path}"),
+    };
+    let mut request = state.client.post(target);
     for (name, value) in headers {
         let name = name.as_str();
         if !dropped.contains(name)
@@ -706,7 +664,7 @@ async fn forward(
     }
     let request = request
         .header(header::AUTHORIZATION.as_str(), format!("Bearer {key}"))
-        .header(TAG_HEADER, format!("{agent} {decision}"))
+        .header(TAG_HEADER, agent)
         .body(body);
     // The send is raced against revocation: cancelled before it starts means
     // nothing is delivered; cancelled mid-send aborts the connection so the
@@ -834,7 +792,8 @@ fn error_response(surface: Surface, status: StatusCode, code: &str, message: &st
     if status == StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer realm=\"Private AI Gateway\""),
+            HeaderValue::from_str(&format!("Bearer realm=\"{PRODUCT_NAME}\""))
+                .unwrap_or_else(|_| HeaderValue::from_static("Bearer")),
         );
     }
     response
@@ -887,8 +846,7 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// A stand-in sidecar that echoes what it received and declares the
-    /// chat and messages surfaces.
+    /// A stand-in sidecar that echoes what it received.
     async fn mock_sidecar() -> String {
         let echo = |headers: HeaderMap, body: Bytes| async move {
             let header = |name: &str| {
@@ -912,15 +870,13 @@ mod tests {
         };
         let app = Router::new()
             .route("/v1/chat/completions", post(echo))
+            .route("/v1/responses", post(echo))
             .route("/v1/messages/count_tokens", post(echo))
             .route(
                 "/v1/models",
                 get(|| async {
                     Json(json!({
-                        "data": [{ "id": "openai/gpt-oss-20b" }],
-                        "aci_capabilities": { "version": 1, "surfaces": {
-                            "chat_completions": "all", "messages": "all", "responses": "undeclared"
-                        }}
+                        "data": [{ "id": "openai/gpt-oss-20b" }]
                     }))
                 }),
             );
@@ -956,56 +912,6 @@ mod tests {
             verified: true,
             catalog: Some(catalog),
         });
-    }
-
-    /// Idle sockets cannot exhaust the handshake permits: they time out,
-    /// release their permit, and a real TLS client still gets through.
-    #[tokio::test]
-    async fn handshakes_are_bounded_and_idle_connections_time_out() {
-        use std::io::Read;
-        let dir = std::env::temp_dir().join(format!("pag-hs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let identity =
-            crate::tls::load_or_create(&dir, &crate::secrets::MemoryStore::default()).unwrap();
-        let (sender, _receiver) = mpsc::channel(4);
-        let state = ProxyState::new(sender);
-        let listener = bind_std("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_tls_with(
-            state,
-            listener,
-            identity.server_config.clone(),
-            Duration::from_millis(200),
-            2,
-        ));
-        // Two idle raw connections take every permit and send nothing.
-        let idle_a = std::net::TcpStream::connect(addr).unwrap();
-        let idle_b = std::net::TcpStream::connect(addr).unwrap();
-        // A real client still completes: the idle handshakes time out and
-        // release their permits.
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(
-                reqwest::Certificate::from_pem(identity.ca_pem.as_bytes()).unwrap(),
-            )
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-        let response = client
-            .get(format!("https://127.0.0.1:{}/health", addr.port()))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        // The idle sockets were closed by the server (read returns EOF).
-        for mut idle in [idle_a, idle_b] {
-            idle.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            let mut buf = [0u8; 1];
-            assert_eq!(idle.read(&mut buf).unwrap_or(0), 0);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1141,7 +1047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_declared_catalog_models_are_forwarded_with_the_real_key() {
+    async fn verified_catalog_models_are_forwarded_with_the_real_key() {
         let (state, mut events) = state();
         state.set_tokens(tokens());
         let sidecar = mock_sidecar().await;
@@ -1160,17 +1066,14 @@ mod tests {
         assert_eq!(unknown.status().as_u16(), 404);
         assert_eq!(events.recv().await.unwrap().model.as_deref(), Some("gpt-5"));
 
-        // Responses is undeclared by the service: refused, never guessed.
-        let undeclared = client
+        let responses = client
             .post(format!("{proxy}/v1/responses"))
             .bearer_auth("codex-token")
             .json(&json!({ "model": "openai/gpt-oss-20b", "input": "hi" }))
             .send()
             .await
             .unwrap();
-        assert_eq!(undeclared.status().as_u16(), 400);
-        let body: Value = undeclared.json().await.unwrap();
-        assert_eq!(body["error"]["code"], json!("surface_undeclared"));
+        assert_eq!(responses.status().as_u16(), 200);
 
         let forwarded = client
             .post(format!("{proxy}/v1/chat/completions"))
@@ -1186,7 +1089,7 @@ mod tests {
         let echo: Value = forwarded.json().await.unwrap();
         assert_eq!(echo["authorization"], json!("Bearer sk-real"));
         assert_eq!(echo["x-api-key"], json!(""));
-        assert_eq!(echo["tag"], json!("opencode declared"));
+        assert_eq!(echo["tag"], json!("opencode"));
         assert_eq!(echo["anthropic-beta"], json!("keep-me"));
         assert_eq!(echo["proxy-connection"], json!(""));
 
@@ -1199,7 +1102,76 @@ mod tests {
             .unwrap();
         assert_eq!(counted.status().as_u16(), 200);
         let echo: Value = counted.json().await.unwrap();
-        assert_eq!(echo["tag"], json!("claude-code declared"));
+        assert_eq!(echo["tag"], json!("claude-code"));
+    }
+
+    /// The proxy relays: for every inference path the sidecar sees the same
+    /// method, path, query, and body bytes the agent sent, and the agent gets
+    /// the sidecar's status, content type, and streamed bytes back unchanged.
+    #[tokio::test]
+    async fn every_path_is_relayed_without_rewriting_request_or_response() {
+        let (state, _events) = state();
+        state.set_tokens(tokens());
+        let echo = |method: axum::http::Method,
+                    uri: axum::http::Uri,
+                    headers: HeaderMap,
+                    body: Bytes| async move {
+            let tag = headers
+                .get(TAG_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = String::from_utf8_lossy(&body);
+            (
+                StatusCode::ACCEPTED,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                format!("event: echo\ndata: {method} {uri} {tag}\n\ndata: {body}\n\n"),
+            )
+        };
+        let sidecar = spawn(
+            Router::new()
+                .route("/v1/chat/completions", post(echo))
+                .route("/v1/messages", post(echo))
+                .route("/v1/responses", post(echo))
+                .route(
+                    "/v1/models",
+                    get(|| async { Json(json!({ "data": [{ "id": "openai/gpt-oss-20b" }] })) }),
+                ),
+        )
+        .await;
+        verified(&state, &sidecar, 1, 1).await;
+        state.set_api_key(Some("sk-real".to_string()));
+        let proxy = spawn(router(state.clone())).await;
+        let client = reqwest::Client::new();
+        // Field order, whitespace, and unknown members are the agent's; the
+        // proxy only reads `model`.
+        let body =
+            r#"{"stream": true, "model":"openai/gpt-oss-20b", "input": [{"x": 1}], "extra": null}"#;
+        for (path, token, agent) in [
+            ("/v1/chat/completions", "opencode-token", "opencode"),
+            ("/v1/messages", "claude-token", "claude-code"),
+            ("/v1/responses", "codex-token", "codex"),
+        ] {
+            let response = client
+                .post(format!("{proxy}{path}?beta=true&v=2"))
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 202, "{path}");
+            assert_eq!(
+                response.headers()["content-type"],
+                "text/event-stream",
+                "{path}"
+            );
+            assert_eq!(
+                response.text().await.unwrap(),
+                format!("event: echo\ndata: POST {path}?beta=true&v=2 {agent}\n\ndata: {body}\n\n"),
+                "{path}"
+            );
+        }
     }
 
     /// A token revoked (or a key removed) while the body is still arriving
@@ -1250,7 +1222,7 @@ mod tests {
     /// Helpers are gated like inference: unknown or missing model, and a
     /// surface the service stopped declaring, are refused.
     #[tokio::test]
-    async fn helper_endpoints_are_capability_gated() {
+    async fn helper_endpoints_require_a_verified_catalog_model() {
         let (state, _events) = state();
         state.set_tokens(tokens());
         let sidecar = mock_sidecar().await;
@@ -1289,23 +1261,6 @@ mod tests {
                 .as_u16(),
             200
         );
-
-        // The service (or an older one) no longer declares Messages: refused.
-        let mut session = state.session();
-        let mut catalog = session.catalog.take().unwrap();
-        catalog.capabilities = None;
-        for model in &mut catalog.models {
-            model.messages = crate::catalog::Support::Undeclared;
-        }
-        session.catalog = Some(catalog);
-        session.epoch += 1;
-        state.publish(session);
-        let refused = count(json!({ "model": "openai/gpt-oss-20b" }))
-            .await
-            .unwrap();
-        assert_eq!(refused.status().as_u16(), 400);
-        let body: Value = refused.json().await.unwrap();
-        assert_eq!(body["error"]["type"], json!("surface_undeclared"));
     }
 
     /// A revocation that lands after the final checks but before the send
@@ -1340,10 +1295,7 @@ mod tests {
                         "/v1/models",
                         get(|| async {
                             Json(json!({
-                                "data": [{ "id": "openai/gpt-oss-20b" }],
-                                "aci_capabilities": { "version": 1, "surfaces": {
-                                    "chat_completions": "all", "messages": "all", "responses": "undeclared"
-                                }}
+                                "data": [{ "id": "openai/gpt-oss-20b" }]
                             }))
                         }),
                     ),

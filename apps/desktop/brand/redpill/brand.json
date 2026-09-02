@@ -1,0 +1,39 @@
+{
+  "id": "redpill",
+  "productName": "RedPill Gateway",
+  "shortName": "RedPill",
+  "organizationName": "RedPill",
+  "tagline": "Private AI, verified",
+  "homepageUrl": "https://redpill.ai",
+  "supportUrl": "https://redpill.ai",
+  "service": {
+    "name": "RedPill",
+    "defaultUrl": "https://tee.redpill.ai",
+    "keyLabel": "RedPill API key"
+  },
+  "bundle": {
+    "identifier": "ai.redpill.private-ai-gateway",
+    "category": "DeveloperTool",
+    "shortDescription": "Verified local AI gateway",
+    "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
+  },
+  "theme": {
+    "accentLight": "#b3262f",
+    "accentDark": "#ff8a8a",
+    "brandColor": "#e0353d",
+    "iconBackground": "#1a0d0e"
+  },
+  "assets": {
+    "appIconMark": "icon.svg",
+    "trayTemplate": "icon-mono.svg",
+    "wordmarkLight": "wordmark.svg",
+    "wordmarkDark": "wordmark-dark.svg"
+  },
+  "source": {
+    "repository": "",
+    "commit": "",
+    "license": "Add the official RedPill assets and their source before building this brand; prepare-brand fails until every file in `assets` exists.",
+    "files": {},
+    "sha256": {}
+  }
+}

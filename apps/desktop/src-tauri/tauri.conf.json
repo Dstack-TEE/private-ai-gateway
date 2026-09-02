@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Private AI Gateway",
   "version": "0.1.0",
-  "identifier": "ai.redpill.private-ai-gateway",
+  "identifier": "dev.private-ai-gateway.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
