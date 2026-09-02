@@ -230,9 +230,11 @@ jobs:
           toolchain: "1.89"
 
       - name: Install Rust (root workspace)
+        if: runner.os == 'Linux'
         uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-node@v6
+        if: runner.os == 'Linux'
         with:
           node-version: 24
 
@@ -253,6 +255,7 @@ jobs:
         run: cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
 
       - name: Stage native sidecars for the Tauri check
+        if: runner.os == 'Linux'
         env:
           RUSTUP_TOOLCHAIN: stable
         run: node apps/desktop/scripts/bundle-native.mjs --debug
@@ -279,4 +282,5 @@ jobs:
           dbus-run-session -- bash "$RUNNER_TEMP/keyring-smoke.sh"
 
       - name: Check Tauri backend (MSRV 1.89)
+        if: runner.os == 'Linux'
         run: cargo +1.89 check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

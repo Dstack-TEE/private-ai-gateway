@@ -157,10 +157,13 @@ runner produces `Private AI Gateway.app`, a DMG, and a ZIP artifact.
 `scripts/bundle-native.mjs` builds two sidecars with `--locked`: the `aci`
 verifier and `private-ai-gateway-helper`, a console binary from the gateway
 crate that prints an agent's local token (kept separate from the GUI app so
-stdout works on Windows). Both crates declare `rust-version = 1.89`, the highest MSRV in their locked
-dependency graphs (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their
-`Cargo.lock`; CI builds and tests with `--locked`, checks the gateway crate,
-helper, and Tauri backend on Rust 1.89, on Ubuntu and Windows as well as macOS, and smoke-tests the
+stdout works on Windows). The desktop gateway and Tauri crates declare
+`rust-version = 1.89`, the highest MSRV in their locked dependency graphs
+(`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
+The root `aci` follows the root workspace toolchain and currently targets Unix
+because the dstack SDK transport uses a Unix-domain socket. CI tests the
+gateway crate and helper on Rust 1.89 on Ubuntu and Windows, checks the Tauri
+backend on Ubuntu, builds the complete app on macOS, and smoke-tests the
 credential store on macOS, Windows, and (under `dbus-run-session` with
 gnome-keyring) Linux.
 
