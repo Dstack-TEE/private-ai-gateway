@@ -15,7 +15,7 @@
     "check": "tsc --noEmit",
     "tauri": "tauri",
     "dist": "npm run build:native && tauri build",
-    "preview": "vite preview --port 4173 --strictPort",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "test:renderer": "playwright test"
   },
   "engines": {

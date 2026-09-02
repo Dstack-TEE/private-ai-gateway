@@ -14,6 +14,11 @@ export default defineConfig({
     command: "npm run preview",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: false,
+    // CI runners can be slow to bind; surface the server's own output when
+    // startup fails instead of a bare timeout.
+    timeout: 120_000,
+    stdout: "pipe",
+    stderr: "pipe",
   },
   reporter: [["list"]],
 });

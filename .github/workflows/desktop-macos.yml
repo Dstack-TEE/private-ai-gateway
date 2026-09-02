@@ -39,6 +39,16 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
+      # Resolved before any step that can fail, so the diagnostics upload
+      # below always has a real name.
+      - name: Beta artifact metadata
+        id: beta
+        shell: bash
+        run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -134,7 +144,6 @@ jobs:
           osascript -e 'tell application "Private AI Gateway" to quit' || kill -TERM "$app_pid"
 
       - name: Inspect macOS artifacts
-        if: always()
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -186,20 +195,12 @@ jobs:
             spctl --assess --type execute --verbose=4 "$app_bundle" || true
           } 2>&1 | tee "$report"
 
-      - name: Beta artifact metadata
-        id: beta
-        shell: bash
-        run: |
-          version="$(node -p "require('./apps/desktop/package.json').version")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
       - name: Upload macOS package and evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: private-ai-gateway-beta-${{ steps.beta.outputs.version }}-${{ steps.beta.outputs.shortsha }}-macos-arm64
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
           path: |
             apps/desktop/release/*.dmg
@@ -208,6 +209,7 @@ jobs:
             apps/desktop/test-results/live-service.json
             apps/desktop/test-results/macos-menu-bar.png
             apps/desktop/test-results/app.*.log
+            apps/desktop/playwright-artifacts/
 
   check-matrix:
     strategy:
@@ -226,9 +228,14 @@ jobs:
         with:
           toolchain: "1.89"
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
+            . -> target
             apps/desktop/gateway -> target
             apps/desktop/src-tauri -> target
 
@@ -236,13 +243,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools
 
       - name: Test local gateway crate (MSRV 1.89)
         run: cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
 
-      - name: Build helper sidecar (MSRV 1.89)
-        run: cargo +1.89 build --locked --manifest-path apps/desktop/gateway/Cargo.toml --bin private-ai-gateway-helper
+      - name: Stage native sidecars for the Tauri check (MSRV 1.89)
+        env:
+          RUSTUP_TOOLCHAIN: "1.89"
+        run: node apps/desktop/scripts/bundle-native.mjs --debug
 
       - name: Credential store smoke (Windows Credential Manager)
         if: runner.os == 'Windows'
@@ -250,11 +259,20 @@ jobs:
 
       - name: Credential store smoke (Linux Secret Service)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          dbus-run-session -- bash -c '
-            echo -n "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml -- --ignored keyring_round_trip
-          '
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          cat > "$RUNNER_TEMP/keyring-smoke.sh" <<'SMOKE'
+          set -euo pipefail
+          eval "$(printf 'ci-keyring-password' | gnome-keyring-daemon --unlock --components=secrets)"
+          export GNOME_KEYRING_CONTROL
+          printf 'bootstrap' | secret-tool store --label 'CI bootstrap' service pag-ci probe bootstrap
+          test "$(secret-tool lookup service pag-ci probe bootstrap)" = bootstrap
+          cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml -- --ignored keyring_round_trip
+          SMOKE
+          dbus-run-session -- bash "$RUNNER_TEMP/keyring-smoke.sh"
 
       - name: Check Tauri backend (MSRV 1.89)
         run: cargo +1.89 check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
