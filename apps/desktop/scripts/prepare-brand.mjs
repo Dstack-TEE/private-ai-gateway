@@ -151,7 +151,6 @@ await writeFile(
   path.join(appRoot, "src-tauri/tauri.brand.conf.json"),
   `${JSON.stringify(
     {
-      $comment: generatedNote,
       productName: brand.productName,
       identifier: brand.bundle.identifier,
       bundle: {
