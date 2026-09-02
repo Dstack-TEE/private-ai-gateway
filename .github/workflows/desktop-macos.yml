@@ -221,12 +221,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # The gateway crate and helper are checked on the declared MSRV (1.89); the
-      # Tauri backend follows stable.
+      # The gateway crate, helper, and Tauri backend are checked on their
+      # declared MSRV (1.89). The root ACI sidecar follows the root workspace's
+      # newer toolchain requirements.
       - name: Install Rust (MSRV for the gateway crate)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89"
+
+      - name: Install Rust (root workspace)
+        uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-node@v6
         with:
@@ -248,9 +252,9 @@ jobs:
       - name: Test local gateway crate (MSRV 1.89)
         run: cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
 
-      - name: Stage native sidecars for the Tauri check (MSRV 1.89)
+      - name: Stage native sidecars for the Tauri check
         env:
-          RUSTUP_TOOLCHAIN: "1.89"
+          RUSTUP_TOOLCHAIN: stable
         run: node apps/desktop/scripts/bundle-native.mjs --debug
 
       - name: Credential store smoke (Windows Credential Manager)
