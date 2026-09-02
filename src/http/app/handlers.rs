@@ -106,16 +106,75 @@ pub(super) async fn models(
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Response {
-    if let Some(middleware) = state.middleware.clone() {
+    let response = if let Some(middleware) = state.middleware.clone() {
         let query = tee_only_catalog_query(&middleware, &headers, query);
-        return middleware
+        middleware
             .handle_catalog(&catalog_path("/v1/models", query))
-            .await;
+            .await
+    } else {
+        match state.service.upstream().models().await {
+            Ok(upstream) => upstream_direct_response(upstream, "application/json"),
+            Err(err) => upstream_proxy_error_response(err),
+        }
+    };
+    with_capability_declaration(response, state.middleware.is_some()).await
+}
+
+/// Version of the `aci_capabilities` declaration attached to `/v1/models`.
+pub const ACI_CAPABILITIES_VERSION: u32 = 1;
+const CATALOG_ANNOTATE_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Attach the versioned capability declaration to a successful catalog
+/// response. Clients that predate it ignore the extra member; clients that
+/// gate on it get exactly what this deployment guarantees for every listed
+/// model, never an inference from model names or feature flags.
+async fn with_capability_declaration(response: Response, middleware: bool) -> Response {
+    if !response.status().is_success() {
+        return response;
     }
-    match state.service.upstream().models().await {
-        Ok(upstream) => upstream_direct_response(upstream, "application/json"),
-        Err(err) => upstream_proxy_error_response(err),
-    }
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, CATALOG_ANNOTATE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "model catalog response is too large to relay",
+            )
+        }
+    };
+    let Ok(mut catalog) = serde_json::from_slice::<Value>(&bytes) else {
+        // Not JSON we understand: relay as-is; nothing is declared.
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    annotate_catalog(&mut catalog, middleware);
+    let mut parts = parts;
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(catalog.to_string()))
+}
+
+/// What this deployment guarantees for every catalog model on each surface.
+/// With the control-plane middleware, chat completions are the catalog's
+/// native surface and Anthropic Messages are converted for every candidate
+/// format; the Responses API passes through to the upstream and is not
+/// declared. Without the middleware nothing is declared: the endpoints proxy
+/// to whatever the upstream implements.
+fn annotate_catalog(catalog: &mut Value, middleware: bool) {
+    let Some(object) = catalog.as_object_mut() else {
+        return;
+    };
+    let declared = |guaranteed: bool| if guaranteed { "all" } else { "undeclared" };
+    object.insert(
+        "aci_capabilities".to_string(),
+        json!({
+            "version": ACI_CAPABILITIES_VERSION,
+            "surfaces": {
+                "chat_completions": declared(middleware),
+                "messages": declared(middleware),
+                "responses": "undeclared",
+            },
+        }),
+    );
 }
 
 // Relay every /v1/models/<sub> sub-catalog to the middleware, which owns the
@@ -1032,4 +1091,32 @@ pub(super) async fn attested_session(
         session.bytes().to_vec(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn the_catalog_declares_only_what_this_deployment_guarantees() {
+        let mut with_middleware = json!({ "data": [{ "id": "m" }] });
+        annotate_catalog(&mut with_middleware, true);
+        assert_eq!(with_middleware["aci_capabilities"]["version"], json!(1));
+        assert_eq!(
+            with_middleware["aci_capabilities"]["surfaces"],
+            json!({ "chat_completions": "all", "messages": "all", "responses": "undeclared" })
+        );
+        assert_eq!(with_middleware["data"][0]["id"], json!("m"));
+
+        let mut direct = json!({ "data": [] });
+        annotate_catalog(&mut direct, false);
+        assert_eq!(
+            direct["aci_capabilities"]["surfaces"],
+            json!({ "chat_completions": "undeclared", "messages": "undeclared", "responses": "undeclared" })
+        );
+
+        let mut not_an_object = json!([1, 2]);
+        annotate_catalog(&mut not_an_object, true);
+        assert_eq!(not_an_object, json!([1, 2]));
+    }
 }

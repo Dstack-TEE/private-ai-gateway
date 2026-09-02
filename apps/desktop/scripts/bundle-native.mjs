@@ -7,7 +7,6 @@ const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const repoRoot = path.resolve(appRoot, "../..");
 const debug = process.argv.includes("--debug");
 const profile = debug ? "debug" : "release";
-const executableName = process.platform === "win32" ? "aci.exe" : "aci";
 const cargo = process.env.CARGO ?? "cargo";
 const rustc = process.env.RUSTC ?? "rustc";
 const cargoDirectory = path.dirname(cargo);
@@ -25,33 +24,41 @@ if (!targetTriple) {
   throw new Error("Cannot determine the Rust host target triple");
 }
 
-const buildArgs = ["build", "--bin", "aci"];
-if (!debug) {
-  buildArgs.push("--release");
-}
-const build = spawnSync(cargo, buildArgs, {
-  cwd: repoRoot,
-  env: buildEnv,
-  stdio: "inherit",
-});
-
-if (build.error) {
-  throw build.error;
-}
-if (build.status !== 0) {
-  throw new Error(`cargo build exited with status ${build.status ?? "unknown"}`);
-}
-
 const destinationDir = path.join(appRoot, "src-tauri/binaries");
-const source = path.join(repoRoot, "target", profile, executableName);
-const destinationName = process.platform === "win32"
-  ? `aci-${targetTriple}.exe`
-  : `aci-${targetTriple}`;
-const destination = path.join(destinationDir, destinationName);
 await mkdir(destinationDir, { recursive: true });
-await copyFile(source, destination);
-if (process.platform !== "win32") {
-  await chmod(destination, 0o755);
-}
 
-console.log(`Bundled ${destination}`);
+// Two sidecars: the ACI verifier and the console credential helper that
+// prints an agent's local token (kept separate so stdout works on Windows).
+const sidecars = [
+  { name: "aci", manifestPath: path.join(repoRoot, "Cargo.toml"), targetDir: path.join(repoRoot, "target") },
+  {
+    name: "private-ai-gateway-helper",
+    manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
+    targetDir: path.join(appRoot, "gateway/target"),
+  },
+];
+
+for (const sidecar of sidecars) {
+  const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
+  if (!debug) {
+    buildArgs.push("--release");
+  }
+  const build = spawnSync(cargo, buildArgs, { cwd: repoRoot, env: buildEnv, stdio: "inherit" });
+  if (build.error) {
+    throw build.error;
+  }
+  if (build.status !== 0) {
+    throw new Error(`cargo build ${sidecar.name} exited with status ${build.status ?? "unknown"}`);
+  }
+  const executable = process.platform === "win32" ? `${sidecar.name}.exe` : sidecar.name;
+  const source = path.join(sidecar.targetDir, profile, executable);
+  const destinationName = process.platform === "win32"
+    ? `${sidecar.name}-${targetTriple}.exe`
+    : `${sidecar.name}-${targetTriple}`;
+  const destination = path.join(destinationDir, destinationName);
+  await copyFile(source, destination);
+  if (process.platform !== "win32") {
+    await chmod(destination, 0o755);
+  }
+  console.log(`Bundled ${destination}`);
+}

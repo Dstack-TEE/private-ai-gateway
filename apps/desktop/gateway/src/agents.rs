@@ -1,0 +1,2140 @@
+//! Agent configuration projection: point an agent at the local gateway by
+//! editing only the fields this app owns, remember what those fields held
+//! before, and put them back on disconnect. Credential fields a connection
+//! takes over are parked in the OS credential store and referenced opaquely;
+//! configs reference a machine-local agent token (through the bundled helper)
+//! and the installation's CA certificate, never the RedPill key.
+//!
+//! Only Claude Code can be connected in this version: Codex needs per-model
+//! metadata the service does not publish, and OpenCode has no
+//! configuration-level way to trust the local certificate. Disconnecting
+//! never depends on support, the endpoint, or the catalog, so a connection
+//! made by an older version can always be restored.
+
+use std::{
+    collections::BTreeMap,
+    env, fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    catalog::{Catalog, Surface},
+    config_doc::{ConfigDoc, ConfigValue, Format},
+    lock,
+    secrets::SecretStore,
+    tokens::{self, TokenFiles, TokenSet},
+};
+
+/// Test-only override for the home directory (and the app data directory).
+pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_GATEWAY_HOME";
+/// Bundle identifier; names the per-user app data directory on every platform.
+pub const APP_IDENTIFIER: &str = "ai.redpill.private-ai-gateway";
+const STORE_FILE: &str = "agent-connections.json";
+const CODEX_UNSUPPORTED: &str = "The verified service publishes no Codex model metadata; Codex's \
+                                 strict catalog needs per-model instructions it ships only for \
+                                 its own models, so this version cannot connect Codex honestly";
+const OPENCODE_UNSUPPORTED: &str = "OpenCode has no configuration-level way to trust the local \
+                                    gateway certificate (only a shell-exported \
+                                    NODE_EXTRA_CA_CERTS would, which the app cannot verify), so \
+                                    this version cannot connect OpenCode";
+const HELPER_MISSING: &str = "The credential helper is missing from this installation, so \
+                              Claude Code cannot be connected";
+const MESSAGES_UNDECLARED: &str = "The service does not publish a capability declaration \
+                                   (aci_capabilities v1) for the Messages API; connecting \
+                                   Claude Code stays disabled until it does";
+
+/// File name of the bundled console helper that prints an agent's token.
+pub fn helper_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "private-ai-gateway-helper.exe"
+    } else {
+        "private-ai-gateway-helper"
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub id: String,
+    pub name: String,
+    pub config_path: String,
+    pub installed: bool,
+    /// The config currently carries this app's projection and a token exists.
+    pub connected: bool,
+    /// A connection record exists (whatever the config now says).
+    pub recorded: bool,
+    /// The proxy would authorize this agent's token right now: recorded,
+    /// enabled, config readable and still exactly the app's projection.
+    pub authorized: bool,
+    /// The wire surface the agent speaks to the local gateway.
+    pub surface: Surface,
+    /// Whether this build can connect the agent. Disconnecting never depends
+    /// on it.
+    pub supported: bool,
+    /// Why it cannot be connected, when `supported` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Something the user must act on (removed model, incomplete disconnect,
+    /// a connection this version no longer supports).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One config field a connection changes. Sensitive fields never show their
+/// values; `None` means absent.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigChange {
+    pub key: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub sensitive: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPreview {
+    pub agent: AgentStatus,
+    pub connect: bool,
+    pub changes: Vec<ConfigChange>,
+    pub note: String,
+    /// Fingerprint of the inputs the preview was computed from; `apply`
+    /// refuses when it no longer matches.
+    pub revision: String,
+}
+
+/// User choices a connection is projected with.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectOptions {
+    /// Claude Code: the catalog model written to `ANTHROPIC_MODEL`.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Agent {
+    Codex,
+    ClaudeCode,
+    OpenCode,
+}
+
+impl Agent {
+    pub const ALL: [Agent; 3] = [Agent::Codex, Agent::ClaudeCode, Agent::OpenCode];
+
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|agent| agent.id() == id)
+            .ok_or_else(|| "Unknown agent".to_string())
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::ClaudeCode => "claude-code",
+            Agent::OpenCode => "opencode",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Codex => "Codex",
+            Agent::ClaudeCode => "Claude Code",
+            Agent::OpenCode => "OpenCode",
+        }
+    }
+
+    pub fn surface(self) -> Surface {
+        match self {
+            Agent::Codex => Surface::Responses,
+            Agent::ClaudeCode => Surface::Messages,
+            Agent::OpenCode => Surface::ChatCompletions,
+        }
+    }
+
+    /// Whether connecting needs the verified catalog (a model choice).
+    pub fn needs_catalog(self) -> bool {
+        matches!(self, Agent::ClaudeCode)
+    }
+
+    /// Why this build cannot connect the agent at all, independent of state.
+    fn static_unsupported(self) -> Option<&'static str> {
+        match self {
+            Agent::Codex => Some(CODEX_UNSUPPORTED),
+            Agent::OpenCode => Some(OPENCODE_UNSUPPORTED),
+            Agent::ClaudeCode => None,
+        }
+    }
+
+    /// The official CLI executable name, for install detection on PATH.
+    fn cli_name(self) -> &'static str {
+        self.id()
+    }
+
+    fn format(self) -> Format {
+        match self {
+            Agent::Codex => Format::Toml,
+            Agent::ClaudeCode | Agent::OpenCode => Format::Json,
+        }
+    }
+
+    /// The live user-level config file. With `tool_env` each tool's own
+    /// location override is honored.
+    fn config_path(self, home: &Path, tool_env: bool) -> PathBuf {
+        let override_dir = |name: &str| tool_env.then(|| env_path(name)).flatten();
+        match self {
+            Agent::Codex => override_dir("CODEX_HOME")
+                .unwrap_or_else(|| home.join(".codex"))
+                .join("config.toml"),
+            Agent::ClaudeCode => override_dir("CLAUDE_CONFIG_DIR")
+                .unwrap_or_else(|| home.join(".claude"))
+                .join("settings.json"),
+            Agent::OpenCode => override_dir("OPENCODE_CONFIG").unwrap_or_else(|| {
+                override_dir("XDG_CONFIG_HOME")
+                    .unwrap_or_else(|| home.join(".config"))
+                    .join("opencode")
+                    .join("opencode.json")
+            }),
+        }
+    }
+
+    fn note(self, connect: bool) -> &'static str {
+        if !connect {
+            return "Only fields written by Private AI Gateway are restored; credentials taken \
+                    over at connect come back from the system credential store; edits made \
+                    since are left in place. The agent's local token is revoked.";
+        }
+        match self {
+            Agent::Codex => CODEX_UNSUPPORTED,
+            Agent::OpenCode => OPENCODE_UNSUPPORTED,
+            Agent::ClaudeCode => {
+                "Claude Code will trust the installation's local certificate, authenticate \
+                 through apiKeyHelper with a machine-local token, and use the selected model. \
+                 Credentials set in this settings file are taken over and restored on \
+                 disconnect; a token exported in your shell would still take priority, so unset \
+                 ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
+                 used through the gateway."
+            }
+        }
+    }
+}
+
+/// Everything a projection is computed from.
+struct Inputs<'a> {
+    endpoint: &'a str,
+    helper_exe: &'a Path,
+    ca_path: &'a Path,
+    catalog: Option<&'a Catalog>,
+    options: &'a ConnectOptions,
+}
+
+/// The fields this app owns for the agent and the values a connection writes.
+fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
+    if let Some(reason) = agent.static_unsupported() {
+        return Err(reason.to_string());
+    }
+    let model = inputs
+        .options
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| "Choose a model from the verified list for Claude Code".to_string())?;
+    let catalog = inputs
+        .catalog
+        .ok_or_else(|| "The verified model list is not available".to_string())?;
+    if !catalog.declares(Surface::Messages) {
+        return Err(MESSAGES_UNDECLARED.to_string());
+    }
+    if catalog.get(model).is_none() {
+        return Err(format!("`{model}` is not in the verified model list"));
+    }
+    Ok(vec![
+        set(&["env", "ANTHROPIC_BASE_URL"], inputs.endpoint),
+        set(
+            &["env", "NODE_EXTRA_CA_CERTS"],
+            inputs.ca_path.display().to_string(),
+        ),
+        set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+        set(&["env", "ANTHROPIC_MODEL"], model),
+        set(
+            &["apiKeyHelper"],
+            helper_command(inputs.helper_exe, "claude-code")?,
+        ),
+        // These outrank apiKeyHelper in Claude Code's precedence, so a
+        // connection takes them over (parked in the credential store).
+        absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
+        absent(&["env", "ANTHROPIC_API_KEY"]),
+    ])
+}
+
+struct Field {
+    path: Vec<String>,
+    /// `None` makes the key absent.
+    value: Option<ConfigValue>,
+}
+
+fn set(path: &[&str], value: impl Into<String>) -> Field {
+    Field {
+        path: owned(path),
+        value: Some(ConfigValue::Str(value.into())),
+    }
+}
+
+fn absent(path: &[&str]) -> Field {
+    Field {
+        path: owned(path),
+        value: None,
+    }
+}
+
+fn owned(path: &[&str]) -> Vec<String> {
+    path.iter().map(|key| key.to_string()).collect()
+}
+
+/// The `apiKeyHelper` command line. Claude Code hands it to a POSIX `sh` on
+/// every platform (Git's sh on Windows), so the path is quoted uniformly
+/// with `shlex`.
+fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
+    let path = exe
+        .to_str()
+        .ok_or_else(|| "The app path is not valid Unicode".to_string())?;
+    let quoted = shlex::try_quote(path)
+        .map_err(|_| "The app path cannot be quoted for the shell".to_string())?;
+    Ok(format!("{quoted} --agent-token {agent}"))
+}
+
+/// Credential-bearing keys: their values never reach previews, manifests,
+/// or logs.
+fn is_sensitive(path: &[String]) -> bool {
+    let last = path
+        .last()
+        .map(|key| key.to_ascii_lowercase())
+        .unwrap_or_default();
+    [
+        "apikey",
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "bearer",
+        "authorization",
+    ]
+    .iter()
+    .any(|needle| last.contains(needle))
+}
+
+/// What a connection wrote, kept so a disconnect can restore exactly that.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Connection {
+    fields: Vec<OwnedField>,
+    /// The agent is not authorized (disconnect in progress, or a connection
+    /// this version no longer supports).
+    #[serde(default)]
+    disabled: bool,
+    /// A disconnect started; the record stays until token, parked secrets,
+    /// and config are all cleaned up, so a retry is idempotent.
+    #[serde(default)]
+    cleanup_pending: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OwnedField {
+    path: Vec<String>,
+    /// What the connection wrote; `None` when it made the key absent.
+    #[serde(default)]
+    value: Option<ConfigValue>,
+    previous: Option<Previous>,
+}
+
+/// The value a field held before the connection. Sensitive values are parked
+/// in the credential store and referenced by entry name only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Previous {
+    Secret { secret_ref: String },
+    Plain(ConfigValue),
+}
+
+type Store = BTreeMap<String, Connection>;
+
+/// A secret to park in the credential store when the edit is committed.
+struct PendingSecret {
+    entry: String,
+    value: String,
+}
+
+struct Edit {
+    changes: Vec<ConfigChange>,
+    record: Option<Connection>,
+    pending_secrets: Vec<PendingSecret>,
+    /// Restore entries whose value was put back (or confirmed gone); only
+    /// these are released from the credential store.
+    consumed_secrets: Vec<String>,
+}
+
+pub struct Projector {
+    home: PathBuf,
+    data_dir: PathBuf,
+    helper_exe: PathBuf,
+    ca_path: PathBuf,
+    endpoint: String,
+    tool_env: bool,
+    tokens: TokenFiles,
+    secrets: Arc<dyn SecretStore>,
+}
+
+impl Projector {
+    pub fn new(
+        helper_exe: PathBuf,
+        ca_path: PathBuf,
+        endpoint: &str,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, String> {
+        let home = env_path(HOME_OVERRIDE_ENV).map_or_else(home_dir, Ok)?;
+        Ok(Self::at(
+            home,
+            app_data_dir()?,
+            helper_exe,
+            ca_path,
+            endpoint,
+            true,
+            secrets,
+        ))
+    }
+
+    fn at(
+        home: PathBuf,
+        data_dir: PathBuf,
+        helper_exe: PathBuf,
+        ca_path: PathBuf,
+        endpoint: &str,
+        tool_env: bool,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            home,
+            tokens: TokenFiles::new(&data_dir),
+            data_dir,
+            helper_exe,
+            ca_path,
+            endpoint: endpoint.to_string(),
+            tool_env,
+            secrets,
+        }
+    }
+
+    fn store_path(&self) -> PathBuf {
+        self.data_dir.join(STORE_FILE)
+    }
+
+    /// One scan: every agent's status and the token set those statuses
+    /// authorize, from the same reads. Callers publish the returned set to
+    /// the proxy, so what the UI reports and what the proxy accepts can
+    /// never diverge; a drifted, corrupted, or unreadable config
+    /// deauthorizes its token on the very next scan.
+    pub fn scan(&self, catalog: Option<&Catalog>) -> Result<(Vec<AgentStatus>, TokenSet), String> {
+        let store = self.load_store()?;
+        let statuses: Vec<AgentStatus> = Agent::ALL
+            .iter()
+            .map(|agent| self.status(*agent, &store, catalog))
+            .collect();
+        let authorized: Vec<&str> = statuses
+            .iter()
+            .filter(|status| status.authorized)
+            .map(|status| status.id.as_str())
+            .collect();
+        let tokens = self.tokens.load(&authorized)?;
+        Ok((statuses, tokens))
+    }
+
+    /// Startup maintenance, under the apply lock: disable connections recorded
+    /// for agents this build no longer supports so their tokens are never
+    /// authorized again (the config stays until the user disconnects).
+    /// Returns whether anything changed.
+    pub fn migrate_legacy(&self) -> Result<bool, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            self.maintain_store_permissions()?;
+            let mut store = self.load_store()?;
+            let mut changed = false;
+            for agent in Agent::ALL {
+                if agent.static_unsupported().is_none() {
+                    continue;
+                }
+                if let Some(record) = store.get_mut(agent.id()) {
+                    if !record.disabled {
+                        record.disabled = true;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.save_store(&store)?;
+            }
+            Ok(changed)
+        })
+    }
+
+    /// The exact edits `apply` would make, computed on a scratch copy, plus a
+    /// revision of everything they were computed from. Nothing is persisted.
+    pub fn preview(
+        &self,
+        agent: Agent,
+        connect: bool,
+        catalog: Option<&Catalog>,
+        options: &ConnectOptions,
+    ) -> Result<AgentPreview, String> {
+        let store = self.load_store()?;
+        if connect {
+            self.require_connectable(agent, &store, catalog)?;
+        }
+        let (text, read_error) = self.config_text(agent);
+        if connect {
+            if let Some(error) = read_error.clone() {
+                return Err(error);
+            }
+        }
+        let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
+            Ok(mut doc) => self.edit(agent, connect, &mut doc, &store, catalog, options)?,
+            // Disconnect previews survive a broken config: nothing can be
+            // restored, but token, parked secrets, and record still go.
+            Err(_) if !connect => {
+                store
+                    .get(agent.id())
+                    .ok_or_else(|| format!("{} is not connected", agent.name()))?;
+                Edit {
+                    changes: Vec::new(),
+                    record: None,
+                    pending_secrets: Vec::new(),
+                    consumed_secrets: Vec::new(),
+                }
+            }
+            Err(reason) => return Err(self.parse_error(agent, &reason)),
+        };
+        Ok(AgentPreview {
+            agent: self.status(agent, &store, catalog),
+            connect,
+            changes: edit.changes,
+            note: agent.note(connect).to_string(),
+            revision: revision(text.as_deref(), store.get(agent.id()), catalog, options),
+        })
+    }
+
+    /// Apply the previewed edits under the cross-process config lock.
+    pub fn apply(
+        &self,
+        agent: Agent,
+        connect: bool,
+        revision_seen: &str,
+        catalog: Option<&Catalog>,
+        options: &ConnectOptions,
+    ) -> Result<AgentStatus, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            self.maintain_store_permissions()?;
+            let mut store = self.load_store()?;
+            let (text, read_error) = self.config_text(agent);
+            if revision(text.as_deref(), store.get(agent.id()), catalog, options) != revision_seen {
+                return Err(format!(
+                    "The {} config changed since the preview; review the changes again",
+                    agent.name()
+                ));
+            }
+            if connect {
+                if let Some(error) = read_error {
+                    return Err(error);
+                }
+                self.require_connectable(agent, &store, catalog)?;
+                self.connect(agent, &mut store, text, catalog, options)?;
+            } else {
+                self.disconnect(agent, &mut store)?;
+            }
+            Ok(self.status(agent, &store, catalog))
+        })
+    }
+
+    /// Emergency restore: disconnect every recorded agent, whether or not
+    /// this version supports it, the endpoint is bound, or the gateway runs.
+    /// Every agent's token file is deleted before any manifest or config is
+    /// touched — revoking the capability itself is durable, so no later
+    /// failure (not even across a restart) can leave an agent authorized.
+    /// `Err` means revocation or the tombstone step failed and callers must
+    /// keep the in-memory token set empty; per-agent cleanup failures keep
+    /// their tombstone for an idempotent retry.
+    pub fn disconnect_all(&self) -> Result<Vec<(String, String)>, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            self.maintain_store_permissions()?;
+            let mut store = self.load_store()?;
+            let targets: Vec<Agent> = Agent::ALL
+                .iter()
+                .copied()
+                .filter(|agent| store.contains_key(agent.id()))
+                .collect();
+            if targets.is_empty() {
+                return Ok(Vec::new());
+            }
+            for agent in &targets {
+                self.tokens.revoke(agent.id())?;
+            }
+            for agent in &targets {
+                if let Some(record) = store.get_mut(agent.id()) {
+                    record.disabled = true;
+                    record.cleanup_pending = true;
+                }
+            }
+            self.save_store(&store)?;
+            let mut failures = Vec::new();
+            for agent in targets {
+                if let Err(error) = self.cleanup(agent, &mut store) {
+                    failures.push((agent.id().to_string(), error));
+                }
+            }
+            Ok(failures)
+        })
+    }
+
+    /// Token, parked secrets, config, and record land together or are rolled
+    /// back together.
+    fn connect(
+        &self,
+        agent: Agent,
+        store: &mut Store,
+        text: Option<String>,
+        catalog: Option<&Catalog>,
+        options: &ConnectOptions,
+    ) -> Result<(), String> {
+        if store
+            .get(agent.id())
+            .is_some_and(|record| record.disabled || record.cleanup_pending)
+        {
+            return Err(format!(
+                "{} has a disconnect in progress; finish it before connecting again",
+                agent.name()
+            ));
+        }
+        let mut doc = self.parse_config(agent, text.as_deref())?;
+        let edit = self.edit(agent, true, &mut doc, store, catalog, options)?;
+        let mut guard = Rollback::default();
+        let result = (|| -> Result<(), String> {
+            // A fresh token on every new connection; a leftover file from an
+            // incomplete disconnect is never reused.
+            if store.contains_key(agent.id()) {
+                self.tokens.ensure(agent.id())?;
+            } else {
+                self.tokens.rotate(agent.id())?;
+                guard.revoke_token = true;
+            }
+            for secret in &edit.pending_secrets {
+                self.secrets.set(&secret.entry, &secret.value)?;
+                guard.delete_secrets.push(secret.entry.clone());
+            }
+            if !edit.changes.is_empty() {
+                let path = agent.config_path(&self.home, self.tool_env);
+                write_atomic(&path, &doc.render()?, Some(text.as_deref())).map_err(|error| {
+                    format!("Cannot write the {} config: {error}", agent.name())
+                })?;
+                guard.config = Some((path, text.clone()));
+            }
+            if let Some(record) = edit.record {
+                store.insert(agent.id().to_string(), record);
+            }
+            self.save_store(store)
+        })();
+        if let Err(error) = result {
+            let rollback = self.rollback(agent, guard);
+            return Err(match rollback {
+                Ok(()) => format!("{error}; nothing was changed"),
+                Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Disconnect revokes the capability itself first: the token file is
+    /// deleted before the record or any config is touched, so whatever fails
+    /// afterwards — even the tombstone save — the agent can never be
+    /// authorized again, not even across a restart. Cleanup never needs the
+    /// old token; a new connection always issues a fresh one.
+    fn disconnect(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+        let Some(record) = store.get_mut(agent.id()) else {
+            return Err(format!("{} is not connected", agent.name()));
+        };
+        self.tokens.revoke(agent.id())?;
+        record.disabled = true;
+        record.cleanup_pending = true;
+        self.save_store(store)?;
+        self.cleanup(agent, store)
+    }
+
+    /// Restore what can be restored and remove token, consumed parked
+    /// secrets, and the record. An unreadable or unparseable config is left
+    /// untouched (and its parked secrets stay in the credential store) rather
+    /// than blocking the disconnect.
+    fn cleanup(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+        let Some(record) = store.get(agent.id()).cloned() else {
+            return Ok(());
+        };
+        let (text, read_error) = self.config_text(agent);
+        if read_error.is_none() {
+            if let Ok(mut doc) =
+                ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
+            {
+                let edit = restore(&mut doc, &record, self.secrets.as_ref())?;
+                if !edit.changes.is_empty() {
+                    let path = agent.config_path(&self.home, self.tool_env);
+                    write_atomic(&path, &doc.render()?, Some(text.as_deref())).map_err(
+                        |error| format!("Cannot write the {} config: {error}", agent.name()),
+                    )?;
+                }
+                for entry in &edit.consumed_secrets {
+                    self.secrets.delete(entry)?;
+                }
+            }
+        }
+        self.tokens.revoke(agent.id())?;
+        store.remove(agent.id());
+        self.save_store(store)
+    }
+
+    fn rollback(&self, agent: Agent, guard: Rollback) -> Result<(), String> {
+        let mut first_error = None;
+        if let Some((path, original)) = guard.config {
+            let restored = match original {
+                Some(original) => write_atomic(&path, &original, None),
+                None => fs::remove_file(&path),
+            };
+            if let Err(error) = restored {
+                first_error.get_or_insert(format!("cannot restore the config: {error}"));
+            }
+        }
+        for entry in guard.delete_secrets {
+            if let Err(error) = self.secrets.delete(&entry) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if guard.revoke_token {
+            if let Err(error) = self.tokens.revoke(agent.id()) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn require_connectable(
+        &self,
+        agent: Agent,
+        store: &Store,
+        catalog: Option<&Catalog>,
+    ) -> Result<(), String> {
+        let status = self.status(agent, store, catalog);
+        match (status.supported, status.reason) {
+            (true, _) => Ok(()),
+            (false, reason) => Err(reason.unwrap_or_else(|| "Unsupported".to_string())),
+        }
+    }
+
+    fn edit(
+        &self,
+        agent: Agent,
+        connect: bool,
+        doc: &mut ConfigDoc,
+        store: &Store,
+        catalog: Option<&Catalog>,
+        options: &ConnectOptions,
+    ) -> Result<Edit, String> {
+        if !connect {
+            let record = store
+                .get(agent.id())
+                .ok_or_else(|| format!("{} is not connected", agent.name()))?;
+            return restore(doc, record, self.secrets.as_ref());
+        }
+        if agent.needs_catalog() && catalog.is_none() {
+            return Err(format!(
+                "Start the gateway and wait until it is verified; the model list for {} comes \
+                 from it",
+                agent.name()
+            ));
+        }
+        let inputs = Inputs {
+            endpoint: &self.endpoint,
+            helper_exe: &self.helper_exe,
+            ca_path: &self.ca_path,
+            catalog,
+            options,
+        };
+        project(doc, &fields(agent, &inputs)?, store.get(agent.id()), agent)
+    }
+
+    fn status(&self, agent: Agent, store: &Store, catalog: Option<&Catalog>) -> AgentStatus {
+        let path = agent.config_path(&self.home, self.tool_env);
+        let installed = (self.tool_env && cli_on_path(agent.cli_name()))
+            || path.exists()
+            || path.parent().is_some_and(Path::exists);
+        let record = store.get(agent.id());
+        let mut status = AgentStatus {
+            id: agent.id().to_string(),
+            name: agent.name().to_string(),
+            config_path: path.display().to_string(),
+            installed,
+            connected: false,
+            recorded: record.is_some(),
+            authorized: false,
+            surface: agent.surface(),
+            supported: true,
+            reason: None,
+            attention: None,
+            error: None,
+        };
+        if let Some(reason) = agent.static_unsupported() {
+            status.supported = false;
+            status.reason = Some(reason.to_string());
+        } else if !self.helper_exe.exists() {
+            status.supported = false;
+            status.reason = Some(HELPER_MISSING.to_string());
+        } else if catalog.is_some_and(|catalog| !catalog.declares(Surface::Messages)) {
+            status.supported = false;
+            status.reason = Some(MESSAGES_UNDECLARED.to_string());
+        }
+        // A broken config is reported, never hidden behind "not connected";
+        // the record, the attention line, and Disconnect all stay available.
+        let (text, read_error) = self.config_text(agent);
+        let doc = match read_error {
+            Some(error) => {
+                status.error = Some(error);
+                None
+            }
+            None => match self.parse_config(agent, text.as_deref()) {
+                Ok(doc) => Some(doc),
+                Err(error) => {
+                    status.error = Some(error);
+                    None
+                }
+            },
+        };
+        let Some(record) = record else {
+            return status;
+        };
+        let managed = doc.as_ref().is_some_and(|doc| {
+            record
+                .fields
+                .iter()
+                .all(|field| doc.get_value(&refs(&field.path)) == field.value)
+        });
+        let token = self.tokens.read(agent.id()).ok().flatten().is_some();
+        status.connected = managed && token;
+        status.authorized =
+            !record.disabled && agent.static_unsupported().is_none() && managed && token;
+        if record.cleanup_pending {
+            status.attention = Some(
+                "Disconnect did not complete; this agent's access is disabled until Disconnect \
+                 is retried"
+                    .to_string(),
+            );
+        } else if record.disabled || agent.static_unsupported().is_some() {
+            status.attention = Some(
+                "Connected by an earlier version that this build no longer supports; access is \
+                 disabled. Disconnect to restore your config"
+                    .to_string(),
+            );
+        } else if !managed {
+            status.attention = Some(
+                "The config no longer matches what the app wrote (edited outside the app, or \
+                 unreadable); this agent's access is disabled. Disconnect to clean up, or \
+                 reconnect"
+                    .to_string(),
+            );
+        } else if !token {
+            status.attention = Some(
+                "This agent's access is revoked; retry Disconnect to restore its config"
+                    .to_string(),
+            );
+        } else if status.connected && agent == Agent::ClaudeCode {
+            if let (Some(catalog), Some(model)) = (
+                catalog,
+                doc.as_ref()
+                    .and_then(|doc| doc.get_str(&["env", "ANTHROPIC_MODEL"])),
+            ) {
+                if catalog.get(&model).is_none() {
+                    status.attention = Some(format!(
+                        "`{model}` is no longer served; choose another model and reconnect"
+                    ));
+                }
+            }
+        }
+        status
+    }
+
+    /// Lenient read for flows that must survive a broken config (status,
+    /// revisions, disconnect): the error is carried, never thrown.
+    fn config_text(&self, agent: Agent) -> (Option<String>, Option<String>) {
+        match self.read_config(agent) {
+            Ok(text) => (text, None),
+            Err(error) => (None, Some(error)),
+        }
+    }
+
+    /// The config text, or `None` when the file does not exist yet.
+    fn read_config(&self, agent: Agent) -> Result<Option<String>, String> {
+        match fs::read_to_string(agent.config_path(&self.home, self.tool_env)) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("Cannot read the {} config: {error}", agent.name())),
+        }
+    }
+
+    fn parse_config(&self, agent: Agent, text: Option<&str>) -> Result<ConfigDoc, String> {
+        ConfigDoc::parse(agent.format(), text.unwrap_or_default())
+            .map_err(|reason| self.parse_error(agent, &reason))
+    }
+
+    fn parse_error(&self, agent: Agent, reason: &str) -> String {
+        format!(
+            "The {} config at {} is {reason}; fix it before connecting",
+            agent.name(),
+            agent.config_path(&self.home, self.tool_env).display()
+        )
+    }
+
+    /// Load the connection record. A pure read (symlinks refused, no
+    /// permission or migration side effects); maintenance happens only under
+    /// the apply lock.
+    fn load_store(&self) -> Result<Store, String> {
+        let text = tokens::read_private_text(&self.store_path())
+            .map_err(|error| format!("Cannot read the agent connection record: {error}"))?;
+        match text {
+            None => Ok(Store::new()),
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|_| "The agent connection record is corrupted".to_string()),
+        }
+    }
+
+    /// Restore owner-only permissions on the record and token files, through
+    /// `O_NOFOLLOW` descriptors. Called only under the apply lock (startup
+    /// and transactions); reads never change permissions.
+    fn maintain_store_permissions(&self) -> Result<(), String> {
+        tokens::tighten_private(&self.store_path())
+            .map_err(|error| format!("Cannot secure the agent connection record: {error}"))?;
+        self.tokens.maintain(&Agent::ALL.map(Agent::id))
+    }
+
+    fn save_store(&self, store: &Store) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
+        tokens::create_private_dir(&self.data_dir)
+            .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
+        write_atomic(&self.store_path(), &text, None)
+            .map_err(|error| format!("Cannot save the agent connection record: {error}"))
+    }
+}
+
+#[derive(Default)]
+struct Rollback {
+    revoke_token: bool,
+    delete_secrets: Vec<String>,
+    config: Option<(PathBuf, Option<String>)>,
+}
+
+/// SHA-256 over everything a preview was computed from: the config text, the
+/// existing connection record, the catalog revision, and the user's choices.
+/// Each part is length-prefixed so boundaries cannot shift. The digest is
+/// compared only, never logged or shown, since the text may contain
+/// credentials.
+fn revision(
+    text: Option<&str>,
+    record: Option<&Connection>,
+    catalog: Option<&Catalog>,
+    options: &ConnectOptions,
+) -> String {
+    let mut hasher = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    part(text.unwrap_or_default().as_bytes());
+    part(
+        serde_json::to_string(&record)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    part(
+        catalog
+            .map_or("", |catalog| catalog.revision.as_str())
+            .as_bytes(),
+    );
+    part(options.model.as_deref().unwrap_or_default().as_bytes());
+    hex(&hasher.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn secret_entry(agent: Agent, path: &[String]) -> String {
+    format!(
+        "restore:{}:{}",
+        agent.id(),
+        hex(&Sha256::digest(path.join("\u{1f}")))
+    )
+}
+
+/// Write the owned fields, remembering what each held before. A field that
+/// still holds what an earlier connection wrote keeps that connection's
+/// `previous`, so reconnecting never records our own value as the original.
+/// Previous values of sensitive fields are returned as pending secrets and
+/// referenced by entry name; they never appear in changes or the record.
+fn project(
+    doc: &mut ConfigDoc,
+    fields: &[Field],
+    prior: Option<&Connection>,
+    agent: Agent,
+) -> Result<Edit, String> {
+    let mut record = Connection::default();
+    let mut changes = Vec::new();
+    let mut pending_secrets = Vec::new();
+    for field in fields {
+        let path = refs(&field.path);
+        let sensitive = is_sensitive(&field.path);
+        let current = doc.get_value(&path);
+        let still_ours = prior.and_then(|prior| {
+            prior
+                .fields
+                .iter()
+                .find(|owned| owned.path == field.path && current == owned.value)
+        });
+        let previous = match still_ours {
+            Some(owned) => owned.previous.clone(),
+            None => match current
+                .clone()
+                .filter(|held| Some(held) != field.value.as_ref())
+            {
+                Some(held) if sensitive => {
+                    let entry = secret_entry(agent, &field.path);
+                    pending_secrets.push(PendingSecret {
+                        entry: entry.clone(),
+                        value: held.display(),
+                    });
+                    Some(Previous::Secret { secret_ref: entry })
+                }
+                Some(held) => Some(Previous::Plain(held)),
+                None => None,
+            },
+        };
+        if current != field.value {
+            match &field.value {
+                Some(value) => doc.set_value(&path, value)?,
+                None => doc.remove(&path),
+            }
+            changes.push(if sensitive {
+                ConfigChange {
+                    key: path.join("."),
+                    before: current.as_ref().map(|_| "Existing secret".to_string()),
+                    after: field
+                        .value
+                        .as_ref()
+                        .map(|_| "Managed local credential".to_string()),
+                    sensitive: true,
+                }
+            } else {
+                change(&path, current, field.value.clone())
+            });
+        }
+        record.fields.push(OwnedField {
+            path: field.path.clone(),
+            value: field.value.clone(),
+            previous,
+        });
+    }
+    Ok(Edit {
+        changes,
+        record: Some(record),
+        pending_secrets,
+        consumed_secrets: Vec::new(),
+    })
+}
+
+/// Undo a connection: every owned field that still holds what we wrote goes
+/// back to its previous value (plain, or fetched from the credential store)
+/// or disappears, pruning emptied containers; anything the user changed since
+/// is left alone. Idempotent: a field already restored is skipped.
+fn restore(
+    doc: &mut ConfigDoc,
+    record: &Connection,
+    secrets: &dyn SecretStore,
+) -> Result<Edit, String> {
+    let mut changes = Vec::new();
+    let mut consumed_secrets = Vec::new();
+    for field in &record.fields {
+        let path = refs(&field.path);
+        let current = doc.get_value(&path);
+        if current != field.value {
+            continue;
+        }
+        let sensitive = is_sensitive(&field.path);
+        if let Some(Previous::Secret { secret_ref }) = &field.previous {
+            consumed_secrets.push(secret_ref.clone());
+        }
+        let (restored, after_label) = match &field.previous {
+            Some(Previous::Plain(value)) => (Some(value.clone()), None),
+            Some(Previous::Secret { secret_ref }) => match secrets.get(secret_ref)? {
+                Some(value) => (
+                    Some(ConfigValue::Str(value)),
+                    Some("Previous secret restored".to_string()),
+                ),
+                None => (
+                    None,
+                    Some("Previous secret unavailable; left unset".to_string()),
+                ),
+            },
+            None => (None, None),
+        };
+        match &restored {
+            Some(value) => doc.set_value(&path, value)?,
+            None => doc.remove(&path),
+        }
+        changes.push(if sensitive {
+            ConfigChange {
+                key: path.join("."),
+                before: current
+                    .as_ref()
+                    .map(|_| "Managed local credential".to_string()),
+                after: after_label,
+                sensitive: true,
+            }
+        } else {
+            change(&path, current, restored)
+        });
+    }
+    Ok(Edit {
+        changes,
+        record: None,
+        pending_secrets: Vec::new(),
+        consumed_secrets,
+    })
+}
+
+fn change(path: &[&str], before: Option<ConfigValue>, after: Option<ConfigValue>) -> ConfigChange {
+    ConfigChange {
+        key: path.join("."),
+        before: before.map(|value| value.display()),
+        after: after.map(|value| value.display()),
+        sensitive: false,
+    }
+}
+
+fn refs(path: &[String]) -> Vec<&str> {
+    path.iter().map(String::as_str).collect()
+}
+
+/// Whether the agent's official CLI is on PATH (platform executable names).
+fn cli_on_path(name: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    let candidates: &[String] = &if cfg!(windows) {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+        ]
+    } else {
+        vec![name.to_string()]
+    };
+    env::split_paths(&paths).any(|dir| {
+        candidates
+            .iter()
+            .any(|candidate| dir.join(candidate).is_file())
+    })
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    env_path("HOME")
+        .or_else(|| env_path("USERPROFILE"))
+        .ok_or_else(|| "Cannot determine the home directory".to_string())
+}
+
+/// The per-user app data directory (tokens, connection record, CA
+/// certificate, locks), resolved the same way by the desktop shell and the
+/// bundled helper.
+pub fn app_data_dir() -> Result<PathBuf, String> {
+    if let Some(home) = env_path(HOME_OVERRIDE_ENV) {
+        return Ok(home.join(".private-ai-gateway"));
+    }
+    let base = if cfg!(target_os = "macos") {
+        home_dir()?.join("Library").join("Application Support")
+    } else if cfg!(windows) {
+        env_path("APPDATA").ok_or_else(|| "APPDATA is not set".to_string())?
+    } else {
+        env_path("XDG_DATA_HOME").map_or_else(
+            || home_dir().map(|home| home.join(".local").join("share")),
+            Ok,
+        )?
+    };
+    Ok(base.join(APP_IDENTIFIER))
+}
+
+/// Replace `path` atomically: refuse symlinks, re-check that the file still
+/// holds `expected` right before the swap, write a random owner-only temp file
+/// (never following links), keep the target's permissions when it exists,
+/// rename, then fsync the directory on Unix. Callers that need cross-process
+/// exclusion wrap this in `lock::with_apply_lock`.
+pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
+    fs::create_dir_all(dir)?;
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to replace a symlink",
+            ))
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(expected) = expected {
+        let current = match fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "the file changed on disk since it was read",
+            ));
+        }
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let mut nonce = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let temp = dir.join(format!(".{name}.{}.tmp", hex(&nonce)));
+    let result = (|| {
+        tokens::write_private(&temp, content)?;
+        if let Some(metadata) = &existing {
+            fs::set_permissions(&temp, metadata.permissions())?;
+        }
+        fs::rename(&temp, path)?;
+        sync_dir(dir)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::MemoryStore;
+    use serde_json::json;
+
+    const ENDPOINT: &str = "https://127.0.0.1:4180";
+
+    fn catalog() -> Catalog {
+        Catalog::from_remote(
+            &json!({
+                "data": [
+                    { "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "context_length": 131072 },
+                    { "id": "phala/qwen" }
+                ],
+                "aci_capabilities": { "version": 1, "surfaces": {
+                    "chat_completions": "all", "messages": "all", "responses": "undeclared"
+                }}
+            }),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn undeclared_catalog() -> Catalog {
+        Catalog::from_remote(&json!({ "data": [{ "id": "openai/gpt-oss-20b" }] }), 1).unwrap()
+    }
+
+    struct Sandbox {
+        home: PathBuf,
+        projector: Projector,
+        secrets: Arc<MemoryStore>,
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// A fresh home directory under the system temp dir with a fake helper
+    /// binary and CA file; tool env overrides are ignored so no real config is
+    /// touched.
+    fn sandbox(name: &str) -> Sandbox {
+        let home = env::temp_dir().join(format!("pag-agents-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let helper = home
+            .join("Private AI Gateway.app")
+            .join(helper_binary_name());
+        write(&helper, "#!/bin/sh\n");
+        let ca = home.join("state").join("local-gateway-ca.pem");
+        write(
+            &ca,
+            "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
+        );
+        let secrets = Arc::new(MemoryStore::default());
+        let projector = Projector::at(
+            home.clone(),
+            home.join("state"),
+            helper,
+            ca,
+            ENDPOINT,
+            false,
+            secrets.clone(),
+        );
+        Sandbox {
+            home,
+            projector,
+            secrets,
+        }
+    }
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn claude_options() -> ConnectOptions {
+        ConnectOptions {
+            model: Some("openai/gpt-oss-20b".to_string()),
+        }
+    }
+
+    fn connect(sandbox: &Sandbox) -> AgentStatus {
+        let catalog = catalog();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &claude_options())
+            .unwrap();
+        sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap()
+    }
+
+    fn disconnect(sandbox: &Sandbox, agent: Agent) -> AgentStatus {
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(agent, false, None, &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, false, &preview.revision, None, &options)
+            .unwrap()
+    }
+
+    fn doc(sandbox: &Sandbox, agent: Agent) -> ConfigDoc {
+        let text = sandbox.projector.read_config(agent).unwrap();
+        sandbox
+            .projector
+            .parse_config(agent, text.as_deref())
+            .unwrap()
+    }
+
+    #[test]
+    fn codex_and_opencode_are_unsupported_but_legacy_connections_disconnect() {
+        let sandbox = sandbox("unsupported");
+        let statuses = sandbox.projector.scan(None).unwrap().0;
+        assert!(!statuses[0].supported && statuses[0].reason.is_some());
+        assert!(
+            !statuses[2].supported
+                && statuses[2]
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("certificate")
+        );
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::OpenCode,
+                true,
+                Some(&catalog()),
+                &ConnectOptions::default()
+            )
+            .is_err());
+
+        // A record left by an earlier version: token present, config projected.
+        let path = sandbox.home.join(".codex").join("config.toml");
+        write(&path, "model_provider = \"private_ai_gateway\"\n");
+        sandbox.projector.tokens.ensure("codex").unwrap();
+        let record = Connection {
+            fields: vec![OwnedField {
+                path: owned(&["model_provider"]),
+                value: Some(ConfigValue::Str("private_ai_gateway".into())),
+                previous: Some(Previous::Plain(ConfigValue::Str("openai".into()))),
+            }],
+            disabled: false,
+            cleanup_pending: false,
+        };
+        let mut store = Store::new();
+        store.insert("codex".into(), record);
+        sandbox.projector.save_store(&store).unwrap();
+
+        // Reading never writes: a scan leaves the record untouched,
+        // yet the unsupported agent's token is not authorized either way.
+        let before = fs::read(sandbox.projector.store_path()).unwrap();
+        assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
+        let status = &sandbox.projector.scan(None).unwrap().0[0];
+        assert!(status.connected, "the config still carries the projection");
+        assert!(!status.supported);
+        assert!(status.attention.as_deref().unwrap().contains("Disconnect"));
+        assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), before);
+        // The explicit startup migration disables it on disk, once.
+        assert!(sandbox.projector.migrate_legacy().unwrap());
+        assert!(!sandbox.projector.migrate_legacy().unwrap());
+        assert!(sandbox.projector.load_store().unwrap()["codex"].disabled);
+
+        // Disconnect works without support, endpoint, or catalog.
+        let status = disconnect(&sandbox, Agent::Codex);
+        assert!(!status.connected);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "model_provider = \"openai\"\n"
+        );
+        assert!(sandbox.projector.tokens.read("codex").unwrap().is_none());
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    #[test]
+    fn claude_takes_over_credentials_via_the_keyring_and_restores_them() {
+        let sandbox = sandbox("claude");
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(
+            &path,
+            r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret"}}"#,
+        );
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+            .unwrap();
+        let token_change = preview
+            .changes
+            .iter()
+            .find(|change| change.key == "env.ANTHROPIC_AUTH_TOKEN")
+            .unwrap();
+        assert_eq!(token_change.before.as_deref(), Some("Existing secret"));
+        assert_eq!(token_change.after, None);
+        assert!(token_change.sensitive);
+        let preview_json = serde_json::to_string(&preview).unwrap();
+        assert!(!preview_json.contains("sk-old-secret"));
+        assert!(sandbox.secrets.is_empty(), "preview parks nothing");
+
+        let status = connect(&sandbox);
+        assert!(status.connected);
+        let doc = doc(&sandbox, Agent::ClaudeCode);
+        assert_eq!(doc.get_str(&["env", "ANTHROPIC_AUTH_TOKEN"]), None);
+        assert_eq!(
+            doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
+            Some(ENDPOINT)
+        );
+        assert!(doc
+            .get_str(&["env", "NODE_EXTRA_CA_CERTS"])
+            .unwrap()
+            .ends_with("local-gateway-ca.pem"));
+        assert_eq!(
+            doc.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
+            Some("openai/gpt-oss-20b")
+        );
+        assert!(doc
+            .get_str(&["apiKeyHelper"])
+            .unwrap()
+            .contains("--agent-token claude-code"));
+        assert_eq!(doc.get_str(&["model"]).as_deref(), Some("opus"));
+        assert!(
+            sandbox.secrets.holds("sk-old-secret"),
+            "old secret parked in the store"
+        );
+        let manifest = fs::read_to_string(sandbox.projector.store_path()).unwrap();
+        assert!(!manifest.contains("sk-old-secret"));
+        assert!(manifest.contains("secret_ref"));
+
+        let smaller =
+            Catalog::from_remote(&json!({ "data": [{ "id": "phala/qwen" }] }), 2).unwrap();
+        let status = &sandbox.projector.scan(Some(&smaller)).unwrap().0[1];
+        assert!(status.connected);
+        assert!(status
+            .attention
+            .as_deref()
+            .unwrap()
+            .contains("no longer served"));
+
+        disconnect(&sandbox, Agent::ClaudeCode);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"ANTHROPIC_AUTH_TOKEN\": \"sk-old-secret\""));
+        assert!(!text.contains("apiKeyHelper") && !text.contains("NODE_EXTRA_CA_CERTS"));
+        assert!(sandbox.secrets.is_empty(), "restore entry released");
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    #[test]
+    fn claude_needs_a_declared_messages_surface_and_a_catalog_model() {
+        let sandbox = sandbox("claude-gate");
+        let status = &sandbox
+            .projector
+            .scan(Some(&undeclared_catalog()))
+            .unwrap()
+            .0[1];
+        assert!(!status.supported);
+        assert!(status
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("aci_capabilities"));
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::ClaudeCode,
+                true,
+                Some(&undeclared_catalog()),
+                &claude_options()
+            )
+            .unwrap_err()
+            .contains("aci_capabilities"));
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::ClaudeCode,
+                true,
+                Some(&catalog()),
+                &ConnectOptions::default()
+            )
+            .unwrap_err()
+            .contains("Choose a model"));
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::ClaudeCode,
+                true,
+                Some(&catalog()),
+                &ConnectOptions {
+                    model: Some("claude-sonnet-4-6".to_string()),
+                },
+            )
+            .unwrap_err()
+            .contains("not in the verified model list"));
+        // Without the helper binary, Claude Code is unsupported too.
+        fs::remove_file(&sandbox.projector.helper_exe).unwrap();
+        assert!(!sandbox.projector.scan(Some(&catalog())).unwrap().0[1].supported);
+    }
+
+    #[test]
+    fn apply_refuses_a_stale_revision() {
+        let sandbox = sandbox("revision");
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(&path, r#"{"model": "opus"}"#);
+        let catalog = catalog();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &claude_options())
+            .unwrap();
+        write(&path, r#"{"model": "sonnet"}"#);
+        let error = sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap_err();
+        assert!(error.contains("changed since the preview"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "sonnet"}"#);
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_rolls_everything_back_when_the_record_cannot_be_saved() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut sandbox = sandbox("rollback");
+        let blocked = sandbox.home.join("blocked");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        sandbox.projector.data_dir = blocked.clone();
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(&path, r#"{"env": {"ANTHROPIC_API_KEY": "sk-user"}}"#);
+        let catalog = catalog();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, true, Some(&catalog), &claude_options())
+            .unwrap();
+        let error = sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("nothing was changed") || error.contains("lock"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"{"env": {"ANTHROPIC_API_KEY": "sk-user"}}"#
+        );
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        assert!(sandbox.secrets.is_empty(), "parked secret rolled back");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token() {
+        let sandbox = sandbox("tombstone");
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(&path, r#"{"model": "opus"}"#);
+        connect(&sandbox);
+        let token = sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .unwrap();
+        assert!(!sandbox.projector.scan(None).unwrap().1.is_empty());
+
+        // Make the config unwritable (a symlink target is refused) so the
+        // restore step fails after the record was tombstoned.
+        let dir = path.parent().unwrap().to_path_buf();
+        let original = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(dir.join("elsewhere.json"), &original).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere.json"), &path).unwrap();
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, false, None, &options)
+            .unwrap();
+        assert!(sandbox
+            .projector
+            .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+            .is_err());
+        assert!(
+            sandbox.projector.scan(None).unwrap().1.is_empty(),
+            "access stays revoked"
+        );
+        let status = &sandbox.projector.scan(None).unwrap().0[1];
+        assert!(status.attention.as_deref().unwrap().contains("retried"));
+        // Reconnecting is refused while the tombstone exists.
+        assert!(sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                true,
+                "any",
+                Some(&catalog()),
+                &claude_options()
+            )
+            .is_err());
+
+        // Repair the config and retry: idempotent cleanup completes.
+        fs::remove_file(&path).unwrap();
+        fs::rename(dir.join("elsewhere.json"), &path).unwrap();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, false, None, &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+            .unwrap();
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        assert!(!fs::read_to_string(&path).unwrap().contains("apiKeyHelper"));
+
+        // A new connection issues a fresh token, never the old value.
+        connect(&sandbox);
+        assert_ne!(
+            sandbox
+                .projector
+                .tokens
+                .read("claude-code")
+                .unwrap()
+                .unwrap(),
+            token
+        );
+    }
+
+    #[test]
+    fn disconnect_all_restores_every_agent_without_support() {
+        let sandbox = sandbox("emergency");
+        write(
+            &sandbox.home.join(".claude").join("settings.json"),
+            r#"{"model": "opus"}"#,
+        );
+        connect(&sandbox);
+        let codex = sandbox.home.join(".codex").join("config.toml");
+        write(&codex, "model_provider = \"private_ai_gateway\"\n");
+        sandbox.projector.tokens.ensure("codex").unwrap();
+        let mut store = sandbox.projector.load_store().unwrap();
+        store.insert(
+            "codex".into(),
+            Connection {
+                fields: vec![OwnedField {
+                    path: owned(&["model_provider"]),
+                    value: Some(ConfigValue::Str("private_ai_gateway".into())),
+                    previous: None,
+                }],
+                disabled: true,
+                cleanup_pending: false,
+            },
+        );
+        sandbox.projector.save_store(&store).unwrap();
+
+        assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&codex).unwrap(), "");
+        assert!(
+            !fs::read_to_string(sandbox.home.join(".claude").join("settings.json"))
+                .unwrap()
+                .contains("apiKeyHelper")
+        );
+        assert!(sandbox
+            .projector
+            .tokens
+            .load(&["codex", "claude-code"])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn atomic_writes_refuse_symlinks_and_changed_files() {
+        let dir = env::temp_dir().join(format!("pag-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("config.json");
+        write_atomic(&target, "{}", Some(None)).unwrap();
+        assert!(write_atomic(&target, "{\"a\":1}", Some(Some("changed"))).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{}");
+        write_atomic(&target, "{\"a\":1}", Some(Some("{}"))).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = dir.join("link.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(write_atomic(&link, "{}", None).is_err());
+            assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+        }
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Config drift or corruption deauthorizes the token on the next load,
+    /// keeps the record visible, and stays recoverable via Disconnect.
+    #[test]
+    fn drifted_or_broken_configs_deauthorize_tokens_but_stay_recoverable() {
+        let sandbox = sandbox("drift");
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(
+            &path,
+            r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret"}}"#,
+        );
+        connect(&sandbox);
+        assert!(!sandbox.projector.scan(None).unwrap().1.is_empty());
+
+        // The user edits an owned field outside the app (a restart is just a
+        // fresh scan, which is what the shell does at startup).
+        let mut doc = doc(&sandbox, Agent::ClaudeCode);
+        doc.set_str(&["env", "ANTHROPIC_MODEL"], "somewhere/else")
+            .unwrap();
+        write(&path, &doc.render().unwrap());
+        assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
+        let status = &sandbox.projector.scan(None).unwrap().0[1];
+        assert!(status.recorded && !status.authorized && !status.connected);
+        assert!(status
+            .attention
+            .as_deref()
+            .unwrap()
+            .contains("no longer matches"));
+
+        // Corrupt the file entirely: still recorded, error reported, token
+        // still unauthorized, and Disconnect cleans up without touching it.
+        write(&path, "{ not json");
+        assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
+        let status = &sandbox.projector.scan(None).unwrap().0[1];
+        assert!(status.recorded && !status.authorized);
+        assert!(status.error.is_some());
+        disconnect(&sandbox, Agent::ClaudeCode);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        // The parked previous secret was not consumed: it stays retrievable.
+        assert!(sandbox.secrets.holds("sk-old-secret"));
+    }
+
+    /// Restore-all revokes every token and tombstones every record before
+    /// any config is read; an unreadable config fails only its own cleanup
+    /// and never leaves the agent authorized.
+    #[test]
+    fn restore_all_revokes_before_reading_any_config() {
+        let sandbox = sandbox("tombstone-first");
+        write(
+            &sandbox.home.join(".claude").join("settings.json"),
+            r#"{"model": "opus"}"#,
+        );
+        connect(&sandbox);
+        // Replace the config with a directory: reading it fails outright.
+        let path = sandbox.home.join(".claude").join("settings.json");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let failures = sandbox.projector.disconnect_all().unwrap();
+        assert!(
+            failures.is_empty(),
+            "unreadable config is skipped, not fatal: {failures:?}"
+        );
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
+    }
+
+    /// The apiKeyHelper command is parsed by a POSIX `sh` on every platform,
+    /// so quoting is uniform `shlex`: paths with spaces, `$`, backticks, and
+    /// single and double quotes round-trip exactly. The `shlex::split`
+    /// contract holds everywhere; where an `sh` exists (Unix, Git Bash on
+    /// CI) the same command line is round-tripped through `sh -c` too.
+    #[test]
+    fn helper_command_quotes_hostile_paths_for_the_shell() {
+        for hostile in [
+            "/Applications/Private AI Gateway.app/Contents/MacOS/helper",
+            "/tmp/it's here/$HOME`echo`;rm -rf/helper",
+            "/tmp/quote\"double\"/helper",
+        ] {
+            let command = helper_command(Path::new(hostile), "claude-code").unwrap();
+            let suffix = " --agent-token claude-code";
+            assert!(command.ends_with(suffix));
+            let quoted = &command[..command.len() - suffix.len()];
+            assert_eq!(shlex::split(quoted), Some(vec![hostile.to_string()]));
+            match std::process::Command::new("sh")
+                .args(["-c", &format!("printf %s {quoted}")])
+                .output()
+            {
+                Ok(output) => {
+                    assert_eq!(
+                        String::from_utf8_lossy(&output.stdout),
+                        hostile,
+                        "{command}"
+                    )
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot run sh: {error}"),
+            }
+        }
+    }
+
+    /// Deleting the token file is the revocation itself: even when the very
+    /// first manifest save fails, a restart (a fresh Projector) authorizes
+    /// nothing, the record stays visible for a retry, and a new connection
+    /// rotates to a fresh token. Covers single Disconnect and Restore all.
+    #[cfg(unix)]
+    #[test]
+    fn revocation_is_durable_even_when_the_first_manifest_save_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        for all in [false, true] {
+            let sandbox = sandbox(if all {
+                "revoke-first-all"
+            } else {
+                "revoke-first"
+            });
+            write(
+                &sandbox.home.join(".claude").join("settings.json"),
+                r#"{"model": "opus"}"#,
+            );
+            connect(&sandbox);
+            let old = sandbox
+                .projector
+                .tokens
+                .read("claude-code")
+                .unwrap()
+                .unwrap();
+            // Make the record unsaveable: the tombstone write fails after the
+            // token file is already gone.
+            let data_dir = sandbox.home.join("state");
+            fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o500)).unwrap();
+            let result = if all {
+                sandbox.projector.disconnect_all().map(|_| ())
+            } else {
+                let options = ConnectOptions::default();
+                let preview = sandbox
+                    .projector
+                    .preview(Agent::ClaudeCode, false, None, &options)
+                    .unwrap();
+                sandbox
+                    .projector
+                    .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+                    .map(|_| ())
+            };
+            fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(result.is_err());
+            assert!(
+                sandbox
+                    .projector
+                    .tokens
+                    .read("claude-code")
+                    .unwrap()
+                    .is_none(),
+                "the capability itself is gone"
+            );
+            // A restart is a fresh scan: nothing is authorized, the record is
+            // still shown with an attention line.
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            assert!(tokens.is_empty());
+            assert!(statuses[1].recorded);
+            assert!(statuses[1]
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("revoked"));
+            // The retry completes; a new connection never reuses the token.
+            disconnect(&sandbox, Agent::ClaudeCode);
+            assert!(sandbox.projector.load_store().unwrap().is_empty());
+            connect(&sandbox);
+            assert_ne!(
+                sandbox
+                    .projector
+                    .tokens
+                    .read("claude-code")
+                    .unwrap()
+                    .unwrap(),
+                old
+            );
+        }
+    }
+
+    /// Revocation is remove-plus-parent-sync, strictly before any manifest
+    /// write: with a failing sync injected, disconnect fails closed — the
+    /// token entry is already gone, the manifest was never touched, a scan
+    /// authorizes nothing — and the retry with a working sync completes.
+    #[test]
+    fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
+        let mut sandbox = sandbox("sync-fail");
+        write(
+            &sandbox.home.join(".claude").join("settings.json"),
+            r#"{"model": "opus"}"#,
+        );
+        connect(&sandbox);
+        let manifest_before = fs::read(sandbox.projector.store_path()).unwrap();
+        sandbox
+            .projector
+            .tokens
+            .set_sync_parent(|_| Err(io::Error::other("injected sync failure")));
+
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, false, None, &options)
+            .unwrap();
+        let error = sandbox
+            .projector
+            .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+            .unwrap_err();
+        assert!(error.contains("could not be persisted"), "{error}");
+        // The removal happened before the failed sync stopped everything…
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        // …and the manifest write never ran: not even the tombstone landed.
+        assert_eq!(
+            fs::read(sandbox.projector.store_path()).unwrap(),
+            manifest_before
+        );
+        // Fail closed either way: a scan authorizes nothing, the record stays
+        // visible for a retry.
+        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+        assert!(tokens.is_empty());
+        assert!(statuses[1].recorded && statuses[1].attention.is_some());
+
+        sandbox.projector.tokens.set_sync_parent(tokens::sync_dir);
+        disconnect(&sandbox, Agent::ClaudeCode);
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    /// Install detection is informational only: with an empty home (and no
+    /// CLI consulted), connect still previews and creates the official
+    /// settings file from scratch.
+    #[test]
+    fn connect_creates_the_official_config_from_scratch() {
+        let sandbox = sandbox("fresh-home");
+        let (statuses, _) = sandbox.projector.scan(None).unwrap();
+        assert!(!statuses[1].installed);
+        let status = connect(&sandbox);
+        assert!(status.connected);
+        let text = fs::read_to_string(sandbox.home.join(".claude").join("settings.json")).unwrap();
+        assert!(text.contains("ANTHROPIC_BASE_URL"));
+        assert!(text.contains("apiKeyHelper"));
+    }
+
+    /// H1 at the proxy layer: a scan is what publishes authority. A token
+    /// obtained while connected stops opening the proxy as soon as a scan
+    /// runs after the config drifted or broke — the request is refused at
+    /// auth and nothing reaches the sidecar.
+    #[tokio::test]
+    async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
+        use crate::proxy::{router, ProxyState, Session};
+        use axum::{routing::get, routing::post, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let sandbox = sandbox("proxy-drift");
+        let path = sandbox.home.join(".claude").join("settings.json");
+        write(&path, r#"{"model": "opus"}"#);
+        connect(&sandbox);
+        let token = sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .unwrap();
+
+        // A counting sidecar and a verified session for it.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let sidecar = Router::new()
+            .route(
+                "/v1/messages",
+                post(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { Json(serde_json::json!({"ok": true})) }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "data": [{ "id": "openai/gpt-oss-20b" }],
+                        "aci_capabilities": { "version": 1, "surfaces": {
+                            "chat_completions": "all", "messages": "all", "responses": "undeclared"
+                        }}
+                    }))
+                }),
+            );
+        let sidecar_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", sidecar_listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(sidecar_listener, sidecar).await.unwrap() });
+
+        let (sender, _events) = tokio::sync::mpsc::channel(8);
+        let state = ProxyState::new(sender);
+        state.set_api_key(Some("sk-live".into()));
+        state.publish(Session {
+            generation: 1,
+            epoch: 1,
+            base_url: Some(base_url.clone()),
+            verified: false,
+            catalog: None,
+        });
+        let catalog = state.fetch_catalog(1, 1).await.unwrap();
+        state.publish(Session {
+            generation: 1,
+            epoch: 1,
+            base_url: Some(base_url),
+            verified: true,
+            catalog: Some(catalog),
+        });
+        state.set_tokens(sandbox.projector.scan(None).unwrap().1);
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+        let app = router(state.clone());
+        tokio::spawn(async move { axum::serve(proxy_listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let send = |token: String| {
+            client
+                .post(format!("{proxy_url}/v1/messages"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({"model": "openai/gpt-oss-20b"}))
+                .send()
+        };
+        assert_eq!(send(token.clone()).await.unwrap().status().as_u16(), 200);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // The config drifts outside the app; the next scan republishes the
+        // token set and the old token stops working immediately.
+        write(&path, "{ not json");
+        state.set_tokens(sandbox.projector.scan(None).unwrap().1);
+        assert_eq!(send(token).await.unwrap().status().as_u16(), 401);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "nothing reached the sidecar"
+        );
+    }
+}

@@ -2,15 +2,57 @@ mod contracts;
 mod gateway;
 mod tray;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{Arc, Mutex};
 
-use contracts::{GatewayState, StartGatewayConfig};
-use gateway::GatewayManager;
+use contracts::{AgentPreview, AgentStatus, ConnectOptions, GatewayState, StartGatewayConfig};
+use desktop_gateway::{
+    agents::{app_data_dir, helper_binary_name, Agent, Projector},
+    catalog::Catalog,
+    lock,
+    proxy::{self, ProxyEvent, ProxyState},
+    secrets::{validate_api_key, KeyringStore, SecretStore, API_KEY_ENTRY},
+    tls,
+    tokens::TokenSet,
+};
+use gateway::{GatewayManager, LOCAL_ADDR, LOCAL_ENDPOINT};
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+
+/// The OS credential store holding the RedPill API key, parked secrets, and
+/// the local CA.
+struct Secrets(Arc<dyn SecretStore>);
+
+/// What the launch established before the window: the bound endpoint and
+/// the TLS identity. `Err` means nothing may start or connect this launch;
+/// the window still opens to say so and to allow disconnecting agents.
+struct Launch(Mutex<Result<Option<Bound>, String>>);
+
+/// The primary-instance lock, held for the whole process lifetime whether or
+/// not the endpoint or identity could be established, so a failed launch
+/// still keeps a second instance from claiming the port meanwhile.
+struct Instance(#[allow(dead_code)] Option<lock::InstanceLock>);
+
+struct Bound {
+    listener: std::net::TcpListener,
+    server_config: Arc<rustls::ServerConfig>,
+}
+
+/// Path of the installation CA certificate agents trust.
+fn ca_path() -> Result<std::path::PathBuf, String> {
+    Ok(app_data_dir()?.join(tls::CA_FILE))
+}
+
+/// The projection engine for this installation: agent configs reference the
+/// bundled console helper next to this executable and the CA certificate.
+fn projector(secrets: &Secrets) -> Result<Projector, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("Cannot locate the app executable: {error}"))?;
+    let helper = exe
+        .parent()
+        .ok_or_else(|| "Cannot locate the app directory".to_string())?
+        .join(helper_binary_name());
+    Projector::new(helper, ca_path()?, LOCAL_ENDPOINT, secrets.0.clone())
+}
 
 #[tauri::command]
 fn get_gateway_state(manager: State<'_, GatewayManager>) -> Result<GatewayState, String> {
@@ -44,43 +86,307 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
         .map_err(|error| format!("Cannot copy text: {error}"))
 }
 
+/// Save (or replace) the RedPill API key in the OS credential store. The key
+/// is validated, stored, loaded into the proxy, and never returned.
+#[tauri::command]
+fn set_api_key(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    key: String,
+) -> Result<GatewayState, String> {
+    let key = validate_api_key(&key)?;
+    secrets.0.set(API_KEY_ENTRY, &key)?;
+    proxy.set_api_key(Some(key));
+    manager.set_api_key_saved(&app, true);
+    manager.snapshot()
+}
+
+/// Revoke first, then forget: the key leaves proxy memory (and admitted
+/// deliveries are cancelled) before the credential store is touched. If the
+/// store delete fails the key stays revoked for this session; the UI keeps
+/// showing it as saved so the user can retry Delete or save a new key.
+#[tauri::command]
+fn clear_api_key(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+) -> Result<GatewayState, String> {
+    proxy.set_api_key(None);
+    if let Err(error) = secrets.0.delete(API_KEY_ENTRY) {
+        return Err(format!(
+            "The key is revoked for this session, but removing it from the credential store \
+             failed: {error}. Retry Delete or save a new key"
+        ));
+    }
+    manager.set_api_key_saved(&app, false);
+    manager.snapshot()
+}
+
+#[tauri::command]
+async fn refresh_catalog(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+) -> Result<GatewayState, String> {
+    manager.refresh_catalog(&app).await
+}
+
+/// One refresh: scan the agents and publish exactly the tokens those
+/// statuses authorize. Publishing cancels admitted-but-unsent deliveries,
+/// so a config that drifted or broke stops opening the proxy in the same
+/// operation that reports it. Startup takes this path too.
+#[tauri::command]
+fn list_agents(
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+) -> Result<Vec<AgentStatus>, String> {
+    let session = proxy.session();
+    let catalog = session.verified.then_some(session.catalog).flatten();
+    let (statuses, tokens) = projector(&secrets)?.scan(catalog.as_ref())?;
+    proxy.set_tokens(tokens);
+    Ok(statuses)
+}
+
+#[tauri::command]
+fn preview_agent_connection(
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    agent_id: String,
+    connect: bool,
+    options: ConnectOptions,
+) -> Result<AgentPreview, String> {
+    let agent = Agent::from_id(&agent_id)?;
+    let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
+    projector(&secrets)?.preview(agent, connect, catalog.as_ref(), &options)
+}
+
+#[tauri::command]
+fn apply_agent_connection(
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    agent_id: String,
+    connect: bool,
+    revision: String,
+    options: ConnectOptions,
+) -> Result<AgentStatus, String> {
+    let agent = Agent::from_id(&agent_id)?;
+    let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
+    let projector = projector(&secrets)?;
+    if !connect {
+        // Revoke in memory first; a disconnect that fails part-way leaves the
+        // agent disabled rather than still authorized.
+        proxy.set_tokens(proxy.tokens().without(agent.id()));
+    }
+    let status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
+    proxy.set_tokens(projector.scan(None)?.1);
+    Ok(status)
+}
+
+/// Emergency restore: revoke every agent in memory, then disconnect and
+/// restore all recorded agents regardless of support, endpoint, or gateway
+/// state (token files are deleted before anything else is touched). Returns
+/// the statuses afterwards; failures are reported as an error once every
+/// agent was attempted.
+#[tauri::command]
+fn disconnect_all_agents(
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+) -> Result<Vec<AgentStatus>, String> {
+    proxy.set_tokens(TokenSet::default());
+    let projector = projector(&secrets)?;
+    match projector.disconnect_all() {
+        // Durable revocation or the tombstone step failed: keep every token
+        // revoked in memory rather than reloading from the store.
+        Err(error) => Err(format!(
+            "Restore all could not revoke the agents ({error}); access stays revoked until \
+             it is retried"
+        )),
+        Ok(failures) => {
+            let (statuses, tokens) = projector.scan(None)?;
+            proxy.set_tokens(tokens);
+            if failures.is_empty() {
+                Ok(statuses)
+            } else {
+                Err(failures
+                    .into_iter()
+                    .map(|(agent, error)| format!("{agent}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; "))
+            }
+        }
+    }
+}
+
+/// The catalog a connection may project from: only the one published with
+/// the current verified session, and only while the local endpoint is bound.
+/// Disconnecting never needs either.
+fn connection_catalog(
+    manager: &GatewayManager,
+    proxy: &ProxyState,
+    agent: Agent,
+    connect: bool,
+) -> Result<Option<Catalog>, String> {
+    if !connect {
+        return Ok(None);
+    }
+    if let Some(error) = manager.snapshot()?.endpoint_error {
+        return Err(format!("The local endpoint is unavailable: {error}"));
+    }
+    if !agent.needs_catalog() {
+        return Ok(None);
+    }
+    let session = proxy.session();
+    match (session.verified, session.catalog) {
+        (true, Some(catalog)) => Ok(Some(catalog)),
+        _ => Err(format!(
+            "Start the gateway and wait until it is verified; the model list for {} comes from it",
+            agent.name()
+        )),
+    }
+}
+
+/// Become the primary instance, claim the endpoint, and load the TLS identity,
+/// in that order, before the window exists. The instance lock is returned
+/// separately so it outlives any later failure.
+fn launch(
+    secrets: &dyn SecretStore,
+) -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
+    let data_dir = match app_data_dir() {
+        Ok(dir) => dir,
+        Err(error) => return (None, Err(error)),
+    };
+    let instance = match lock::instance(&data_dir) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return (None, Ok(None)),
+        Err(error) => return (None, Err(format!("Cannot take the instance lock: {error}"))),
+    };
+    let bound = proxy::bind_std(LOCAL_ADDR).and_then(|listener| {
+        tls::load_or_create(&data_dir, secrets).map(|identity| {
+            Some(Bound {
+                listener,
+                server_config: identity.server_config,
+            })
+        })
+    });
+    (Some(instance), bound)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
+    let (instance, launched) = launch(secrets.as_ref());
+    let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
+    let proxy = ProxyState::new(events);
+
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_window(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(GatewayManager::default())
+        .manage(GatewayManager::new(proxy.clone()))
+        .manage(proxy.clone())
+        .manage(Secrets(secrets.clone()))
+        .manage(Instance(instance))
+        .manage(Launch(Mutex::new(launched)))
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
             start_gateway,
             stop_gateway,
-            copy_text
+            copy_text,
+            set_api_key,
+            clear_api_key,
+            refresh_catalog,
+            list_agents,
+            preview_agent_connection,
+            apply_agent_connection,
+            disconnect_all_agents
         ])
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
+            // Closing the window only hides it; the tray keeps the app alive.
             let window_for_events = window.clone();
-            let was_focused = Arc::new(AtomicBool::new(false));
-            window.on_window_event(move |event| match event {
-                WindowEvent::CloseRequested { api, .. } => {
+            window.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    was_focused.store(false, Ordering::SeqCst);
                     let _ = window_for_events.hide();
                 }
-                WindowEvent::Focused(focused) => {
-                    if *focused {
-                        was_focused.store(true, Ordering::SeqCst);
-                    } else if was_focused.swap(false, Ordering::SeqCst) {
-                        let _ = window_for_events.hide();
-                    }
-                }
-                _ => {}
             });
             tray::setup(app.handle())?;
+
+            let handle = app.handle().clone();
+            let manager = app.state::<GatewayManager>();
+            let launched = app
+                .state::<Launch>()
+                .0
+                .lock()
+                .map_err(|_| "launch state unavailable".to_string())?
+                .as_mut()
+                .map(Option::take)
+                .map_err(|error| error.clone());
+            match launched {
+                Ok(Some(bound)) => {
+                    manager.set_endpoint(&handle, Ok(()));
+                    let serve_handle = handle.clone();
+                    let serve_proxy = proxy.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let Bound {
+                            listener,
+                            server_config,
+                        } = bound;
+                        let result = proxy::serve_tls(serve_proxy, listener, server_config).await;
+                        if let Err(error) = result {
+                            let manager = serve_handle.state::<GatewayManager>();
+                            manager.set_endpoint(&serve_handle, Err(error));
+                        }
+                    });
+                }
+                Ok(None) => manager.set_endpoint(
+                    &handle,
+                    Err(
+                        "Another instance of Private AI Gateway is the primary instance"
+                            .to_string(),
+                    ),
+                ),
+                Err(error) => manager.set_endpoint(&handle, Err(error)),
+            }
+
+            // Load what the proxy needs to admit and forward: the saved key
+            // (only its presence reaches the UI) and connected agents' tokens.
+            match secrets.get(API_KEY_ENTRY) {
+                Ok(key) => {
+                    manager.set_api_key_saved(&handle, key.is_some());
+                    proxy.set_api_key(key);
+                }
+                Err(error) => manager.report_error(&handle, error),
+            }
+            // Startup maintenance (under the config lock) before authorizing
+            // any token: connections this build no longer supports are disabled.
+            let store = Secrets(secrets.clone());
+            match projector(&store).and_then(|projector| {
+                projector.migrate_legacy()?;
+                projector.scan(None)
+            }) {
+                Ok((_, tokens)) => proxy.set_tokens(tokens),
+                Err(error) => manager.report_error(&handle, error),
+            }
+
+            let events_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = proxy_events.recv().await {
+                    let manager = events_handle.state::<GatewayManager>();
+                    manager.record_proxy_event(&events_handle, event);
+                }
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -92,7 +398,7 @@ pub fn run() {
             let _ = manager.stop(app);
         }
         #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => tray::show_popup(app, None),
+        tauri::RunEvent::Reopen { .. } => tray::show_window(app),
         _ => {}
     });
 }

@@ -2,6 +2,15 @@ name: Desktop macOS
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-macos.yml'
+      - 'apps/desktop/**'
+      - 'src/aci/**'
+      - 'src/bin/aci/**'
+      - 'src/http/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
   push:
     branches:
       - feat/private-ai-gateway-desktop-mvp
@@ -10,6 +19,7 @@ on:
       - 'apps/desktop/**'
       - 'src/aci/**'
       - 'src/bin/aci/**'
+      - 'src/http/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
 
@@ -37,6 +47,7 @@ jobs:
         with:
           workspaces: |
             . -> target
+            apps/desktop/gateway -> target
             apps/desktop/src-tauri -> target
 
       - name: Install desktop dependencies
@@ -47,18 +58,27 @@ jobs:
         run: |
           npm --prefix apps/desktop run check
           npm --prefix apps/desktop run build
+          cargo fmt --manifest-path apps/desktop/gateway/Cargo.toml -- --check
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Renderer smoke (Playwright, stateful mock)
+        working-directory: apps/desktop
+        run: |
+          npx playwright install chromium
+          npm run test:renderer
 
       - name: Build bundled ACI sidecar
         working-directory: apps/desktop
         run: npm run build:native
 
       - name: Test ACI sidecar
-        run: cargo test --bin aci
+        run: cargo test --locked --bin aci
 
-      - name: Test Tauri backend
+      - name: Test local gateway and Tauri backend
         run: |
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/gateway/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/gateway/Cargo.toml -- --ignored keyring_round_trip
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Package Tauri app and DMG
         working-directory: apps/desktop
@@ -78,7 +98,10 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app_bundle" \
             "release/Private-AI-Gateway-${RUNNER_ARCH}.zip"
 
+      # Live-service steps are diagnostics for the beta package: an outage of
+      # the public service must not block producing the artifact below.
       - name: Run bundled ACI live smoke
+        continue-on-error: true
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -92,6 +115,7 @@ jobs:
             "test-results/live-service.json"
 
       - name: Launch tray app and capture menu bar
+        continue-on-error: true
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -126,6 +150,7 @@ jobs:
           test -d "$app_bundle"
           test -x "$executable"
           test -x "$aci"
+          test -x "$app_bundle/Contents/MacOS/private-ai-gateway-helper"
           test -f "$dmg"
           test -f "$zip"
 
@@ -161,11 +186,19 @@ jobs:
             spctl --assess --type execute --verbose=4 "$app_bundle" || true
           } 2>&1 | tee "$report"
 
+      - name: Beta artifact metadata
+        id: beta
+        shell: bash
+        run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Upload macOS package and evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: private-ai-gateway-tauri-macos-${{ runner.arch }}
+          name: private-ai-gateway-beta-${{ steps.beta.outputs.version }}-${{ steps.beta.outputs.shortsha }}-macos-arm64
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -175,3 +208,53 @@ jobs:
             apps/desktop/test-results/live-service.json
             apps/desktop/test-results/macos-menu-bar.png
             apps/desktop/test-results/app.*.log
+
+  check-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      # The gateway crate and helper are checked on the declared MSRV (1.89); the
+      # Tauri backend follows stable.
+      - name: Install Rust (MSRV for the gateway crate)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/gateway -> target
+            apps/desktop/src-tauri -> target
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11
+
+      - name: Test local gateway crate (MSRV 1.89)
+        run: cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
+
+      - name: Build helper sidecar (MSRV 1.89)
+        run: cargo +1.89 build --locked --manifest-path apps/desktop/gateway/Cargo.toml --bin private-ai-gateway-helper
+
+      - name: Credential store smoke (Windows Credential Manager)
+        if: runner.os == 'Windows'
+        run: cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml -- --ignored keyring_round_trip
+
+      - name: Credential store smoke (Linux Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -c '
+            echo -n "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml -- --ignored keyring_round_trip
+          '
+
+      - name: Check Tauri backend (MSRV 1.89)
+        run: cargo +1.89 check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml

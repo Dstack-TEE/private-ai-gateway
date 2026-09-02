@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import type {
+  AgentPreview,
+  AgentStatus,
+  ConnectOptions,
   DesktopApi,
   GatewayState,
   StartGatewayConfig,
@@ -41,5 +44,31 @@ export const desktopApi: DesktopApi = {
   },
   stop(): Promise<GatewayState> {
     return invoke("stop_gateway");
+  },
+  setApiKey(key: string): Promise<GatewayState> {
+    return invoke("set_api_key", { key });
+  },
+  clearApiKey(): Promise<GatewayState> {
+    return invoke("clear_api_key");
+  },
+  refreshCatalog(): Promise<GatewayState> {
+    return invoke("refresh_catalog");
+  },
+  listAgents(): Promise<AgentStatus[]> {
+    return invoke("list_agents");
+  },
+  disconnectAllAgents(): Promise<AgentStatus[]> {
+    return invoke("disconnect_all_agents");
+  },
+  previewAgent(agentId: string, connect: boolean, options: ConnectOptions): Promise<AgentPreview> {
+    return invoke("preview_agent_connection", { agentId, connect, options });
+  },
+  applyAgent(
+    agentId: string,
+    connect: boolean,
+    revision: string,
+    options: ConnectOptions,
+  ): Promise<AgentStatus> {
+    return invoke("apply_agent_connection", { agentId, connect, revision, options });
   },
 };

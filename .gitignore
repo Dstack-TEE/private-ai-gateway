@@ -14,5 +14,8 @@ clients/pi-provider/packages/*/dist/
 /apps/desktop/resources/native/
 /apps/desktop/release/
 /apps/desktop/test-results/
+/apps/desktop/playwright-artifacts/
 /apps/desktop/src-tauri/binaries/*
 /ci-artifacts/
+/apps/desktop/gateway/target/
+/apps/desktop/src-tauri/target/

@@ -74,6 +74,9 @@ prometheus = "0.13"
 # Async traits used by upstream and verifier abstractions.
 async-trait = "0.1"
 
+# Cancellation token for the serve delivery gate.
+tokio-util = "0.7"
+
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 

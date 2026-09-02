@@ -1,92 +1,89 @@
 use tauri::{
-    menu::MenuBuilder,
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WebviewWindow,
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
+    tray::TrayIconBuilder,
+    AppHandle, Manager, Wry,
 };
 
-use crate::gateway::GatewayManager;
+use crate::{contracts::GatewayState, gateway::GatewayManager};
+
+const APP_NAME: &str = "Private AI Gateway";
+
+/// Live handles to the two menu rows that mirror gateway state.
+pub struct TrayMenu {
+    toggle: CheckMenuItem<Wry>,
+    status: MenuItem<Wry>,
+}
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    let (checked, status_line) = menu_state(&GatewayState::default());
+    let toggle = CheckMenuItemBuilder::with_id("toggle", APP_NAME)
+        .checked(checked)
+        .build(app)?;
+    let status = MenuItemBuilder::with_id("status", status_line)
+        .enabled(false)
+        .build(app)?;
     let menu = MenuBuilder::new(app)
-        .text("open", "Open Private AI Gateway")
+        .item(&toggle)
+        .item(&status)
         .separator()
-        .text("quit", "Quit Private AI Gateway")
+        .text("open", format!("Open {APP_NAME}"))
+        .separator()
+        .text("quit", format!("Quit {APP_NAME}"))
         .build()?;
+    app.manage(TrayMenu { toggle, status });
+
     let icon =
         tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
-
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
         .icon_as_template(true)
-        .tooltip("Private AI Gateway - Stopped")
+        .tooltip(format!("{APP_NAME} - {status_line}"))
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => show_popup(app, None),
+            "toggle" => app.state::<GatewayManager>().toggle(app),
+            "open" => show_window(app),
             "quit" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = manager.stop(app);
+                let _ = app.state::<GatewayManager>().stop(app);
                 app.exit(0);
             }
             _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                rect,
-                ..
-            } = event
-            {
-                toggle_popup(tray.app_handle(), rect);
-            }
         })
         .build(app)?;
     Ok(())
 }
 
-pub fn show_popup(app: &AppHandle, tray_rect: Option<Rect>) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    if let Some(rect) = tray_rect {
-        position_below_tray(&window, rect);
-    } else {
-        position_at_top_right(&window);
+/// Reflect the gateway state in the checkmark, the status row, and the tooltip.
+pub fn sync(app: &AppHandle, state: &GatewayState) {
+    let (checked, status_line) = menu_state(state);
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let _ = menu.toggle.set_checked(checked);
+        let _ = menu.status.set_text(status_line);
     }
-    present(&window);
-}
-
-fn position_at_top_right(window: &WebviewWindow) {
-    let Ok(Some(monitor)) = window.primary_monitor() else {
-        return;
-    };
-    let Ok(window_size) = window.outer_size() else {
-        return;
-    };
-    let monitor_position = monitor.position();
-    let monitor_size = monitor.size();
-    let x = monitor_position.x + monitor_size.width as i32 - window_size.width as i32 - 12;
-    let y = monitor_position.y + 28;
-    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-}
-
-fn toggle_popup(app: &AppHandle, tray_rect: Rect) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
-    } else {
-        position_below_tray(&window, tray_rect);
-        present(&window);
+    if let Some(tray) = app.tray_by_id("gateway") {
+        let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
     }
 }
 
-fn present(window: &WebviewWindow) {
+pub fn show_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
     let _ = window.show();
     activate_app();
     let _ = window.set_focus();
+}
+
+/// Checkmark state and the plain-language status row for the gateway state.
+fn menu_state(state: &GatewayState) -> (bool, &'static str) {
+    match state.status.as_str() {
+        "verifying" => (true, "Starting - verifying service"),
+        "verified" if !state.api_key_saved => (true, "Verified - add your API key"),
+        "verified" => (true, "Ready - requests protected"),
+        "blocked" => (true, "Blocked - service identity changed"),
+        "error" => (false, "Failed - open for details"),
+        _ => (false, "Stopped"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -103,16 +100,32 @@ fn activate_app() {
 #[cfg(not(target_os = "macos"))]
 fn activate_app() {}
 
-fn position_below_tray(window: &WebviewWindow, rect: Rect) {
-    let Ok(scale_factor) = window.scale_factor() else {
-        return;
-    };
-    let tray_position: PhysicalPosition<i32> = rect.position.to_physical(scale_factor);
-    let tray_size: PhysicalSize<u32> = rect.size.to_physical(scale_factor);
-    let Ok(window_size) = window.outer_size() else {
-        return;
-    };
-    let x = tray_position.x + (tray_size.width as i32 / 2) - (window_size.width as i32 / 2);
-    let y = tray_position.y + tray_size.height as i32 + 6;
-    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+#[cfg(test)]
+mod tests {
+    use super::menu_state;
+    use crate::contracts::GatewayState;
+
+    fn state(status: &str, api_key_saved: bool) -> GatewayState {
+        GatewayState {
+            status: status.to_string(),
+            api_key_saved,
+            ..GatewayState::default()
+        }
+    }
+
+    #[test]
+    fn checkmark_tracks_running_states() {
+        assert_eq!(menu_state(&state("stopped", false)), (false, "Stopped"));
+        assert_eq!(
+            menu_state(&state("verified", true)),
+            (true, "Ready - requests protected")
+        );
+        assert_eq!(
+            menu_state(&state("verified", false)),
+            (true, "Verified - add your API key")
+        );
+        assert!(menu_state(&state("verifying", false)).0);
+        assert!(menu_state(&state("blocked", true)).0);
+        assert!(!menu_state(&state("error", true)).0);
+    }
 }

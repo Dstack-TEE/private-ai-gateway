@@ -14,7 +14,9 @@
     "generate:icons": "node scripts/generate-icons.mjs",
     "check": "tsc --noEmit",
     "tauri": "tauri",
-    "dist": "npm run build:native && tauri build"
+    "dist": "npm run build:native && tauri build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test:renderer": "playwright test"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -27,6 +29,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@resvg/resvg-js": "2.6.2",
     "@tauri-apps/cli": "2.11.4",
     "@types/node": "26.4.0",

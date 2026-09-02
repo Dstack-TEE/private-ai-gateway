@@ -42,6 +42,7 @@ use crate::verify::{verify_service, ServiceVerification};
 /// members this proxy does not know about (Appendix B).
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
+    "proxy-connection",
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
@@ -89,6 +90,16 @@ pub struct RequestOutcome {
     /// The one-line detail printed after the request line, e.g.
     /// `receipt rcpt-1: signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)`.
     pub detail: String,
+    /// Caller-supplied `x-aci-tag` (stripped before forwarding), e.g. the
+    /// local gateway's `<agent> <route>` attribution.
+    pub tag: Option<String>,
+    /// Whether the receipt records a service-side rewrite of the request
+    /// (§9.3 note); known only once the receipt was checked.
+    pub rewritten: Option<bool>,
+    /// Whether this proxy changed the request body before forwarding (ACI
+    /// policy: `provider.aci_verified` / pinned sessions, re-serialized).
+    /// The receipt then binds the constrained bytes, not the caller's.
+    pub locally_constrained: bool,
 }
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
@@ -128,6 +139,10 @@ pub struct RecordedExchange {
     pub at: u64,
     /// Verdict of the last verification, when one reached a verdict.
     pub verified: Option<bool>,
+    /// Caller-supplied `x-aci-tag`, carried into every outcome for this exchange.
+    pub tag: Option<String>,
+    /// Whether the forwarded body differs from what the caller sent.
+    pub locally_constrained: bool,
 }
 
 /// Recorded exchanges kept for on-demand verification (a bounded ring;
@@ -166,6 +181,13 @@ pub struct ProxyState {
     /// service refuses a pinned forward with 412 `session_not_accepted`.
     policy_pins: Mutex<Vec<String>>,
     reporter: Reporter,
+    /// Delivery gate (same pattern as the desktop proxy): every identity loss
+    /// or replacement cancels this token, so a request that passed the entry
+    /// checks but has not started sending upstream is refused, never sent
+    /// under a decision made for the old identity.
+    delivery: Mutex<tokio_util::sync::CancellationToken>,
+    #[cfg(test)]
+    pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     event_sink: EventSink,
 }
 
@@ -209,7 +231,26 @@ impl ProxyState {
             policy_pins: Mutex::new(Vec::new()),
             reporter,
             event_sink,
+            delivery: Mutex::new(tokio_util::sync::CancellationToken::new()),
+            #[cfg(test)]
+            pause: Mutex::new(None),
         }
+    }
+
+    fn delivery_token(&self) -> tokio_util::sync::CancellationToken {
+        self.delivery
+            .lock()
+            .expect("delivery gate poisoned")
+            .clone()
+    }
+
+    /// Cancel every delivery admitted under the previous identity.
+    fn revoke_deliveries(&self) {
+        let previous = std::mem::replace(
+            &mut *self.delivery.lock().expect("delivery gate poisoned"),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        previous.cancel();
     }
 
     /// The active accepted set: the user's fixed list, or the current
@@ -276,6 +317,9 @@ impl ProxyState {
             verification.observed_spki.as_deref(),
             verification_summary,
         );
+        // The identity is being replaced: nothing admitted under the old one
+        // may still be delivered.
+        self.revoke_deliveries();
         *self.trusted.lock().expect("trusted identity poisoned") = TrustedIdentity {
             report: Arc::new(verification.report),
             keyset_digest,
@@ -465,12 +509,19 @@ fn build_control_router(state: Arc<ProxyState>) -> Router {
         .with_state(state)
 }
 
+/// Largest request body the proxy accepts; the desktop gateway in front of it
+/// applies the same limit so a body is never accepted there and refused here.
+pub const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+
 fn build_proxy_router(state: Arc<ProxyState>) -> Router {
     // No route list: every method and path forwards to the same path on the
     // service, so protocol surfaces this proxy does not know about
     // (Appendix B) keep working. POST is the inference surface (§5.1) and
     // gets the receipt check; everything else is read-only passthrough.
-    Router::new().fallback(proxy).with_state(state)
+    Router::new()
+        .fallback(proxy)
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .with_state(state)
 }
 
 async fn proxy(
@@ -480,6 +531,36 @@ async fn proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let path = uri.path().to_string();
+    // Every method re-checks verification (§3.4): an expired or rotated keyset
+    // blocks GET passthrough exactly like inference. A re-verification that
+    // changed the service identity must not carry this request either: it
+    // was admitted upstream against the old identity, so it is refused with a
+    // retryable status until the desktop publishes the new identity.
+    if crate::checks::now_secs() >= state.snapshot().not_after {
+        state.blocked.store(true, Ordering::SeqCst);
+        state.revoke_deliveries();
+    }
+    let identity_before = state.snapshot().keyset_digest;
+    if let Err(reason) = state.ensure_unblocked().await {
+        (state.event_sink)(json!({
+            "type": "blocked",
+            "schema_version": SERVE_EVENT_SCHEMA_VERSION,
+            "reason": reason,
+        }));
+        eprintln!("!! {method} {path} -> 503 blocked: {reason}");
+        return text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream keyset changed or expired and re-verification failed; refusing to forward\n",
+        );
+    }
+    if state.snapshot().keyset_digest != identity_before {
+        eprintln!("!! {method} {path} -> 503 identity changed during re-verification; retry");
+        return text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service identity changed during re-verification; retry once the gateway is verified again\n",
+        );
+    }
     if method == Method::POST {
         proxy_inference(state, uri, headers, body).await
     } else {
@@ -496,14 +577,16 @@ async fn proxy_passthrough(
     body: Bytes,
 ) -> Response {
     let path = uri.path().to_string();
+    let delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let mut req = forward_headers(state.client.request(method.clone(), &url), &headers);
     if !body.is_empty() {
         req = req.body(body.to_vec());
     }
-    let resp = match req.send().await {
-        Ok(resp) => resp,
-        Err(e) => return send_error(&state, method, path, e),
+    let resp = match race_delivery(&delivery, req.send()).await {
+        None => return delivery_revoked_response(&path),
+        Some(Ok(resp)) => resp,
+        Some(Err(e)) => return send_error(&state, method, path, e),
     };
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
@@ -516,10 +599,14 @@ async fn proxy_passthrough(
         receipt_id: None,
         verified: None,
         detail: String::new(),
+        tag: None,
+        rewritten: None,
+        locally_constrained: false,
     });
     let mut builder = Response::builder().status(status);
+    let named = connection_named(&resp_headers);
     for (name, value) in resp_headers.iter() {
-        if !is_hop_by_hop(name.as_str()) {
+        if !is_hop_by_hop(name.as_str()) && !named.contains(name.as_str()) {
             builder = builder.header(name, value);
         }
     }
@@ -537,6 +624,7 @@ async fn proxy_inference(
     body: Bytes,
 ) -> Response {
     let path = uri.path().to_string();
+    let tag = header_str(&headers, TAG_HEADER).map(str::to_string);
 
     if has_e2ee_request_headers(&headers) {
         eprintln!("!! POST {path} -> 400 E2EE request rejected by plaintext local API");
@@ -546,25 +634,8 @@ async fn proxy_inference(
         );
     }
 
-    // §3.4: a long-running proxy must not keep forwarding on an expired
-    // keyset — expiry blocks exactly like a rotation.
-    if crate::checks::now_secs() >= state.snapshot().not_after {
-        state.blocked.store(true, Ordering::SeqCst);
-    }
-    if let Err(reason) = state.ensure_unblocked().await {
-        (state.event_sink)(json!({
-            "type": "blocked",
-            "schema_version": SERVE_EVENT_SCHEMA_VERSION,
-            "reason": reason,
-        }));
-        eprintln!("!! POST {path} -> 503 blocked: {reason}");
-        return text_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "upstream keyset changed or expired and re-verification failed; refusing to forward\n",
-        );
-    }
-
     let trusted = state.snapshot();
+    let delivery = state.delivery_token();
     let url = join_url(&state.base_url, &uri);
     let active_pins = state.active_pins();
     // A policy-derived set is refreshed only when it actually constrained this
@@ -588,9 +659,18 @@ async fn proxy_inference(
             .body(body)
             .send()
     };
-    let mut resp = match send(request_body.clone()).await {
-        Ok(resp) => resp,
-        Err(e) => return send_error(&state, Method::POST, path, e),
+    #[cfg(test)]
+    {
+        let pause = state.pause.lock().expect("pause poisoned").clone();
+        if let Some((reached, resume)) = pause {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+    let mut resp = match race_delivery(&delivery, send(request_body.clone())).await {
+        None => return delivery_revoked_response(&path),
+        Some(Ok(resp)) => resp,
+        Some(Err(e)) => return send_error(&state, Method::POST, path, e),
     };
     // A 412 refusal against a policy-derived pin set means the sessions
     // rotated under us (§8 supersession): refresh the set from the service's
@@ -617,9 +697,10 @@ async fn proxy_inference(
                         );
                     }
                 };
-                match send(request_body.clone()).await {
-                    Ok(retried) => resp = retried,
-                    Err(e) => return send_error(&state, Method::POST, path, e),
+                match race_delivery(&delivery, send(request_body.clone())).await {
+                    None => return delivery_revoked_response(&path),
+                    Some(Ok(retried)) => resp = retried,
+                    Some(Err(e)) => return send_error(&state, Method::POST, path, e),
                 }
             }
             Ok(_) => {}
@@ -635,8 +716,9 @@ async fn proxy_inference(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     let mut builder = Response::builder().status(status);
+    let named = connection_named(&resp_headers);
     for (name, value) in resp_headers.iter() {
-        if !is_hop_by_hop(name.as_str()) {
+        if !is_hop_by_hop(name.as_str()) && !named.contains(name.as_str()) {
             builder = builder.header(name, value);
         }
     }
@@ -648,6 +730,7 @@ async fn proxy_inference(
     let hook_path = path.clone();
     let hook_trusted = trusted.clone();
     let hook_bearer = bearer_token(&headers);
+    let locally_constrained = request_body.as_slice() != body.as_ref();
     let request_digest = BodyDigest::of(&request_body);
     // §9.3(6): the pinned ids ride along so the on-demand check enforces the
     // same membership rule as `aci send --session`.
@@ -668,6 +751,9 @@ async fn proxy_inference(
                 receipt_id,
                 verified,
                 detail,
+                tag: tag.clone(),
+                rewritten: None,
+                locally_constrained,
             };
         let outcome = match &receipt_id {
             Some(id) => outcome(
@@ -701,15 +787,12 @@ async fn proxy_inference(
                 pinned_sessions,
                 at: crate::checks::now_secs(),
                 verified: None,
+                tag: tag.clone(),
+                locally_constrained,
             };
             hook_state.record(exchange.clone());
             if hook_state.verify_receipts {
-                verify_recorded_in_background(
-                    hook_state,
-                    hook_trusted,
-                    exchange,
-                    hook_bearer,
-                );
+                verify_recorded_in_background(hook_state, hook_trusted, exchange, hook_bearer);
                 return;
             }
         }
@@ -771,7 +854,7 @@ async fn control_verify(
     };
     let bearer = bearer_token(&headers);
     let trusted = state.snapshot();
-    let report = |verified: Option<bool>, detail: String| {
+    let report = |verified: Option<bool>, rewritten: Option<bool>, detail: String| {
         (state.reporter)(RequestOutcome {
             method: Method::POST,
             path: exchange.path.clone(),
@@ -780,11 +863,15 @@ async fn control_verify(
             receipt_id: Some(exchange.receipt_id.clone()),
             verified,
             detail,
+            tag: exchange.tag.clone(),
+            rewritten,
+            locally_constrained: exchange.locally_constrained,
         });
     };
     match verify_exchange(&state, &trusted, &exchange, bearer.as_deref()).await {
         Ok((transcript, detail)) => {
             let verified = transcript.verified();
+            let rewritten = Some(rewrite_noted(&transcript));
             {
                 let mut recorded = state.recorded.lock().expect("recorded ring poisoned");
                 if let Some(entry) = recorded
@@ -795,7 +882,7 @@ async fn control_verify(
                     entry.verified = Some(verified);
                 }
             }
-            report(Some(verified), detail);
+            report(Some(verified), rewritten, detail);
             let mut body = transcript.to_json(false);
             body["receipt_id"] = json!(id);
             json_response(StatusCode::OK, body)
@@ -811,7 +898,7 @@ async fn control_verify(
                 entry.verified = None;
             }
             drop(recorded);
-            report(None, detail.clone());
+            report(None, None, detail.clone());
             json_response(StatusCode::BAD_GATEWAY, json!({ "error": detail }))
         }
     }
@@ -825,31 +912,27 @@ fn verify_recorded_in_background(
 ) {
     tokio::spawn(async move {
         let receipt_id = exchange.receipt_id.clone();
-        let (verified, detail) = match verify_exchange(
-            &state,
-            &trusted,
-            &exchange,
-            bearer.as_deref(),
-        )
-        .await
-        {
-            Ok((transcript, detail)) => {
-                let verified = transcript.verified();
-                let mut recorded = state.recorded.lock().expect("recorded ring poisoned");
-                if let Some(entry) = recorded
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| entry.receipt_id == receipt_id)
-                {
-                    entry.verified = Some(verified);
+        let (verified, rewritten, detail) =
+            match verify_exchange(&state, &trusted, &exchange, bearer.as_deref()).await {
+                Ok((transcript, detail)) => {
+                    let verified = transcript.verified();
+                    let rewritten = rewrite_noted(&transcript);
+                    let mut recorded = state.recorded.lock().expect("recorded ring poisoned");
+                    if let Some(entry) = recorded
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| entry.receipt_id == receipt_id)
+                    {
+                        entry.verified = Some(verified);
+                    }
+                    (Some(verified), Some(rewritten), detail)
                 }
-                (Some(verified), detail)
-            }
-            Err(error) => (
-                None,
-                format!("receipt {receipt_id}: verification unavailable: {error}"),
-            ),
-        };
+                Err(error) => (
+                    None,
+                    None,
+                    format!("receipt {receipt_id}: verification unavailable: {error}"),
+                ),
+            };
         (state.reporter)(RequestOutcome {
             method: Method::POST,
             path: exchange.path,
@@ -858,6 +941,9 @@ fn verify_recorded_in_background(
             receipt_id: Some(receipt_id),
             verified,
             detail,
+            tag: exchange.tag,
+            rewritten,
+            locally_constrained: exchange.locally_constrained,
         });
     });
 }
@@ -992,6 +1078,11 @@ fn upstream_clause(transcript: &Transcript, session: Option<&Value>, serving: &s
     }
 }
 
+/// Whether the receipt notes a service-side rewrite (§9.3 informational note).
+fn rewrite_noted(transcript: &Transcript) -> bool {
+    status_of(transcript, "receipt-note") == Some(Status::Info)
+}
+
 fn status_of(transcript: &Transcript, id: &str) -> Option<Status> {
     transcript
         .checks
@@ -1068,6 +1159,9 @@ fn request_outcome_event(outcome: RequestOutcome) -> Value {
         "receipt_id": outcome.receipt_id,
         "verified": outcome.verified,
         "detail": outcome.detail,
+        "tag": outcome.tag,
+        "rewritten": outcome.rewritten,
+        "locally_constrained": outcome.locally_constrained,
     })
 }
 
@@ -1085,10 +1179,32 @@ fn write_json_event(event: &Value) -> Result<(), String> {
 /// Keyset-rotation gate (§3.4): a response advertising a digest other than
 /// the trusted one blocks further inference forwards until a fresh verify
 /// re-establishes trust.
+/// Race an upstream send against the delivery gate; `None` means revoked
+/// before (or while) sending, and nothing may be treated as delivered.
+async fn race_delivery<T>(
+    token: &tokio_util::sync::CancellationToken,
+    send: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => None,
+        result = send => Some(result),
+    }
+}
+
+fn delivery_revoked_response(path: &str) -> Response {
+    eprintln!("!! {path} -> 503 verification changed before the request was sent");
+    text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "verification changed before the request was sent; retry once the gateway is verified again\n",
+    )
+}
+
 fn rotation_gate(state: &ProxyState, trusted_digest: &str, headers: &HeaderMap) {
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
         if observed != trusted_digest {
             state.blocked.store(true, Ordering::SeqCst);
+            state.revoke_deliveries();
             let reason = format!(
                 "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
             );
@@ -1203,16 +1319,34 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Attribution header a local caller may set; recorded in outcomes, never forwarded.
+const TAG_HEADER: &str = "x-aci-tag";
+
 fn forward_headers(
     mut req: reqwest::RequestBuilder,
     headers: &HeaderMap,
 ) -> reqwest::RequestBuilder {
+    let named = connection_named(headers);
     for (name, value) in headers.iter() {
-        if !is_hop_by_hop(name.as_str()) {
+        let name_str = name.as_str();
+        if !is_hop_by_hop(name_str) && !named.contains(name_str) && name_str != TAG_HEADER {
             req = req.header(name, value);
         }
     }
     req
+}
+
+/// Header names the `Connection` header marks as hop-by-hop for this message
+/// (RFC 9110 §7.6.1), lowercased.
+fn connection_named(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 /// The bearer token (credential only, `Bearer ` prefix stripped) for the
@@ -1240,6 +1374,9 @@ fn send_error(state: &ProxyState, method: Method, path: String, err: reqwest::Er
         receipt_id: None,
         verified: Some(false),
         detail: format!("upstream connection failed (possible TLS pin mismatch): {err}"),
+        tag: None,
+        rewritten: None,
+        locally_constrained: false,
     });
     text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n")
 }
@@ -1305,6 +1442,77 @@ mod tests {
         );
     }
 
+    /// A request that passed the entry checks but has not started sending is
+    /// refused with zero delivery when the identity is lost in between (as a
+    /// concurrent response's rotation gate would do).
+    #[tokio::test]
+    async fn blocked_after_entry_checks_delivers_nothing() {
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = delivered.clone();
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Json(json!({ "ok": true })) }
+            }),
+        );
+        let base = spawn_server(upstream).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = state_over(base, tx);
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *state.pause.lock().unwrap() = Some((reached.clone(), resume.clone()));
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{proxy}/v1/chat/completions"))
+                .header("content-type", "application/json")
+                .body(r#"{"model":"m","messages":[]}"#)
+                .send()
+                .await
+                .unwrap()
+        });
+        reached.notified().await;
+        state.blocked.store(true, Ordering::SeqCst);
+        state.revoke_deliveries();
+        resume.notify_one();
+        let response = request.await.unwrap();
+        assert_eq!(response.status().as_u16(), 503);
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// While blocked, every method is refused until re-verification succeeds;
+    /// here the upstream offers no attestation, so it cannot.
+    #[tokio::test]
+    async fn non_post_requests_are_refused_while_blocked() {
+        let upstream = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(json!({ "data": [{ "id": "demo-model" }] })) }),
+        );
+        let base = spawn_server(upstream).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = state_over(base, tx);
+        state.blocked.store(true, Ordering::SeqCst);
+        let proxy = spawn_server(build_proxy_router(state)).await;
+        let resp = reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 503);
+    }
+
+    #[test]
+    fn connection_named_headers_are_stripped_in_both_directions() {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", "close, X-Private".parse().unwrap());
+        headers.insert("x-private", "1".parse().unwrap());
+        let named = connection_named(&headers);
+        assert!(named.contains("x-private"));
+        assert!(is_hop_by_hop("Proxy-Connection"));
+        assert!(!named.contains("x-receipt-id"));
+    }
+
     #[test]
     fn request_outcome_event_is_stable_json() {
         let outcome = RequestOutcome {
@@ -1315,8 +1523,12 @@ mod tests {
             receipt_id: Some("rcpt-1".to_string()),
             verified: Some(true),
             detail: "receipt verified".to_string(),
+            tag: Some("claude-code declared".to_string()),
+            rewritten: Some(false),
+            locally_constrained: true,
         };
         let event = request_outcome_event(outcome);
+        assert_eq!(event["locally_constrained"], true);
 
         assert_eq!(event["type"], "request_complete");
         assert_eq!(event["schema_version"], 1);
@@ -1610,7 +1822,10 @@ mod tests {
             .route(
                 "/v1/aci/receipts/:id",
                 get(|headers: HeaderMap| async move {
-                    assert_eq!(header_str(&headers, "authorization"), Some("Bearer test-key"));
+                    assert_eq!(
+                        header_str(&headers, "authorization"),
+                        Some("Bearer test-key")
+                    );
                     Json(vector_receipt_envelope())
                 }),
             )
@@ -1663,7 +1878,11 @@ mod tests {
         assert_eq!(outcome.path, "/v1/chat/completions");
         assert_eq!(outcome.receipt_id.as_deref(), Some("rcpt-0001"));
         assert_eq!(outcome.verified, Some(true));
-        assert!(outcome.detail.contains("signature ok"), "{}", outcome.detail);
+        assert!(
+            outcome.detail.contains("signature ok"),
+            "{}",
+            outcome.detail
+        );
 
         // Any POST path is inference-capable: an Anthropic-style /v1/messages
         // forward is recorded the same way without being enumerated.
