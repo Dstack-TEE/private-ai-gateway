@@ -110,10 +110,10 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .mac-menu-right time { font-variant-numeric: tabular-nums; }
 .tray-trigger { width: 24px; height: 24px; padding: 2px; display: grid; place-items: center; background: transparent; border: 0; border-radius: 4px; }
 .tray-trigger:hover, .tray-trigger.is-open { background: rgb(0 0 0 / 0.1); }
-.tray-trigger img { width: 20px; height: 20px; }
+.tray-template-icon { width: 18px; height: 18px; color: inherit; background: currentColor; mask: url("./generated/tray-mark.svg") center / contain no-repeat; mask-mode: alpha; }
 .preview-tray { position: fixed; z-index: 50; top: 32px; right: 8px; width: 286px; padding: 9px 0; color: #202022; background: rgb(255 255 255 / 0.94); border: 1px solid rgb(0 0 0 / 0.16); border-radius: 9px; box-shadow: 0 16px 40px rgb(0 0 0 / 0.3), 0 2px 8px rgb(0 0 0 / 0.18); backdrop-filter: blur(26px) saturate(140%); }
 .preview-tray-heading { min-height: 58px; padding: 5px 14px 8px; display: flex; align-items: center; gap: 10px; }
-.preview-tray-heading img { width: 28px; height: 28px; }
+.preview-tray-heading .brand-app-icon { width: 32px; height: 32px; }
 .preview-tray-heading span, .preview-tray-protection > span { min-width: 0; display: grid; }
 .preview-tray-heading strong, .preview-tray-protection strong { font-size: 14px; font-weight: 650; }
 .preview-tray-heading small, .preview-tray-protection small { color: rgb(32 32 34 / 0.62); font-size: 12px; }
@@ -143,7 +143,9 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .traffic-zoom { background: #28c840; }
 .sidebar-brand { min-height: 38px; margin: 0 6px 10px; display: flex; align-items: center; gap: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; }
 .sidebar-brand span { overflow: hidden; text-overflow: ellipsis; }
-.brand-mark { width: 26px; height: 26px; flex: 0 0 auto; object-fit: contain; }
+.brand-app-icon { display: inline-grid; place-items: center; flex: 0 0 auto; }
+.brand-app-icon > img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.brand-mark { width: 30px; height: 30px; }
 .sidebar nav { display: grid; gap: 2px; }
 .nav-item { width: 100%; min-height: 40px; padding: 0 10px; display: flex; align-items: center; gap: 11px; color: var(--text); background: transparent; border: 0; border-radius: var(--radius-control); text-align: left; font-size: var(--font-body); font-weight: 400; white-space: nowrap; }
 .nav-item:hover { background: color-mix(in srgb, var(--selected) 65%, transparent); }
@@ -187,8 +189,9 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .status-gateway { display: grid; min-height: 206px; place-items: center; text-align: center; }
 .gateway-core { display: flex; flex-direction: column; align-items: center; }
 .gateway-core > strong { margin-top: 6px; font-size: var(--font-title); font-weight: 600; line-height: 24px; }
-.gateway-mark { position: relative; width: 36px; height: 36px; display: grid; place-items: center; }
-.gateway-mark img { width: 36px; height: 36px; object-fit: contain; }
+.gateway-mark { width: 44px; height: 44px; }
+.brand-app-icon.is-busy { animation: brand-icon-pulse 1.5s ease-in-out infinite; }
+@keyframes brand-icon-pulse { 50% { opacity: 0.68; transform: scale(0.96); } }
 .gateway-verdict { margin-top: 2px; font-size: var(--font-body); font-weight: 600; line-height: 20px; }
 .status-actions { margin-top: 10px; display: flex; gap: 6px; }
 .icon-button { width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; color: var(--text-secondary); background: color-mix(in srgb, var(--panel) 72%, transparent); border: 1px solid var(--control-border); border-radius: var(--control-radius); }
@@ -440,9 +443,6 @@ input:disabled, select:disabled { opacity: 0.55; }
 .change-list li.sensitive > span { font-style: italic; }
 .sheet-actions { margin-top: 20px; display: flex; justify-content: flex-end; gap: 12px; }
 .empty-state { min-height: 72px; padding: 13px; display: grid; place-items: center; color: var(--text-tertiary); font-size: 12px; text-align: center; }
-.spin { animation: spin 900ms linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
 .usage-page { max-width: 920px; min-height: 100%; margin: 0 auto; }
 .usage-toolbar { display: grid; grid-template-columns: minmax(150px, 0.8fr) minmax(210px, 1.25fr) auto; align-items: end; gap: 10px; }
 .usage-toolbar > label { min-width: 0; display: grid; gap: 5px; color: var(--text-secondary); font-size: var(--font-caption); font-weight: 600; }
@@ -577,5 +577,5 @@ input:disabled, select:disabled { opacity: 0.55; }
 
 @media (prefers-reduced-motion: reduce) {
   .switch, .switch > span, .toggle-track span, .inline-switch > span > span, .status-glow, .track-layer { transition: none; }
-  .track-strip, .spin { animation: none; }
+  .track-strip, .brand-app-icon.is-busy { animation: none; }
 }

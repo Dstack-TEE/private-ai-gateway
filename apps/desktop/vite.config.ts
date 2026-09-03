@@ -5,6 +5,7 @@ export default defineConfig({
   root: "src/renderer",
   plugins: [react()],
   build: {
+    assetsInlineLimit: 0,
     emptyOutDir: true,
     outDir: "../../dist",
   },

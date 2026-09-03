@@ -36,6 +36,19 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   await expect(openAtLogin).toHaveAttribute("aria-checked", "true");
   await openAtLogin.click();
   await expect(openAtLogin).toHaveAttribute("aria-checked", "false");
+
+  const brandImageElements = page.locator(".brand-app-icon img");
+  await expect(brandImageElements).toHaveCount(3);
+  await expect.poll(() => brandImageElements.evaluateAll((images) =>
+    images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
+  )).toBe(true);
+  const brandIcons = await brandImageElements.evaluateAll((images) =>
+    images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
+  );
+  expect(brandIcons).toHaveLength(3);
+  expect(brandIcons.every(({ source }) => source.includes("app-icon-light") && !source.startsWith("data:"))).toBe(true);
+  await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark/);
+
   await tray.getByRole("menuitem", { name: "Settings…" }).click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
 
@@ -45,6 +58,7 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   const frameCenter = frameBox!.x + frameBox!.width / 2;
   const dialogCenter = dialogBox!.x + dialogBox!.width / 2;
   expect(Math.abs(frameCenter - dialogCenter)).toBeLessThanOrEqual(2);
+
 });
 
 test("protection flow, page headers, and focus follow the native desktop contract", async ({ page }) => {
@@ -95,6 +109,16 @@ test("five agents use verified discovery, a required Codex default, previews, an
   for (const name of ["Codex", "Claude Code", "OpenCode", "Pi", "Hermes"]) {
     await expect(rows.filter({ hasText: name })).toBeVisible();
   }
+  const agentImageElements = rows.locator(".mark img");
+  await expect(agentImageElements).toHaveCount(5);
+  await expect.poll(() => agentImageElements.evaluateAll((images) =>
+    images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
+  )).toBe(true);
+  const iconResults = await agentImageElements.evaluateAll((images) =>
+    images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
+  );
+  expect(iconResults).toHaveLength(5);
+  expect(iconResults.every(({ source }) => source.includes("/assets/") && !source.startsWith("data:"))).toBe(true);
 
   const codex = rows.filter({ hasText: "Codex" });
   await codex.locator(".inline-switch").click();
@@ -256,6 +280,7 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   await nav(page, "Overview").click();
   expect(await overflow(page), "Overview at 200% zoom").toBeLessThanOrEqual(0);
   await expect(page.locator(".track-strip").first()).toHaveCSS("animation-name", "none");
+  expect(await page.locator(".brand-app-icon img").first().evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("app-icon-dark");
 
   const audit = await page.evaluate(() => {
     const productText = [...document.querySelectorAll<HTMLElement>("body *")]

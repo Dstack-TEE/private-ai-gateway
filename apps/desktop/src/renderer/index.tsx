@@ -99,6 +99,16 @@ const AGENT_ICONS: Record<string, string> = {
   hermes: hermesIcon,
 };
 
+function BrandAppIcon({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
+  const classes = ["brand-app-icon", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
+  return (
+    <picture className={classes} aria-hidden="true">
+      <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />
+      <img src={brand.appIcon.light} alt="" />
+    </picture>
+  );
+}
+
 type View = "overview" | "agents" | "usage" | "settings";
 type SettingsTarget = "confidential" | "privacy" | "local-api";
 type UsageMetric = "tokens" | "cost" | "requests";
@@ -621,7 +631,7 @@ function Sidebar({
         )}
       </div>
       <div className="sidebar-brand" data-tauri-drag-region>
-        <img className="brand-mark" src={brand.mark} alt="" aria-hidden="true" />
+        <BrandAppIcon className="brand-mark" />
         <span>{brand.productName}</span>
       </div>
       <nav aria-label="Main navigation" onKeyDown={onKeyDown}>
@@ -664,7 +674,7 @@ function MacMenuBar({ trayOpen, onTray }: { trayOpen: boolean; onTray(): void })
       </div>
       <div className="mac-menu-right">
         <button className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Gateway menu" aria-expanded={trayOpen} onClick={onTray}>
-          <img src={brand.mark} alt="" aria-hidden="true" />
+          <span className="tray-template-icon" aria-hidden="true" />
         </button>
         <Wifi size={15} strokeWidth={1.8} aria-hidden="true" />
         <BatteryMedium size={17} strokeWidth={1.8} aria-hidden="true" />
@@ -701,7 +711,7 @@ function PreviewTrayMenu({
   return (
     <div className="preview-tray" role="menu" aria-label="Private AI Gateway">
       <div className="preview-tray-heading">
-        <img src={brand.mark} alt="" aria-hidden="true" />
+        <BrandAppIcon />
         <span><strong>{brand.productName}</strong><small>{serviceHost(brand.service.defaultUrl)}</small></span>
       </div>
       <div className="preview-tray-protection">
@@ -927,9 +937,7 @@ function StatusSurface({
 
       <div className="status-segment status-gateway">
         <div className="gateway-core">
-          <span className="gateway-mark" aria-hidden="true">
-            <img src={brand.mark} alt="" className={busy ? "spin" : undefined} />
-          </span>
+          <BrandAppIcon className="gateway-mark" busy={busy} />
           <strong>{brand.productName}</strong>
           <span className={`gateway-verdict state-${verdict.tone}`} aria-live="polite">{verdict.title}</span>
           <ProtectedControl
