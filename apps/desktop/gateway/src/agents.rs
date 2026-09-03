@@ -1803,11 +1803,11 @@ mod tests {
                 .installed
         );
 
-        let executable = sandbox.home.join(".local/bin").join(if cfg!(windows) {
-            "pi.exe"
-        } else {
-            "pi"
-        });
+        let executable =
+            sandbox
+                .home
+                .join(".local/bin")
+                .join(if cfg!(windows) { "pi.exe" } else { "pi" });
         write(&executable, "#!/bin/sh\n");
         let statuses = sandbox.projector.scan(None).unwrap().0;
         assert!(
