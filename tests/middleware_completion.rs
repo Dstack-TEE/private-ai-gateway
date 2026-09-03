@@ -30,6 +30,7 @@ use private_ai_gateway::middleware::control::ControlClient;
 use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
+use private_ai_gateway::middleware::types::{OrganizationScope, Payer, TenantIdentity};
 use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -612,6 +613,7 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "userId": 7,
             "organizationId": 11,
             "workspaceId": 13,
+            "payer": "organization",
             "virtualKeyId": 3
         }),
     )
@@ -627,6 +629,7 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     assert_eq!(report["userId"], json!(7));
     assert_eq!(report["organizationId"], json!(11));
     assert_eq!(report["workspaceId"], json!(13));
+    assert_eq!(report["payer"], json!("organization"));
     assert!(report.get("billingOwnerType").is_none());
     assert!(report.get("billingOwnerId").is_none());
     assert_eq!(report["virtualKeyId"], json!(3));
@@ -944,6 +947,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "report usage must be pre-cost-injection"
     );
     assert_eq!(report["userId"], json!(7));
+    assert_eq!(report["payer"], json!("user"));
     assert_eq!(report["isStreaming"], json!(false));
 }
 
@@ -968,8 +972,14 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         request_model: "gpt".to_string(),
         pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
         spend_mode: None,
-        user_id: Some(9),
-        organization: None,
+        tenant: TenantIdentity {
+            user_id: Some(9),
+            payer: Payer::Organization,
+            organization: Some(OrganizationScope {
+                organization_id: 11,
+                workspace_id: 13,
+            }),
+        },
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1012,6 +1022,9 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     );
     assert!(report["ttftMs"].is_number(), "ttft must be recorded");
     assert_eq!(report["userId"], json!(9));
+    assert_eq!(report["organizationId"], json!(11));
+    assert_eq!(report["workspaceId"], json!(13));
+    assert_eq!(report["payer"], json!("organization"));
 }
 
 #[tokio::test]
@@ -1643,8 +1656,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1708,8 +1720,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2455,8 +2466,7 @@ async fn mid_stream_read_timeout_settles_504_with_message() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2653,8 +2663,7 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2961,8 +2970,7 @@ async fn in_band_stream_error_message_reaches_the_usage_report() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,

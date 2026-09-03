@@ -161,6 +161,27 @@ pub struct OrganizationScope {
     pub workspace_id: i64,
 }
 
+/// Ledger selected by the control plane for this request. The gateway validates
+/// and echoes this value; it never derives it from the resource scope.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Payer {
+    #[default]
+    User,
+    Organization,
+}
+
+/// Authenticated actor, resource scope, and payer fixed by pre-consult.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    pub payer: Payer,
+    #[serde(flatten)]
+    pub organization: Option<OrganizationScope>,
+}
+
 /// Pre-request consult response. On `allow: false`, `status` and `message` carry
 /// the client-facing denial; otherwise `candidates` and `pricing` drive routing.
 #[derive(Debug, Clone, Deserialize)]
@@ -175,10 +196,8 @@ pub struct PreConsult {
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
     pub candidates: Option<Vec<RouteCandidate>>,
-    #[serde(default)]
-    pub user_id: Option<i64>,
     #[serde(flatten)]
-    pub organization: Option<OrganizationScope>,
+    pub tenant: TenantIdentity,
     #[serde(default)]
     pub virtual_key_id: Option<i64>,
     #[serde(default)]
@@ -204,6 +223,8 @@ struct PreConsultWire {
     #[serde(default)]
     user_id: Option<i64>,
     #[serde(default)]
+    payer: Payer,
+    #[serde(default)]
     organization_id: Option<i64>,
     #[serde(default)]
     workspace_id: Option<i64>,
@@ -221,6 +242,11 @@ impl TryFrom<PreConsultWire> for PreConsult {
     type Error = &'static str;
 
     fn try_from(wire: PreConsultWire) -> Result<Self, Self::Error> {
+        let user_id = match wire.user_id {
+            Some(user_id) if user_id > 0 => Some(user_id),
+            None => None,
+            Some(_) => return Err("userId must be a positive integer when provided"),
+        };
         let organization = match (wire.organization_id, wire.workspace_id) {
             (Some(organization_id), Some(workspace_id))
                 if organization_id > 0 && workspace_id > 0 =>
@@ -235,6 +261,12 @@ impl TryFrom<PreConsultWire> for PreConsult {
                 return Err("organizationId and workspaceId must be positive and provided together")
             }
         };
+        if organization.is_some() && user_id.is_none() {
+            return Err("organizationId and workspaceId require a positive userId");
+        }
+        if wire.payer == Payer::Organization && organization.is_none() {
+            return Err("payer organization requires organizationId and workspaceId");
+        }
 
         Ok(Self {
             allow: wire.allow,
@@ -242,8 +274,11 @@ impl TryFrom<PreConsultWire> for PreConsult {
             message: wire.message,
             pricing: wire.pricing,
             candidates: wire.candidates,
-            user_id: wire.user_id,
-            organization,
+            tenant: TenantIdentity {
+                user_id,
+                payer: wire.payer,
+                organization,
+            },
             virtual_key_id: wire.virtual_key_id,
             spend_mode: wire.spend_mode,
             user_tier: wire.user_tier,
@@ -297,10 +332,8 @@ pub struct PostReport {
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<i64>,
     #[serde(flatten)]
-    pub organization: Option<OrganizationScope>,
+    pub tenant: TenantIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_key_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,39 +348,78 @@ pub struct PostReport {
 
 #[cfg(test)]
 mod tests {
-    use super::PreConsult;
+    use super::{Payer, PreConsult};
 
     #[test]
-    fn organization_identity_requires_complete_workspace_scope() {
-        let complete: PreConsult = serde_json::from_value(serde_json::json!({
+    fn tenant_identity_accepts_legacy_and_explicit_payers() {
+        let legacy: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7
+        }))
+        .unwrap();
+        assert_eq!(legacy.tenant.payer, Payer::User);
+        assert!(legacy.tenant.organization.is_none());
+
+        let user_with_resources: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": true,
+            "userId": 7,
+            "organizationId": 11,
+            "workspaceId": 13
+        }))
+        .unwrap();
+        assert_eq!(user_with_resources.tenant.payer, Payer::User);
+        assert_eq!(
+            user_with_resources
+                .tenant
+                .organization
+                .unwrap()
+                .organization_id,
+            11
+        );
+
+        let organization: PreConsult = serde_json::from_value(serde_json::json!({
             "allow": true,
             "userId": 7,
             "organizationId": 11,
             "workspaceId": 13,
-            "virtualKeyId": 3
+            "payer": "organization"
         }))
         .unwrap();
-        assert_eq!(complete.organization.unwrap().organization_id, 11);
-
-        let incomplete = serde_json::from_value::<PreConsult>(serde_json::json!({
-            "allow": true,
-            "userId": 7,
-            "organizationId": 11,
-            "virtualKeyId": 3
-        }));
-        assert!(incomplete.is_err());
+        assert_eq!(organization.tenant.payer, Payer::Organization);
     }
 
     #[test]
-    fn non_positive_workspace_id_is_rejected_at_the_wire_boundary() {
-        let result = serde_json::from_value::<PreConsult>(serde_json::json!({
-            "allow": true,
-            "userId": 7,
-            "organizationId": 11,
-            "workspaceId": 0,
-            "virtualKeyId": 3
-        }));
-
-        assert!(result.is_err());
+    fn tenant_identity_rejects_invalid_wire_shapes() {
+        for invalid in [
+            serde_json::json!({ "allow": true, "userId": 0 }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "organizationId": 11
+            }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "organizationId": 11,
+                "workspaceId": 0
+            }),
+            serde_json::json!({
+                "allow": true,
+                "organizationId": 11,
+                "workspaceId": 13
+            }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "payer": "organization"
+            }),
+            serde_json::json!({
+                "allow": true,
+                "userId": 7,
+                "payer": "account"
+            }),
+        ] {
+            assert!(serde_json::from_value::<PreConsult>(invalid).is_err());
+        }
     }
 }

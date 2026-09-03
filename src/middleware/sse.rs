@@ -35,7 +35,7 @@ use super::completion::{
 use super::control::ControlClient;
 use super::pricing;
 use super::response_transform;
-use super::types::{ErrorSource, OrganizationScope, PostReport, SpendMode};
+use super::types::{ErrorSource, PostReport, SpendMode, TenantIdentity};
 
 /// Cap on the partial-line reassembly buffer. An upstream that streams bytes
 /// without ever sending a `\n` would otherwise grow it without bound until the
@@ -112,8 +112,7 @@ pub struct StreamReport {
     pub request_model: String,
     pub pricing: Option<Value>,
     pub spend_mode: Option<SpendMode>,
-    pub user_id: Option<i64>,
-    pub organization: Option<OrganizationScope>,
+    pub tenant: TenantIdentity,
     pub virtual_key_id: Option<i64>,
     pub selected_route_id: Option<String>,
     pub attempt_index: u32,
@@ -170,8 +169,7 @@ impl StreamReport {
             usage,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
-            user_id: self.user_id,
-            organization: self.organization,
+            tenant: self.tenant,
             virtual_key_id: self.virtual_key_id,
             error_source,
             error_message,
@@ -947,8 +945,7 @@ mod tests {
             request_model: "m".to_string(),
             pricing: None,
             spend_mode: None,
-            user_id: None,
-            organization: None,
+            tenant: TenantIdentity::default(),
             virtual_key_id: None,
             selected_route_id: None,
             attempt_index: 0,

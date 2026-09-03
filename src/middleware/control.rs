@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use super::config::MiddlewareConfig;
 use super::request_features::RequestFeatures;
-use super::types::{PostReport, PreConsult};
+use super::types::{PostReport, PreConsult, TenantIdentity};
 
 const DEFAULT_CONTROL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_CONTROL_POST_TIMEOUT_MS: u64 = 10_000;
@@ -259,8 +259,7 @@ fn fail_closed() -> PreConsult {
         message: Some("control plane unavailable".to_string()),
         pricing: None,
         candidates: None,
-        user_id: None,
-        organization: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         spend_mode: None,
         user_tier: None,
