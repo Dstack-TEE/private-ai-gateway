@@ -87,9 +87,12 @@ package step pass as `--config`. The Tauri CLI merges it (RFC 7396, so arrays
 replace rather than merge) and exports the merged document to the compile step
 (`TAURI_CONFIG`), so the bundle and the compiled context agree, while the
 tracked `tauri.conf.json` stays neutral and compilable for plain `cargo` runs.
-The overlay carries only product name, identifier, and bundle metadata; the
-window list (geometry, minimum size, hidden start) stays in the tracked config
-and the native window title is set from the Rust brand module during setup,
-before the window is shown. The Rust and renderer modules
+The overlay carries product name, identifier, and bundle metadata. On macOS it
+also replaces the icon array with the precompiled `Assets.car` plus legacy
+fallbacks; other platforms retain the tracked legacy icon array. The `.icon`
+directory remains a generated source asset rather than a direct Tauri input.
+The window list (geometry, minimum size, hidden start) stays in the tracked
+config and the native window title is set from the Rust brand module during
+setup, before the window is shown. The Rust and renderer modules
 must be real files (they are compiled in), so those are generated and
 committed for the default brand only.

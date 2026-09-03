@@ -7,7 +7,8 @@
   "type": "module",
   "scripts": {
     "prepare:brand": "node scripts/prepare-brand.mjs",
-    "build": "npm run prepare:brand && vite build",
+    "prepare:macos-icon": "node scripts/prepare-macos-icon.mjs",
+    "build": "npm run prepare:brand && npm run prepare:macos-icon && vite build",
     "build:native": "node scripts/bundle-native.mjs",
     "build:native:debug": "node scripts/bundle-native.mjs --debug",
     "check": "npm run prepare:brand && tsc --noEmit",

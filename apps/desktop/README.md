@@ -156,15 +156,16 @@ assets so they ship self-hosted under the production CSP),
 Composer asset in `src-tauri/icons`, the template tray icon in `assets/tray`,
 and an ignored
 `src-tauri/tauri.brand.conf.json` overlay (product name, identifier, bundle
-metadata only) that `dev`, `dist`, and CI pass to the Tauri CLI as
+metadata, plus the precompiled native icon list on macOS) that `dev`, `dist`,
+and CI pass to the Tauri CLI as
 `--config`; the tracked `tauri.conf.json` keeps the window list and stays
 neutral, and the window title is set at run time from `brand.rs`. The
 committed outputs are for the default brand; CI regenerates them and fails on
-drift. On macOS 26 the `.icon` asset supplies native light and dark appearances;
-the generated ICNS keeps the dark appearance as the stable fallback for older
-macOS versions and the other desktop platforms. The script validates everything
-before writing anything and fails fast on a missing field, a missing asset, or a
-changed asset digest.
+drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
+the `Assets.car` that supplies native light and dark appearances; the generated
+ICNS keeps the dark appearance as the stable fallback for older macOS versions
+and the other desktop platforms. The scripts validate their inputs and fail
+fast on a missing field, asset, digest, or named app icon.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
@@ -203,8 +204,9 @@ dialog focus, dark/high-contrast/reduced-motion media, 200% zoom, and
 
 ## Packaging
 
-`npm run dist` builds the release `aci` sidecar and runs `tauri build`. A macOS
-runner produces `Private AI Gateway.app`, a DMG, and a ZIP artifact.
+`npm run dist` builds the release `aci` sidecar and runs `tauri build`. Xcode 26
+or newer is required to package the adaptive macOS app icon. A macOS runner
+produces `Private AI Gateway.app`, a DMG, and a ZIP artifact.
 
 `scripts/bundle-native.mjs` builds two sidecars with `--locked`: the `aci`
 verifier and `private-ai-gateway-helper`, a console binary from the gateway

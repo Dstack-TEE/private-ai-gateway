@@ -14,6 +14,7 @@ clients/pi-provider/packages/*/dist/
 /apps/desktop/resources/native/
 /apps/desktop/brand/.generated/
 /apps/desktop/src-tauri/tauri.brand.conf.json
+/apps/desktop/src-tauri/icons/Assets.car
 /apps/desktop/release/
 /apps/desktop/test-results/
 /apps/desktop/playwright-artifacts/

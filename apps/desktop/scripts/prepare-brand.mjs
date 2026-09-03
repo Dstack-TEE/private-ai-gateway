@@ -219,6 +219,11 @@ await writeFile(
         longDescription: brand.bundle.longDescription,
         publisher: brand.organizationName,
         homepage: brand.homepageUrl,
+        ...(process.platform === "darwin"
+          ? {
+              icon: [...LEGACY_DESKTOP_ICONS.map((file) => `icons/${file}`), "icons/Assets.car"],
+            }
+          : {}),
       },
     },
     null,
@@ -228,9 +233,9 @@ await writeFile(
 
 // --- icons ------------------------------------------------------------------
 // The macOS 26 Icon Composer package provides native light/dark materials.
-// Tauri compiles it to Assets.car and keeps the ICNS below as the fallback for
-// older macOS versions. Other desktop platforms continue to use the generated
-// PNG/ICO set.
+// `prepare-macos-icon.mjs` compiles it before bundling; the ICNS below remains
+// the fallback for older macOS versions. Other desktop platforms continue to
+// use the generated PNG/ICO set.
 const composerDir = path.join(appRoot, "src-tauri/icons/AppIcon.icon");
 await rm(composerDir, { recursive: true, force: true });
 await mkdir(path.join(composerDir, "Assets"), { recursive: true });
