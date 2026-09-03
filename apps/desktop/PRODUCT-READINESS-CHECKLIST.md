@@ -46,7 +46,7 @@ platform verification result.
 - [ ] Native window, traffic lights, sidebar, page headers, dialogs, and tray menu align to the app window.
 - [x] Tray includes Protection, status, Open, Settings, Open at Login, and Quit.
 - [x] Autostart failures are visible in the window and tray state remains truthful.
-- [x] Open at Login uses the app bundle path through the macOS AppleScript launcher.
+- [x] Open at Login uses a per-user LaunchAgent and never requests Automation access.
 - [x] Closing hides the window while Quit stops the gateway and exits.
 
 ## Interaction And Accessibility

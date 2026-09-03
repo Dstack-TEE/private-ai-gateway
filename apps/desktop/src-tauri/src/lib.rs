@@ -374,7 +374,7 @@ pub fn run() {
             tray::show_window(app);
         }))
         .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::AppleScript,
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
