@@ -163,10 +163,9 @@ pub struct OrganizationScope {
 
 /// Ledger selected by the control plane for this request. The gateway validates
 /// and echoes this value; it never derives it from the resource scope.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Payer {
-    #[default]
     User,
     Organization,
 }
@@ -177,7 +176,8 @@ pub enum Payer {
 pub struct TenantIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<i64>,
-    pub payer: Payer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payer: Option<Payer>,
     #[serde(flatten)]
     pub organization: Option<OrganizationScope>,
 }
@@ -223,7 +223,7 @@ struct PreConsultWire {
     #[serde(default)]
     user_id: Option<i64>,
     #[serde(default)]
-    payer: Payer,
+    payer: Option<Payer>,
     #[serde(default)]
     organization_id: Option<i64>,
     #[serde(default)]
@@ -247,6 +247,11 @@ impl TryFrom<PreConsultWire> for PreConsult {
             None => None,
             Some(_) => return Err("userId must be a positive integer when provided"),
         };
+        let payer = match (user_id, wire.payer) {
+            (Some(_), payer) => Some(payer.unwrap_or(Payer::User)),
+            (None, None) => None,
+            (None, Some(_)) => return Err("payer requires a positive userId"),
+        };
         let organization = match (wire.organization_id, wire.workspace_id) {
             (Some(organization_id), Some(workspace_id))
                 if organization_id > 0 && workspace_id > 0 =>
@@ -264,7 +269,7 @@ impl TryFrom<PreConsultWire> for PreConsult {
         if organization.is_some() && user_id.is_none() {
             return Err("organizationId and workspaceId require a positive userId");
         }
-        if wire.payer == Payer::Organization && organization.is_none() {
+        if payer == Some(Payer::Organization) && organization.is_none() {
             return Err("payer organization requires organizationId and workspaceId");
         }
 
@@ -276,7 +281,7 @@ impl TryFrom<PreConsultWire> for PreConsult {
             candidates: wire.candidates,
             tenant: TenantIdentity {
                 user_id,
-                payer: wire.payer,
+                payer,
                 organization,
             },
             virtual_key_id: wire.virtual_key_id,
@@ -357,7 +362,7 @@ mod tests {
             "userId": 7
         }))
         .unwrap();
-        assert_eq!(legacy.tenant.payer, Payer::User);
+        assert_eq!(legacy.tenant.payer, Some(Payer::User));
         assert!(legacy.tenant.organization.is_none());
 
         let user_with_resources: PreConsult = serde_json::from_value(serde_json::json!({
@@ -367,7 +372,7 @@ mod tests {
             "workspaceId": 13
         }))
         .unwrap();
-        assert_eq!(user_with_resources.tenant.payer, Payer::User);
+        assert_eq!(user_with_resources.tenant.payer, Some(Payer::User));
         assert_eq!(
             user_with_resources
                 .tenant
@@ -385,7 +390,13 @@ mod tests {
             "payer": "organization"
         }))
         .unwrap();
-        assert_eq!(organization.tenant.payer, Payer::Organization);
+        assert_eq!(organization.tenant.payer, Some(Payer::Organization));
+
+        let anonymous: PreConsult = serde_json::from_value(serde_json::json!({
+            "allow": false
+        }))
+        .unwrap();
+        assert_eq!(anonymous.tenant.payer, None);
     }
 
     #[test]
@@ -417,6 +428,10 @@ mod tests {
                 "allow": true,
                 "userId": 7,
                 "payer": "account"
+            }),
+            serde_json::json!({
+                "allow": false,
+                "payer": "user"
             }),
         ] {
             assert!(serde_json::from_value::<PreConsult>(invalid).is_err());

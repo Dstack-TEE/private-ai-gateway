@@ -974,7 +974,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         spend_mode: None,
         tenant: TenantIdentity {
             user_id: Some(9),
-            payer: Payer::Organization,
+            payer: Some(Payer::Organization),
             organization: Some(OrganizationScope {
                 organization_id: 11,
                 workspace_id: 13,
@@ -1686,6 +1686,10 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
     let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
     assert_eq!(report["status"], json!(502), "internal failure, not 499");
     assert_eq!(report["errorSource"], json!("gateway"));
+    assert!(
+        report.get("payer").is_none(),
+        "anonymous failure reports must not claim a payer"
+    );
     assert_eq!(
         report["selectedRouteId"],
         json!("openai:gpt"),
