@@ -118,9 +118,9 @@ pub fn sync(app: &AppHandle, state: &GatewayState) {
 
 fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
     let bytes = if protected {
-        include_bytes!("../../assets/tray/trayTemplateProtected@2x.png").as_slice()
+        include_bytes!("../../assets/tray/trayTemplateProtected.png").as_slice()
     } else {
-        include_bytes!("../../assets/tray/trayTemplate@2x.png").as_slice()
+        include_bytes!("../../assets/tray/trayTemplate.png").as_slice()
     };
     tauri::image::Image::from_bytes(bytes)
 }
@@ -141,6 +141,9 @@ fn menu_state(state: &GatewayState) -> (bool, &'static str) {
         "verifying" => (true, "Starting - verifying service"),
         "verified" if state.configuration_verification => (false, "Configuration verified"),
         "verified" if !state.api_key_saved => (true, "Verified - add your API key"),
+        "verified" if !state.config.require_production_os => {
+            (true, "Ready - development OS allowed")
+        }
         "verified" => (true, "Ready - requests protected"),
         "blocked" => (true, "Blocked - service identity changed"),
         "error" => (false, "Failed - open for details"),

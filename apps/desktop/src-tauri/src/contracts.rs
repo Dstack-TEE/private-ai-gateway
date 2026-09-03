@@ -263,9 +263,9 @@ pub struct GatewayState {
     pub active_profile_id: String,
     pub local_api: LocalApiConfig,
     pub api_key_saved: bool,
-    /// The most recently verified catalog. A stopped gateway may retain it so
-    /// Settings can show what a successful configuration check discovered;
-    /// the proxy still requires a live verified session before forwarding.
+    /// The most recently verified catalog. A stopped gateway may retain it for
+    /// agent projection and readiness state; the proxy still requires a live
+    /// verified session before forwarding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogSummary>,
 }

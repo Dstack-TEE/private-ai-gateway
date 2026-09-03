@@ -53,8 +53,8 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   await tray.getByRole("menuitem", { name: "Settings…" }).click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
 
-  await page.getByRole("button", { name: "Configure…" }).click();
-  const settingsDialog = page.getByRole("dialog", { name: "Confidential AI settings" });
+  await page.getByRole("button", { name: "Manage…" }).click();
+  const settingsDialog = page.getByRole("dialog", { name: "Profiles" });
   const dialogBox = await settingsDialog.boundingBox();
   expect(dialogBox).not.toBeNull();
   const frameCenter = frameBox!.x + frameBox!.width / 2;
@@ -67,22 +67,27 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
 
 test("protection flow, page headers, and focus follow the native desktop contract", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
-  await page.goto("/?mock=interactive");
+  await page.goto("/?mock=no-profiles");
 
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
 
   await page.getByRole("switch", { name: "Start protection" }).click();
-  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
-  await expect(service).toBeVisible();
-  await expect(service.getByRole("button", { name: "Verify and Save" })).toBeVisible();
-  const done = service.getByRole("button", { name: "Done" });
-  await expect(done).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await expect(editor).toBeVisible();
+  const editorHeight = await editor.evaluate((node) => node.getBoundingClientRect().height);
+  await editor.getByLabel("RedPill API key").fill("sk-test-123");
+  expect(await editor.evaluate((node) => node.getBoundingClientRect().height)).toBe(editorHeight);
+  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(editor).toHaveCount(0);
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  const initialProfilesHeight = await profiles.evaluate((node) => node.getBoundingClientRect().height);
+  await expect(profiles.getByText(/Verified configuration/)).toBeVisible();
+  await expect(profiles.getByText(/models discovered from the verified endpoint/i)).toHaveCount(0);
+  expect(await profiles.evaluate((node) => node.getBoundingClientRect().height)).toBe(initialProfilesHeight);
+  const done = profiles.getByRole("button", { name: "Done" });
   await expect(done).not.toHaveClass(/primary/);
-  await expect(service).toBeFocused();
-  await service.getByLabel("RedPill API key").fill("sk-test-123");
-  await service.getByRole("button", { name: "Verify and Save" }).click();
-  await expect(service.getByText("6 models discovered from the verified endpoint")).toBeVisible();
   await done.click();
 
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
@@ -133,14 +138,14 @@ test("five agents connect and disconnect directly from the verified discovered c
   expect(iconResults.every(({ source }) => source.includes("/assets/") && !source.startsWith("data:"))).toBe(true);
 
   const codex = rows.filter({ hasText: "Codex" });
-  await codex.locator(".inline-switch").click();
+  await codex.getByRole("switch", { name: "Connect Codex" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(codex.getByText("Connected", { exact: true })).toBeVisible();
 
   const pi = rows.filter({ hasText: "Pi" });
-  await pi.locator(".inline-switch").click();
+  await pi.getByRole("switch", { name: "Connect Pi" }).click();
   await expect(pi.getByText("Connected", { exact: true })).toBeVisible();
-  await pi.locator(".inline-switch").click();
+  await pi.getByRole("switch", { name: "Disconnect Pi" }).click();
   await expect(pi.getByText("Not connected", { exact: true })).toBeVisible();
 
   await nav(page, "Settings").click();
@@ -244,23 +249,27 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await expect(page.locator('.sr-only[role="status"]')).toContainText(/Deleted \d+ usage records/);
 });
 
-test("model catalog is discovered inside Confidential AI settings, scrollable, priced, and marks only reported TEE models", async ({ page }) => {
+test("service settings stay focused while privacy verification exposes the complete proof", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=ready");
   await nav(page, "Settings").click();
+  await page.getByRole("switch", { name: "Stop protection" }).click();
 
   await expect(page.locator("details.model-catalog")).toHaveCount(0);
-  await page.getByRole("button", { name: "Configure…" }).click();
-  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
-  const catalog = service.getByRole("region", { name: "Verified model catalog" });
-  await expect(service.getByText("6 models", { exact: true })).toBeVisible();
-  await expect(catalog.locator(".model-card")).toHaveCount(6);
-  await expect(catalog.getByText(/\$0\.080 input/).first()).toBeVisible();
-  await expect(catalog.getByText("131K", { exact: true }).first()).toBeVisible();
-  await expect(catalog.getByText("tools", { exact: true }).first()).toBeVisible();
-  await expect(catalog.locator(".badge", { hasText: "TEE" })).toHaveCount(5);
-  expect(await catalog.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
-  await service.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Manage…" }).click();
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  await expect(profiles.getByText("Model catalog", { exact: true })).toHaveCount(0);
+  await expect(profiles.getByText(/Verified configuration/)).toBeVisible();
+  const redpillLogo = profiles.locator(".service-redpill img");
+  await expect(redpillLogo).toBeVisible();
+  await expect.poll(() => redpillLogo.evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("service-redpill-");
+  expect(await redpillLogo.evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain(".png");
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit profile" }).getByText("Verified configuration", { exact: true })).toBeVisible();
+  await page.getByRole("dialog", { name: "Edit profile" }).getByRole("button", { name: "Done" }).click();
+  await profiles.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
   await nav(page, "Overview").click();
   await page.getByRole("button", { name: "Privacy verification" }).click();
   const privacy = page.getByRole("dialog", { name: "Privacy verification" });
@@ -281,43 +290,51 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(advanced).not.toHaveAttribute("open", "");
   await advanced.locator("summary").click();
   await expect(advanced.getByText("Allow development OS", { exact: true })).toBeVisible();
-  await expect(advanced.getByRole("checkbox")).not.toBeChecked();
+  const devMode = advanced.getByRole("switch", { name: "Allow development OS" });
+  await expect(devMode).toHaveAttribute("aria-checked", "false");
+  await devMode.click();
+  await expect(page.getByText("Dev mode", { exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Start protection" })).toHaveClass(/is-development/);
+  await devMode.click();
 
   const localApi = page.locator("section", { has: page.getByRole("heading", { name: "Local API", level: 2 }) });
   await expect(localApi.getByText("Endpoint", { exact: true })).toHaveCount(0);
   await expect(localApi.getByText("Status", { exact: true })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Configure…" }).click();
-  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
-  await expect(service.getByRole("button", { name: "RedPill https://tee.redpill.ai" })).toHaveAttribute("aria-pressed", "true");
-  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
-  await expect(service.getByLabel("Service endpoint")).toBeDisabled();
+  await page.getByRole("button", { name: "Manage…" }).click();
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  const redpill = profiles.locator(".profile-select", { hasText: "RedPill" });
+  await expect(redpill).toHaveAttribute("aria-pressed", "true");
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  let editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor.getByRole("button", { name: "RedPill https://tee.redpill.ai" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
+  await expect(editor.getByLabel("Service endpoint")).toBeDisabled();
 
-  await service.getByRole("button", { name: "Phala https://inference.phala.com" }).click();
-  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
-  await expect(service.getByLabel("Phala API key")).toBeVisible();
-  await expect(service.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
-  await expect(service.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
+  await editor.getByRole("button", { name: "Phala https://inference.phala.com" }).click();
+  await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
+  await expect(editor.getByLabel("Phala API key")).toBeVisible();
+  await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
 
-  await service.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
-  await expect(service.getByLabel("Service endpoint")).toBeEnabled();
-  await service.getByLabel("Service endpoint").fill("https://private.example.com");
-  await expect(service.getByLabel("API key")).toBeVisible();
+  await editor.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
+  await editor.getByLabel("Service endpoint").fill("https://private.example.com");
+  await expect(editor.getByLabel("API key")).toBeVisible();
+  await editor.getByRole("button", { name: "Done" }).click();
 
-  await service.getByRole("button", { name: "New profile" }).click();
-  await expect(service.getByLabel("Profile", { exact: true })).toHaveValue("");
-  await service.getByLabel("Profile name").fill("Private Lab");
-  await service.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
-  await service.getByLabel("Service endpoint").fill("https://private.example.com");
-  await service.getByLabel("API key").fill("sk-profile-test");
-  await service.getByRole("button", { name: "Verify and Save" }).click();
-  await expect(service.getByText("Verified configuration", { exact: true })).toBeVisible();
-  await expect(service.getByLabel("Profile", { exact: true }).locator("option", { hasText: "Private Lab" })).toHaveCount(1);
+  await profiles.getByRole("button", { name: "New Profile" }).click();
+  editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByLabel("Profile name").fill("Private Lab");
+  await editor.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await editor.getByLabel("Service endpoint").fill("https://private.example.com");
+  await editor.getByLabel("API key").fill("sk-profile-test");
+  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(profiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
-
-  await service.getByLabel("Profile", { exact: true }).selectOption("default");
-  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
-  await expect(service.getByLabel("RedPill API key")).toBeVisible();
+  await profiles.locator(".profile-select", { hasText: "RedPill" }).click();
+  await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
 });
 
 test("fail-closed states stay explicit and never show the success effects", async ({ page }) => {

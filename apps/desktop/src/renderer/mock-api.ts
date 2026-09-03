@@ -18,6 +18,7 @@ import type {
  */
 export type MockScenario =
   | "ready"
+  | "no-profiles"
   | "no-key"
   | "verifying"
   | "error"
@@ -221,6 +222,11 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
         state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, activity: ACTIVITY, sessionId: "session-demo", sessionUsage: usageSummary(ACTIVITY) },
         agents: DEFAULT_AGENTS,
       };
+    case "no-profiles":
+      return {
+        state: { ...BASE, profiles: [], activeProfileId: "", apiKeySaved: false, remoteUrl: undefined, config: { ...BASE.config, remoteUrl: "" } },
+        agents: STOPPED_AGENTS,
+      };
     case "no-key":
       return {
         state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, profiles: [{ ...REDPILL_PROFILE, verifiedAt: undefined }], apiKeySaved: false },
@@ -291,7 +297,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 }
 
 export function mockApi(name: string | null): DesktopApi {
-  const known: MockScenario[] = ["ready", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
+  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   const listeners = new Set<(state: GatewayState) => void>();

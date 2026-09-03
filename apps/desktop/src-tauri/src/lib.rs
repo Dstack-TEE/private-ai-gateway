@@ -974,6 +974,12 @@ pub fn run() {
             });
             tray::setup(app.handle())?;
             menu::setup(app.handle())?;
+            if show_on_launch {
+                // Present the UI before startup maintenance so a normal app
+                // launch always gives immediate visual feedback. Login-item
+                // launches keep running quietly in the tray.
+                tray::show_window(app.handle());
+            }
 
             let handle = app.handle().clone();
             let manager = app.state::<GatewayManager>();
@@ -1048,9 +1054,6 @@ pub fn run() {
                     manager.record_proxy_event(&events_handle, event);
                 }
             });
-            if show_on_launch {
-                tray::show_window(app.handle());
-            }
             Ok(())
         })
         .build(tauri::generate_context!())

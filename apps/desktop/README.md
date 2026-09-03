@@ -212,8 +212,9 @@ body, status, and streamed bytes through unchanged), the projections
 Playwright against the stateful in-page mock. It covers protection start/stop,
 five-agent discovery and reversible config previews, current-session Overview
 usage, persistent-history filters and cursor pagination, CSV/clear flows,
-proof and local-block semantics, the scrollable priced model catalog, native
-dialog focus, dark/high-contrast/reduced-motion media, 200% zoom, and
+proof and local-block semantics, profile management, native dialog focus,
+dark/high-contrast/reduced-motion
+media, 200% zoom, and
 940/720/540/320 widths. CI runs it on the macOS package job.
 
 ## Packaging
