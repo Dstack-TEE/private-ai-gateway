@@ -1803,7 +1803,11 @@ mod tests {
                 .installed
         );
 
-        let executable = sandbox.home.join(".local/bin/pi");
+        let executable = sandbox.home.join(".local/bin").join(if cfg!(windows) {
+            "pi.exe"
+        } else {
+            "pi"
+        });
         write(&executable, "#!/bin/sh\n");
         let statuses = sandbox.projector.scan(None).unwrap().0;
         assert!(
@@ -1814,7 +1818,10 @@ mod tests {
                 .installed
         );
 
-        let codex = sandbox.home.join(".nvm/versions/node/v22.19.0/bin/codex");
+        let codex = sandbox
+            .home
+            .join(".nvm/versions/node/v22.19.0/bin")
+            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
         write(&codex, "#!/bin/sh\n");
         let statuses = sandbox.projector.scan(None).unwrap().0;
         assert!(
