@@ -20,6 +20,8 @@ use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use usage::{UsagePage, UsageQuery, UsageStore};
 
+const AUTOSTART_ARG: &str = "--autostart";
+
 /// The OS credential store holding the RedPill API key and parked secrets.
 struct Secrets(Arc<dyn SecretStore>);
 
@@ -341,6 +343,8 @@ fn launch() -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let show_on_launch =
+        !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
     let (instance, launched) = launch();
     let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
@@ -375,7 +379,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -498,6 +502,9 @@ pub fn run() {
                     manager.record_proxy_event(&events_handle, event);
                 }
             });
+            if show_on_launch {
+                tray::show_window(app.handle());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
