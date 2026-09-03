@@ -209,6 +209,7 @@ pub struct GatewayState {
     pub error: Option<String>,
     /// The configuration the next start (window or tray toggle) will use.
     pub config: StartGatewayConfig,
+    pub local_api: LocalApiConfig,
     pub api_key_saved: bool,
     /// The catalog of the current verified session; absent whenever the
     /// session is not verified.
@@ -232,8 +233,30 @@ impl Default for GatewayState {
             usage_revision: 0,
             error: None,
             config: StartGatewayConfig::default(),
+            local_api: LocalApiConfig::default(),
             api_key_saved: false,
             catalog: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalApiConfig {
+    pub listen_address: String,
+    pub allow_network_access: bool,
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_host: Option<String>,
+}
+
+impl Default for LocalApiConfig {
+    fn default() -> Self {
+        Self {
+            listen_address: "127.0.0.1".to_string(),
+            allow_network_access: false,
+            port: 4180,
+            client_host: None,
         }
     }
 }

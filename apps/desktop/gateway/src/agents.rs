@@ -12,10 +12,14 @@
 
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env,
+    ffi::OsString,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use std::process::Command;
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -34,6 +38,7 @@ use crate::{
 pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_GATEWAY_HOME";
 pub use crate::brand::APP_IDENTIFIER;
 const STORE_FILE: &str = "agent-connections.json";
+const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
 const HELPER_MISSING: &str = "The credential helper is missing from this installation, so \
                               agents cannot be connected";
 
@@ -198,8 +203,9 @@ impl Agent {
         match self {
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
-                 selected model from the verified catalog, and command-backed authentication. \
-                 Restart Codex after applying."
+                 selected model from the verified catalog, command-backed authentication, and \
+                 model metadata exported by the installed Codex version. Restart Codex after \
+                 applying."
             }
             Agent::OpenCode => {
                 "OpenCode will use an app-owned provider catalog generated from the verified \
@@ -227,6 +233,7 @@ struct Inputs<'a> {
     endpoint: &'a str,
     helper_exe: &'a Path,
     token_path: &'a Path,
+    codex_catalog_path: &'a Path,
     catalog: Option<&'a Catalog>,
     options: &'a ConnectOptions,
 }
@@ -267,6 +274,10 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                 set(
                     &["model_providers", "private_ai_gateway", "wire_api"],
                     "responses",
+                ),
+                set(
+                    &["model_catalog_json"],
+                    inputs.codex_catalog_path.display().to_string(),
                 ),
                 set(
                     &["model_providers", "private_ai_gateway", "auth", "command"],
@@ -453,6 +464,140 @@ fn pi_provider(
         "apiKey": format!("!{}", helper_command(helper_exe, "pi")?),
         "models": models,
     }))
+}
+
+fn codex_catalog(
+    catalog: &Catalog,
+    bundled: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let bundled_models = bundled
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .filter(|models| !models.is_empty())
+        .ok_or_else(|| "Codex returned an empty bundled model catalog".to_string())?;
+    let fallback = bundled_models
+        .iter()
+        .find(|model| {
+            model
+                .get("supported_in_api")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && model.get("visibility").and_then(serde_json::Value::as_str) == Some("list")
+        })
+        .unwrap_or(&bundled_models[0]);
+    let models = catalog
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let leaf = model.id().rsplit('/').next().unwrap_or(model.id());
+            let matched_template = bundled_models
+                .iter()
+                .find(|candidate| {
+                    candidate
+                        .get("slug")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|slug| slug == model.id() || slug == leaf)
+                });
+            let template = matched_template.unwrap_or(fallback);
+            let has_instructions = template
+                .get("model_messages")
+                .and_then(|messages| messages.get("instructions_template"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|instructions| !instructions.trim().is_empty())
+                || template
+                    .get("base_instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|instructions| !instructions.trim().is_empty());
+            if !has_instructions {
+                return Err("Codex returned model metadata without its built-in instructions"
+                    .to_string());
+            }
+            let mut value = template
+                .as_object()
+                .cloned()
+                .ok_or_else(|| "Codex returned a malformed bundled model catalog".to_string())?;
+            let capabilities = model.string_array("supported_features");
+            let reasoning = capabilities.iter().any(|value| value == "reasoning");
+            let verbosity = capabilities.iter().any(|value| value == "verbosity");
+            let image = model
+                .string_array("input_modalities")
+                .iter()
+                .any(|value| value == "image");
+            let context = model.remote.context_length.map(serde_json::Value::from).unwrap_or_default();
+            value.insert("slug".to_string(), serde_json::Value::String(model.id().to_string()));
+            value.insert(
+                "display_name".to_string(),
+                serde_json::Value::String(model.display_name().to_string()),
+            );
+            value.insert(
+                "description".to_string(),
+                model
+                    .string_field("description")
+                    .map(serde_json::Value::String)
+                    .unwrap_or_default(),
+            );
+            value.insert(
+                "default_reasoning_level".to_string(),
+                reasoning
+                    .then(|| serde_json::Value::String("medium".to_string()))
+                    .unwrap_or_default(),
+            );
+            value.insert(
+                "supported_reasoning_levels".to_string(),
+                if reasoning {
+                    serde_json::json!([
+                        { "effort": "low", "description": "Faster responses with lighter reasoning" },
+                        { "effort": "medium", "description": "Balanced reasoning for everyday coding work" },
+                        { "effort": "high", "description": "Deeper reasoning for complex tasks" }
+                    ])
+                } else {
+                    serde_json::json!([])
+                },
+            );
+            value.insert("visibility".to_string(), serde_json::Value::String("list".to_string()));
+            value.insert("supported_in_api".to_string(), serde_json::Value::Bool(true));
+            value.insert("priority".to_string(), serde_json::Value::from(index + 1));
+            value.insert("additional_speed_tiers".to_string(), serde_json::json!([]));
+            value.insert("service_tiers".to_string(), serde_json::json!([]));
+            value.insert("default_reasoning_summary".to_string(), serde_json::Value::String(if reasoning { "auto" } else { "none" }.to_string()));
+            value.insert("support_verbosity".to_string(), serde_json::Value::Bool(verbosity));
+            value.insert(
+                "default_verbosity".to_string(),
+                verbosity
+                    .then(|| serde_json::Value::String("medium".to_string()))
+                    .unwrap_or_default(),
+            );
+            value.insert("supports_image_detail_original".to_string(), serde_json::Value::Bool(image));
+            value.insert("context_window".to_string(), context.clone());
+            value.insert("max_context_window".to_string(), context);
+            value.insert("comp_hash".to_string(), serde_json::Value::Null);
+            value.insert(
+                "input_modalities".to_string(),
+                if image { serde_json::json!(["text", "image"]) } else { serde_json::json!(["text"]) },
+            );
+            value.insert(
+                "supports_search_tool".to_string(),
+                serde_json::Value::Bool(capabilities.iter().any(|value| value == "web_search")),
+            );
+            value.insert("use_responses_lite".to_string(), serde_json::Value::Bool(false));
+            if matched_template.is_none() {
+                value.insert("tool_mode".to_string(), serde_json::Value::Null);
+                value.insert("apply_patch_tool_type".to_string(), serde_json::Value::Null);
+                value.insert("multi_agent_version".to_string(), serde_json::Value::Null);
+                value.insert(
+                    "web_search_tool_type".to_string(),
+                    serde_json::Value::String("text".to_string()),
+                );
+                value.insert(
+                    "shell_type".to_string(),
+                    serde_json::Value::String("unified_exec".to_string()),
+                );
+            }
+            Ok(serde_json::Value::Object(value))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(serde_json::json!({ "models": models }))
 }
 
 struct Field {
@@ -647,6 +792,71 @@ impl Projector {
         self.data_dir.join(STORE_FILE)
     }
 
+    fn codex_catalog_path(&self) -> PathBuf {
+        self.data_dir.join(CODEX_CATALOG_FILE)
+    }
+
+    /// Keep Codex's startup metadata in sync with the verified service
+    /// catalog. The installed Codex binary supplies its exact catalog schema
+    /// and complete built-in instructions; only public model metadata from
+    /// the verified service is overlaid. No credentials are written here.
+    pub fn sync_codex_catalog(&self, catalog: &Catalog) -> Result<(), String> {
+        let bundled = self.codex_bundled_catalog()?;
+        let text = serde_json::to_string_pretty(&codex_catalog(catalog, &bundled)?)
+            .map_err(|error| format!("Cannot encode the Codex model catalog: {error}"))?;
+        tokens::create_private_dir(&self.data_dir)
+            .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
+        if fs::read_to_string(self.codex_catalog_path()).is_ok_and(|current| current == text) {
+            return Ok(());
+        }
+        write_atomic(&self.codex_catalog_path(), &text, None)
+            .map_err(|error| format!("Cannot write the Codex model catalog: {error}"))
+    }
+
+    #[cfg(not(test))]
+    fn codex_bundled_catalog(&self) -> Result<serde_json::Value, String> {
+        let search_paths = cli_paths(&self.home, self.tool_env);
+        let executable = find_cli_in_paths(Agent::Codex, &search_paths).ok_or_else(|| {
+            "Codex CLI was not found; install or update Codex before connecting".to_string()
+        })?;
+        let output = command_output(
+            &executable,
+            &["debug", "models", "--bundled"],
+            &search_paths,
+        )
+        .map_err(|error| format!("Cannot read model metadata from Codex: {error}"))?;
+        if !output.status.success() {
+            return Err(
+                "Codex could not export its bundled model metadata; update Codex and try again"
+                    .to_string(),
+            );
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|_| "Codex returned malformed bundled model metadata".to_string())
+    }
+
+    #[cfg(test)]
+    fn codex_bundled_catalog(&self) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "models": [{
+                "slug": "gpt-test",
+                "display_name": "GPT Test",
+                "description": "Bundled test model",
+                "model_messages": { "instructions_template": "Complete official Codex instructions" },
+                "base_instructions": "Complete official Codex instructions",
+                "supported_in_api": true,
+                "visibility": "list",
+                "shell_type": "unified_exec",
+                "tool_mode": "code_mode_only",
+                "apply_patch_tool_type": "freeform",
+                "multi_agent_version": "v2",
+                "web_search_tool_type": "text_and_image",
+                "truncation_policy": { "mode": "tokens", "limit": 10_000 },
+                "input_modalities": ["text"]
+            }]
+        }))
+    }
+
     /// One scan: every agent's status and the token set those statuses
     /// authorize, from the same reads. Callers publish the returned set to
     /// the proxy, so what the UI reports and what the proxy accepts can
@@ -813,6 +1023,11 @@ impl Projector {
             ));
         }
         let mut doc = self.parse_config(agent, text.as_deref())?;
+        if agent == Agent::Codex {
+            self.sync_codex_catalog(
+                catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
+            )?;
+        }
         let edit = self.edit(agent, true, &mut doc, store, catalog, options)?;
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), String> {
@@ -952,10 +1167,12 @@ impl Projector {
                 agent.name()
             ));
         }
+        let codex_catalog_path = self.codex_catalog_path();
         let inputs = Inputs {
             endpoint: &self.endpoint,
             helper_exe: &self.helper_exe,
             token_path: &self.tokens.path(agent.id()),
+            codex_catalog_path: &codex_catalog_path,
             catalog,
             options,
         };
@@ -1351,7 +1568,7 @@ fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
     }
 }
 
-fn cli_installed(agent: Agent, home: &Path, tool_env: bool) -> bool {
+fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = if tool_env {
         env::var_os("PATH")
             .map(|paths| env::split_paths(&paths).collect())
@@ -1376,10 +1593,23 @@ fn cli_installed(agent: Agent, home: &Path, tool_env: bool) -> bool {
         &home.join(".local/share/fnm/node-versions"),
         &["installation", "bin"],
     ));
+    paths
+}
+
+fn find_cli(agent: Agent, home: &Path, tool_env: bool) -> Option<PathBuf> {
+    let paths = cli_paths(home, tool_env);
+    find_cli_in_paths(agent, &paths)
+}
+
+fn find_cli_in_paths(agent: Agent, paths: &[PathBuf]) -> Option<PathBuf> {
     agent
         .cli_names()
         .iter()
-        .any(|name| cli_in_paths(name, &paths))
+        .find_map(|name| cli_in_paths(name, &paths))
+}
+
+fn cli_installed(agent: Agent, home: &Path, tool_env: bool) -> bool {
+    find_cli(agent, home, tool_env).is_some()
 }
 
 fn versioned_runtime_bins(root: &Path, suffix: &[&str]) -> Vec<PathBuf> {
@@ -1398,7 +1628,7 @@ fn versioned_runtime_bins(root: &Path, suffix: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn cli_in_paths(name: &str, paths: &[PathBuf]) -> bool {
+fn cli_in_paths(name: &str, paths: &[PathBuf]) -> Option<PathBuf> {
     let candidates: &[String] = &if cfg!(windows) {
         vec![
             format!("{name}.exe"),
@@ -1408,11 +1638,50 @@ fn cli_in_paths(name: &str, paths: &[PathBuf]) -> bool {
     } else {
         vec![name.to_string()]
     };
-    paths.iter().any(|dir| {
-        candidates
-            .iter()
-            .any(|candidate| dir.join(candidate).is_file())
-    })
+    paths
+        .iter()
+        .flat_map(|dir| candidates.iter().map(move |candidate| dir.join(candidate)))
+        .find(|candidate| candidate.is_file())
+}
+
+fn command_output(
+    executable: &Path,
+    args: &[&str],
+    search_paths: &[PathBuf],
+) -> io::Result<std::process::Output> {
+    let mut command;
+    #[cfg(windows)]
+    if executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+    {
+        command = Command::new("cmd");
+        command.arg("/C").arg(executable).args(args);
+    } else {
+        command = Command::new(executable);
+        command.args(args);
+    }
+    #[cfg(not(windows))]
+    {
+        command = Command::new(executable);
+        command.args(args);
+    }
+    command.env("PATH", command_path(search_paths)?).output()
+}
+
+fn command_path(search_paths: &[PathBuf]) -> io::Result<OsString> {
+    let mut paths = search_paths.to_vec();
+    if let Some(current) = env::var_os("PATH") {
+        for path in env::split_paths(&current) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    env::join_paths(paths).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -1583,6 +1852,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn command_output_resolves_the_discovered_shebang_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("pag-command-path-{}", std::process::id()));
+        let runtime = root.join("bin");
+        let executable = runtime.join("codex");
+        let node = runtime.join("node");
+        let _ = fs::remove_dir_all(&root);
+        write(&executable, "#!/usr/bin/env node\n");
+        write(&node, "#!/bin/sh\nprintf bundled-catalog\n");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = command_output(&executable, &[], std::slice::from_ref(&runtime)).unwrap();
+        let _ = fs::remove_dir_all(root);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"bundled-catalog");
+    }
+
     fn connect(sandbox: &Sandbox) -> AgentStatus {
         let catalog = catalog();
         let preview = sandbox
@@ -1659,6 +1949,50 @@ mod tests {
                 .as_deref(),
             Some("http://127.0.0.1:4180/v1")
         );
+        assert_eq!(
+            codex.get_str(&["model_catalog_json"]).as_deref(),
+            Some(
+                sandbox
+                    .projector
+                    .codex_catalog_path()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        let generated: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(sandbox.projector.codex_catalog_path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(generated["models"][0]["slug"], "openai/gpt-oss-20b");
+        assert_eq!(generated["models"][0]["context_window"], 131072);
+        assert_eq!(
+            generated["models"][1]["context_window"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            generated["models"][0]["model_messages"]["instructions_template"],
+            "Complete official Codex instructions"
+        );
+        assert_eq!(
+            generated["models"][0]["base_instructions"],
+            "Complete official Codex instructions"
+        );
+        assert_eq!(generated["models"][0]["support_verbosity"], false);
+        assert_eq!(
+            generated["models"][0]["default_verbosity"],
+            serde_json::Value::Null
+        );
+        assert_eq!(generated["models"][0]["tool_mode"], serde_json::Value::Null);
+        assert_eq!(
+            generated["models"][0]["apply_patch_tool_type"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            generated["models"][0]["multi_agent_version"],
+            serde_json::Value::Null
+        );
+        assert_eq!(generated["models"][0]["web_search_tool_type"], "text");
+        assert_eq!(generated["models"][0]["shell_type"], "unified_exec");
         disconnect(&sandbox, Agent::Codex);
 
         let preview = sandbox

@@ -46,6 +46,7 @@ const BASE: GatewayState = {
   },
   usageRevision: 0,
   config: { remoteUrl: "https://tee.redpill.ai", requireProductionOs: false },
+  localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: true,
 };
 
@@ -93,8 +94,8 @@ const ACTIVITY: GatewayState["activity"] = [
   usage({ id: "51be02", method: "POST", path: "/v1/messages", model: "openai/gpt-oss-20b", status: 200, streamed: true, receiptId: "rcpt-51be02", verified: true, detail: "receipt verified", at: now - 80, agent: "claude-code", locallyConstrained: true, rewritten: true, leftDevice: true, inputTokens: 1260, outputTokens: 284, cacheReadTokens: 800, costUsd: 0.0009 }),
   usage({ id: "7f3a9c", method: "POST", path: "/v1/responses", model: "deepseek/deepseek-v4-flash-0731", status: 200, streamed: true, receiptId: "rcpt-7f3a9c", verified: true, detail: "receipt verified", at: now - 120, agent: "codex", locallyConstrained: true, rewritten: false, leftDevice: true, inputTokens: 880, outputTokens: 412, costUsd: 0.0005 }),
   usage({ id: "local01", method: "POST", path: "/v1/messages", model: "claude-sonnet-4-6", status: 404, detail: "`claude-sonnet-4-6` is not in the verified model list", at: now - 200, agent: "claude-code" }),
-  usage({ id: "local02", method: "GET", path: "/v1/models", status: 401, detail: "This endpoint accepts only agents connected through Private AI Gateway", at: now - 260 }),
   usage({ id: "a50005", method: "POST", path: "/v1/responses", model: "openai/gpt-oss-20b", status: 200, streamed: true, receiptId: "rcpt-a50005", verified: true, detail: "receipt verified", at: now - 320, agent: "pi", leftDevice: true, inputTokens: 450, outputTokens: 90, costUsd: 0.00008 }),
+  usage({ id: "c42d18", method: "POST", path: "/v1/chat/completions", model: "zai/glm-5.2", status: 200, receiptId: "rcpt-c42d18", verified: true, detail: "receipt verified", at: now - 410, agent: "hermes", leftDevice: true, inputTokens: 720, outputTokens: 144, costUsd: 0.00039 }),
 ];
 
 const HISTORY_AGENTS = ["claude-code", "codex", "opencode", "pi", "hermes"] as const;
@@ -294,6 +295,17 @@ export function mockApi(name: string | null): DesktopApi {
     rotateClientKey: async () => {
       clientKey = `pag_demo_${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
       return clientKey;
+    },
+    saveLocalApiConfig: async (config) => {
+      if (config.port < 1024 || config.port > 65535) throw new Error("Port must be between 1024 and 65535");
+      if (!config.allowNetworkAccess && !["127.0.0.1", "::1"].includes(config.listenAddress)) {
+        throw new Error("Turn on Allow network access before listening outside this Mac");
+      }
+      const host = config.clientHost?.trim() || config.listenAddress;
+      const wrapped = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+      state = { ...state, localApi: config, proxyUrl: `http://${wrapped}:${config.port}`, endpointError: undefined };
+      publish();
+      return state;
     },
     getState: async () => state,
     onStateChange: (listener) => {

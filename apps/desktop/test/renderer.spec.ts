@@ -37,7 +37,7 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   await openAtLogin.click();
   await expect(openAtLogin).toHaveAttribute("aria-checked", "false");
 
-  const brandImageElements = page.locator(".brand-app-icon img");
+  const brandImageElements = page.locator(".brand-logo img");
   await expect(brandImageElements).toHaveCount(3);
   await expect.poll(() => brandImageElements.evaluateAll((images) =>
     images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
@@ -46,7 +46,7 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
     images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
   );
   expect(brandIcons).toHaveLength(3);
-  expect(brandIcons.every(({ source }) => source.includes("app-icon-light") && !source.startsWith("data:"))).toBe(true);
+  expect(brandIcons.every(({ source }) => source.includes("brand-mark-light") && !source.startsWith("data:"))).toBe(true);
   await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark/);
 
   await tray.getByRole("menuitem", { name: "Settings…" }).click();
@@ -68,6 +68,16 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
 
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
+  await expect(service).toBeVisible();
+  await expect(service.getByRole("button", { name: "Verify and Save" })).toBeVisible();
+  await expect(service.getByRole("button", { name: "Done" })).toBeVisible();
+  await service.getByLabel("RedPill API key").fill("sk-test-123");
+  await service.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(service.getByText("6 models discovered from the verified endpoint")).toBeVisible();
+  await service.getByRole("button", { name: "Done" }).click();
+
   await nav(page, "Overview").focus();
   await page.keyboard.press("ArrowDown");
   await expect(nav(page, "Agents")).toBeFocused();
@@ -77,15 +87,6 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await nav(page, "Settings").click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
   await expect(page.getByText("Protected", { exact: true })).toBeVisible();
-
-  await page.getByRole("button", { name: "Configure…" }).click();
-  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
-  await service.getByLabel("RedPill API key").fill("sk-test-123");
-  await service.getByRole("button", { name: "Verify", exact: true }).click();
-  await expect(service.getByText("Using the saved key")).toBeVisible();
-  await service.getByRole("button", { name: "Done" }).click();
-
-  await expect(page.getByRole("switch", { name: "Cancel protection start" })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
 
   await nav(page, "Overview").click();
@@ -99,7 +100,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(page.locator(".tracks-left")).toHaveCSS("opacity", "0");
 });
 
-test("five agents use verified discovery, a required Codex default, previews, and reversible restore", async ({ page }) => {
+test("five agents connect and disconnect directly from the verified discovered catalog", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=ready");
   await nav(page, "Agents").click();
@@ -122,22 +123,14 @@ test("five agents use verified discovery, a required Codex default, previews, an
 
   const codex = rows.filter({ hasText: "Codex" });
   await codex.locator(".inline-switch").click();
-  const codexSheet = page.getByRole("dialog", { name: "Connect Codex" });
-  await expect(codexSheet.getByLabel("Default model for Codex")).toHaveValue("");
-  await expect(codexSheet.getByRole("option", { name: "Select a verified model" })).toBeAttached();
-  await expect(codexSheet.getByRole("button", { name: "Connect", exact: true })).toBeDisabled();
-  await codexSheet.getByLabel("Default model for Codex").selectOption("openai/gpt-oss-20b");
-  await expect(codexSheet.getByText(/available model choices come from the verified service/i)).toBeVisible();
-  await codexSheet.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(codex.getByText("Connected", { exact: true })).toBeVisible();
 
   const pi = rows.filter({ hasText: "Pi" });
   await pi.locator(".inline-switch").click();
-  const piSheet = page.getByRole("dialog", { name: "Connect Pi" });
-  await expect(piSheet.getByRole("combobox")).toHaveCount(0);
-  await expect(piSheet.getByText("Pi discovers the verified model catalog automatically.")).toBeVisible();
-  await piSheet.getByRole("button", { name: "Cancel" }).click();
-  await expect(pi.getByRole("checkbox", { name: "Connect Pi" })).toBeFocused();
+  await expect(pi.getByText("Connected", { exact: true })).toBeVisible();
+  await pi.locator(".inline-switch").click();
+  await expect(pi.getByText("Not connected", { exact: true })).toBeVisible();
 
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Restore all" }).click();
@@ -152,8 +145,16 @@ test("overview shows five agents, five current-session records, truthful copy su
 
   const agentsModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents" }) });
   await expect(agentsModule.locator(".agent-block")).toHaveCount(5);
+  await expect(agentsModule.locator(".agent-block").last()).toBeVisible();
   const usageModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Recent usage" }) });
-  await expect(usageModule.locator(".preview-row")).toHaveCount(5);
+  await expect(usageModule.locator(".usage-row")).toHaveCount(5);
+  await expect(usageModule.locator(".usage-row").last()).toBeVisible();
+  expect(await agentsModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
+  expect(await usageModule.locator(".module").evaluate((node) => node.scrollHeight <= node.clientHeight)).toBe(true);
+  await usageModule.locator(".usage-row").first().click();
+  const overviewProof = page.getByRole("dialog", { name: "Usage proof" });
+  await expect(overviewProof).toContainText("Signed receipt verified");
+  await overviewProof.getByRole("button", { name: "Done" }).click();
 
   const session = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Session usage" }) });
   for (const label of ["Requests", "Tokens", "Cost", "Protected"]) {
@@ -177,9 +178,13 @@ test("overview shows five agents, five current-session records, truthful copy su
   await localApi.getByRole("button", { name: "Local API settings" }).click();
   const localSheet = page.getByRole("dialog", { name: "Local API settings" });
   await expect(localSheet).toBeVisible();
-  const settingsEndpoint = localSheet.getByRole("button", { name: /OpenAI-style endpoint/ });
-  await settingsEndpoint.hover();
-  await expect(settingsEndpoint.getByText("Copy", { exact: true })).toBeVisible();
+  for (const label of ["Listen address", "Allow network access", "Port", "Client host", "Client key"]) {
+    await expect(localSheet.getByText(label, { exact: true }).first()).toBeVisible();
+  }
+  await expect(localSheet.getByRole("button", { name: "Copy OpenAI-style endpoint" })).toBeVisible();
+  await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
+  await expect(localSheet.getByRole("button", { name: "Manage agents" })).toBeVisible();
+  await expect(localSheet.getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -196,7 +201,9 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
 
   const uncertainDelivery = history.getByRole("button", { name: /Upstream failed/ }).first();
   await uncertainDelivery.click();
-  await expect(page.getByLabel("Usage details")).toContainText("whether the service received it could not be confirmed");
+  const uncertainProof = page.getByRole("dialog", { name: "Usage proof" });
+  await expect(uncertainProof).toContainText("whether the service received it could not be confirmed");
+  await uncertainProof.getByRole("button", { name: "Done" }).click();
 
   const agentFilter = page.getByRole("combobox", { name: "Agent", exact: true });
   await agentFilter.selectOption("hermes");
@@ -204,9 +211,11 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await agentFilter.selectOption("");
   const blocked = history.getByRole("button", { name: /Blocked locally/ }).first();
   await blocked.click();
-  const details = page.getByLabel("Usage details");
-  await expect(details.getByText("Blocked locally", { exact: true })).toBeVisible();
-  await expect(details.getByText(/did not leave this Mac/)).toBeVisible();
+  const blockedProof = page.getByRole("dialog", { name: "Usage proof" });
+  await expect(blockedProof.getByText("Blocked locally", { exact: true })).toBeVisible();
+  await expect(blockedProof.getByText(/did not leave this Mac/)).toBeVisible();
+  await blockedProof.getByRole("button", { name: "Done" }).click();
+  await expect(history).not.toContainText("/v1/models");
 
   await page.getByRole("button", { name: "Export usage as CSV" }).click();
   await expect(page.locator('.sr-only[role="status"]')).toContainText(/Exported \d+ usage records/);
@@ -228,11 +237,11 @@ test("model catalog is discovered inside Confidential AI settings, scrollable, p
   await page.getByRole("button", { name: "Configure…" }).click();
   const service = page.getByRole("dialog", { name: "Confidential AI settings" });
   const catalog = service.getByRole("region", { name: "Verified model catalog" });
-  await expect(catalog.getByText("6 models · scroll for more", { exact: true })).toBeVisible();
-  await expect(catalog.locator(".model-row")).toHaveCount(6);
+  await expect(service.getByText("6 models", { exact: true })).toBeVisible();
+  await expect(catalog.locator(".model-card")).toHaveCount(6);
   await expect(catalog.getByText(/\$0\.080 input/).first()).toBeVisible();
-  await expect(catalog.getByText(/131K context/).first()).toBeVisible();
-  await expect(catalog.getByText(/tools · reasoning/i).first()).toBeVisible();
+  await expect(catalog.getByText("131K", { exact: true }).first()).toBeVisible();
+  await expect(catalog.getByText("tools", { exact: true }).first()).toBeVisible();
   await expect(catalog.locator(".badge", { hasText: "TEE" })).toHaveCount(5);
   expect(await catalog.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
   await service.getByRole("button", { name: "Done" }).click();
@@ -241,6 +250,8 @@ test("model catalog is discovered inside Confidential AI settings, scrollable, p
   const privacy = page.getByRole("dialog", { name: "Privacy verification" });
   await expect(privacy.getByText("Attested encrypted channel")).toBeVisible();
   await expect(privacy).toContainText("SPKI-pinned TLS");
+  await expect(privacy.locator("details")).toHaveCount(0);
+  await expect(privacy.getByRole("heading", { name: "Verification checks" })).toBeVisible();
 });
 
 test("fail-closed states stay explicit and never show the success effects", async ({ page }) => {
@@ -280,7 +291,7 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
   await nav(page, "Overview").click();
   expect(await overflow(page), "Overview at 200% zoom").toBeLessThanOrEqual(0);
   await expect(page.locator(".track-strip").first()).toHaveCSS("animation-name", "none");
-  expect(await page.locator(".brand-app-icon img").first().evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("app-icon-dark");
+  expect(await page.locator(".brand-logo img").first().evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("brand-mark-dark");
 
   const audit = await page.evaluate(() => {
     const productText = [...document.querySelectorAll<HTMLElement>("body *")]
@@ -288,7 +299,13 @@ test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay b
       .filter((node) => !node.closest(".track-layer, .sr-only"));
     const tooSmall = productText.filter((node) => Number.parseFloat(getComputedStyle(node).fontSize) < 12);
     const clippedControls = [...document.querySelectorAll<HTMLElement>("button, select, input")]
-      .filter((node) => node.offsetParent !== null && (node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1));
+      .filter((node) => {
+        if (node.offsetParent === null) return false;
+        const style = getComputedStyle(node);
+        const clipsX = node.scrollWidth > node.clientWidth + 1 && style.overflowX !== "hidden";
+        const clipsY = node.scrollHeight > node.clientHeight + 1 && style.overflowY !== "hidden";
+        return clipsX || clipsY;
+      });
     const nestedInteractive = document.querySelectorAll("button button, button input, button select, a button, label button").length;
     return { tooSmall: tooSmall.map((node) => node.textContent), clippedControls: clippedControls.map((node) => node.getAttribute("aria-label") ?? node.textContent), nestedInteractive };
   });

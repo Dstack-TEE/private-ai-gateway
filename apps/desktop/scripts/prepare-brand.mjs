@@ -151,6 +151,8 @@ const generatedDir = path.join(appRoot, "src/renderer/generated");
 await mkdir(generatedDir, { recursive: true });
 await writeFile(path.join(generatedDir, "app-icon-light.svg"), appIconLightSvg);
 await writeFile(path.join(generatedDir, "app-icon-dark.svg"), appIconDarkSvg);
+await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(appIconLightMark, appIconWhiteAsCutout));
+await writeFile(path.join(generatedDir, "brand-mark-dark.svg"), standaloneMark(appIconDarkMark, appIconWhiteAsCutout));
 await writeFile(path.join(generatedDir, "tray-mark.svg"), trayTemplateSvg);
 await copyFile(path.join(brandDir, brand.assets.wordmarkLight), path.join(generatedDir, "wordmark-light.svg"));
 await copyFile(path.join(brandDir, brand.assets.wordmarkDark), path.join(generatedDir, "wordmark-dark.svg"));
@@ -170,12 +172,15 @@ await writeFile(
   `// ${generatedNote}
 import appIconDark from "./app-icon-dark.svg";
 import appIconLight from "./app-icon-light.svg";
+import brandMarkDark from "./brand-mark-dark.svg";
+import brandMarkLight from "./brand-mark-light.svg";
 import wordmarkDark from "./wordmark-dark.svg";
 import wordmarkLight from "./wordmark-light.svg";
 
 export const brand = {
   ...${JSON.stringify(rendererBrand, null, 2).replace(/\n/g, "\n  ")},
   appIcon: { light: appIconLight, dark: appIconDark },
+  mark: { light: brandMarkLight, dark: brandMarkDark },
   wordmark: { light: wordmarkLight, dark: wordmarkDark },
 } as const;
 `,
@@ -296,7 +301,7 @@ function render(svg, size) {
 
 function composeAppIcon(mark, background, whiteAsCutout) {
   const { width, height } = svgSize(mark);
-  const inset = 824 * 0.62;
+  const inset = 1024 * 0.56;
   const scale = inset / Math.max(width, height);
   const offsetX = 512 - (width * scale) / 2;
   const offsetY = 512 - (height * scale) / 2;
@@ -315,13 +320,18 @@ function composeAppIcon(mark, background, whiteAsCutout) {
 
 function composeIconLayer(mark, whiteAsCutout) {
   const { width, height } = svgSize(mark);
-  const inset = 1024 * 0.5;
+  const inset = 1024 * 0.56;
   const scale = inset / Math.max(width, height);
   const offsetX = 512 - (width * scale) / 2;
   const offsetY = 512 - (height * scale) / 2;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
 <g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>
 </svg>`;
+}
+
+function standaloneMark(mark, whiteAsCutout) {
+  const { width, height } = svgSize(mark);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg>`;
 }
 
 function composeIconComposerManifest(lightBackground, darkBackground) {

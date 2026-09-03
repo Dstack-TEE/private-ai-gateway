@@ -10,7 +10,7 @@
 
 use std::{
     collections::VecDeque,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::IpAddr,
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,14 +26,12 @@ use tokio::sync::mpsc::Receiver;
 use url::Url;
 
 use crate::contracts::{
-    CatalogSummary, GatewayIdentity, GatewayState, RequestActivity, SourceProvenance,
-    StartGatewayConfig, UsageSummary, VerificationCheck,
+    CatalogSummary, GatewayIdentity, GatewayState, LocalApiConfig, RequestActivity,
+    SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
 };
+use crate::local_api;
 use crate::usage::UsageStore;
 
-/// The stable loopback HTTP endpoint agents are configured with.
-pub const LOCAL_ENDPOINT: &str = "http://127.0.0.1:4180";
-pub const LOCAL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4180);
 const EVENT_SCHEMA_VERSION: u64 = 1;
 const MAX_ACTIVITY: usize = 50;
 const MAX_DIAGNOSTIC_BYTES: usize = 4_096;
@@ -67,7 +65,11 @@ struct RuntimeState {
 }
 
 impl GatewayManager {
-    pub fn new(proxy: Arc<ProxyState>, usage: Arc<UsageStore>) -> Self {
+    pub fn new(proxy: Arc<ProxyState>, usage: Arc<UsageStore>, local_api: LocalApiConfig) -> Self {
+        let state = GatewayState {
+            local_api,
+            ..GatewayState::default()
+        };
         Self {
             inner: Mutex::new(RuntimeState {
                 child: None,
@@ -79,7 +81,7 @@ impl GatewayManager {
                 identity_ready: false,
                 session_id: "unscoped".to_string(),
                 last_catalog: None,
-                state: GatewayState::default(),
+                state,
             }),
             proxy,
             usage,
@@ -204,6 +206,7 @@ impl GatewayManager {
     fn carried(previous: &GatewayState) -> GatewayState {
         GatewayState {
             config: previous.config.clone(),
+            local_api: previous.local_api.clone(),
             api_key_saved: previous.api_key_saved,
             proxy_url: previous.proxy_url.clone(),
             endpoint_error: previous.endpoint_error.clone(),
@@ -238,17 +241,32 @@ impl GatewayManager {
 
     /// Record whether the stable local endpoint is bound. A failure blocks
     /// starting and connecting until the app is relaunched.
-    pub fn set_endpoint(&self, app: &AppHandle, bound: Result<(), String>) {
+    pub fn set_endpoint(
+        &self,
+        app: &AppHandle,
+        config: LocalApiConfig,
+        bound: Result<String, String>,
+    ) {
         self.update(app, |state| match bound {
-            Ok(()) => {
-                state.proxy_url = Some(LOCAL_ENDPOINT.to_string());
+            Ok(endpoint) => {
+                state.local_api = config;
+                state.proxy_url = Some(endpoint);
                 state.endpoint_error = None;
             }
             Err(error) => {
+                state.local_api = config;
                 state.proxy_url = None;
                 state.endpoint_error = Some(error);
             }
         });
+    }
+
+    pub fn local_api(&self) -> Result<local_api::ResolvedLocalApi, String> {
+        local_api::resolve(self.lock()?.state.local_api.clone())
+    }
+
+    pub fn is_running(&self) -> Result<bool, String> {
+        Ok(self.lock()?.child.is_some())
     }
 
     pub fn report_error(&self, app: &AppHandle, message: String) {
@@ -265,6 +283,9 @@ impl GatewayManager {
 
     /// A request the local proxy answered itself, before any receipt.
     pub fn record_proxy_event(&self, app: &AppHandle, event: ProxyEvent) {
+        if event.path == "/v1/models" {
+            return;
+        }
         let activity = RequestActivity {
             id: event.request_id,
             session_id: event.session_id,
@@ -784,6 +805,9 @@ fn apply_request_event(
 }
 
 fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
+    if incoming.path == "/v1/models" {
+        return;
+    }
     if let Some(existing) = state
         .activity
         .iter_mut()

@@ -1,12 +1,15 @@
 mod contracts;
 mod gateway;
+mod local_api;
 mod menu;
 mod tray;
 mod usage;
 
 use std::sync::{Arc, Mutex};
 
-use contracts::{AgentPreview, AgentStatus, ConnectOptions, GatewayState, StartGatewayConfig};
+use contracts::{
+    AgentPreview, AgentStatus, ConnectOptions, GatewayState, LocalApiConfig, StartGatewayConfig,
+};
 use desktop_gateway::{
     agents::{app_data_dir, helper_binary_name, Agent, Projector},
     catalog::Catalog,
@@ -15,7 +18,7 @@ use desktop_gateway::{
     secrets::{validate_api_key, KeyringStore, SecretStore, API_KEY_ENTRY},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
-use gateway::{GatewayManager, LOCAL_ADDR, LOCAL_ENDPOINT};
+use gateway::GatewayManager;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use usage::{UsagePage, UsageQuery, UsageStore};
@@ -65,16 +68,112 @@ struct Bound {
     listener: std::net::TcpListener,
 }
 
+struct EndpointRuntime(Mutex<Option<tauri::async_runtime::JoinHandle<()>>>);
+
+impl EndpointRuntime {
+    fn start(
+        &self,
+        app: AppHandle,
+        proxy: Arc<ProxyState>,
+        listener: std::net::TcpListener,
+        config: LocalApiConfig,
+    ) -> Result<(), String> {
+        let mut runtime = self
+            .0
+            .lock()
+            .map_err(|_| "The Local API runtime is unavailable".to_string())?;
+        if runtime.is_some() {
+            return Err("The Local API runtime is already active".to_string());
+        }
+        let task = tauri::async_runtime::spawn(async move {
+            if let Err(error) = proxy::serve(proxy, listener).await {
+                let manager = app.state::<GatewayManager>();
+                manager.set_endpoint(&app, config, Err(error));
+            }
+        });
+        *runtime = Some(task);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        let previous = self
+            .0
+            .lock()
+            .map_err(|_| "The Local API runtime is unavailable".to_string())?
+            .take();
+        if let Some(previous) = previous {
+            previous.abort();
+            let _ = previous.await;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct CodexCatalogSyncAttempt {
+    revision: String,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct CodexCatalogSync(Mutex<Option<CodexCatalogSyncAttempt>>);
+
+impl CodexCatalogSync {
+    fn reset(&self) -> Result<(), String> {
+        *self
+            .0
+            .lock()
+            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? = None;
+        Ok(())
+    }
+
+    fn remember_success(&self, revision: &str) -> Result<(), String> {
+        *self
+            .0
+            .lock()
+            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? =
+            Some(CodexCatalogSyncAttempt {
+                revision: revision.to_string(),
+                error: None,
+            });
+        Ok(())
+    }
+
+    fn refresh_error(&self, projector: &Projector, catalog: &Catalog) -> Option<String> {
+        let mut previous = match self.0.lock() {
+            Ok(previous) => previous,
+            Err(_) => {
+                return Some("The Codex model metadata state is unavailable".to_string());
+            }
+        };
+        if let Some(attempt) = previous.as_ref() {
+            if attempt.revision == catalog.revision {
+                return attempt.error.clone();
+            }
+        }
+        let error = projector.sync_codex_catalog(catalog).err();
+        *previous = Some(CodexCatalogSyncAttempt {
+            revision: catalog.revision.clone(),
+            error: error.clone(),
+        });
+        error
+    }
+}
+
 /// The projection engine for this installation: agent configs reference the
 /// bundled console helper next to this executable.
-fn projector(secrets: &Secrets) -> Result<Projector, String> {
+fn projector(secrets: &Secrets, endpoint: &str) -> Result<Projector, String> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("Cannot locate the app executable: {error}"))?;
     let helper = exe
         .parent()
         .ok_or_else(|| "Cannot locate the app directory".to_string())?
         .join(helper_binary_name());
-    Projector::new(helper, LOCAL_ENDPOINT, secrets.0.clone())
+    Projector::new(helper, endpoint, secrets.0.clone())
+}
+
+fn current_projector(manager: &GatewayManager, secrets: &Secrets) -> Result<Projector, String> {
+    projector(secrets, &manager.local_api()?.endpoint)
 }
 
 #[tauri::command]
@@ -86,8 +185,10 @@ fn get_gateway_state(manager: State<'_, GatewayManager>) -> Result<GatewayState,
 fn start_gateway(
     app: AppHandle,
     manager: State<'_, GatewayManager>,
+    codex_sync: State<'_, CodexCatalogSync>,
     config: StartGatewayConfig,
 ) -> Result<GatewayState, String> {
+    codex_sync.reset()?;
     manager.start(&app, config)
 }
 
@@ -201,11 +302,97 @@ fn rotate_client_key(
 }
 
 #[tauri::command]
+async fn save_local_api_config(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    endpoint_runtime: State<'_, EndpointRuntime>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    config: LocalApiConfig,
+) -> Result<GatewayState, String> {
+    if manager.is_running()? {
+        return Err("Stop protection before changing Local API settings".to_string());
+    }
+    let current = manager.local_api()?;
+    let resolved = local_api::resolve(config.clone())?;
+    if current.endpoint != resolved.endpoint {
+        let statuses = projector(&secrets, &current.endpoint)?.scan(None)?.0;
+        if statuses.iter().any(|agent| agent.recorded) {
+            return Err(
+                "Disconnect managed agents before changing the endpoint they use".to_string(),
+            );
+        }
+    }
+    let needs_bind = current.bind != resolved.bind || manager.snapshot()?.proxy_url.is_none();
+    if !needs_bind {
+        let resolved = local_api::save(config)?;
+        manager.set_endpoint(&app, resolved.config, Ok(resolved.endpoint));
+        return manager.snapshot();
+    }
+
+    endpoint_runtime.stop().await?;
+    let listener = match proxy::bind_std(resolved.bind) {
+        Ok(listener) => listener,
+        Err(error) => {
+            if let Err(restore_error) = restore_endpoint(
+                &endpoint_runtime,
+                &app,
+                proxy.inner().clone(),
+                current.clone(),
+            ) {
+                manager.set_endpoint(&app, current.config, Err(restore_error.clone()));
+                return Err(format!("{error}; {restore_error}"));
+            }
+            return Err(error);
+        }
+    };
+    let resolved = match local_api::save(config) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            drop(listener);
+            if let Err(restore_error) = restore_endpoint(
+                &endpoint_runtime,
+                &app,
+                proxy.inner().clone(),
+                current.clone(),
+            ) {
+                manager.set_endpoint(&app, current.config, Err(restore_error.clone()));
+                return Err(format!("{error}; {restore_error}"));
+            }
+            return Err(error);
+        }
+    };
+    endpoint_runtime.start(
+        app.clone(),
+        proxy.inner().clone(),
+        listener,
+        resolved.config.clone(),
+    )?;
+    manager.set_endpoint(&app, resolved.config, Ok(resolved.endpoint));
+    manager.snapshot()
+}
+
+fn restore_endpoint(
+    runtime: &EndpointRuntime,
+    app: &AppHandle,
+    proxy: Arc<ProxyState>,
+    previous: local_api::ResolvedLocalApi,
+) -> Result<(), String> {
+    let listener = proxy::bind_std(previous.bind).map_err(|restore_error| {
+        format!("The new Local API settings failed and the previous listener could not be restored: {restore_error}")
+    })?;
+    runtime.start(app.clone(), proxy, listener, previous.config)
+}
+
+#[tauri::command]
 async fn refresh_catalog(
     app: AppHandle,
     manager: State<'_, GatewayManager>,
+    codex_sync: State<'_, CodexCatalogSync>,
 ) -> Result<GatewayState, String> {
-    manager.refresh_catalog(&app).await
+    let state = manager.refresh_catalog(&app).await?;
+    codex_sync.reset()?;
+    Ok(state)
 }
 
 /// One refresh: scan the agents and publish exactly the tokens those
@@ -214,13 +401,32 @@ async fn refresh_catalog(
 /// operation that reports it. Startup takes this path too.
 #[tauri::command]
 fn list_agents(
+    manager: State<'_, GatewayManager>,
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
     credentials: State<'_, Arc<ClientCredentials>>,
+    codex_sync: State<'_, CodexCatalogSync>,
 ) -> Result<Vec<AgentStatus>, String> {
     let session = proxy.session();
     let catalog = session.verified.then_some(session.catalog).flatten();
-    let (statuses, tokens) = projector(&secrets)?.scan(catalog.as_ref())?;
+    let projector = current_projector(&manager, &secrets)?;
+    let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
+    if let Some(catalog) = catalog.as_ref() {
+        if let Some(codex) = statuses
+            .iter_mut()
+            .find(|status| status.id == Agent::Codex.id() && status.connected)
+        {
+            if let Some(error) = codex_sync.refresh_error(&projector, catalog) {
+                let refresh = format!(
+                    "Codex model metadata could not be refreshed: {error}. Disconnect remains available"
+                );
+                codex.attention = Some(match codex.attention.take() {
+                    Some(attention) => format!("{attention} {refresh}"),
+                    None => refresh,
+                });
+            }
+        }
+    }
     proxy.set_tokens(with_client_token(tokens, &credentials)?);
     Ok(statuses)
 }
@@ -236,7 +442,7 @@ fn preview_agent_connection(
 ) -> Result<AgentPreview, String> {
     let agent = Agent::from_id(&agent_id)?;
     let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
-    projector(&secrets)?.preview(agent, connect, catalog.as_ref(), &options)
+    current_projector(&manager, &secrets)?.preview(agent, connect, catalog.as_ref(), &options)
 }
 
 #[tauri::command]
@@ -245,6 +451,7 @@ fn apply_agent_connection(
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
     credentials: State<'_, Arc<ClientCredentials>>,
+    codex_sync: State<'_, CodexCatalogSync>,
     agent_id: String,
     connect: bool,
     revision: String,
@@ -252,13 +459,18 @@ fn apply_agent_connection(
 ) -> Result<AgentStatus, String> {
     let agent = Agent::from_id(&agent_id)?;
     let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
-    let projector = projector(&secrets)?;
+    let projector = current_projector(&manager, &secrets)?;
     if !connect {
         // Revoke in memory first; a disconnect that fails part-way leaves the
         // agent disabled rather than still authorized.
         proxy.set_tokens(proxy.tokens().without(agent.id()));
     }
     let status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
+    if agent == Agent::Codex && connect {
+        if let Some(catalog) = catalog.as_ref() {
+            codex_sync.remember_success(&catalog.revision)?;
+        }
+    }
     proxy.set_tokens(with_client_token(projector.scan(None)?.1, &credentials)?);
     Ok(status)
 }
@@ -270,12 +482,13 @@ fn apply_agent_connection(
 /// agent was attempted.
 #[tauri::command]
 fn disconnect_all_agents(
+    manager: State<'_, GatewayManager>,
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
     credentials: State<'_, Arc<ClientCredentials>>,
 ) -> Result<Vec<AgentStatus>, String> {
     proxy.set_tokens(with_client_token(TokenSet::default(), &credentials)?);
-    let projector = projector(&secrets)?;
+    let projector = current_projector(&manager, &secrets)?;
     match projector.disconnect_all() {
         // Durable revocation or the tombstone step failed: keep every token
         // revoked in memory rather than reloading from the store.
@@ -327,7 +540,9 @@ fn connection_catalog(
 /// Become the primary instance and claim the endpoint before the window
 /// exists. The instance lock is returned separately so it outlives any later
 /// failure.
-fn launch() -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
+fn launch(
+    bind: std::net::SocketAddr,
+) -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
     let data_dir = match app_data_dir() {
         Ok(dir) => dir,
         Err(error) => return (None, Err(error)),
@@ -337,7 +552,7 @@ fn launch() -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
         Ok(None) => return (None, Ok(None)),
         Err(error) => return (None, Err(format!("Cannot take the instance lock: {error}"))),
     };
-    let bound = proxy::bind_std(LOCAL_ADDR).map(|listener| Some(Bound { listener }));
+    let bound = proxy::bind_std(bind).map(|listener| Some(Bound { listener }));
     (Some(instance), bound)
 }
 
@@ -346,7 +561,15 @@ pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-    let (instance, launched) = launch();
+    let (local_api, local_api_error) = match local_api::load() {
+        Ok(config) => (config, None),
+        Err(error) => (
+            local_api::resolve(LocalApiConfig::default())
+                .expect("the built-in Local API settings must be valid"),
+            Some(error),
+        ),
+    };
+    let (instance, launched) = launch(local_api.bind);
     let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
     let proxy = ProxyState::new(events);
     let client_credentials = match app_data_dir() {
@@ -385,8 +608,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(GatewayManager::new(proxy.clone(), usage.clone()))
+        .manage(GatewayManager::new(
+            proxy.clone(),
+            usage.clone(),
+            local_api.config.clone(),
+        ))
         .manage(proxy.clone())
+        .manage(EndpointRuntime(Mutex::new(None)))
+        .manage(CodexCatalogSync::default())
         .manage(client_credentials.clone())
         .manage(usage)
         .manage(Secrets(secrets.clone()))
@@ -405,6 +634,7 @@ pub fn run() {
             clear_api_key,
             get_client_key,
             rotate_client_key,
+            save_local_api_config,
             refresh_catalog,
             list_agents,
             preview_agent_connection,
@@ -444,25 +674,27 @@ pub fn run() {
                 .map_err(|error| error.clone());
             match launched {
                 Ok(Some(bound)) => {
-                    manager.set_endpoint(&handle, Ok(()));
-                    let serve_handle = handle.clone();
-                    let serve_proxy = proxy.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let result = proxy::serve(serve_proxy, bound.listener).await;
-                        if let Err(error) = result {
-                            let manager = serve_handle.state::<GatewayManager>();
-                            manager.set_endpoint(&serve_handle, Err(error));
-                        }
-                    });
+                    manager.set_endpoint(
+                        &handle,
+                        local_api.config.clone(),
+                        Ok(local_api.endpoint.clone()),
+                    );
+                    app.state::<EndpointRuntime>().start(
+                        handle.clone(),
+                        proxy.clone(),
+                        bound.listener,
+                        local_api.config.clone(),
+                    )?;
                 }
                 Ok(None) => manager.set_endpoint(
                     &handle,
+                    local_api.config.clone(),
                     Err(format!(
                         "Another instance of {} is the primary instance",
                         desktop_gateway::brand::PRODUCT_NAME
                     )),
                 ),
-                Err(error) => manager.set_endpoint(&handle, Err(error)),
+                Err(error) => manager.set_endpoint(&handle, local_api.config.clone(), Err(error)),
             }
 
             // Load what the proxy needs to admit and forward: the saved key
@@ -477,6 +709,9 @@ pub fn run() {
             if let Some(error) = usage_error.clone() {
                 manager.report_error(&handle, error);
             }
+            if let Some(error) = local_api_error.clone() {
+                manager.report_error(&handle, error);
+            }
             // Startup maintenance (under the config lock) before authorizing
             // any token.
             let store = Secrets(secrets.clone());
@@ -484,7 +719,7 @@ pub fn run() {
                 Ok(tokens) => proxy.set_tokens(tokens),
                 Err(error) => manager.report_error(&handle, error),
             }
-            match projector(&store).and_then(|projector| {
+            match projector(&store, &local_api.endpoint).and_then(|projector| {
                 projector.migrate_legacy()?;
                 projector.scan(None)
             }) {

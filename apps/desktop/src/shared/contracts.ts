@@ -124,6 +124,13 @@ export interface StartGatewayConfig {
   requireProductionOs: boolean;
 }
 
+export interface LocalApiConfig {
+  listenAddress: string;
+  allowNetworkAccess: boolean;
+  port: number;
+  clientHost?: string;
+}
+
 export interface GatewayState {
   status: GatewayStatus;
   /** What the gateway is doing while verifying. */
@@ -141,6 +148,7 @@ export interface GatewayState {
   usageRevision: number;
   error?: string;
   config: StartGatewayConfig;
+  localApi: LocalApiConfig;
   apiKeySaved: boolean;
   catalog?: CatalogSummary;
 }
@@ -190,6 +198,7 @@ export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
+  saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the window to show a section (macOS Settings…). */

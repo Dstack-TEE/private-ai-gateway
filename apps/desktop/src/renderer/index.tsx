@@ -7,6 +7,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -36,10 +37,10 @@ import { desktopApi as liveApi } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
 import type {
-  AgentPreview,
   AgentStatus,
   DesktopApi,
   GatewayState,
+  LocalApiConfig,
   ModelSummary,
   RequestActivity,
   UsagePage,
@@ -71,6 +72,7 @@ const INITIAL_STATE: GatewayState = {
   },
   usageRevision: 0,
   config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: false },
+  localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
 };
 
@@ -99,12 +101,12 @@ const AGENT_ICONS: Record<string, string> = {
   hermes: hermesIcon,
 };
 
-function BrandAppIcon({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
-  const classes = ["brand-app-icon", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
+function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
+  const classes = ["brand-logo", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
   return (
     <picture className={classes} aria-hidden="true">
-      <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />
-      <img src={brand.appIcon.light} alt="" />
+      <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />
+      <img src={brand.mark.light} alt="" />
     </picture>
   );
 }
@@ -148,20 +150,13 @@ const TLS_TRACKS = [
   "17 03 03 00 3c   7a0d 2c95 f6e3 41b8 d9c0 3f5e 8a2b 6e17 c4d8 0b93 5a6f e1d2 7c04 93ab 5e8f 21c6 d0a3 7b19",
 ];
 
-/** A connect or disconnect in progress: the sheet's state. */
-interface Pending {
-  agent: AgentStatus;
-  connect: boolean;
-  model: string;
-  preview?: AgentPreview;
-  error?: string;
-  loading: boolean;
-}
-
 /** Native modal dialog: `showModal()` gives browser-native focus
  * containment, Escape handling, and an inert background. Focus returns to
  * the opener on close. */
-function useModalDialog(onClose: () => void): React.RefObject<HTMLDialogElement | null> {
+function useModalDialog(
+  onClose: () => void,
+  initialFocus?: React.RefObject<HTMLElement | null>,
+): React.RefObject<HTMLDialogElement | null> {
   const ref = useRef<HTMLDialogElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -173,6 +168,7 @@ function useModalDialog(onClose: () => void): React.RefObject<HTMLDialogElement 
   useEffect(() => {
     const node = ref.current;
     node?.showModal();
+    initialFocus?.current?.focus();
     const onCloseEvent = () => closeRef.current();
     node?.addEventListener("close", onCloseEvent);
     return () => {
@@ -199,8 +195,9 @@ function App(): React.JSX.Element {
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [pending, setPending] = useState<Pending>();
+  const [agentBusy, setAgentBusy] = useState<string>();
   const [applying, setApplying] = useState(false);
+  const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [confirmRestoreAll, setConfirmRestoreAll] = useState(false);
   const [notice, setNotice] = useState<{ id: number; text: string }>();
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
@@ -311,10 +308,15 @@ function App(): React.JSX.Element {
     }
   };
 
-  const toggleGateway = () =>
+  const toggleGateway = () => {
+    if (!running && !busy && (!state.apiKeySaved || !remoteUrl.trim())) {
+      setSettingsTarget("confidential");
+      return;
+    }
     void run(() =>
       running || busy ? desktopApi.stop() : desktopApi.start({ remoteUrl, requireProductionOs }),
     );
+  };
 
   const verifyConfiguration = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -347,6 +349,19 @@ function App(): React.JSX.Element {
     }
   };
 
+  const saveLocalApi = async (config: LocalApiConfig): Promise<string | undefined> => {
+    setActionError(undefined);
+    try {
+      setState(await desktopApi.saveLocalApiConfig(config));
+      setNotice({ id: Date.now(), text: "Local API settings saved" });
+      return undefined;
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      return message;
+    }
+  };
+
   const copy = async (label: string, value: string) => {
     await run(async () => {
       await desktopApi.copyText(value);
@@ -360,49 +375,21 @@ function App(): React.JSX.Element {
     });
   };
 
-  // A preview is fetched once the inputs are known: immediately for a
-  // disconnect, after the model choice for a connect.
-  const loadPreview = async (agent: AgentStatus, connect: boolean, model: string) => {
-    setPending({ agent, connect, model, loading: true });
-    try {
-      const preview = await desktopApi.previewAgent(agent.id, connect, connect ? { defaultModel: model || undefined } : {});
-      setPending((current) =>
-        current?.agent.id === agent.id ? { ...current, preview, error: undefined, loading: false } : current,
-      );
-    } catch (error) {
-      setPending((current) =>
-        current?.agent.id === agent.id
-          ? { ...current, preview: undefined, error: errorMessage(error), loading: false }
-          : current,
-      );
-    }
-  };
-
-  const openPending = (agent: AgentStatus, connect: boolean) => {
-    if (connect && agent.id === "codex") {
-      setPending({ agent, connect: true, model: "", loading: false });
-    } else if (connect) {
-      void loadPreview(agent, true, "");
-    } else {
-      void loadPreview(agent, false, "");
-    }
-  };
-
-  const confirmPending = async () => {
-    if (!pending?.preview) {
-      return;
-    }
-    const { agent, connect, model, preview } = pending;
-    setApplying(true);
+  const applyAgent = async (agent: AgentStatus, connect: boolean) => {
+    const options = connect && agent.id === "codex"
+      ? { defaultModel: models[0]?.id }
+      : {};
+    setAgentBusy(agent.id);
     setActionError(undefined);
     try {
-      await desktopApi.applyAgent(agent.id, connect, preview.revision, connect ? { defaultModel: model || undefined } : {});
-      setPending(undefined);
+      const preview = await desktopApi.previewAgent(agent.id, connect, options);
+      await desktopApi.applyAgent(agent.id, connect, preview.revision, options);
       await loadAgents();
+      setNotice({ id: Date.now(), text: `${displayAgentName(agent)} ${connect ? "connected" : "disconnected"}` });
     } catch (error) {
-      setPending((current) => current ? { ...current, error: errorMessage(error) } : current);
+      setActionError(errorMessage(error));
     } finally {
-      setApplying(false);
+      setAgentBusy(undefined);
     }
   };
 
@@ -423,7 +410,7 @@ function App(): React.JSX.Element {
 
   const anyRecorded = agents.some((agent) => agent.recorded);
   const problem = actionError ?? state.error;
-  const locked = Boolean(pending) || applying;
+  const locked = Boolean(agentBusy) || applying;
   const focusPageHeading = (next: View) => {
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
   };
@@ -470,7 +457,8 @@ function App(): React.JSX.Element {
             onUsage={() => changeView("usage")}
             onCopy={copy}
             onToggleClientKey={() => setClientKeyVisible((visible) => !visible)}
-            onSelect={openPending}
+            onSelect={(agent, connect) => void applyAgent(agent, connect)}
+            onInspect={setSelectedUsage}
           />
         )}
         {view === "agents" && (
@@ -480,7 +468,7 @@ function App(): React.JSX.Element {
             catalogReady={catalogReady}
             locked={locked}
             problem={problem}
-            onSelect={openPending}
+            onSelect={(agent, connect) => void applyAgent(agent, connect)}
           />
         )}
         {view === "usage" && (
@@ -489,6 +477,7 @@ function App(): React.JSX.Element {
             agents={agents}
             problem={problem}
             onNotice={(text) => setNotice({ id: Date.now(), text })}
+            onInspect={setSelectedUsage}
           />
         )}
         {view === "settings" && (
@@ -511,17 +500,6 @@ function App(): React.JSX.Element {
         </div>
       </section>
 
-      {pending && (
-        <ConnectSheet
-          pending={pending}
-          models={models}
-          catalogReady={catalogReady}
-          applying={applying}
-          onModel={(model) => void loadPreview(pending.agent, true, model)}
-          onCancel={() => setPending(undefined)}
-          onConfirm={() => void confirmPending()}
-        />
-      )}
       {confirmRestoreAll && (
         <RestoreAllSheet
           applying={applying}
@@ -552,14 +530,24 @@ function App(): React.JSX.Element {
       {settingsTarget === "local-api" && (
         <LocalApiSheet
           state={state}
+          agents={agents}
+          frozen={busy || running}
           clientKey={clientKey}
           clientKeyVisible={clientKeyVisible}
           copied={copied}
           onCopy={copy}
           onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
+          onSave={saveLocalApi}
+          onManageAgents={() => {
+            setSettingsTarget(undefined);
+            changeView("agents");
+          }}
           onClose={() => setSettingsTarget(undefined)}
         />
+      )}
+      {selectedUsage && (
+        <UsageEvidenceSheet activity={selectedUsage} onClose={() => setSelectedUsage(undefined)} />
       )}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {notice?.text}
@@ -631,7 +619,7 @@ function Sidebar({
         )}
       </div>
       <div className="sidebar-brand" data-tauri-drag-region>
-        <BrandAppIcon className="brand-mark" />
+        <BrandMark className="brand-mark" />
         <span>{brand.productName}</span>
       </div>
       <nav aria-label="Main navigation" onKeyDown={onKeyDown}>
@@ -711,7 +699,7 @@ function PreviewTrayMenu({
   return (
     <div className="preview-tray" role="menu" aria-label="Private AI Gateway">
       <div className="preview-tray-heading">
-        <BrandAppIcon />
+        <BrandMark />
         <span><strong>{brand.productName}</strong><small>{serviceHost(brand.service.defaultUrl)}</small></span>
       </div>
       <div className="preview-tray-protection">
@@ -801,6 +789,7 @@ function Overview({
   onCopy,
   onToggleClientKey,
   onSelect,
+  onInspect,
 }: {
   state: GatewayState;
   agents: AgentStatus[];
@@ -822,6 +811,7 @@ function Overview({
   onCopy(label: string, value: string): Promise<void>;
   onToggleClientKey(): void;
   onSelect(agent: AgentStatus, connect: boolean): void;
+  onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
   const recent = state.activity.slice(0, 5);
   return (
@@ -882,7 +872,7 @@ function Overview({
               <EmptyState text={running ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
             {recent.map((item) => (
-              <UsagePreviewRow key={item.id} activity={item} />
+              <UsageRow key={item.id} activity={item} onOpen={() => onInspect(item)} />
             ))}
           </div>
         </OverviewModule>
@@ -937,7 +927,7 @@ function StatusSurface({
 
       <div className="status-segment status-gateway">
         <div className="gateway-core">
-          <BrandAppIcon className="gateway-mark" busy={busy} />
+          <BrandMark className="gateway-mark" busy={busy} />
           <strong>{brand.productName}</strong>
           <span className={`gateway-verdict state-${verdict.tone}`} aria-live="polite">{verdict.title}</span>
           <ProtectedControl
@@ -1137,14 +1127,20 @@ function SessionSummary({ summary, running }: { summary: UsageSummary; running: 
   );
 }
 
-function UsagePreviewRow({ activity }: { activity: RequestActivity }): React.JSX.Element {
+function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): void }): React.JSX.Element {
   const outcome = outcomeOf(activity);
+  const tokens = (activity.inputTokens ?? 0) + (activity.outputTokens ?? 0);
   return (
-    <div className="preview-row">
-      <span className={`preview-dot state-${outcome.tone}`} aria-hidden="true" />
-      <span><strong>{agentName(activity.agent)}</strong><code>{activity.path}</code></span>
-      <time>{formatTimestamp(activity.at * 1_000, true)}</time>
-    </div>
+    <button className="row list-row usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
+      <span className="row-main">
+        <span className="row-title">{agentName(activity.agent)}</span>
+        <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
+        <code className="row-note">{activity.model ?? activity.path}</code>
+      </span>
+      <span className="usage-amount"><strong>{tokens ? formatTokens(tokens) : "—"}</strong><small>tokens</small></span>
+      <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
+      <time className="row-side">{formatTimestamp(activity.at * 1_000, true)}</time>
+    </button>
   );
 }
 
@@ -1283,11 +1279,13 @@ function UsageView({
   agents,
   problem,
   onNotice,
+  onInspect,
 }: {
   state: GatewayState;
   agents: AgentStatus[];
   problem?: string;
   onNotice(text: string): void;
+  onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
@@ -1297,7 +1295,6 @@ function UsageView({
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [selected, setSelected] = useState<string>();
   const [confirmClear, setConfirmClear] = useState(false);
   const focusAfterPage = useRef(false);
   const requestGeneration = useRef(0);
@@ -1337,9 +1334,7 @@ function UsageView({
   useEffect(() => { void load(); }, [load, state.usageRevision]);
   const resetPagination = () => {
     setCursors([undefined]);
-    setSelected(undefined);
   };
-  const current = page?.items.find((item) => item.id === selected);
   const agentOptions = Array.from(new Set([
     ...agents.map((entry) => entry.id),
     ...(page?.agents ?? []),
@@ -1408,19 +1403,9 @@ function UsageView({
           {loading && !page && <EmptyState text="Loading usage history…" />}
           {!loading && page?.items.length === 0 && <EmptyState text={page.summary.requests === 0 ? "No saved usage matches these filters." : "No records on this page."} />}
           <ul className="list-items" aria-label="Usage history">
-            {page?.items.map((item) => {
-              const outcome = outcomeOf(item);
-              return (
-                <li key={item.id}>
-                  <button className="row list-row usage-row" aria-pressed={selected === item.id} onClick={() => setSelected((value) => value === item.id ? undefined : item.id)}>
-                    <span className="row-main"><span className="row-title">{agentName(item.agent)}</span><StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} /><code className="row-note">{item.model ?? item.path}</code></span>
-                    <span className="usage-amount"><strong>{formatTokens((item.inputTokens ?? 0) + (item.outputTokens ?? 0))}</strong><small>tokens</small></span>
-                    <span className="usage-amount"><strong>{item.costUsd === undefined ? "—" : currency(item.costUsd)}</strong><small>cost</small></span>
-                    <time className="row-side">{formatTimestamp(item.at * 1_000, true)}</time>
-                  </button>
-                </li>
-              );
-            })}
+            {page?.items.map((item) => (
+              <li key={item.id}><UsageRow activity={item} onOpen={() => onInspect(item)} /></li>
+            ))}
           </ul>
         </div>
         <div className="pagination">
@@ -1429,7 +1414,6 @@ function UsageView({
             disabled={loading || cursors.length === 1}
             onClick={() => {
               focusAfterPage.current = true;
-              setSelected(undefined);
               setCursors((value) => value.slice(0, -1));
             }}
           ><ChevronLeft size={16} /></IconButton>
@@ -1445,15 +1429,11 @@ function UsageView({
             onClick={() => {
               if (!page?.nextCursor) return;
               focusAfterPage.current = true;
-              setSelected(undefined);
               setCursors((value) => [...value, page.nextCursor]);
             }}
           ><ChevronRight size={16} /></IconButton>
         </div>
       </section>
-      <aside className="inspector" aria-live="polite" aria-label="Usage details">
-        {current ? <Evidence activity={current} /> : <p className="inspector-hint">Select a request to inspect usage and proof details.</p>}
-      </aside>
       {confirmClear && <ClearUsageSheet onCancel={() => setConfirmClear(false)} onConfirm={() => void clear()} />}
     </div>
   );
@@ -1591,6 +1571,22 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
   );
 }
 
+function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
+  const dialog = useModalDialog(onClose);
+  const outcome = outcomeOf(activity);
+  const ProofIcon = outcome.icon;
+  return (
+    <dialog ref={dialog} className="sheet usage-evidence-sheet" aria-label="Usage proof">
+      <div className="sheet-heading usage-proof-heading">
+        <span className={`proof-mark state-${outcome.tone}`} aria-hidden="true"><ProofIcon size={18} /></span>
+        <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, false)}</small></span>
+      </div>
+      <div className="sheet-card proof-card"><Evidence activity={activity} /></div>
+      <div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div>
+    </dialog>
+  );
+}
+
 function SettingsView({
   state,
   busy,
@@ -1711,65 +1707,144 @@ function ServiceConfigurationSheet({
             <small>{state.apiKeySaved ? "Using the saved key. Enter a new one to replace it after verification." : "The key is stored in the system credential store and never written into agent configs."}</small>
           </label>
         </div>
-        <div className="sheet-card verification-card">
-          <div className="verification-heading"><span><strong>{verified ? "Configuration verified" : busy ? "Verifying configuration" : "Configuration not verified"}</strong><small>{verified ? `${models.length} models available` : "Start protection to verify the service and discover models"}</small></span><StateLabel tone={verified ? "success" : busy ? "neutral" : "warning"} icon={verified ? Check : busy ? LoaderCircle : undefined} text={verified ? "Ready" : busy ? "Verifying" : "Not verified"} /></div>
-          {models.length > 0 && (
+        <div className="configuration-submit">
+          <span>{frozen ? "Stop protection to change or verify this configuration." : "Verification must succeed before the endpoint and key are used."}</span>
+          <button type="submit" className="button primary" disabled={savingKey || busy || frozen || (!state.apiKeySaved && !apiKeyDraft.trim())}>{savingKey || busy ? "Verifying…" : "Verify and Save"}</button>
+        </div>
+        <div className="verification-summary">
+          <span><strong>{verified ? "Verified service" : busy ? "Verifying service" : "Model discovery unavailable"}</strong><small>{verified ? `${models.length} models discovered from the verified endpoint` : "Verify the endpoint and key to load its model catalog."}</small></span>
+          <StateLabel tone={verified ? "success" : busy ? "neutral" : "warning"} icon={verified ? Check : busy ? LoaderCircle : undefined} text={verified ? "Ready" : busy ? "Verifying" : "Not verified"} />
+        </div>
+        {models.length > 0 && (
+          <section className="catalog-section" aria-labelledby="model-catalog-heading">
+            <div className="catalog-section-heading"><span><h3 id="model-catalog-heading">Model catalog</h3><small>Discovered from this verified service</small></span><span>{models.length} models</span></div>
             <div className="model-list service-model-list" role="region" aria-label="Verified model catalog" tabIndex={0}>
-              <div className="model-catalog-head">
-                <span className="model-catalog-title"><strong>Model catalog</strong><small>{models.length} models · scroll for more</small></span>
-                <span>Input / output per 1M</span>
-              </div>
               {models.map((model) => <ModelRow key={model.id} model={model} />)}
             </div>
-          )}
-        </div>
-        <div className="sheet-actions">
-          <button type="button" className="button" onClick={onClose}>Done</button>
-          <button type="submit" className="button primary" disabled={savingKey || busy || (!state.apiKeySaved && !apiKeyDraft.trim())}>{savingKey || busy ? "Verifying…" : verified ? "Verify again" : "Verify"}</button>
-        </div>
+          </section>
+        )}
+        <div className="sheet-actions"><button type="button" className="button primary" onClick={onClose}>Done</button></div>
       </form>
     </dialog>
   );
 }
 
 function PrivacyVerificationSheet({ state, verified, onClose }: { state: GatewayState; verified: boolean; onClose(): void }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
-  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2>Privacy verification</h2></div><PrivacyVerification state={state} verified={verified} /><div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div></dialog>;
+  const heading = useRef<HTMLHeadingElement>(null);
+  const dialog = useModalDialog(onClose, heading);
+  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2 ref={heading} tabIndex={-1}>Privacy verification</h2></div><PrivacyVerification state={state} verified={verified} /><div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div></dialog>;
 }
 
 function LocalApiSheet({
   state,
+  agents,
+  frozen,
   clientKey,
   clientKeyVisible,
   copied,
   onCopy,
   onToggleKey,
   onRotate,
+  onSave,
+  onManageAgents,
   onClose,
 }: {
   state: GatewayState;
+  agents: AgentStatus[];
+  frozen: boolean;
   clientKey: string;
   clientKeyVisible: boolean;
   copied?: string;
   onCopy(label: string, value: string): Promise<void>;
   onToggleKey(): void;
   onRotate(): Promise<void>;
+  onSave(config: LocalApiConfig): Promise<string | undefined>;
+  onManageAgents(): void;
   onClose(): void;
 }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
+  const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const endpoint = localEndpoint(draft) ?? "";
+  const openAi = openAiEndpoint(endpoint) ?? "";
+  const managed = agents.filter((agent) => agent.recorded).length;
+  const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setError(undefined);
+  };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    const message = await onSave(draft);
+    setSaving(false);
+    setError(message);
+    if (!message) onClose();
+  };
   return (
-    <dialog ref={dialog} className="sheet" aria-label="Local API settings">
+    <dialog ref={dialog} className="sheet local-api-sheet" aria-label="Local API settings">
       <div className="sheet-heading"><h2>Local API settings</h2></div>
-      <div className="sheet-card local-api-sheet-card">
-        <EndpointRow label="OpenAI-style endpoint" value={openAiEndpoint(state.proxyUrl)} copied={copied} onCopy={onCopy} />
-        <EndpointRow label="Anthropic-style endpoint" value={state.proxyUrl} copied={copied} onCopy={onCopy} />
-        <div className="row">
-          <span className="row-main"><span className="row-title">Client key</span><code className="row-note">{clientKeyVisible ? clientKey : maskClientKey(clientKey)}</code></span>
-          <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="sheet-card config-fields">
+          <div className="row field settings-field-row">
+            <label className="field-label" htmlFor="local-listen-address">Listen address</label>
+            <div className="field-controls">
+              <input id="local-listen-address" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
+            </div>
+            <span className="field-note">Address used by the local gateway.</span>
+            <datalist id="listen-addresses"><option value="127.0.0.1" /><option value="::1" /><option value="0.0.0.0" /></datalist>
+          </div>
+          <label className="row toggle-row">
+            <span className="row-main"><span className="row-title">Allow network access</span><span className="row-note">Permit a non-loopback listen address. Keep this off for local agents.</span></span>
+            <input type="checkbox" checked={draft.allowNetworkAccess} disabled={frozen || saving} onChange={(event) => update("allowNetworkAccess", event.target.checked)} />
+            <span className="toggle-track" aria-hidden="true"><span /></span>
+          </label>
+          {draft.allowNetworkAccess && <p className="row-warning">Other devices on the network may reach this gateway. Only use this on a trusted network.</p>}
+          <div className="row field settings-field-row">
+            <label className="field-label" htmlFor="local-port">Port</label>
+            <div className="field-controls"><input id="local-port" type="number" min="1024" max="65535" value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} /></div>
+            <span className="field-note">1024–65535</span>
+          </div>
+          <div className="row field settings-field-row">
+            <label className="field-label" htmlFor="local-client-host">Client host</label>
+            <div className="field-controls"><input id="local-client-host" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} /></div>
+            <span className="field-note">Optional hostname shown to clients.</span>
+          </div>
         </div>
-        <p className="row-footnote">The listener is bound to loopback. This key is stored in an owner-only file and can call every supported local API format.</p>
-      </div>
-      <div className="sheet-actions"><button className="button destructive" onClick={() => void onRotate()}>Replace Key…</button><button className="button primary" onClick={onClose}>Done</button></div>
+        <div className="sheet-card client-key-card">
+          <div className="row field settings-field-row">
+            <label className="field-label" htmlFor="local-client-key">Client key</label>
+            <div className="field-controls credential-controls">
+              <input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
+              <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+              <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
+              <button type="button" className="button" disabled={frozen || saving} onClick={() => void onRotate()}><RefreshCw size={15} />Generate</button>
+            </div>
+            <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</span>
+          </div>
+        </div>
+        <div className="sheet-card endpoints-card">
+          <div className="row">
+            <span className="row-main"><span className="row-title">OpenAI-style endpoint</span><code className="row-note">{openAi || "Invalid settings"}</code></span>
+            <IconButton label="Copy OpenAI-style endpoint" disabled={!openAi} onClick={() => void onCopy("OpenAI-style endpoint", openAi)}>{copied === "OpenAI-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
+          </div>
+          <div className="row">
+            <span className="row-main"><span className="row-title">Anthropic-style endpoint</span><code className="row-note">{endpoint || "Invalid settings"}</code></span>
+            <IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
+          </div>
+        </div>
+        <div className="sheet-card access-keys-card">
+          <div className="row"><span className="row-main"><span className="row-title-line"><span className="row-title">Access keys</span><span className="row-side">{managed} managed</span></span><span className="row-note">Created per agent when it is connected and revoked when it is disconnected. Keys are never shown.</span></span><button type="button" className="button" onClick={onManageAgents}><SquareTerminal size={15} />Manage agents</button></div>
+        </div>
+        {frozen && <p className="sheet-text">Stop protection before changing the listener.</p>}
+        {error && <p className="sheet-text error" role="alert">{error}</p>}
+        <div className="sheet-actions split-actions">
+          <button type="button" className="button" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</button>
+          <span />
+          <button type="button" className="button" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</button>
+          <button type="submit" className="button primary" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</button>
+        </div>
+      </form>
     </dialog>
   );
 }
@@ -1806,12 +1881,12 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
     },
   ];
   return (
-    <section className="group" aria-label="Privacy">
-      <h2 className="group-title" id="privacy-title" tabIndex={-1}>
-        Privacy
-        {checks.length > 0 && <span>{checkCount(checks)} checks passed</span>}
-      </h2>
-      <div className="inset">
+    <section className="privacy-content" aria-label="Privacy">
+      <div className={`privacy-verdict state-${verified ? "success" : "warning"}`}>
+        {verified ? <ShieldCheck size={22} aria-hidden="true" /> : <ShieldX size={22} aria-hidden="true" />}
+        <span><strong>{verified ? "Protection is cryptographically verified" : "Protection is not established"}</strong><small>{verified ? "Identity, channel binding, and response receipts are checked locally by this app." : "Start protection to verify the service before sending requests."}</small></span>
+      </div>
+      <div className="sheet-card privacy-facts">
         {facts.map((fact) => (
           <div className="row fact" key={fact.title}>
             <span className={fact.ok ? "check-icon check-pass" : "check-icon check-skip"} aria-hidden="true">
@@ -1823,23 +1898,30 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
             </span>
           </div>
         ))}
-        {identity && (
-          <details className="disclosure">
-            <summary>Technical details</summary>
-            <div className="identity-grid">
-              <Detail label="Hardware" value={hardwareName(identity.teeType)} />
-              <Detail label="Trust" value={trustName(identity.trustLevel)} />
-              <Detail label="Source" value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"} mono />
-              <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
-              <Detail label="Serving" value={identity.serving} />
-              <Detail label="Channel" value={passed("id-6") ? "SPKI-pinned attested TLS" : "Not established"} />
-              <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
-              {identity.tlsSpki && <Detail label="TLS key" value={identity.tlsSpki} mono wide />}
-            </div>
-            {checks.map((check) => <CheckRow key={check.id} check={check} />)}
-          </details>
-        )}
       </div>
+      {identity && (
+        <section className="privacy-section" aria-labelledby="verified-identity-title">
+          <div className="privacy-section-heading"><h3 id="verified-identity-title">Verified identity</h3><span>{checkCount(checks)} checks passed</span></div>
+          <div className="sheet-card identity-grid">
+            <Detail label="Hardware" value={hardwareName(identity.teeType)} />
+            <Detail label="Trust" value={trustName(identity.trustLevel)} />
+            <Detail label="Source commit" value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"} mono />
+            <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
+            <Detail label="Serving mode" value={identity.serving} />
+            <Detail label="Channel" value={passed("id-6") ? "SPKI-pinned attested TLS" : "Not established"} />
+            <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
+            {identity.tlsSpki && <Detail label="TLS public key" value={identity.tlsSpki} mono wide />}
+            {identity.source.repoUrl && <Detail label="Source repository" value={identity.source.repoUrl} mono wide />}
+            {identity.source.imageDigest && <Detail label="Image digest" value={identity.source.imageDigest} mono wide />}
+          </div>
+        </section>
+      )}
+      {checks.length > 0 && (
+        <section className="privacy-section" aria-labelledby="verification-checks-title">
+          <div className="privacy-section-heading"><h3 id="verification-checks-title">Verification checks</h3><span>{checks.length} total</span></div>
+          <div className="sheet-card check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+        </section>
+      )}
     </section>
   );
 }
@@ -1880,111 +1962,15 @@ function ModelRow({ model }: { model: ModelSummary }): React.JSX.Element {
     model.cacheWritePricePerMillion === undefined ? undefined : `${formatPrice(model.cacheWritePricePerMillion)} cache write`,
   ].filter(Boolean);
   return (
-    <div className="row model-row">
-      <span className="row-main">
-        <span className="model-title"><code title={model.id}>{model.id}</code>{model.isTee === true && <span className="badge">TEE</span>}</span>
-        {model.name !== model.id && <span className="row-note" title={model.name}>{model.name}</span>}
-        {capabilities.length > 0 && <span className="model-capabilities">{capabilities.join(" · ")}</span>}
-      </span>
-      <span className="model-meta">
-        <span>{prices.length ? `${prices.join(" · ")} / 1M tokens` : "Pricing not reported"}</span>
-        <span>{model.contextLength ? `${formatContext(model.contextLength)} context` : "Context not reported"}{model.maxOutputLength ? ` · ${formatContext(model.maxOutputLength)} max output` : ""}</span>
-      </span>
-    </div>
-  );
-}
-
-function ConnectSheet({
-  pending,
-  models,
-  catalogReady,
-  applying,
-  onModel,
-  onCancel,
-  onConfirm,
-}: {
-  pending: Pending;
-  models: ModelSummary[];
-  catalogReady: boolean;
-  applying: boolean;
-  onModel(model: string): void;
-  onCancel(): void;
-  onConfirm(): void;
-}): React.JSX.Element {
-  const { agent, connect, model, preview, error, loading } = pending;
-  const dialog = useModalDialog(onCancel);
-  const modelRequired = agent.id === "codex";
-  return (
-    <dialog ref={dialog} className="sheet" aria-label={`${connect ? "Connect" : "Disconnect"} ${agent.name}`}>
-      <div className="sheet-heading">
-        <AgentMark agent={agent} />
-        <h2>{connect ? `Connect ${agent.name}` : `Disconnect ${agent.name}`}</h2>
+    <article className="model-card">
+      <div className="model-card-heading"><span><strong title={model.name}>{model.name}</strong><code title={model.id}>{model.id}</code></span>{model.isTee === true && <span className="badge"><ShieldCheck size={11} aria-hidden="true" />TEE</span>}</div>
+      <div className="model-card-facts">
+        <span><small>Context</small><strong>{model.contextLength ? formatContext(model.contextLength) : "—"}</strong></span>
+        <span><small>Max output</small><strong>{model.maxOutputLength ? formatContext(model.maxOutputLength) : "—"}</strong></span>
+        <span className="model-price"><small>Price per 1M tokens</small><strong>{prices.length ? prices.join(" · ") : "Not reported"}</strong></span>
       </div>
-      {connect && agent.id !== "pi" && (
-        <label className="sheet-field">
-          <span>{modelRequired ? "Default model" : "Default model (optional)"}</span>
-          <select
-            aria-label={`Default model for ${agent.name}`}
-            value={model}
-            onChange={(event) => onModel(event.target.value)}
-            disabled={applying || !catalogReady}
-          >
-            <option value="">{modelRequired ? "Select a verified model" : `Choose in ${agent.name}`}</option>
-            {models.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.contextLength ? `${entry.id} · ${formatContext(entry.contextLength)}` : entry.id}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {connect && agent.id === "pi" && (
-        <p className="sheet-text">Pi discovers the verified model catalog automatically. Choose a model inside Pi after connecting.</p>
-      )}
-      <p className="sheet-text">
-        {connect
-          ? `After you connect, ${agent.name}'s AI requests go through ${brand.productName} to the verified service${model ? ` with ${model} as its default` : ""}. Available model choices come from the verified service, and previous settings return when you disconnect.`
-          : `${agent.name} goes back to its previous settings; its local token is revoked.`}
-      </p>
-      {loading && <p className="sheet-text">Previewing changes…</p>}
-      {error && <p className="sheet-text error" role="alert">{error}</p>}
-      {preview && (
-        <details className="disclosure">
-          <summary>{preview.changes.length ? `Configuration changes (${preview.changes.length})` : "Configuration changes (none)"}</summary>
-          <code className="config-path" title={agent.configPath}>{agent.configPath}</code>
-          {preview.changes.length > 0 ? (
-            <ul className="change-list">
-              {preview.changes.map((change) => (
-                <li key={change.key} className={change.sensitive ? "sensitive" : undefined}>
-                  <code title={change.key}>{change.key}</code>
-                  <span title={change.sensitive ? "Value hidden" : change.before ?? undefined}>{change.before ?? "(not set)"}</span>
-                  <span aria-hidden="true">&rarr;</span>
-                  <span title={change.sensitive ? "Value hidden" : change.after ?? undefined}>{change.after ?? "(removed)"}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="sheet-text">
-              {connect
-                ? "The config already points at the gateway; nothing will change."
-                : "Nothing to restore; only the connection record will be cleared."}
-            </p>
-          )}
-          <p className="sheet-text">{preview.note}</p>
-        </details>
-      )}
-      {preview && agent.id === "opencode" && connect && (
-        <p className="sheet-text">Restart OpenCode after connecting so it reloads its config.</p>
-      )}
-      <div className="sheet-actions">
-        <button className="button" onClick={onCancel} disabled={applying}>
-          Cancel
-        </button>
-        <button className={connect ? "button primary" : "button destructive"} onClick={onConfirm} disabled={applying || !preview}>
-          {applying ? "Applying…" : connect ? "Connect" : "Disconnect"}
-        </button>
-      </div>
-    </dialog>
+      {capabilities.length > 0 && <div className="model-capabilities">{capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
+    </article>
   );
 }
 
@@ -2042,11 +2028,11 @@ function Detail({
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
   return (
-    <div className="row check-row" title={`${check.title}: ${check.detail}`}>
+    <div className="row check-row">
       <span className={`check-icon check-${check.status}`} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>
-      <span className="row-main">{title}</span>
+      <span className="row-main"><span className="row-title">{title}</span><span className="row-note">{check.detail}</span></span>
       <span className={`result result-${check.status}`}>{checkStatusLabel(check.status)}</span>
     </div>
   );
@@ -2188,6 +2174,13 @@ function checkCount(checks: VerificationCheck[]): string {
 
 function openAiEndpoint(proxyUrl?: string): string | undefined {
   return proxyUrl ? `${proxyUrl.replace(/\/+$/, "")}/v1` : undefined;
+}
+
+function localEndpoint(config: LocalApiConfig): string | undefined {
+  const host = config.clientHost?.trim() || config.listenAddress.trim();
+  if (!host || !Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) return undefined;
+  const wrapped = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `http://${wrapped}:${config.port}`;
 }
 
 function serviceHost(value: string): string {

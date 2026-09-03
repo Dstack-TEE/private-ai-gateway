@@ -90,6 +90,9 @@ impl UsageStore {
     }
 
     pub fn upsert(&self, item: &RequestActivity) -> Result<(), String> {
+        if item.path == "/v1/models" {
+            return Ok(());
+        }
         self.lock()?
             .execute(
                 "INSERT INTO usage_records (
@@ -303,13 +306,14 @@ fn initialize(connection: &Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
              CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
              CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);",
+             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);
+             DELETE FROM usage_records WHERE path = '/v1/models';",
         )
         .map_err(|error| format!("Cannot initialize the usage database: {error}"))
 }
 
 fn filters(query: &UsageQuery, include_cursor: bool) -> Result<(String, Vec<SqlValue>), String> {
-    let mut clauses = Vec::new();
+    let mut clauses = vec!["path != '/v1/models'".to_string()];
     let mut values = Vec::new();
     if let Some(agent) = clean_filter(query.agent.as_deref(), "agent")? {
         clauses.push("agent = ?".to_string());
@@ -440,7 +444,9 @@ fn series(
 fn facet(connection: &Connection, column: &str) -> Result<Vec<String>, String> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT DISTINCT {column} FROM usage_records WHERE {column} IS NOT NULL AND {column} != '' ORDER BY {column}"
+            "SELECT DISTINCT {column} FROM usage_records \
+             WHERE path != '/v1/models' AND {column} IS NOT NULL AND {column} != '' \
+             ORDER BY {column}"
         ))
         .map_err(db_error)?;
     let rows = statement
@@ -561,6 +567,27 @@ mod tests {
         let store = UsageStore::open(path.clone()).unwrap();
         store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
         store.upsert(&item("b2", 20, "pi", "model-b")).unwrap();
+        let mut discovery = item("catalog", 30, "codex", "catalog-only");
+        discovery.path = "/v1/models".to_string();
+        store.upsert(&discovery).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO usage_records (
+                   id, session_id, at, agent, model, method, path, status, streamed,
+                   receipt_id, verified, detail, locally_constrained, rewritten,
+                   left_device, input_tokens, output_tokens, cache_read_tokens,
+                   cache_write_tokens, cost_usd, updated_at
+                 ) SELECT
+                   'legacy-catalog', session_id, at, agent, 'legacy-catalog-only', method,
+                   '/v1/models', status, streamed, receipt_id, verified, detail,
+                   locally_constrained, rewritten, left_device, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, updated_at
+                 FROM usage_records WHERE id = 'a1'",
+                [],
+            )
+            .unwrap();
         let first = store
             .page(&UsageQuery {
                 limit: Some(1),
@@ -571,6 +598,7 @@ mod tests {
         assert!(first.next_cursor.is_some());
         assert_eq!(first.summary.requests, 2);
         assert_eq!(first.summary.input_tokens, 200);
+        assert!(!first.models.iter().any(|model| model == "catalog-only"));
         let second = store
             .page(&UsageQuery {
                 cursor: first.next_cursor,
@@ -588,6 +616,16 @@ mod tests {
         assert_eq!(pi.items.len(), 1);
         drop(store);
         let reopened = UsageStore::open(path).unwrap();
+        let legacy_count: u64 = reopened
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM usage_records WHERE path = '/v1/models'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_count, 0);
         assert_eq!(
             reopened
                 .page(&UsageQuery::default())

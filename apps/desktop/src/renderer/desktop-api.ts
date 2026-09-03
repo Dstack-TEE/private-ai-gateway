@@ -7,6 +7,7 @@ import type {
   ConnectOptions,
   DesktopApi,
   GatewayState,
+  LocalApiConfig,
   StartGatewayConfig,
   UsagePage,
   UsageQuery,
@@ -21,6 +22,9 @@ export const desktopApi: DesktopApi = {
   },
   rotateClientKey(): Promise<string> {
     return invoke("rotate_client_key");
+  },
+  saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState> {
+    return invoke("save_local_api_config", { config });
   },
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");

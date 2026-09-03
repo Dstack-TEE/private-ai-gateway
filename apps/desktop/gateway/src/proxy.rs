@@ -416,23 +416,21 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
 async fn models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
     let surface = Surface::ChatCompletions;
     if let Err(rejection) = state.authorize(&headers, "/v1/models") {
-        return reject(&state, None, "GET", "/v1/models", None, surface, rejection);
+        return error_response(
+            surface,
+            rejection.status,
+            rejection.code,
+            &rejection.message,
+        );
     }
     let session = state.session();
     match (session.verified, session.catalog) {
         (true, Some(catalog)) => Json(catalog.openai_list()).into_response(),
-        _ => reject(
-            &state,
-            None,
-            "GET",
-            "/v1/models",
-            None,
+        _ => error_response(
             surface,
-            Rejection::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gateway_not_verified",
-                "The verified model list is not available until verification succeeds",
-            ),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway_not_verified",
+            "The verified model list is not available until verification succeeds",
         ),
     }
 }

@@ -12,7 +12,7 @@ gateway for Codex, Claude Code, OpenCode, Pi, and Hermes.
 Codex / Claude Code / OpenCode / Pi / Hermes
         │  the agent's own API, a machine-local token
         ▼
-http://127.0.0.1:4180   in-process Rust proxy: agent tokens, catalog check,
+configured Local API    in-process Rust proxy: agent tokens, catalog check,
         │               limits, revocation gate, activity; relays unchanged
         ▼
 127.0.0.1:<dynamic>     bundled `aci serve`: TEE identity, pinned channel,
@@ -29,13 +29,14 @@ headers, and bytes come back the same way. Whether the service answers a
 protocol is the service's own response, shown as such.
 
 - **Primary instance, then endpoint.** At launch the app takes a per-user OS
-  file lock (`fd-lock`) to become the primary instance and binds
-  `127.0.0.1:4180` synchronously and exclusively; a failure is shown in the
-  window and blocks starting and connecting for that launch. Disconnecting
-  agents never depends on it. A second instance hands off to the first (the
-  Tauri single-instance plugin only focuses the window; the lock decides).
-- **Local endpoint `http://127.0.0.1:4180`** is loopback-only HTTP. The app
-  claims the port before agent connections are available.
+  file lock (`fd-lock`) to become the primary instance and synchronously binds
+  the saved Local API address and port; a failure is shown in the window and
+  blocks starting and connecting for that launch. Disconnecting agents never
+  depends on it. A second instance hands off to the first (the Tauri
+  single-instance plugin only focuses the window; the lock decides).
+- **Local endpoint** defaults to loopback-only `http://127.0.0.1:4180`. The
+  app claims the configured address and port before agent connections are
+  available.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity
