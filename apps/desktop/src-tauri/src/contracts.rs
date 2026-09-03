@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConfigChange, ConnectOptions};
+pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConnectOptions};
 use desktop_gateway::catalog::Catalog;
 use serde::{Deserialize, Serialize};
 
@@ -46,8 +46,12 @@ pub struct GatewayIdentity {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestActivity {
+    pub id: String,
+    pub session_id: String,
     pub method: String,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: u16,
     pub streamed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +69,33 @@ pub struct RequestActivity {
     /// Whether the receipt records a service-side rewrite of the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewritten: Option<bool>,
+    /// False means the request was rejected by the local proxy before any
+    /// bytes left the device.
+    pub left_device: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+    pub protected: u64,
+    pub blocked_locally: u64,
+    pub failed_proof: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -74,6 +105,23 @@ pub struct ModelSummary {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_tee: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_price_per_million: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_price_per_million: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_price_per_million: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_price_per_million: Option<f64>,
+    pub input_modalities: Vec<String>,
+    pub output_modalities: Vec<String>,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -95,6 +143,16 @@ impl CatalogSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),
                 context_length: model.remote.context_length,
+                max_output_length: model.remote.max_output_length,
+                is_tee: model.bool_field("is_tee"),
+                input_price_per_million: model.price_per_million("prompt"),
+                output_price_per_million: model.price_per_million("completion"),
+                cache_read_price_per_million: model.price_per_million("input_cache_read"),
+                cache_write_price_per_million: model.price_per_million("input_cache_write"),
+                input_modalities: model.string_array("input_modalities"),
+                output_modalities: model.string_array("output_modalities"),
+                capabilities: model.string_array("supported_features"),
+                description: model.string_field("description"),
             })
             .collect();
         // Carry forward ids that disappeared until the service lists them
@@ -140,6 +198,13 @@ pub struct GatewayState {
     pub identity: Option<GatewayIdentity>,
     pub checks: Vec<VerificationCheck>,
     pub activity: Vec<RequestActivity>,
+    /// Stable id and complete persisted totals for the current protection run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub session_usage: UsageSummary,
+    /// Changes only when persisted usage changes; renderer queries can depend
+    /// on this instead of the bounded activity preview.
+    pub usage_revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The configuration the next start (window or tray toggle) will use.
@@ -162,6 +227,9 @@ impl Default for GatewayState {
             identity: None,
             checks: Vec::new(),
             activity: Vec::new(),
+            session_id: None,
+            session_usage: UsageSummary::default(),
+            usage_revision: 0,
             error: None,
             config: StartGatewayConfig::default(),
             api_key_saved: false,

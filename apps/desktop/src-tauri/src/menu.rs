@@ -21,7 +21,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         },
         Emitter,
     };
-    use tauri_plugin_shell::ShellExt;
+    use tauri_plugin_opener::OpenerExt;
 
     let about = AboutMetadata {
         name: Some(PRODUCT_NAME.to_string()),
@@ -98,7 +98,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "support" => {
-            let _ = app.shell().open(SUPPORT_URL, None);
+            let _ = app.opener().open_url(SUPPORT_URL, None::<&str>);
         }
         _ => {}
     });

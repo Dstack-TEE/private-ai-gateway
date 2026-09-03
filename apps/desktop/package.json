@@ -23,7 +23,9 @@
   },
   "packageManager": "npm@11.16.0",
   "dependencies": {
+    "@lobehub/icons-static-svg": "^1.94.0",
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "lucide-react": "1.38.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

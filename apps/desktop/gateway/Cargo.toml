@@ -17,6 +17,7 @@ path = "src/bin/private-ai-gateway-helper.rs"
 
 [dependencies]
 axum = "0.7"
+async-stream = "0.3"
 bytes = "1"
 fd-lock = "4"
 futures-util = "0.3"
@@ -30,6 +31,7 @@ shlex = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
+yaml-edit = { version = "0.3.1", default-features = false }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

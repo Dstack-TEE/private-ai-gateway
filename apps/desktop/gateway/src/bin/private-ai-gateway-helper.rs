@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         (Some("--agent-token"), Some(agent)) => agent,
         _ => {
             eprintln!(
-                "usage: private-ai-gateway-helper --agent-token <codex|claude-code|opencode>"
+                "usage: private-ai-gateway-helper --agent-token <codex|claude-code|opencode|pi|hermes>"
             );
             return ExitCode::from(2);
         }

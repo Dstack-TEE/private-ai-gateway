@@ -6,11 +6,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
+use yaml_edit::{path::YamlPath, YamlFile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Json,
     Toml,
+    Yaml,
 }
 
 /// The scalar shapes a projection writes.
@@ -19,7 +21,9 @@ pub enum Format {
 pub enum ConfigValue {
     Str(String),
     Number(u64),
+    Bool(bool),
     List(Vec<String>),
+    Json(Value),
 }
 
 impl ConfigValue {
@@ -27,9 +31,11 @@ impl ConfigValue {
         match self {
             ConfigValue::Str(value) => value.clone(),
             ConfigValue::Number(value) => value.to_string(),
+            ConfigValue::Bool(value) => value.to_string(),
             ConfigValue::List(values) => {
                 serde_json::to_string(values).unwrap_or_else(|_| values.join(", "))
             }
+            ConfigValue::Json(value) => serde_json::to_string(value).unwrap_or_default(),
         }
     }
 
@@ -37,12 +43,15 @@ impl ConfigValue {
         match value {
             Value::String(text) => Some(ConfigValue::Str(text.clone())),
             Value::Number(number) => number.as_u64().map(ConfigValue::Number),
+            Value::Bool(value) => Some(ConfigValue::Bool(*value)),
             Value::Array(items) => items
                 .iter()
                 .map(|item| item.as_str().map(str::to_string))
                 .collect::<Option<Vec<_>>>()
-                .map(ConfigValue::List),
-            _ => None,
+                .map(ConfigValue::List)
+                .or_else(|| Some(ConfigValue::Json(value.clone()))),
+            Value::Object(_) => Some(ConfigValue::Json(value.clone())),
+            Value::Null => None,
         }
     }
 
@@ -50,12 +59,14 @@ impl ConfigValue {
         match self {
             ConfigValue::Str(text) => Value::String(text.clone()),
             ConfigValue::Number(number) => Value::from(*number),
+            ConfigValue::Bool(value) => Value::from(*value),
             ConfigValue::List(items) => Value::Array(
                 items
                     .iter()
                     .map(|item| Value::String(item.clone()))
                     .collect(),
             ),
+            ConfigValue::Json(value) => value.clone(),
         }
     }
 
@@ -65,6 +76,9 @@ impl ConfigValue {
         }
         if let Some(number) = item.as_integer() {
             return u64::try_from(number).ok().map(ConfigValue::Number);
+        }
+        if let Some(value) = item.as_bool() {
+            return Some(ConfigValue::Bool(value));
         }
         item.as_array().and_then(|array| {
             array
@@ -81,12 +95,16 @@ impl ConfigValue {
             ConfigValue::Number(number) => toml_edit::value(
                 i64::try_from(*number).map_err(|_| "number too large for TOML".to_string())?,
             ),
+            ConfigValue::Bool(value) => toml_edit::value(*value),
             ConfigValue::List(items) => {
                 let mut array = toml_edit::Array::new();
                 for item in items {
                     array.push(item.as_str());
                 }
                 toml_edit::value(array)
+            }
+            ConfigValue::Json(_) => {
+                return Err("complex JSON values cannot be written to TOML".to_string())
             }
         })
     }
@@ -96,6 +114,7 @@ impl ConfigValue {
 pub enum ConfigDoc {
     Json(Value),
     Toml(DocumentMut),
+    Yaml(YamlFile),
 }
 
 impl ConfigDoc {
@@ -117,6 +136,13 @@ impl ConfigDoc {
                 .parse::<DocumentMut>()
                 .map(Self::Toml)
                 .map_err(|_| "not valid TOML".to_string()),
+            Format::Yaml => {
+                let source = if text.trim().is_empty() { "{}\n" } else { text };
+                source
+                    .parse::<YamlFile>()
+                    .map(Self::Yaml)
+                    .map_err(|error| format!("not valid YAML: {error}"))
+            }
         }
     }
 
@@ -126,6 +152,7 @@ impl ConfigDoc {
                 .map(|text| text + "\n")
                 .map_err(|error| error.to_string()),
             Self::Toml(doc) => Ok(doc.to_string()),
+            Self::Yaml(doc) => Ok(doc.to_string()),
         }
     }
 
@@ -133,6 +160,12 @@ impl ConfigDoc {
         match self {
             Self::Json(root) => ConfigValue::from_json(json_get(root, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
+            Self::Yaml(file) => yaml_value(
+                file.documents()
+                    .next()?
+                    .try_get_path(&path.join("."))
+                    .ok()?,
+            ),
         }
     }
 
@@ -152,6 +185,26 @@ impl ConfigDoc {
             Self::Toml(doc) => {
                 toml_container(doc.as_item_mut(), parents)?.insert(leaf, value.to_toml()?);
             }
+            Self::Yaml(file) => {
+                let doc = file
+                    .documents()
+                    .next()
+                    .ok_or_else(|| "YAML document is empty".to_string())?;
+                let path = path.join(".");
+                match value {
+                    ConfigValue::Str(value) => doc.try_set_path(&path, value.as_str()),
+                    ConfigValue::Number(value) => {
+                        let value = i64::try_from(*value)
+                            .map_err(|_| "number too large for YAML".to_string())?;
+                        doc.try_set_path(&path, value)
+                    }
+                    ConfigValue::Bool(value) => doc.try_set_path(&path, *value),
+                    ConfigValue::List(_) | ConfigValue::Json(_) => {
+                        return Err("complex values are not used in YAML projections".to_string())
+                    }
+                }
+                .map_err(|error| format!("cannot edit YAML path {path}: {error}"))?;
+            }
         }
         Ok(())
     }
@@ -166,6 +219,10 @@ impl ConfigDoc {
             Self::Toml(doc) => {
                 toml_get(doc.as_item(), path).is_some_and(|item| item.as_table_like().is_some())
             }
+            Self::Yaml(file) => file.documents().next().is_some_and(|doc| {
+                doc.try_get_path(&path.join("."))
+                    .is_ok_and(|node| node.is_mapping())
+            }),
         }
     }
 
@@ -187,11 +244,45 @@ impl ConfigDoc {
                     table.remove(leaf);
                     table.is_empty()
                 }),
+            Self::Yaml(file) => {
+                let Some(doc) = file.documents().next() else {
+                    return;
+                };
+                let full = path.join(".");
+                let removed = doc.try_remove_path(&full).is_ok();
+                if removed {
+                    for length in (1..path.len()).rev() {
+                        let parent = path[..length].join(".");
+                        let empty = doc
+                            .try_get_path(&parent)
+                            .ok()
+                            .and_then(|node| node.as_mapping().cloned())
+                            .is_some_and(|mapping| mapping.is_empty());
+                        if empty {
+                            let _ = doc.try_remove_path(&parent);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                None
+            }
         };
         if emptied == Some(true) && !parents.is_empty() {
             self.remove(parents);
         }
     }
+}
+
+fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
+    if let Some(value) = node.to_bool() {
+        return Some(ConfigValue::Bool(value));
+    }
+    if let Some(value) = node.to_i64().and_then(|value| u64::try_from(value).ok()) {
+        return Some(ConfigValue::Number(value));
+    }
+    node.as_scalar()
+        .map(|scalar| ConfigValue::Str(scalar.as_string()))
 }
 
 fn split_leaf<'a>(path: &'a [&'a str]) -> Result<(&'a str, &'a [&'a str]), String> {
@@ -291,5 +382,24 @@ mod tests {
             doc.get_value(&["limit", "context"]),
             Some(ConfigValue::Number(4096))
         );
+    }
+
+    #[test]
+    fn yaml_edits_preserve_comments_and_prune_owned_tables() {
+        let mut doc = ConfigDoc::parse(Format::Yaml, "# user comment\ntheme: dark\n").unwrap();
+        doc.set_value(
+            &["providers", "private-ai-gateway", "discover_models"],
+            &ConfigValue::Bool(true),
+        )
+        .unwrap();
+        assert_eq!(
+            doc.get_value(&["providers", "private-ai-gateway", "discover_models"]),
+            Some(ConfigValue::Bool(true))
+        );
+        doc.remove(&["providers", "private-ai-gateway", "discover_models"]);
+        let text = doc.render().unwrap();
+        assert!(text.contains("# user comment"));
+        assert!(text.contains("theme: dark"));
+        assert!(!text.contains("private-ai-gateway"));
     }
 }

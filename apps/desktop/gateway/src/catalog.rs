@@ -49,6 +49,44 @@ impl CatalogModel {
     pub fn display_name(&self) -> &str {
         self.remote.name.as_deref().unwrap_or(&self.remote.id)
     }
+
+    pub fn bool_field(&self, name: &str) -> Option<bool> {
+        self.remote.extra.get(name).and_then(Value::as_bool)
+    }
+
+    pub fn string_field(&self, name: &str) -> Option<String> {
+        self.remote
+            .extra
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    }
+
+    pub fn string_array(&self, name: &str) -> Vec<String> {
+        self.remote
+            .extra
+            .get(name)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Remote pricing is per token. The UI presents the same validated value
+    /// per one million tokens and omits malformed or negative fields.
+    pub fn price_per_million(&self, name: &str) -> Option<f64> {
+        let value = self.remote.extra.get("pricing")?.get(name)?;
+        let per_token = match value {
+            Value::Number(value) => value.as_f64()?,
+            Value::String(value) => value.parse::<f64>().ok()?,
+            _ => return None,
+        };
+        (per_token.is_finite() && per_token >= 0.0).then_some(per_token * 1_000_000.0)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -158,5 +196,29 @@ mod tests {
             Catalog::from_remote(&json!({ "data": [{ "id": "openai/gpt-oss-20b" }] }), 2).unwrap();
         assert_eq!(after.removed_since(&before), ["meta/llama"]);
         assert_ne!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn malformed_optional_metadata_is_omitted() {
+        let catalog = Catalog::from_remote(
+            &json!({ "data": [{
+                "id": "model-a",
+                "is_tee": "yes",
+                "supported_features": ["tools", 4, ""],
+                "pricing": {
+                    "prompt": "0.000002",
+                    "completion": -1,
+                    "input_cache_read": "NaN"
+                }
+            }] }),
+            1,
+        )
+        .unwrap();
+        let model = &catalog.models[0];
+        assert_eq!(model.bool_field("is_tee"), None);
+        assert_eq!(model.string_array("supported_features"), ["tools"]);
+        assert_eq!(model.price_per_million("prompt"), Some(2.0));
+        assert_eq!(model.price_per_million("completion"), None);
+        assert_eq!(model.price_per_million("input_cache_read"), None);
     }
 }

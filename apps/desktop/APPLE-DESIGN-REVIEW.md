@@ -15,10 +15,10 @@ macOS.
 | Type family | System font | `-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`; monospace only for identifiers. |
 | Layout | Group related items with negative space, backgrounds, or separators; put the most important item first | 8 pt spacing grid (4/8/12/16/20/24); 20 px content margins; inset groups with hairline separators; the verdict and switch come first. |
 | Buttons | One or two prominent buttons per view; a hit region people can hit easily; title-case verb labels; a press state | One prominent button per view (Start/Connect); regular controls 32 px, primary 40 px; hover, pressed, disabled, focus states; ellipsis on labels that open a sheet (Restore All…). |
-| Segmented control | Toolbar segmented controls switch views; equal segments; a few segments | Three equal segments in the toolbar (Overview / Activity / Settings), implemented as a tab list with arrow-key movement. |
-| Toolbars | Prefer the content layer over tinted backgrounds; no overflow by default | A plain toolbar with a hairline; no title (the native title bar shows the product name); the segmented control shrinks before it overflows (verified at 220 px effective width). |
+| Sidebar | Use a source-list style sidebar for stable top-level destinations | Overview, Agents, Usage, and Settings use one persistent sidebar with native system typography, restrained selection styling, and arrow-key navigation. |
+| Page headers | Keep titles and primary state controls predictable | Every destination has a separate title row; non-Overview pages place the labeled Protected switch at the trailing edge. |
 | Settings | Minimize settings; Command-Comma opens them; respect system settings | Four groups (General, Privacy, Agents, Advanced) plus About; ⌘, in the app menu; appearance, contrast, and motion follow the system. |
-| Windows | Don't create custom window UI | Standard Tauri window with the native title bar and traffic lights; nothing in the WebView repeats the title. |
+| Windows | Preserve standard window behavior and controls | A decorated Tauri `NSWindow` uses the supported overlay title-bar style. The real AppKit traffic lights are positioned over the sidebar; production HTML never draws replacement controls. |
 | Sheets | Cancel left of the default action; default button is prominent | Native `<dialog>` styled as a sheet, Cancel then the default action, one prominent button. |
 | Accessibility | Don't rely on colour alone; keyboard access; legible at larger sizes | Every state pairs colour with an icon or dot; the segmented control is a tab list with arrow keys, the activity list is a native `<ul>` of plain buttons whose selection is `aria-pressed`, and sheets, disclosures, and fields are native elements, so Tab order and VoiceOver names come from the platform; `prefers-contrast: more` strengthens separators; `prefers-reduced-motion` stops the spinner and toggle animation; every view is checked at 360 px and 200 % zoom with no horizontal overflow. |
 
@@ -33,8 +33,9 @@ macOS.
 
 ## Native boundaries
 
-Native (Tauri, AppKit through Tauri): the window, title bar, and traffic
-lights; the tray icon (monochrome template of the brand mark) and its menu;
+Native (Tauri, AppKit through Tauri): the decorated window, overlay title bar,
+traffic lights, shadow, resizing, and focus behavior; the tray icon
+(monochrome template of the brand mark) and its menu;
 the macOS menu bar laid out like Tauri's default menu, built only from
 predefined items so each keeps its system role and shortcut: the application
 menu (About with version and organization, Settings… ⌘,, Services, Hide, Hide
@@ -43,18 +44,18 @@ the text fields in the window rely on), View (Full Screen), Window (Minimize,
 Zoom, Close Window), and Help with the brand's support link; the OS credential
 store. Menu labels come from the generated brand module.
 
-Web (HTML in the WebView): the segmented control, grouped lists, sheets,
-and the privacy path graphic. They use standard elements (`button`,
-`input`, `select`, `details`, `dialog`) with ARIA roles where the element has
-none (the tab list), so keyboard focus and VoiceOver behave like native
-controls.
+Web (HTML in the WebView): the sidebar contents, page headers, grouped lists,
+sheets, and the privacy status surface. They use standard elements (`button`,
+`input`, `select`, `details`, `dialog`) with explicit labels and roving focus
+where needed, so keyboard focus and VoiceOver names remain predictable.
 
-Not native, and why: a real `NSToolbar` segmented control, `NSAlert` sheets,
-and an AppKit settings window would need private or per-platform code beyond
-Tauri's stable API; the web versions follow the same structure and keep one
-implementation for macOS, Windows, and Linux. The menu bar is macOS-only and
-cannot be exercised on the Linux machine this was built on; it relies on the
-macOS CI job.
+Not native, and why: custom-content configuration sheets and the multi-column
+usage/catalog views do not map to stable Tauri wrappers around AppKit controls.
+The WebView versions preserve macOS spacing, typography, focus order, and
+system light/dark/contrast/motion preferences while keeping one implementation
+for macOS, Windows, and Linux. Destructive and file-system actions still use
+the platform dialog plugins. The menu bar and final traffic-light placement
+are macOS-only and are verified by the macOS package job.
 
 ## Branding
 

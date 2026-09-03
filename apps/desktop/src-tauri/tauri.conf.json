@@ -14,12 +14,19 @@
       {
         "label": "main",
         "title": "Private AI Gateway",
-        "width": 440,
-        "height": 780,
-        "minWidth": 420,
-        "minHeight": 560,
+        "width": 1052,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 16
+        },
+        "hiddenTitle": true,
         "center": true,
         "visible": false
       }

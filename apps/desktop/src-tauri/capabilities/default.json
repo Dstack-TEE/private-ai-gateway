@@ -6,6 +6,7 @@
     "main"
   ],
   "permissions": [
-    "core:event:default"
+    "core:event:default",
+    "dialog:allow-save"
   ]
 }

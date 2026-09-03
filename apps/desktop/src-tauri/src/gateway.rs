@@ -27,8 +27,9 @@ use url::Url;
 
 use crate::contracts::{
     CatalogSummary, GatewayIdentity, GatewayState, RequestActivity, SourceProvenance,
-    StartGatewayConfig, VerificationCheck,
+    StartGatewayConfig, UsageSummary, VerificationCheck,
 };
+use crate::usage::UsageStore;
 
 /// The stable loopback HTTP endpoint agents are configured with.
 pub const LOCAL_ENDPOINT: &str = "http://127.0.0.1:4180";
@@ -41,6 +42,7 @@ const MAX_EVENT_BYTES: usize = 1_048_576;
 pub struct GatewayManager {
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
+    usage: Arc<UsageStore>,
 }
 
 struct RuntimeState {
@@ -56,13 +58,16 @@ struct RuntimeState {
     sidecar_url: Option<String>,
     /// The sidecar reported a verified identity for this generation.
     identity_ready: bool,
+    /// Stable id for one protection run. Overview shows only this run while
+    /// the Usage page reads every run from SQLite.
+    session_id: String,
     /// Last published catalog, kept across sessions to report removed models.
     last_catalog: Option<CatalogSummary>,
     state: GatewayState,
 }
 
 impl GatewayManager {
-    pub fn new(proxy: Arc<ProxyState>) -> Self {
+    pub fn new(proxy: Arc<ProxyState>, usage: Arc<UsageStore>) -> Self {
         Self {
             inner: Mutex::new(RuntimeState {
                 child: None,
@@ -72,10 +77,12 @@ impl GatewayManager {
                 diagnostic: VecDeque::with_capacity(MAX_DIAGNOSTIC_BYTES),
                 sidecar_url: None,
                 identity_ready: false,
+                session_id: "unscoped".to_string(),
                 last_catalog: None,
                 state: GatewayState::default(),
             }),
             proxy,
+            usage,
         }
     }
 
@@ -125,6 +132,8 @@ impl GatewayManager {
 
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
+        runtime.session_id = format!("{:016x}-{:016x}", now_secs(), generation);
+        let session_id = runtime.session_id.clone();
         runtime.child = Some(child);
         runtime.stdout.clear();
         runtime.diagnostic.clear();
@@ -134,10 +143,13 @@ impl GatewayManager {
             status: "verifying".to_string(),
             progress: Some("Starting the verifier".to_string()),
             remote_url: Some(remote_url.clone()),
+            session_id: Some(session_id.clone()),
+            session_usage: UsageSummary::default(),
             config: StartGatewayConfig {
                 remote_url,
                 require_production_os: config.require_production_os,
             },
+            activity: Vec::new(),
             ..Self::carried(&runtime.state)
         };
         let state = runtime.state.clone();
@@ -146,6 +158,7 @@ impl GatewayManager {
         self.proxy.publish(Session {
             generation,
             epoch: 0,
+            session_id: Some(session_id),
             ..Session::default()
         });
         publish_state(app, &state);
@@ -167,11 +180,13 @@ impl GatewayManager {
         runtime.state = Self::carried(&runtime.state);
         let state = runtime.state.clone();
         let epoch = runtime.epoch;
+        let session_id = runtime.session_id.clone();
         drop(runtime);
 
         self.proxy.publish(Session {
             generation,
             epoch,
+            session_id: Some(session_id),
             ..Session::default()
         });
         if let Some(child) = child {
@@ -193,6 +208,9 @@ impl GatewayManager {
             proxy_url: previous.proxy_url.clone(),
             endpoint_error: previous.endpoint_error.clone(),
             activity: previous.activity.clone(),
+            session_id: previous.session_id.clone(),
+            session_usage: previous.session_usage.clone(),
+            usage_revision: previous.usage_revision,
             ..GatewayState::default()
         }
     }
@@ -237,26 +255,54 @@ impl GatewayManager {
         self.update(app, |state| state.error = Some(message));
     }
 
+    pub fn clear_session_usage(&self, app: &AppHandle) {
+        self.update(app, |state| {
+            state.activity.clear();
+            state.session_usage = UsageSummary::default();
+            state.usage_revision = state.usage_revision.wrapping_add(1);
+        });
+    }
+
     /// A request the local proxy answered itself, before any receipt.
     pub fn record_proxy_event(&self, app: &AppHandle, event: ProxyEvent) {
+        let activity = RequestActivity {
+            id: event.request_id,
+            session_id: event.session_id,
+            method: event.method,
+            path: event.path,
+            model: event.model,
+            status: event.status,
+            streamed: event.streamed,
+            receipt_id: event.receipt_id,
+            verified: event.verified,
+            detail: event.detail,
+            at: event.at,
+            agent: event.agent,
+            locally_constrained: event.locally_constrained,
+            rewritten: event.rewritten,
+            left_device: event.left_device,
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            cache_read_tokens: event.cache_read_tokens,
+            cache_write_tokens: event.cache_write_tokens,
+            cost_usd: event.cost_usd,
+        };
+        let summary = self
+            .usage
+            .upsert(&activity)
+            .and_then(|()| self.usage.session_summary(&activity.session_id));
         self.update(app, |state| {
-            state.activity.insert(
-                0,
-                RequestActivity {
-                    method: event.method,
-                    path: event.path,
-                    status: event.status,
-                    streamed: false,
-                    receipt_id: None,
-                    verified: None,
-                    detail: event.detail,
-                    at: event.at,
-                    agent: event.agent,
-                    locally_constrained: None,
-                    rewritten: None,
-                },
-            );
-            state.activity.truncate(MAX_ACTIVITY);
+            merge_activity(state, activity.clone());
+            state.usage_revision = state.usage_revision.wrapping_add(1);
+            match summary {
+                Ok(summary)
+                    if state.session_id.as_deref() == Some(activity.session_id.as_str()) =>
+                {
+                    state.session_usage = summary;
+                }
+                Err(error) => state.error = Some(error),
+                _ => {}
+            }
         });
     }
 
@@ -305,6 +351,7 @@ impl GatewayManager {
                 self.proxy.publish(Session {
                     generation,
                     epoch,
+                    session_id: Some(runtime.session_id.clone()),
                     base_url: Some(sidecar_url),
                     verified: true,
                     catalog: Some(catalog),
@@ -396,6 +443,7 @@ impl GatewayManager {
         }
 
         let mut load_catalog = false;
+        let mut persist = None;
         match event_type.as_str() {
             // Identity in (or rotated): a new epoch; the session stays closed
             // until the catalog read through this identity is in too.
@@ -412,7 +460,9 @@ impl GatewayManager {
                 runtime.state.catalog = None;
                 load_catalog = true;
             }
-            "request_complete" => apply_request_event(&mut runtime.state, object)?,
+            "request_complete" => {
+                persist = Some(apply_request_event(&mut runtime.state, object)?);
+            }
             // Verification lost: one atomic barrier. The epoch moves so a
             // read still in flight can neither publish nor clear this error,
             // and the identity must be reported again before anything opens.
@@ -440,18 +490,40 @@ impl GatewayManager {
             _ => return Ok(()),
         }
 
-        let state = runtime.state.clone();
+        let mut state = runtime.state.clone();
         let epoch = runtime.epoch;
         if state.status != "verified" {
             // Any state other than verified revokes the session at once.
             self.proxy.publish(Session {
                 generation,
                 epoch,
+                session_id: Some(runtime.session_id.clone()),
                 base_url: runtime.sidecar_url.clone(),
                 ..Session::default()
             });
         }
         drop(runtime);
+        if let Some(activity) = persist {
+            let summary = self
+                .usage
+                .upsert(&activity)
+                .and_then(|()| self.usage.session_summary(&activity.session_id));
+            let mut runtime = self.lock()?;
+            if runtime.generation == generation {
+                runtime.state.usage_revision = runtime.state.usage_revision.wrapping_add(1);
+                match summary {
+                    Ok(summary)
+                        if runtime.state.session_id.as_deref()
+                            == Some(activity.session_id.as_str()) =>
+                    {
+                        runtime.state.session_usage = summary;
+                    }
+                    Err(error) => runtime.state.error = Some(error),
+                    _ => {}
+                }
+                state = runtime.state.clone();
+            }
+        }
         publish_state(app, &state);
         if load_catalog {
             let app = app.clone();
@@ -501,10 +573,12 @@ impl GatewayManager {
         }
         let state = runtime.state.clone();
         let epoch = runtime.epoch;
+        let session_id = runtime.session_id.clone();
         drop(runtime);
         self.proxy.publish(Session {
             generation,
             epoch,
+            session_id: Some(session_id),
             ..Session::default()
         });
         publish_state(app, &state);
@@ -525,10 +599,12 @@ impl GatewayManager {
         runtime.state.error = Some(message);
         let state = runtime.state.clone();
         let epoch = runtime.epoch;
+        let session_id = runtime.session_id.clone();
         drop(runtime);
         self.proxy.publish(Session {
             generation,
             epoch,
+            session_id: Some(session_id),
             ..Session::default()
         });
         if let Some(child) = child {
@@ -569,7 +645,22 @@ fn validate_remote_url(value: &str) -> Result<String, String> {
     let mut url = Url::parse(value.trim())
         .map_err(|_| "Gateway URL must be a valid HTTP or HTTPS URL".to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("Gateway URL must use HTTP or HTTPS".to_string());
+        return Err(
+            "Gateway URL must use HTTPS (HTTP is allowed only for loopback development)"
+                .to_string(),
+        );
+    }
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "https" && !loopback {
+        return Err(
+            "Gateway URL must use HTTPS unless it points to localhost or a loopback address"
+                .to_string(),
+        );
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err("Gateway URL must not contain credentials".to_string());
@@ -649,16 +740,26 @@ fn parse_checks(value: Option<&Value>) -> Vec<VerificationCheck> {
         .collect()
 }
 
-fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> Result<(), String> {
+fn apply_request_event(
+    state: &mut GatewayState,
+    event: &Map<String, Value>,
+) -> Result<RequestActivity, String> {
     let status = event
         .get("status")
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
         .ok_or_else(|| "ACI emitted an invalid request event".to_string())?;
     let receipt_id = optional_string(event, "receipt_id");
+    let (request_id, session_id, agent) = parse_request_tag(
+        optional_string(event, "tag").as_deref(),
+        receipt_id.as_deref(),
+    );
     let activity = RequestActivity {
+        id: request_id,
+        session_id,
         method: required_string(event, "method")?,
         path: required_string(event, "path")?,
+        model: None,
         status,
         streamed: event
             .get("streamed")
@@ -668,24 +769,84 @@ fn apply_request_event(state: &mut GatewayState, event: &Map<String, Value>) -> 
         verified: event.get("verified").and_then(Value::as_bool),
         detail: optional_string(event, "detail").unwrap_or_default(),
         at: now_secs(),
-        // The local proxy tags each forwarded request with its agent.
-        agent: optional_string(event, "tag"),
+        agent,
         locally_constrained: event.get("locally_constrained").and_then(Value::as_bool),
         rewritten: event.get("rewritten").and_then(Value::as_bool),
+        left_device: true,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
     };
-    if let Some(existing) = receipt_id.and_then(|id| {
-        state
-            .activity
-            .iter_mut()
-            .find(|item| item.receipt_id.as_deref() == Some(id.as_str()))
-    }) {
-        let at = existing.at;
-        *existing = RequestActivity { at, ..activity };
+    merge_activity(state, activity.clone());
+    Ok(activity)
+}
+
+fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
+    if let Some(existing) = state
+        .activity
+        .iter_mut()
+        .find(|item| item.id == incoming.id)
+    {
+        incoming.at = existing.at.min(incoming.at);
+        incoming.agent = incoming.agent.or_else(|| existing.agent.clone());
+        incoming.model = incoming.model.or_else(|| existing.model.clone());
+        incoming.receipt_id = incoming.receipt_id.or_else(|| existing.receipt_id.clone());
+        incoming.verified = incoming.verified.or(existing.verified);
+        if incoming.detail.is_empty() {
+            incoming.detail = existing.detail.clone();
+        }
+        incoming.locally_constrained = incoming
+            .locally_constrained
+            .or(existing.locally_constrained);
+        incoming.rewritten = incoming.rewritten.or(existing.rewritten);
+        incoming.left_device |= existing.left_device;
+        incoming.input_tokens = incoming.input_tokens.or(existing.input_tokens);
+        incoming.output_tokens = incoming.output_tokens.or(existing.output_tokens);
+        incoming.cache_read_tokens = incoming.cache_read_tokens.or(existing.cache_read_tokens);
+        incoming.cache_write_tokens = incoming.cache_write_tokens.or(existing.cache_write_tokens);
+        incoming.cost_usd = incoming.cost_usd.or(existing.cost_usd);
+        *existing = incoming;
     } else {
-        state.activity.insert(0, activity);
+        state.activity.insert(0, incoming);
     }
+    state.activity.sort_by(|left, right| right.at.cmp(&left.at));
     state.activity.truncate(MAX_ACTIVITY);
-    Ok(())
+}
+
+fn parse_request_tag(
+    tag: Option<&str>,
+    receipt_id: Option<&str>,
+) -> (String, String, Option<String>) {
+    if let Some(tag) = tag {
+        let mut parts = tag.splitn(4, ':');
+        if parts.next() == Some("pag") {
+            if let (Some(request), Some(session), Some(agent)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                if !request.is_empty() && !session.is_empty() && !agent.is_empty() {
+                    return (
+                        request.to_string(),
+                        session.to_string(),
+                        Some(agent.to_string()),
+                    );
+                }
+            }
+        }
+        return (
+            receipt_id.unwrap_or(tag).to_string(),
+            "legacy".to_string(),
+            Some(tag.to_string()),
+        );
+    }
+    (
+        receipt_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("legacy-{:016x}", now_secs())),
+        "legacy".to_string(),
+        None,
+    )
 }
 
 fn now_secs() -> u64 {
@@ -725,6 +886,15 @@ mod tests {
         );
         assert!(validate_remote_url("https://token@tee.redpill.ai").is_err());
         assert!(validate_remote_url("file:///tmp/gateway").is_err());
+        assert!(validate_remote_url("http://tee.redpill.ai").is_err());
+        assert_eq!(
+            validate_remote_url("http://127.0.0.1:8090/").unwrap(),
+            "http://127.0.0.1:8090"
+        );
+        assert_eq!(
+            validate_remote_url("http://localhost:8090/").unwrap(),
+            "http://localhost:8090"
+        );
     }
 
     #[test]
@@ -755,22 +925,103 @@ mod tests {
         let request = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": null,
-            "detail": "receipt rcpt-1 recorded", "tag": "claude-code"
+            "detail": "receipt rcpt-1 recorded", "tag": "pag:req-1:session-1:claude-code"
         });
         apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
         let verdict = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
             "locally_constrained": true,
-            "detail": "receipt verified", "tag": "claude-code"
+            "detail": "receipt verified", "tag": "pag:req-1:session-1:claude-code"
         });
         apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
 
         assert_eq!(state.activity.len(), 1);
         let item = &state.activity[0];
+        assert_eq!(item.id, "req-1");
+        assert_eq!(item.session_id, "session-1");
         assert_eq!(item.agent.as_deref(), Some("claude-code"));
         assert_eq!(item.verified, Some(true));
         assert_eq!(item.rewritten, Some(true));
         assert_eq!(item.locally_constrained, Some(true));
+    }
+
+    #[test]
+    fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
+        let mut state = GatewayState::default();
+        merge_activity(
+            &mut state,
+            RequestActivity {
+                id: "req-merge".to_string(),
+                session_id: "session-merge".to_string(),
+                method: "POST".to_string(),
+                path: "/v1/messages".to_string(),
+                model: Some("openai/gpt-oss-20b".to_string()),
+                status: 200,
+                streamed: true,
+                receipt_id: Some("rcpt-merge".to_string()),
+                verified: None,
+                detail: "Awaiting receipt verification".to_string(),
+                at: 100,
+                agent: Some("claude-code".to_string()),
+                locally_constrained: None,
+                rewritten: None,
+                left_device: true,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: None,
+            },
+        );
+
+        let verdict = json!({
+            "method": "POST", "path": "/v1/messages", "status": 200,
+            "streamed": true, "receipt_id": "rcpt-merge", "verified": true,
+            "locally_constrained": true, "rewritten": true,
+            "detail": "receipt verified",
+            "tag": "pag:req-merge:session-merge:claude-code"
+        });
+        apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
+
+        merge_activity(
+            &mut state,
+            RequestActivity {
+                id: "req-merge".to_string(),
+                session_id: "session-merge".to_string(),
+                method: "POST".to_string(),
+                path: "/v1/messages".to_string(),
+                model: Some("openai/gpt-oss-20b".to_string()),
+                status: 200,
+                streamed: true,
+                receipt_id: None,
+                verified: None,
+                detail: String::new(),
+                at: 102,
+                agent: Some("claude-code".to_string()),
+                locally_constrained: None,
+                rewritten: None,
+                left_device: true,
+                input_tokens: Some(1_024),
+                output_tokens: Some(256),
+                cache_read_tokens: Some(512),
+                cache_write_tokens: Some(64),
+                cost_usd: Some(0.0042),
+            },
+        );
+
+        assert_eq!(state.activity.len(), 1);
+        let item = &state.activity[0];
+        assert_eq!(item.id, "req-merge");
+        assert_eq!(item.at, 100);
+        assert_eq!(item.receipt_id.as_deref(), Some("rcpt-merge"));
+        assert_eq!(item.verified, Some(true));
+        assert_eq!(item.locally_constrained, Some(true));
+        assert_eq!(item.rewritten, Some(true));
+        assert_eq!(item.input_tokens, Some(1_024));
+        assert_eq!(item.output_tokens, Some(256));
+        assert_eq!(item.cache_read_tokens, Some(512));
+        assert_eq!(item.cache_write_tokens, Some(64));
+        assert_eq!(item.cost_usd, Some(0.0042));
     }
 }

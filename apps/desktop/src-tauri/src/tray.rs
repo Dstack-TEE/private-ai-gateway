@@ -1,8 +1,9 @@
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Manager, Wry,
+    AppHandle, Emitter, Manager, Wry,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
 
@@ -12,25 +13,36 @@ use crate::{contracts::GatewayState, gateway::GatewayManager};
 pub struct TrayMenu {
     toggle: CheckMenuItem<Wry>,
     status: MenuItem<Wry>,
+    autostart: CheckMenuItem<Wry>,
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let (checked, status_line) = menu_state(&GatewayState::default());
-    let toggle = CheckMenuItemBuilder::with_id("toggle", APP_NAME)
+    let toggle = CheckMenuItemBuilder::with_id("toggle", "Protected")
         .checked(checked)
         .build(app)?;
     let status = MenuItemBuilder::with_id("status", status_line)
         .enabled(false)
+        .build(app)?;
+    let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
+        .checked(app.autolaunch().is_enabled().unwrap_or(false))
         .build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&toggle)
         .item(&status)
         .separator()
         .text("open", format!("Open {APP_NAME}"))
+        .text("settings", "Settings…")
+        .separator()
+        .item(&autostart)
         .separator()
         .text("quit", format!("Quit {APP_NAME}"))
         .build()?;
-    app.manage(TrayMenu { toggle, status });
+    app.manage(TrayMenu {
+        toggle,
+        status,
+        autostart,
+    });
 
     let icon =
         tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
@@ -43,6 +55,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => app.state::<GatewayManager>().toggle(app),
             "open" => show_window(app),
+            "settings" => {
+                show_window(app);
+                let _ = app.emit(crate::menu::NAVIGATE_EVENT, "settings");
+            }
+            "autostart" => sync_autostart(app),
             "quit" => {
                 let _ = app.state::<GatewayManager>().stop(app);
                 app.exit(0);
@@ -51,6 +68,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+fn sync_autostart(app: &AppHandle) {
+    let menu = app.state::<TrayMenu>();
+    let checked = menu.autostart.is_checked().unwrap_or(false);
+    let result = if checked {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    if let Err(error) = result {
+        let _ = menu.autostart.set_checked(!checked);
+        app.state::<GatewayManager>()
+            .report_error(app, format!("Open at Login could not be changed: {error}"));
+    }
 }
 
 /// Reflect the gateway state in the checkmark, the status row, and the tooltip.

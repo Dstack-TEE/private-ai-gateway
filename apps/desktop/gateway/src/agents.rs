@@ -93,9 +93,10 @@ pub struct AgentPreview {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectOptions {
-    /// Catalog model selected for the agent.
+    /// Optional default selected from the verified catalog. The full model
+    /// list is discovered natively or generated from that catalog.
     #[serde(default)]
-    pub model: Option<String>,
+    pub default_model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,10 +104,18 @@ pub enum Agent {
     Codex,
     ClaudeCode,
     OpenCode,
+    Pi,
+    Hermes,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 3] = [Agent::Codex, Agent::ClaudeCode, Agent::OpenCode];
+    pub const ALL: [Agent; 5] = [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::OpenCode,
+        Agent::Pi,
+        Agent::Hermes,
+    ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
         Self::ALL
@@ -120,6 +129,8 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::ClaudeCode => "claude-code",
             Agent::OpenCode => "opencode",
+            Agent::Pi => "pi",
+            Agent::Hermes => "hermes",
         }
     }
 
@@ -128,18 +139,27 @@ impl Agent {
             Agent::Codex => "Codex",
             Agent::ClaudeCode => "Claude Code",
             Agent::OpenCode => "OpenCode",
+            Agent::Pi => "Pi",
+            Agent::Hermes => "Hermes",
         }
     }
 
     /// The official CLI executable name, for install detection on PATH.
-    fn cli_name(self) -> &'static str {
-        self.id()
+    fn cli_names(self) -> &'static [&'static str] {
+        match self {
+            Agent::Codex => &["codex"],
+            Agent::ClaudeCode => &["claude"],
+            Agent::OpenCode => &["opencode"],
+            Agent::Pi => &["pi"],
+            Agent::Hermes => &["hermes"],
+        }
     }
 
     fn format(self) -> Format {
         match self {
             Agent::Codex => Format::Toml,
-            Agent::ClaudeCode | Agent::OpenCode => Format::Json,
+            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi => Format::Json,
+            Agent::Hermes => Format::Yaml,
         }
     }
 
@@ -160,6 +180,12 @@ impl Agent {
                     .join("opencode")
                     .join("opencode.json")
             }),
+            Agent::Pi => override_dir("PI_AGENT_DIR")
+                .unwrap_or_else(|| home.join(".pi").join("agent"))
+                .join("models.json"),
+            Agent::Hermes => override_dir("HERMES_HOME")
+                .unwrap_or_else(|| home.join(".hermes"))
+                .join("config.yaml"),
         }
     }
 
@@ -171,19 +197,26 @@ impl Agent {
         }
         match self {
             Agent::Codex => {
-                "Codex will use its official custom model provider with the Responses API and \
-                 command-backed authentication. Restart Codex after applying."
+                "Codex will use its official custom model provider with the Responses API, the \
+                 selected model from the verified catalog, and command-backed authentication. \
+                 Restart Codex after applying."
             }
             Agent::OpenCode => {
-                "OpenCode will use its OpenAI-compatible provider with the selected verified \
-                 model and a file-backed machine-local token. Restart OpenCode after applying."
+                "OpenCode will use an app-owned provider catalog generated from the verified \
+                 service and a file-backed machine-local token. Restart OpenCode after applying."
             }
             Agent::ClaudeCode => {
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
-                 and use the selected model. Credentials set in this settings file are taken over and restored on \
+                 and discover models from the verified service. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway."
+            }
+            Agent::Pi => {
+                "Pi will load an app-owned provider catalog generated from the verified service. Choose a model in Pi after applying. Restart Pi after applying."
+            }
+            Agent::Hermes => {
+                "Hermes will discover models from the local gateway and authenticate with a machine-local token command. Start a new Hermes session after applying."
             }
         }
     }
@@ -200,119 +233,241 @@ struct Inputs<'a> {
 
 /// The fields this app owns for the agent and the values a connection writes.
 fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
-    let model = inputs
-        .options
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
-        .ok_or_else(|| format!("Choose a model from the verified list for {}", agent.name()))?;
     let catalog = inputs
         .catalog
         .ok_or_else(|| "The verified model list is not available".to_string())?;
-    if catalog.get(model).is_none() {
-        return Err(format!("`{model}` is not in the verified model list"));
+    let default_model = inputs
+        .options
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if default_model.is_some_and(|model| catalog.get(model).is_none()) {
+        return Err(format!(
+            "`{}` is not in the verified model list",
+            default_model.unwrap_or_default()
+        ));
+    }
+    if agent == Agent::Codex && default_model.is_none() {
+        return Err("Choose a verified default model for Codex".to_string());
     }
     let base = inputs.endpoint.trim_end_matches('/');
     Ok(match agent {
-        Agent::Codex => vec![
-            set(&["model"], model),
-            set(&["model_provider"], "private_ai_gateway"),
-            set(
-                &["model_providers", "private_ai_gateway", "name"],
-                PRODUCT_NAME,
-            ),
-            set(
-                &["model_providers", "private_ai_gateway", "base_url"],
-                format!("{base}/v1"),
-            ),
-            set(
-                &["model_providers", "private_ai_gateway", "wire_api"],
-                "responses",
-            ),
-            set(
-                &["model_providers", "private_ai_gateway", "auth", "command"],
-                inputs.helper_exe.display().to_string(),
-            ),
-            list(
-                &["model_providers", "private_ai_gateway", "auth", "args"],
-                &["--agent-token", "codex"],
-            ),
-            number(
-                &[
-                    "model_providers",
-                    "private_ai_gateway",
-                    "auth",
-                    "timeout_ms",
-                ],
-                5_000,
-            ),
-            number(
-                &[
-                    "model_providers",
-                    "private_ai_gateway",
-                    "auth",
-                    "refresh_interval_ms",
-                ],
-                0,
-            ),
-        ],
-        Agent::ClaudeCode => vec![
-            set(&["env", "ANTHROPIC_BASE_URL"], base),
-            set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
-            set(&["env", "ANTHROPIC_MODEL"], model),
-            set(
-                &["apiKeyHelper"],
-                helper_command(inputs.helper_exe, "claude-code")?,
-            ),
-            absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
-            absent(&["env", "ANTHROPIC_API_KEY"]),
-        ],
-        Agent::OpenCode => {
-            let provider = "private-ai-gateway";
+        Agent::Codex => {
             let mut fields = vec![
-                set(&["model"], format!("{provider}/{model}")),
-                set(&["provider", provider, "npm"], "@ai-sdk/openai-compatible"),
-                set(&["provider", provider, "name"], PRODUCT_NAME),
+                set(&["model_provider"], "private_ai_gateway"),
                 set(
-                    &["provider", provider, "options", "baseURL"],
+                    &["model_providers", "private_ai_gateway", "name"],
+                    PRODUCT_NAME,
+                ),
+                set(
+                    &["model_providers", "private_ai_gateway", "base_url"],
                     format!("{base}/v1"),
                 ),
                 set(
-                    &["provider", provider, "options", "apiKey"],
-                    format!("{{file:{}}}", inputs.token_path.display()),
+                    &["model_providers", "private_ai_gateway", "wire_api"],
+                    "responses",
                 ),
                 set(
-                    &["provider", provider, "models", model, "name"],
-                    catalog.get(model).unwrap().display_name(),
+                    &["model_providers", "private_ai_gateway", "auth", "command"],
+                    inputs.helper_exe.display().to_string(),
+                ),
+                list(
+                    &["model_providers", "private_ai_gateway", "auth", "args"],
+                    &["--agent-token", "codex"],
+                ),
+                number(
+                    &[
+                        "model_providers",
+                        "private_ai_gateway",
+                        "auth",
+                        "timeout_ms",
+                    ],
+                    5_000,
+                ),
+                number(
+                    &[
+                        "model_providers",
+                        "private_ai_gateway",
+                        "auth",
+                        "refresh_interval_ms",
+                    ],
+                    0,
                 ),
             ];
-            let remote = &catalog.get(model).unwrap().remote;
-            if let (Some(context), Some(output)) = (remote.context_length, remote.max_output_length)
-            {
-                fields.push(number(
-                    &["provider", provider, "models", model, "limit", "context"],
-                    context,
-                ));
-                fields.push(number(
-                    &["provider", provider, "models", model, "limit", "output"],
-                    output,
-                ));
+            if let Some(model) = default_model {
+                fields.push(set(&["model"], model));
+            }
+            fields
+        }
+        Agent::ClaudeCode => {
+            let mut fields = vec![
+                set(&["env", "ANTHROPIC_BASE_URL"], base),
+                set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+                set(
+                    &["apiKeyHelper"],
+                    helper_command(inputs.helper_exe, "claude-code")?,
+                ),
+                absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
+                absent(&["env", "ANTHROPIC_API_KEY"]),
+            ];
+            if let Some(model) = default_model {
+                fields.push(set(&["env", "ANTHROPIC_MODEL"], model));
+            }
+            fields
+        }
+        Agent::OpenCode => {
+            let provider = "private-ai-gateway";
+            let mut fields = vec![generated_catalog(
+                &["provider", provider],
+                opencode_provider(catalog, base, inputs.token_path),
+                catalog.models.len(),
+            )];
+            if let Some(model) = default_model {
+                fields.push(set(&["model"], format!("{provider}/{model}")));
+            }
+            fields
+        }
+        Agent::Pi => vec![generated_catalog(
+            &["providers", "private-ai-gateway"],
+            pi_provider(catalog, base, inputs.helper_exe)?,
+            catalog.models.len(),
+        )],
+        Agent::Hermes => {
+            let provider = "private-ai-gateway";
+            let mut fields = vec![
+                set(&["providers", provider, "name"], PRODUCT_NAME),
+                set(&["providers", provider, "api"], format!("{base}/v1")),
+                set(&["providers", provider, "transport"], "chat_completions"),
+                boolean(&["providers", provider, "discover_models"], true),
+                set(
+                    &["providers", provider, "key_cmd"],
+                    helper_command(inputs.helper_exe, "hermes")?,
+                ),
+                set(&["model", "provider"], format!("custom:{provider}")),
+            ];
+            if let Some(model) = default_model {
+                fields.push(set(&["providers", provider, "default_model"], model));
+                fields.push(set(&["model", "default"], model));
             }
             fields
         }
     })
 }
 
+fn opencode_provider(catalog: &Catalog, base: &str, token_path: &Path) -> serde_json::Value {
+    let models = catalog
+        .models
+        .iter()
+        .map(|model| {
+            let mut config = serde_json::Map::new();
+            config.insert(
+                "name".to_string(),
+                serde_json::Value::String(model.display_name().to_string()),
+            );
+            if model.remote.context_length.is_some() || model.remote.max_output_length.is_some() {
+                let mut limit = serde_json::Map::new();
+                if let Some(value) = model.remote.context_length {
+                    limit.insert("context".to_string(), serde_json::Value::from(value));
+                }
+                if let Some(value) = model.remote.max_output_length {
+                    limit.insert("output".to_string(), serde_json::Value::from(value));
+                }
+                config.insert("limit".to_string(), serde_json::Value::Object(limit));
+            }
+            (model.id().to_string(), serde_json::Value::Object(config))
+        })
+        .collect();
+    serde_json::json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "name": PRODUCT_NAME,
+        "options": {
+            "baseURL": format!("{base}/v1"),
+            "apiKey": format!("{{file:{}}}", token_path.display()),
+        },
+        "models": serde_json::Value::Object(models),
+    })
+}
+
+fn pi_provider(
+    catalog: &Catalog,
+    base: &str,
+    helper_exe: &Path,
+) -> Result<serde_json::Value, String> {
+    let models: Vec<serde_json::Value> = catalog
+        .models
+        .iter()
+        .map(|model| {
+            let mut value = serde_json::Map::new();
+            value.insert(
+                "id".to_string(),
+                serde_json::Value::String(model.id().to_string()),
+            );
+            value.insert(
+                "name".to_string(),
+                serde_json::Value::String(model.display_name().to_string()),
+            );
+            if let Some(context) = model.remote.context_length {
+                value.insert(
+                    "contextWindow".to_string(),
+                    serde_json::Value::from(context),
+                );
+            }
+            if let Some(output) = model.remote.max_output_length {
+                value.insert("maxTokens".to_string(), serde_json::Value::from(output));
+            }
+            let input = model.string_array("input_modalities");
+            if !input.is_empty() {
+                value.insert("input".to_string(), serde_json::json!(input));
+            }
+            if model
+                .string_array("supported_features")
+                .iter()
+                .any(|feature| feature == "reasoning")
+            {
+                value.insert("reasoning".to_string(), serde_json::Value::Bool(true));
+            }
+            let mut cost = serde_json::Map::new();
+            for (source, target) in [
+                ("prompt", "input"),
+                ("completion", "output"),
+                ("input_cache_read", "cacheRead"),
+                ("input_cache_write", "cacheWrite"),
+            ] {
+                if let Some(price) = model
+                    .price_per_million(source)
+                    .and_then(serde_json::Number::from_f64)
+                {
+                    cost.insert(target.to_string(), serde_json::Value::Number(price));
+                }
+            }
+            if !cost.is_empty() {
+                value.insert("cost".to_string(), serde_json::Value::Object(cost));
+            }
+            serde_json::Value::Object(value)
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "baseUrl": format!("{base}/v1"),
+        "api": "openai-responses",
+        "apiKey": format!("!{}", helper_command(helper_exe, "pi")?),
+        "models": models,
+    }))
+}
+
 struct Field {
     path: Vec<String>,
     /// `None` makes the key absent.
     value: Option<ConfigValue>,
+    /// Concise preview text for generated structured values.
+    preview: Option<String>,
 }
 
 fn set(path: &[&str], value: impl Into<String>) -> Field {
     Field {
         path: owned(path),
         value: Some(ConfigValue::Str(value.into())),
+        preview: None,
     }
 }
 
@@ -320,6 +475,23 @@ fn number(path: &[&str], value: u64) -> Field {
     Field {
         path: owned(path),
         value: Some(ConfigValue::Number(value)),
+        preview: None,
+    }
+}
+
+fn boolean(path: &[&str], value: bool) -> Field {
+    Field {
+        path: owned(path),
+        value: Some(ConfigValue::Bool(value)),
+        preview: None,
+    }
+}
+
+fn generated_catalog(path: &[&str], value: serde_json::Value, models: usize) -> Field {
+    Field {
+        path: owned(path),
+        value: Some(ConfigValue::Json(value)),
+        preview: Some(format!("Generated catalog ({models} models)")),
     }
 }
 
@@ -329,6 +501,7 @@ fn list(path: &[&str], values: &[&str]) -> Field {
         value: Some(ConfigValue::List(
             values.iter().map(|value| (*value).to_string()).collect(),
         )),
+        preview: None,
     }
 }
 
@@ -336,6 +509,7 @@ fn absent(path: &[&str]) -> Field {
     Field {
         path: owned(path),
         value: None,
+        preview: None,
     }
 }
 
@@ -790,9 +964,7 @@ impl Projector {
 
     fn status(&self, agent: Agent, store: &Store, catalog: Option<&Catalog>) -> AgentStatus {
         let path = agent.config_path(&self.home, self.tool_env);
-        let installed = (self.tool_env && cli_on_path(agent.cli_name()))
-            || path.exists()
-            || path.parent().is_some_and(Path::exists);
+        let installed = cli_installed(agent, &self.home, self.tool_env);
         let record = store.get(agent.id());
         let mut status = AgentStatus {
             id: agent.id().to_string(),
@@ -965,7 +1137,13 @@ fn revision(
             .map_or("", |catalog| catalog.revision.as_str())
             .as_bytes(),
     );
-    part(options.model.as_deref().unwrap_or_default().as_bytes());
+    part(
+        options
+            .default_model
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hex(&hasher.finalize())
 }
 
@@ -1039,7 +1217,12 @@ fn project(
                     sensitive: true,
                 }
             } else {
-                change(&path, current, field.value.clone())
+                preview_change(
+                    &path,
+                    current,
+                    field.value.clone(),
+                    field.preview.as_deref(),
+                )
             });
         }
         record.fields.push(OwnedField {
@@ -1125,6 +1308,30 @@ fn change(path: &[&str], before: Option<ConfigValue>, after: Option<ConfigValue>
     }
 }
 
+fn preview_change(
+    path: &[&str],
+    before: Option<ConfigValue>,
+    after: Option<ConfigValue>,
+    preview: Option<&str>,
+) -> ConfigChange {
+    ConfigChange {
+        key: path.join("."),
+        before: before.map(|value| {
+            if preview.is_some() && matches!(value, ConfigValue::Json(_)) {
+                "Existing provider configuration".to_string()
+            } else {
+                value.display()
+            }
+        }),
+        after: after.map(|value| {
+            preview
+                .map(str::to_string)
+                .unwrap_or_else(|| value.display())
+        }),
+        sensitive: false,
+    }
+}
+
 fn refs(path: &[String]) -> Vec<&str> {
     path.iter().map(String::as_str).collect()
 }
@@ -1139,14 +1346,59 @@ fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
                 .strip_prefix("private-ai-gateway/")
                 .map(str::to_string)
         }),
+        Agent::Pi => None,
+        Agent::Hermes => doc.get_str(&["model", "default"]),
     }
 }
 
-/// Whether the agent's official CLI is on PATH (platform executable names).
-fn cli_on_path(name: &str) -> bool {
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
+fn cli_installed(agent: Agent, home: &Path, tool_env: bool) -> bool {
+    let mut paths: Vec<PathBuf> = if tool_env {
+        env::var_os("PATH")
+            .map(|paths| env::split_paths(&paths).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
+    paths.extend([
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        home.join("Library/pnpm"),
+        home.join(".bun/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+    paths.extend(versioned_runtime_bins(
+        &home.join(".nvm/versions/node"),
+        &["bin"],
+    ));
+    paths.extend(versioned_runtime_bins(
+        &home.join(".local/share/fnm/node-versions"),
+        &["installation", "bin"],
+    ));
+    agent
+        .cli_names()
+        .iter()
+        .any(|name| cli_in_paths(name, &paths))
+}
+
+fn versioned_runtime_bins(root: &Path, suffix: &[&str]) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .take(64)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| {
+            suffix
+                .iter()
+                .fold(entry.path(), |path, part| path.join(part))
+        })
+        .collect()
+}
+
+fn cli_in_paths(name: &str, paths: &[PathBuf]) -> bool {
     let candidates: &[String] = &if cfg!(windows) {
         vec![
             format!("{name}.exe"),
@@ -1156,7 +1408,7 @@ fn cli_on_path(name: &str) -> bool {
     } else {
         vec![name.to_string()]
     };
-    env::split_paths(&paths).any(|dir| {
+    paths.iter().any(|dir| {
         candidates
             .iter()
             .any(|candidate| dir.join(candidate).is_file())
@@ -1327,7 +1579,7 @@ mod tests {
 
     fn claude_options() -> ConnectOptions {
         ConnectOptions {
-            model: Some("openai/gpt-oss-20b".to_string()),
+            default_model: Some("openai/gpt-oss-20b".to_string()),
         }
     }
 
@@ -1413,6 +1665,10 @@ mod tests {
             .projector
             .preview(Agent::OpenCode, true, Some(&catalog), &options)
             .unwrap();
+        assert!(preview.changes.iter().any(|change| {
+            change.key == "provider.private-ai-gateway"
+                && change.after.as_deref() == Some("Generated catalog (2 models)")
+        }));
         let status = sandbox
             .projector
             .apply(
@@ -1438,6 +1694,136 @@ mod tests {
             Some("http://127.0.0.1:4180/v1")
         );
         disconnect(&sandbox, Agent::OpenCode);
+    }
+
+    #[test]
+    fn pi_and_hermes_use_verified_model_discovery() {
+        let sandbox = sandbox("discovery-providers");
+        let catalog = catalog();
+        let options = ConnectOptions::default();
+
+        let preview = sandbox
+            .projector
+            .preview(Agent::Pi, true, Some(&catalog), &options)
+            .unwrap();
+        assert!(preview.changes.iter().any(|change| {
+            change.key == "providers.private-ai-gateway"
+                && change.after.as_deref() == Some("Generated catalog (2 models)")
+        }));
+        sandbox
+            .projector
+            .apply(Agent::Pi, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        let pi = doc(&sandbox, Agent::Pi);
+        let provider = pi.get_value(&["providers", "private-ai-gateway"]).unwrap();
+        let ConfigValue::Json(provider) = provider else {
+            panic!("Pi provider must be a generated JSON catalog");
+        };
+        assert_eq!(provider["models"].as_array().unwrap().len(), 2);
+        assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
+        assert!(provider["apiKey"]
+            .as_str()
+            .unwrap()
+            .contains("--agent-token pi"));
+        disconnect(&sandbox, Agent::Pi);
+
+        let path = sandbox.home.join(".hermes").join("config.yaml");
+        write(&path, "# keep this comment\ntheme: dark\n");
+        let preview = sandbox
+            .projector
+            .preview(Agent::Hermes, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(
+                Agent::Hermes,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &options,
+            )
+            .unwrap();
+        let hermes = doc(&sandbox, Agent::Hermes);
+        assert_eq!(
+            hermes.get_value(&["providers", "private-ai-gateway", "discover_models"]),
+            Some(ConfigValue::Bool(true))
+        );
+        assert_eq!(
+            hermes.get_str(&["model", "provider"]).as_deref(),
+            Some("custom:private-ai-gateway")
+        );
+        disconnect(&sandbox, Agent::Hermes);
+        let restored = fs::read_to_string(path).unwrap();
+        assert!(restored.contains("# keep this comment"));
+        assert!(restored.contains("theme: dark"));
+        assert!(!restored.contains("private-ai-gateway"));
+
+        let fresh = self::sandbox("fresh-hermes");
+        let preview = fresh
+            .projector
+            .preview(
+                Agent::Hermes,
+                true,
+                Some(&catalog),
+                &ConnectOptions::default(),
+            )
+            .unwrap();
+        fresh
+            .projector
+            .apply(
+                Agent::Hermes,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &ConnectOptions::default(),
+            )
+            .unwrap();
+        let hermes = doc(&fresh, Agent::Hermes);
+        assert_eq!(
+            hermes
+                .get_str(&["providers", "private-ai-gateway", "transport"])
+                .as_deref(),
+            Some("chat_completions")
+        );
+        assert!(hermes
+            .get_str(&["providers", "private-ai-gateway", "key_cmd"])
+            .is_some_and(|command| command.contains("--agent-token hermes")));
+    }
+
+    #[test]
+    fn installation_detection_uses_executables_not_config_directories() {
+        let sandbox = sandbox("installed");
+        fs::create_dir_all(sandbox.home.join(".pi/agent")).unwrap();
+        let statuses = sandbox.projector.scan(None).unwrap().0;
+        assert!(
+            !statuses
+                .iter()
+                .find(|status| status.id == "pi")
+                .unwrap()
+                .installed
+        );
+
+        let executable = sandbox.home.join(".local/bin/pi");
+        write(&executable, "#!/bin/sh\n");
+        let statuses = sandbox.projector.scan(None).unwrap().0;
+        assert!(
+            statuses
+                .iter()
+                .find(|status| status.id == "pi")
+                .unwrap()
+                .installed
+        );
+
+        let codex = sandbox.home.join(".nvm/versions/node/v22.19.0/bin/codex");
+        write(&codex, "#!/bin/sh\n");
+        let statuses = sandbox.projector.scan(None).unwrap().0;
+        assert!(
+            statuses
+                .iter()
+                .find(|status| status.id == "codex")
+                .unwrap()
+                .installed
+        );
     }
 
     #[test]
@@ -1524,8 +1910,7 @@ mod tests {
                 Some(&catalog()),
                 &ConnectOptions::default()
             )
-            .unwrap_err()
-            .contains("Choose a model"));
+            .is_ok());
         assert!(sandbox
             .projector
             .preview(
@@ -1533,7 +1918,7 @@ mod tests {
                 true,
                 Some(&catalog()),
                 &ConnectOptions {
-                    model: Some("claude-sonnet-4-6".to_string()),
+                    default_model: Some("claude-sonnet-4-6".to_string()),
                 },
             )
             .unwrap_err()
@@ -2082,6 +2467,7 @@ mod tests {
         state.publish(Session {
             generation: 1,
             epoch: 1,
+            session_id: Some("test-session".to_string()),
             base_url: Some(base_url.clone()),
             verified: false,
             catalog: None,
@@ -2090,6 +2476,7 @@ mod tests {
         state.publish(Session {
             generation: 1,
             epoch: 1,
+            session_id: Some("test-session".to_string()),
             base_url: Some(base_url),
             verified: true,
             catalog: Some(catalog),

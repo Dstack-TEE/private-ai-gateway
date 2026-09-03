@@ -8,11 +8,19 @@ import type {
   DesktopApi,
   GatewayState,
   StartGatewayConfig,
+  UsagePage,
+  UsageQuery,
 } from "../shared/contracts";
 
 export const desktopApi: DesktopApi = {
   copyText(text: string): Promise<void> {
     return invoke("copy_text", { text });
+  },
+  getClientKey(): Promise<string> {
+    return invoke("get_client_key");
+  },
+  rotateClientKey(): Promise<string> {
+    return invoke("rotate_client_key");
   },
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");
@@ -38,6 +46,15 @@ export const desktopApi: DesktopApi = {
   },
   clearApiKey(): Promise<GatewayState> {
     return invoke("clear_api_key");
+  },
+  queryUsage(query: UsageQuery): Promise<UsagePage> {
+    return invoke("query_usage", { query });
+  },
+  exportUsageCsv(query: UsageQuery, path: string): Promise<number> {
+    return invoke("export_usage_csv", { query, path });
+  },
+  clearUsage(): Promise<number> {
+    return invoke("clear_usage");
   },
   refreshCatalog(): Promise<GatewayState> {
     return invoke("refresh_catalog");

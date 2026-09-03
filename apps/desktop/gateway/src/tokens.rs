@@ -14,15 +14,27 @@ use std::{
 use rand::RngCore;
 
 const TOKEN_BYTES: usize = 32;
+pub const LOCAL_TOOLS_AGENT: &str = "local-tools";
 
 /// Which local paths a token issued to `agent` may call. `/v1/models` is
 /// shared; inference and its helpers are per agent.
 pub fn agent_allows(agent: &str, path: &str) -> bool {
+    if agent == LOCAL_TOOLS_AGENT {
+        return matches!(
+            path,
+            "/v1/models"
+                | "/v1/responses"
+                | "/v1/responses/compact"
+                | "/v1/messages"
+                | "/v1/messages/count_tokens"
+                | "/v1/chat/completions"
+        );
+    }
     match path {
         "/v1/models" => true,
-        "/v1/responses" | "/v1/responses/compact" => agent == "codex",
+        "/v1/responses" | "/v1/responses/compact" => matches!(agent, "codex" | "pi"),
         "/v1/messages" | "/v1/messages/count_tokens" => agent == "claude-code",
-        "/v1/chat/completions" => agent == "opencode",
+        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes"),
         _ => false,
     }
 }
@@ -67,7 +79,11 @@ impl TokenFiles {
     }
 
     fn issue(&self, agent: &str) -> Result<String, String> {
-        let token = generate();
+        let token = if agent == LOCAL_TOOLS_AGENT {
+            format!("pag_{}", generate())
+        } else {
+            generate()
+        };
         create_private_dir(&self.dir)
             .and_then(|()| write_private(&self.path(agent), &token))
             .map_err(|error| format!("Cannot store the {agent} token: {error}"))?;
@@ -360,6 +376,8 @@ mod tests {
         assert_eq!(set.agent_for(&codex), Some("codex"));
         assert_eq!(set.agent_for("nope"), None);
         assert_eq!(set.without("codex").agent_for(&codex), None);
+        let client = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        assert!(client.starts_with("pag_"));
         files.revoke("codex").unwrap();
         assert!(files.read("codex").unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
@@ -373,6 +391,11 @@ mod tests {
         assert!(agent_allows("claude-code", "/v1/messages/count_tokens"));
         assert!(!agent_allows("claude-code", "/v1/chat/completions"));
         assert!(agent_allows("opencode", "/v1/chat/completions"));
+        assert!(agent_allows("hermes", "/v1/chat/completions"));
+        assert!(agent_allows("pi", "/v1/responses"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/messages"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));
         assert!(agent_allows("opencode", "/v1/models"));
         assert!(!agent_allows("opencode", "/v1/responses"));
     }

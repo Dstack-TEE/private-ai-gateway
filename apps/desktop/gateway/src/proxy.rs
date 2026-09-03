@@ -29,6 +29,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures_util::StreamExt;
+use rand::RngCore;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
@@ -48,6 +50,8 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle limit between upstream bytes; matches Claude Code's stream watchdog.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_USAGE_CAPTURE_BYTES: usize = 1024 * 1024;
+const MAX_SSE_LINE_BYTES: usize = 128 * 1024;
 /// Attribution (the agent id) added on the way to the sidecar, which copies
 /// it into the receipt event and strips it before forwarding.
 pub const TAG_HEADER: &str = "x-aci-tag";
@@ -70,22 +74,38 @@ const HOP_BY_HOP: [&str; 9] = [
 pub struct Session {
     pub generation: u64,
     pub epoch: u64,
+    pub session_id: Option<String>,
     pub base_url: Option<String>,
     pub verified: bool,
     pub catalog: Option<Catalog>,
 }
 
-/// A request the proxy answered itself (rejected or failed before a receipt).
+/// One stage of a request observed by the local proxy. Forwarded requests can
+/// emit an initial response event and a final usage event before the sidecar's
+/// receipt verdict is merged by the desktop backend.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyEvent {
+    pub request_id: String,
+    pub session_id: String,
     pub agent: Option<String>,
     pub method: String,
     pub path: String,
     pub model: Option<String>,
     pub status: u16,
+    pub streamed: bool,
+    pub receipt_id: Option<String>,
+    pub verified: Option<bool>,
     pub detail: String,
     pub at: u64,
+    pub locally_constrained: Option<bool>,
+    pub rewritten: Option<bool>,
+    pub left_device: bool,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Default)]
@@ -222,6 +242,10 @@ impl ProxyState {
             (Some(base_url), true, Some(_)) => Ok(Lease {
                 generation: session.generation,
                 epoch: session.epoch,
+                session_id: session
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| "unscoped".to_string()),
                 base_url: base_url.clone(),
             }),
             _ => Err(Rejection::new(
@@ -313,6 +337,7 @@ impl ProxyState {
 struct Lease {
     generation: u64,
     epoch: u64,
+    session_id: String,
     base_url: String,
 }
 
@@ -590,8 +615,9 @@ async fn relay(
         }
     }
     forward(
-        &state,
+        state,
         &lease.base_url,
+        &lease.session_id,
         &key,
         &agent,
         surface,
@@ -632,8 +658,9 @@ fn check_catalog(state: &ProxyState, model: Option<&str>) -> Result<(), Rejectio
 
 #[allow(clippy::too_many_arguments)]
 async fn forward(
-    state: &ProxyState,
+    state: Arc<ProxyState>,
     base_url: &str,
+    session_id: &str,
     key: &str,
     agent: &str,
     surface: Surface,
@@ -644,6 +671,7 @@ async fn forward(
     model: Option<String>,
     delivery: CancellationToken,
 ) -> Response {
+    let request_id = new_id();
     let dropped = hop_by_hop_names(headers);
     let target = match query {
         Some(query) => format!("{base_url}{path}?{query}"),
@@ -664,11 +692,28 @@ async fn forward(
     }
     let request = request
         .header(header::AUTHORIZATION.as_str(), format!("Bearer {key}"))
-        .header(TAG_HEADER, agent)
+        .header(TAG_HEADER, format_tag(&request_id, session_id, agent))
         .body(body);
-    // The send is raced against revocation: cancelled before it starts means
-    // nothing is delivered; cancelled mid-send aborts the connection so the
-    // sidecar never completes the request.
+    if delivery.is_cancelled() {
+        let rejection = Rejection::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revoked",
+            "Credentials or the verified session were revoked before the request was sent; \
+             send it again",
+        );
+        return reject(
+            &state,
+            Some(agent.to_string()),
+            "POST",
+            path,
+            model,
+            surface,
+            rejection,
+        );
+    }
+    // Once request.send() is polled, bytes may have reached the sidecar even
+    // if revocation, timeout, or a connection failure prevents a response.
+    // Those failures must never be described as a local rejection.
     let sent = tokio::select! {
         biased;
         _ = delivery.cancelled() => None,
@@ -678,17 +723,11 @@ async fn forward(
         let rejection = Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "revoked",
-            "Credentials or the verified session were revoked before the request was sent; \
-             send it again",
+            "Credentials or the verified session were revoked while the request was being sent; \
+             its delivery could not be confirmed",
         );
-        return reject(
-            state,
-            Some(agent.to_string()),
-            "POST",
-            path,
-            model,
-            surface,
-            rejection,
+        return reject_after_send(
+            &state, request_id, session_id, agent, path, model, surface, rejection,
         );
     };
     let upstream = match sent {
@@ -707,17 +746,45 @@ async fn forward(
                     "The verified gateway did not respond",
                 )
             };
-            return reject(
-                state,
-                Some(agent.to_string()),
-                "POST",
-                path,
-                model,
-                surface,
-                rejection,
+            return reject_after_send(
+                &state, request_id, session_id, agent, path, model, surface, rejection,
             );
         }
     };
+    let status = upstream.status().as_u16();
+    let streamed = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+    let receipt_id = upstream
+        .headers()
+        .get("x-receipt-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    state.emit(ProxyEvent {
+        request_id: request_id.clone(),
+        session_id: session_id.to_string(),
+        agent: Some(agent.to_string()),
+        method: "POST".to_string(),
+        path: path.to_string(),
+        model: model.clone(),
+        status,
+        streamed,
+        receipt_id: receipt_id.clone(),
+        verified: None,
+        detail: "Awaiting receipt verification".to_string(),
+        at: now_secs(),
+        locally_constrained: None,
+        rewritten: None,
+        left_device: true,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
+    });
     let dropped = hop_by_hop_names(upstream.headers());
     let mut builder = Response::builder().status(upstream.status().as_u16());
     for (name, value) in upstream.headers() {
@@ -725,16 +792,60 @@ async fn forward(
             builder = builder.header(name.as_str(), value.as_bytes());
         }
     }
-    builder
-        .body(Body::from_stream(upstream.bytes_stream()))
-        .unwrap_or_else(|_| {
-            error_response(
-                surface,
-                StatusCode::BAD_GATEWAY,
-                "upstream_unreachable",
-                "The verified gateway returned an unusable response",
-            )
-        })
+    let mut stream = upstream.bytes_stream();
+    let event_state = state.clone();
+    let event_request_id = request_id;
+    let event_session_id = session_id.to_string();
+    let event_agent = agent.to_string();
+    let event_path = path.to_string();
+    let event_model = model;
+    let event_receipt_id = receipt_id;
+    let body = async_stream::stream! {
+        let mut capture = UsageCapture::new(streamed);
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    capture.push(&bytes);
+                    yield Ok::<Bytes, reqwest::Error>(bytes);
+                }
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+        let usage = capture.finish();
+        event_state.emit(ProxyEvent {
+            request_id: event_request_id,
+            session_id: event_session_id,
+            agent: Some(event_agent),
+            method: "POST".to_string(),
+            path: event_path,
+            model: event_model,
+            status,
+            streamed,
+            receipt_id: event_receipt_id,
+            verified: None,
+            detail: String::new(),
+            at: now_secs(),
+            locally_constrained: None,
+            rewritten: None,
+            left_device: true,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            cost_usd: usage.cost_usd,
+        });
+    };
+    builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
+        error_response(
+            surface,
+            StatusCode::BAD_GATEWAY,
+            "upstream_unreachable",
+            "The verified gateway returned an unusable response",
+        )
+    })
 }
 
 /// Standard hop-by-hop names plus whatever the `Connection` header names.
@@ -763,14 +874,83 @@ fn reject(
     surface: Surface,
     rejection: Rejection,
 ) -> Response {
+    let session_id = state
+        .session()
+        .session_id
+        .unwrap_or_else(|| "unscoped".to_string());
+    reject_with_context(
+        state,
+        new_id(),
+        session_id,
+        agent,
+        method,
+        path,
+        model,
+        surface,
+        rejection,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reject_after_send(
+    state: &ProxyState,
+    request_id: String,
+    session_id: &str,
+    agent: &str,
+    path: &str,
+    model: Option<String>,
+    surface: Surface,
+    rejection: Rejection,
+) -> Response {
+    reject_with_context(
+        state,
+        request_id,
+        session_id.to_string(),
+        Some(agent.to_string()),
+        "POST",
+        path,
+        model,
+        surface,
+        rejection,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reject_with_context(
+    state: &ProxyState,
+    request_id: String,
+    session_id: String,
+    agent: Option<String>,
+    method: &str,
+    path: &str,
+    model: Option<String>,
+    surface: Surface,
+    rejection: Rejection,
+    left_device: bool,
+) -> Response {
     state.emit(ProxyEvent {
+        request_id,
+        session_id,
         agent,
         method: method.to_string(),
         path: path.to_string(),
         model,
         status: rejection.status.as_u16(),
+        streamed: false,
+        receipt_id: None,
+        verified: None,
         detail: rejection.message.clone(),
         at: now_secs(),
+        locally_constrained: None,
+        rewritten: None,
+        left_device,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        cost_usd: None,
     });
     error_response(
         surface,
@@ -824,6 +1004,189 @@ fn model_of(bytes: &[u8]) -> Option<String> {
         .get("model")?
         .as_str()
         .map(str::to_string)
+}
+
+fn new_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn format_tag(request_id: &str, session_id: &str, agent: &str) -> String {
+    format!("pag:{request_id}:{session_id}:{agent}")
+}
+
+#[derive(Default)]
+struct UsageValues {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+}
+
+impl UsageValues {
+    fn merge(&mut self, newer: Self) {
+        if newer.input_tokens.is_some() {
+            self.input_tokens = newer.input_tokens;
+        }
+        if newer.output_tokens.is_some() {
+            self.output_tokens = newer.output_tokens;
+        }
+        if newer.cache_read_tokens.is_some() {
+            self.cache_read_tokens = newer.cache_read_tokens;
+        }
+        if newer.cache_write_tokens.is_some() {
+            self.cache_write_tokens = newer.cache_write_tokens;
+        }
+        if newer.cost_usd.is_some() {
+            self.cost_usd = newer.cost_usd;
+        }
+    }
+}
+
+struct UsageCapture {
+    streamed: bool,
+    body: Vec<u8>,
+    line: Vec<u8>,
+    latest: UsageValues,
+    body_overflow: bool,
+}
+
+impl UsageCapture {
+    fn new(streamed: bool) -> Self {
+        Self {
+            streamed,
+            body: Vec::new(),
+            line: Vec::new(),
+            latest: UsageValues::default(),
+            body_overflow: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if self.streamed {
+            self.push_sse(bytes);
+        } else if !self.body_overflow {
+            if self.body.len().saturating_add(bytes.len()) <= MAX_USAGE_CAPTURE_BYTES {
+                self.body.extend_from_slice(bytes);
+            } else {
+                self.body.clear();
+                self.body_overflow = true;
+            }
+        }
+    }
+
+    fn push_sse(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            if *byte == b'\n' {
+                self.parse_sse_line();
+                self.line.clear();
+            } else if self.line.len() < MAX_SSE_LINE_BYTES {
+                self.line.push(*byte);
+            }
+        }
+    }
+
+    fn parse_sse_line(&mut self) {
+        let line = self.line.strip_suffix(b"\r").unwrap_or(&self.line);
+        let payload = line
+            .strip_prefix(b"data: ")
+            .or_else(|| line.strip_prefix(b"data:"))
+            .map(trim_ascii_start);
+        let Some(payload) = payload else { return };
+        if payload == b"[DONE]" {
+            return;
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(payload) {
+            if let Some(usage) = find_usage(&value) {
+                self.latest.merge(parse_usage(usage));
+            }
+        }
+    }
+
+    fn finish(mut self) -> UsageValues {
+        if self.streamed {
+            if !self.line.is_empty() {
+                self.parse_sse_line();
+            }
+            self.latest
+        } else if self.body_overflow {
+            UsageValues::default()
+        } else {
+            serde_json::from_slice::<Value>(&self.body)
+                .ok()
+                .and_then(|value| find_usage(&value).map(parse_usage))
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn find_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    if let Some(usage) = value.get("usage").and_then(Value::as_object) {
+        return Some(usage);
+    }
+    value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .and_then(Value::as_object)
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+                .and_then(Value::as_object)
+        })
+}
+
+fn parse_usage(usage: &serde_json::Map<String, Value>) -> UsageValues {
+    let cache_read = token(usage, "cache_read_input_tokens")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(number_u64)
+        })
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(number_u64)
+        });
+    UsageValues {
+        input_tokens: token(usage, "prompt_tokens").or_else(|| token(usage, "input_tokens")),
+        output_tokens: token(usage, "completion_tokens").or_else(|| token(usage, "output_tokens")),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: token(usage, "cache_creation_input_tokens"),
+        cost_usd: usage.get("cost").and_then(number_f64),
+    }
+}
+
+fn token(usage: &serde_json::Map<String, Value>, name: &str) -> Option<u64> {
+    usage.get(name).and_then(number_u64)
+}
+
+fn number_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn number_f64(value: &Value) -> Option<f64> {
+    let value = match value {
+        Value::Number(value) => value.as_f64()?,
+        Value::String(value) => value.parse().ok()?,
+        _ => return None,
+    };
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn trim_ascii_start(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    value
 }
 
 fn now_secs() -> u64 {
@@ -900,6 +1263,7 @@ mod tests {
         state.publish(Session {
             generation,
             epoch,
+            session_id: Some("test-session".to_string()),
             base_url: Some(sidecar.to_string()),
             verified: false,
             catalog: None,
@@ -908,6 +1272,7 @@ mod tests {
         state.publish(Session {
             generation,
             epoch,
+            session_id: Some("test-session".to_string()),
             base_url: Some(sidecar.to_string()),
             verified: true,
             catalog: Some(catalog),
@@ -936,7 +1301,14 @@ mod tests {
         let error = bind_std(addr).unwrap_err();
         assert!(error.contains("Cannot listen"));
         drop(squatter);
-        assert!(bind_std(addr).is_ok());
+        let rebound = (0..20).find_map(|_| match bind_std(addr) {
+            Ok(listener) => Some(listener),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        });
+        assert!(rebound.is_some());
     }
 
     #[tokio::test]
@@ -1010,6 +1382,7 @@ mod tests {
         state.publish(Session {
             generation: 1,
             epoch: 1,
+            session_id: Some("test-session".to_string()),
             base_url: Some(sidecar.clone()),
             verified: true,
             catalog: None,
@@ -1031,6 +1404,7 @@ mod tests {
         state.publish(Session {
             generation: 1,
             epoch: 2,
+            session_id: Some("test-session".to_string()),
             base_url: Some(sidecar.clone()),
             verified: false,
             catalog: None,
@@ -1089,7 +1463,12 @@ mod tests {
         let echo: Value = forwarded.json().await.unwrap();
         assert_eq!(echo["authorization"], json!("Bearer sk-real"));
         assert_eq!(echo["x-api-key"], json!(""));
-        assert_eq!(echo["tag"], json!("opencode"));
+        let tag = echo["tag"].as_str().unwrap();
+        let parts: Vec<_> = tag.split(':').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "pag");
+        assert_eq!(parts[2], "test-session");
+        assert_eq!(parts[3], "opencode");
         assert_eq!(echo["anthropic-beta"], json!("keep-me"));
         assert_eq!(echo["proxy-connection"], json!(""));
 
@@ -1102,7 +1481,41 @@ mod tests {
             .unwrap();
         assert_eq!(counted.status().as_u16(), 200);
         let echo: Value = counted.json().await.unwrap();
-        assert_eq!(echo["tag"], json!("claude-code"));
+        let tag = echo["tag"].as_str().unwrap();
+        assert!(tag.starts_with("pag:"));
+        assert!(tag.ends_with(":test-session:claude-code"));
+    }
+
+    #[tokio::test]
+    async fn send_failures_are_not_reported_as_local_rejections() {
+        let (state, mut events) = state();
+        state.set_tokens(tokens());
+        let sidecar = mock_sidecar().await;
+        verified(&state, &sidecar, 1, 1).await;
+        state.set_api_key(Some("sk-real".to_string()));
+
+        let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_url = format!("http://{}", unavailable.local_addr().unwrap());
+        drop(unavailable);
+        state.publish(Session {
+            base_url: Some(unavailable_url),
+            ..state.session()
+        });
+
+        let proxy = spawn(router(state)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{proxy}/v1/responses"))
+            .bearer_auth("codex-token")
+            .json(&json!({ "model": "openai/gpt-oss-20b", "input": "hello" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 502);
+        let event = events.recv().await.unwrap();
+        assert!(event.left_device);
+        assert_eq!(event.session_id, "test-session");
+        assert_eq!(event.agent.as_deref(), Some("codex"));
+        assert_eq!(event.model.as_deref(), Some("openai/gpt-oss-20b"));
     }
 
     /// The proxy relays: for every inference path the sidecar sees the same
@@ -1166,12 +1579,70 @@ mod tests {
                 "text/event-stream",
                 "{path}"
             );
-            assert_eq!(
-                response.text().await.unwrap(),
-                format!("event: echo\ndata: POST {path}?beta=true&v=2 {agent}\n\ndata: {body}\n\n"),
-                "{path}"
+            let text = response.text().await.unwrap();
+            assert!(
+                text.starts_with(&format!(
+                    "event: echo\ndata: POST {path}?beta=true&v=2 pag:"
+                )),
+                "{path}: {text}"
+            );
+            assert!(
+                text.contains(&format!(":test-session:{agent}\n\ndata: {body}\n\n")),
+                "{path}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
+        let mut stream = UsageCapture::new(true);
+        stream.push(
+            b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,",
+        );
+        stream.push(
+            b"\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":3},\"cost\":\"0.004\"}}}\n\n",
+        );
+        let usage = stream.finish();
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.cache_read_tokens, Some(3));
+        assert_eq!(usage.cost_usd, Some(0.004));
+
+        let mut json = UsageCapture::new(false);
+        json.push(br#"{"usage":{"prompt_tokens":21,"completion_tokens":8,"cache_creation_input_tokens":4,"prompt_tokens_details":{"cached_tokens":7},"cost":-1}}"#);
+        let usage = json.finish();
+        assert_eq!(usage.input_tokens, Some(21));
+        assert_eq!(usage.output_tokens, Some(8));
+        assert_eq!(usage.cache_read_tokens, Some(7));
+        assert_eq!(usage.cache_write_tokens, Some(4));
+        assert_eq!(usage.cost_usd, None);
+
+        let mut messages = UsageCapture::new(true);
+        messages.push(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":144,\"cache_read_input_tokens\":32,\"cache_creation_input_tokens\":8}}}\n\n");
+        messages.push(b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":21}}\n\n");
+        let usage = messages.finish();
+        assert_eq!(usage.input_tokens, Some(144));
+        assert_eq!(usage.output_tokens, Some(21));
+        assert_eq!(usage.cache_read_tokens, Some(32));
+        assert_eq!(usage.cache_write_tokens, Some(8));
+    }
+
+    #[test]
+    fn oversized_usage_body_stays_unknown() {
+        let mut capture = UsageCapture::new(false);
+        capture.push(&vec![b'x'; MAX_USAGE_CAPTURE_BYTES + 1]);
+        let usage = capture.finish();
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn attribution_tag_contains_request_session_and_agent() {
+        assert_eq!(
+            format_tag("request-1", "session-2", "pi"),
+            "pag:request-1:session-2:pi"
+        );
     }
 
     /// A token revoked (or a key removed) while the body is still arriving

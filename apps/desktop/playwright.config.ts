@@ -11,7 +11,7 @@ export default defineConfig({
   timeout: 30_000,
   use: { baseURL: "http://127.0.0.1:4173" },
   webServer: {
-    command: "npm run preview",
+    command: "npm run build && npm run preview",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: false,
     // CI runners can be slow to bind; surface the server's own output when

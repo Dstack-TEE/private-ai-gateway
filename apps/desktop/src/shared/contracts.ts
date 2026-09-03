@@ -33,8 +33,11 @@ export interface GatewayIdentity {
 }
 
 export interface RequestActivity {
+  id: string;
+  sessionId: string;
   method: string;
   path: string;
+  model?: string;
   status: number;
   streamed: boolean;
   receiptId?: string;
@@ -45,12 +48,68 @@ export interface RequestActivity {
   /** The verifier applied its ACI policy to the body; the receipt binds those bytes. */
   locallyConstrained?: boolean;
   rewritten?: boolean;
+  leftDevice: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
 }
 
 export interface ModelSummary {
   id: string;
   name: string;
   contextLength?: number;
+  maxOutputLength?: number;
+  isTee?: boolean;
+  inputPricePerMillion?: number;
+  outputPricePerMillion?: number;
+  cacheReadPricePerMillion?: number;
+  cacheWritePricePerMillion?: number;
+  inputModalities: string[];
+  outputModalities: string[];
+  capabilities: string[];
+  description?: string;
+}
+
+export interface UsageQuery {
+  agent?: string;
+  model?: string;
+  sessionId?: string;
+  since?: number;
+  until?: number;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface UsageSummary {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  protected: number;
+  blockedLocally: number;
+  failedProof: number;
+}
+
+export interface UsagePoint {
+  day: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  tokens: number;
+  costUsd: number;
+}
+
+export interface UsagePage {
+  items: RequestActivity[];
+  nextCursor?: string;
+  summary: UsageSummary;
+  series: UsagePoint[];
+  agents: string[];
+  models: string[];
 }
 
 export interface CatalogSummary {
@@ -77,6 +136,9 @@ export interface GatewayState {
   identity?: GatewayIdentity;
   checks: VerificationCheck[];
   activity: RequestActivity[];
+  sessionId?: string;
+  sessionUsage: UsageSummary;
+  usageRevision: number;
   error?: string;
   config: StartGatewayConfig;
   apiKeySaved: boolean;
@@ -111,8 +173,8 @@ export interface ConfigChange {
 
 /** User choices a connection is projected with. */
 export interface ConnectOptions {
-  /** Catalog model selected for the agent. */
-  model?: string;
+  /** Optional default. The verified catalog remains discoverable by the agent. */
+  defaultModel?: string;
 }
 
 export interface AgentPreview {
@@ -126,6 +188,8 @@ export interface AgentPreview {
 
 export interface DesktopApi {
   copyText(text: string): Promise<void>;
+  getClientKey(): Promise<string>;
+  rotateClientKey(): Promise<string>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the window to show a section (macOS Settings…). */
@@ -136,6 +200,9 @@ export interface DesktopApi {
   stop(): Promise<GatewayState>;
   setApiKey(key: string): Promise<GatewayState>;
   clearApiKey(): Promise<GatewayState>;
+  queryUsage(query: UsageQuery): Promise<UsagePage>;
+  exportUsageCsv(query: UsageQuery, path: string): Promise<number>;
+  clearUsage(): Promise<number>;
   refreshCatalog(): Promise<GatewayState>;
   listAgents(): Promise<AgentStatus[]>;
   disconnectAllAgents(): Promise<AgentStatus[]>;

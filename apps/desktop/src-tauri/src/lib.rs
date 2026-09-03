@@ -2,6 +2,7 @@ mod contracts;
 mod gateway;
 mod menu;
 mod tray;
+mod usage;
 
 use std::sync::{Arc, Mutex};
 
@@ -12,14 +13,41 @@ use desktop_gateway::{
     lock,
     proxy::{self, ProxyEvent, ProxyState},
     secrets::{validate_api_key, KeyringStore, SecretStore, API_KEY_ENTRY},
-    tokens::TokenSet,
+    tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use gateway::{GatewayManager, LOCAL_ADDR, LOCAL_ENDPOINT};
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use usage::{UsagePage, UsageQuery, UsageStore};
 
 /// The OS credential store holding the RedPill API key and parked secrets.
 struct Secrets(Arc<dyn SecretStore>);
+
+struct ClientCredentials(Mutex<TokenFiles>);
+
+impl ClientCredentials {
+    fn token(&self) -> Result<String, String> {
+        self.0
+            .lock()
+            .map_err(|_| "Client credential store unavailable".to_string())?
+            .ensure(LOCAL_TOOLS_AGENT)
+    }
+
+    fn rotate(&self) -> Result<String, String> {
+        self.0
+            .lock()
+            .map_err(|_| "Client credential store unavailable".to_string())?
+            .rotate(LOCAL_TOOLS_AGENT)
+    }
+}
+
+fn with_client_token(
+    mut tokens: TokenSet,
+    credentials: &ClientCredentials,
+) -> Result<TokenSet, String> {
+    tokens.insert(credentials.token()?, LOCAL_TOOLS_AGENT.to_string());
+    Ok(tokens)
+}
 
 /// What the launch established before the window: the bound endpoint. `Err`
 /// means nothing may start or connect this launch; the window still opens to
@@ -72,9 +100,9 @@ fn stop_gateway(
 /// Open the brand's support page in the system browser.
 #[tauri::command]
 fn open_support(app: AppHandle) -> Result<(), String> {
-    use tauri_plugin_shell::ShellExt;
-    app.shell()
-        .open(desktop_gateway::brand::SUPPORT_URL, None)
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(desktop_gateway::brand::SUPPORT_URL, None::<&str>)
         .map_err(|error| format!("Cannot open the support page: {error}"))
 }
 
@@ -86,6 +114,31 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard()
         .write_text(text)
         .map_err(|error| format!("Cannot copy text: {error}"))
+}
+
+#[tauri::command]
+fn query_usage(store: State<'_, Arc<UsageStore>>, query: UsageQuery) -> Result<UsagePage, String> {
+    store.page(&query)
+}
+
+#[tauri::command]
+fn export_usage_csv(
+    store: State<'_, Arc<UsageStore>>,
+    query: UsageQuery,
+    path: String,
+) -> Result<usize, String> {
+    store.export_csv(&query, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn clear_usage(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    store: State<'_, Arc<UsageStore>>,
+) -> Result<u64, String> {
+    let changed = store.clear()?;
+    manager.clear_session_usage(&app);
+    Ok(changed)
 }
 
 /// Save (or replace) the RedPill API key in the OS credential store. The key
@@ -128,6 +181,24 @@ fn clear_api_key(
 }
 
 #[tauri::command]
+fn get_client_key(credentials: State<'_, Arc<ClientCredentials>>) -> Result<String, String> {
+    credentials.token()
+}
+
+#[tauri::command]
+fn rotate_client_key(
+    proxy: State<'_, Arc<ProxyState>>,
+    credentials: State<'_, Arc<ClientCredentials>>,
+) -> Result<String, String> {
+    proxy.set_tokens(proxy.tokens().without(LOCAL_TOOLS_AGENT));
+    let token = credentials.rotate()?;
+    let mut tokens = proxy.tokens();
+    tokens.insert(token.clone(), LOCAL_TOOLS_AGENT.to_string());
+    proxy.set_tokens(tokens);
+    Ok(token)
+}
+
+#[tauri::command]
 async fn refresh_catalog(
     app: AppHandle,
     manager: State<'_, GatewayManager>,
@@ -143,11 +214,12 @@ async fn refresh_catalog(
 fn list_agents(
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
+    credentials: State<'_, Arc<ClientCredentials>>,
 ) -> Result<Vec<AgentStatus>, String> {
     let session = proxy.session();
     let catalog = session.verified.then_some(session.catalog).flatten();
     let (statuses, tokens) = projector(&secrets)?.scan(catalog.as_ref())?;
-    proxy.set_tokens(tokens);
+    proxy.set_tokens(with_client_token(tokens, &credentials)?);
     Ok(statuses)
 }
 
@@ -170,6 +242,7 @@ fn apply_agent_connection(
     manager: State<'_, GatewayManager>,
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
+    credentials: State<'_, Arc<ClientCredentials>>,
     agent_id: String,
     connect: bool,
     revision: String,
@@ -184,7 +257,7 @@ fn apply_agent_connection(
         proxy.set_tokens(proxy.tokens().without(agent.id()));
     }
     let status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
-    proxy.set_tokens(projector.scan(None)?.1);
+    proxy.set_tokens(with_client_token(projector.scan(None)?.1, &credentials)?);
     Ok(status)
 }
 
@@ -197,8 +270,9 @@ fn apply_agent_connection(
 fn disconnect_all_agents(
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
+    credentials: State<'_, Arc<ClientCredentials>>,
 ) -> Result<Vec<AgentStatus>, String> {
-    proxy.set_tokens(TokenSet::default());
+    proxy.set_tokens(with_client_token(TokenSet::default(), &credentials)?);
     let projector = projector(&secrets)?;
     match projector.disconnect_all() {
         // Durable revocation or the tombstone step failed: keep every token
@@ -209,7 +283,7 @@ fn disconnect_all_agents(
         )),
         Ok(failures) => {
             let (statuses, tokens) = projector.scan(None)?;
-            proxy.set_tokens(tokens);
+            proxy.set_tokens(with_client_token(tokens, &credentials)?);
             if failures.is_empty() {
                 Ok(statuses)
             } else {
@@ -271,15 +345,46 @@ pub fn run() {
     let (instance, launched) = launch();
     let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
     let proxy = ProxyState::new(events);
+    let client_credentials = match app_data_dir() {
+        Ok(dir) => Arc::new(ClientCredentials(Mutex::new(TokenFiles::new(&dir)))),
+        Err(error) => {
+            eprintln!("Cannot initialize client credentials: {error}");
+            return;
+        }
+    };
+    let (usage, usage_error) =
+        match app_data_dir().and_then(|dir| UsageStore::open(dir.join("usage.sqlite3"))) {
+            Ok(store) => (Arc::new(store), None),
+            Err(error) => match UsageStore::memory() {
+                Ok(store) => (
+                    Arc::new(store),
+                    Some(format!(
+                        "Usage history is unavailable for this launch: {error}"
+                    )),
+                ),
+                Err(fallback_error) => {
+                    eprintln!("Cannot initialize usage storage: {error}; {fallback_error}");
+                    return;
+                }
+            },
+        };
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_window(app);
         }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::AppleScript,
+            None,
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(GatewayManager::new(proxy.clone()))
+        .manage(GatewayManager::new(proxy.clone(), usage.clone()))
         .manage(proxy.clone())
+        .manage(client_credentials.clone())
+        .manage(usage)
         .manage(Secrets(secrets.clone()))
         .manage(Instance(instance))
         .manage(Launch(Mutex::new(launched)))
@@ -288,9 +393,14 @@ pub fn run() {
             start_gateway,
             stop_gateway,
             copy_text,
+            query_usage,
+            export_usage_csv,
+            clear_usage,
             open_support,
             set_api_key,
             clear_api_key,
+            get_client_key,
+            rotate_client_key,
             refresh_catalog,
             list_agents,
             preview_agent_connection,
@@ -360,14 +470,24 @@ pub fn run() {
                 }
                 Err(error) => manager.report_error(&handle, error),
             }
+            if let Some(error) = usage_error.clone() {
+                manager.report_error(&handle, error);
+            }
             // Startup maintenance (under the config lock) before authorizing
             // any token.
             let store = Secrets(secrets.clone());
+            match with_client_token(TokenSet::default(), &client_credentials) {
+                Ok(tokens) => proxy.set_tokens(tokens),
+                Err(error) => manager.report_error(&handle, error),
+            }
             match projector(&store).and_then(|projector| {
                 projector.migrate_legacy()?;
                 projector.scan(None)
             }) {
-                Ok((_, tokens)) => proxy.set_tokens(tokens),
+                Ok((_, tokens)) => match with_client_token(tokens, &client_credentials) {
+                    Ok(tokens) => proxy.set_tokens(tokens),
+                    Err(error) => manager.report_error(&handle, error),
+                },
                 Err(error) => manager.report_error(&handle, error),
             }
 

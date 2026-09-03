@@ -1,7 +1,7 @@
 # Private AI Gateway Desktop
 
 Tauri v2 menu bar app that turns the bundled `aci serve` verifier into a local
-gateway for Codex, Claude Code, and OpenCode.
+gateway for Codex, Claude Code, OpenCode, Pi, and Hermes.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -9,7 +9,7 @@ gateway for Codex, Claude Code, and OpenCode.
 ## Architecture
 
 ```
-Codex / Claude Code / OpenCode
+Codex / Claude Code / OpenCode / Pi / Hermes
         │  the agent's own API, a machine-local token
         ▼
 http://127.0.0.1:4180   in-process Rust proxy: agent tokens, catalog check,
@@ -47,20 +47,26 @@ protocol is the service's own response, shown as such.
   after the body is read; the send is then raced against a delivery token
   that every revocation cancels, so a request admitted before a Delete key,
   Disconnect, or Stop but not yet sent is refused (`503 revoked`) rather than
-  delivered. Deletes revoke the key in memory before touching the credential
-  store. The sidecar re-checks verification for every method and refuses to
-  forward when a re-verification changed the service identity mid-request.
+  delivered. A failure before `send()` is recorded as `Blocked locally`; once
+  upstream delivery begins, a timeout or connection failure is recorded as an
+  upstream failure with delivery explicitly unconfirmed, never as "did not
+  leave this Mac." Deletes revoke the key in memory before touching the
+  credential store. The sidecar re-checks verification for every method and
+  refuses to forward when a re-verification changed the service identity
+  mid-request.
 - **Agent tokens** are random per-agent secrets in owner-only files under the
   app data directory. A token is a capability for that agent's endpoints
-  (Claude Code: Messages and `count_tokens`; Codex: Responses and
-  `responses/compact`; OpenCode: Chat Completions; `/v1/models` for all) plus
+  (Claude Code: Messages and `count_tokens`; Codex and Pi: Responses and
+  `responses/compact`; OpenCode and Hermes: Chat Completions; `/v1/models`
+  for all) plus
   an attribution label the proxy sends as `x-aci-tag`, which the sidecar
   copies into its receipt event and strips before forwarding. It does not
   defend against other software running as the same OS user, which can read
   the same files or run the helper. Codex and Claude Code obtain their token
   through the bundled console helper
-  (`private-ai-gateway-helper --agent-token <agent>`); OpenCode reads the
-  token file through its `{file:...}` reference.
+  (`private-ai-gateway-helper --agent-token <agent>`). OpenCode reads the
+  token file through its `{file:...}` reference; Pi and Hermes use their
+  supported command-backed provider credential mechanisms.
 - **RedPill API key** and any credential a connection takes over live only in
   the OS credential store (`keyring` 4). The key is loaded into the proxy's
   memory and swapped for the agent token on the way to the sidecar; it never
@@ -76,6 +82,14 @@ protocol is the service's own response, shown as such.
   `/v1/models`, and a request whose `model` is not listed is refused before
   it leaves the machine. Models that disappear on a refresh are reported,
   never replaced.
+- **Usage history** is written to an owner-only SQLite database in the app
+  data directory and has no automatic retention cutoff. Overview shows five
+  recent rows plus a complete current-session summary aggregated from SQLite,
+  rather than from the 50-row in-memory activity preview. Usage keeps history
+  across app restarts, supports agent/model/time filters and cursor pagination,
+  and deletes records only after explicit confirmation. CSV cells that could
+  be interpreted as spreadsheet formulas are escaped. Token and cost fields
+  remain absent when the provider did not report them.
 - **What a receipt proves.** The verifier applies its ACI policy to inference
   bodies (`provider.aci_verified`, pinned sessions) and re-serializes them;
   the receipt binds those bytes, shown as `Policy applied`, not the agent's
@@ -95,14 +109,20 @@ protocol is the service's own response, shown as such.
 
 | Agent | Config written | Credential reference |
 | --- | --- | --- |
-| Codex | `~/.codex/config.toml`: selected `model`, `model_provider`, and a `model_providers.private_ai_gateway` entry (`base_url`, `wire_api = "responses"`, command-backed `auth`) | helper command |
-| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, selected `env.ANTHROPIC_MODEL`, `apiKeyHelper`; `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY` are taken over (they outrank `apiKeyHelper`) and restored on disconnect | helper command |
-| OpenCode | `opencode.json`: an `@ai-sdk/openai-compatible` provider with the local `baseURL`, the selected model's name and limits, and a `{file:...}` token reference | token file |
+| Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_gateway` Responses provider | helper command |
+| Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, gateway model discovery, `apiKeyHelper`; optional `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
+| OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
+| Pi | `~/.pi/agent/models.json`: an app-owned Responses provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
+| Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
 
-Every agent needs a model from the verified list, so `Connect` is available
-once the gateway is verified. `Connect` previews the exact fields with a
-revision of the inputs; `Apply` refuses if any moved. Token, parked secrets,
-config, and record are applied as one transaction and rolled back together.
+The verified catalog is the only model source. Codex requires a selected
+verified default because it does not discover this custom provider's model
+catalog; the other agents may choose after connecting through native discovery
+or an app-owned catalog generated from the verified service. `Connect` previews
+the exact fields with a revision of the inputs; generated model maps are shown
+as a concise catalog summary instead of serialized JSON. `Apply` refuses if any
+moved. Token, parked secrets, config, and record are applied as one transaction
+and rolled back together.
 `Disconnect` and `Restore all` work without endpoint or gateway.
 `Disconnect` tombstones the record (disabled, cleanup pending), deletes the
 token file before any record or config is touched, and syncs the removal to
@@ -111,9 +131,11 @@ else runs: revoking the capability itself is durable, so no later failure can
 leave an agent authorized, while the record stays visible for an idempotent
 retry. A failed sync fails the disconnect closed. `Disconnect` removes token,
 record, and consumed parked secrets and leaves an unreadable config untouched.
-Install detection (config directory or CLI on `PATH`) is informational only
-and never gates Connect; connecting creates the official config file from
-scratch. The `apiKeyHelper` command line is parsed by a POSIX `sh` on every
+Install detection requires a real executable on `PATH` or in common per-user
+and macOS package-manager binary directories; a config directory alone does
+not count as an installation. Detection is informational only and never gates
+Connect; connecting creates the official config file from scratch. The
+`apiKeyHelper` command line is parsed by a POSIX `sh` on every
 platform (Git's sh on Windows), so the path is quoted uniformly with `shlex`.
 Record and token files are read through `O_NOFOLLOW` descriptors and reads
 never change permissions; owner-only permissions are restored only by explicit
@@ -167,12 +189,13 @@ covers the proxy (token scope, fail-closed session, revocation gate, and a
 relay check proving that each inference path carries method, path, query,
 body, status, and streamed bytes through unchanged), the projections
 (round-trip per agent, stale revision, restore all), and the catalog.
-`npm run test:renderer` runs a Playwright smoke against the built renderer and
-the stateful in-page mock (`?mock=interactive`): start/stop with cancel and a
-failed-verification retry, key save and delete, connect, Restore all, the
-native `<dialog>` confirmation (focus containment, inert background, Escape
-returning focus to the trigger), and a 200 % zoom overflow check. CI runs it
-on the macOS package job.
+`npm run test:renderer` first builds the production renderer, then runs
+Playwright against the stateful in-page mock. It covers protection start/stop,
+five-agent discovery and reversible config previews, current-session Overview
+usage, persistent-history filters and cursor pagination, CSV/clear flows,
+proof and local-block semantics, the scrollable priced model catalog, native
+dialog focus, dark/high-contrast/reduced-motion media, 200% zoom, and
+940/720/540/320 widths. CI runs it on the macOS package job.
 
 ## Packaging
 
