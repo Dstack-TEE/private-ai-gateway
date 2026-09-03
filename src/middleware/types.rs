@@ -154,7 +154,7 @@ pub struct RateLimit {
     pub reset_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationScope {
     pub organization_id: i64,

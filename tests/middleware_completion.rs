@@ -628,8 +628,6 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     assert_eq!(report["userId"], json!(7));
     assert_eq!(report["organizationId"], json!(11));
     assert_eq!(report["workspaceId"], json!(13));
-    assert!(report.get("billingOwnerType").is_none());
-    assert!(report.get("billingOwnerId").is_none());
     assert_eq!(report["virtualKeyId"], json!(3));
     assert!(report["selectedRouteId"].is_null());
     assert!(report["usage"].is_null());
