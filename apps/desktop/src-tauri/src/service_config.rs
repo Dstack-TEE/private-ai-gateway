@@ -273,7 +273,8 @@ fn normalize_url(value: &str) -> Result<String, String> {
     if url.query().is_some() || url.fragment().is_some() {
         return Err("Gateway URL must not contain a query or fragment".to_string());
     }
-    url.set_path(url.path().trim_end_matches('/'));
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
