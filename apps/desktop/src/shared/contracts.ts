@@ -119,6 +119,28 @@ export interface CatalogSummary {
   removed: string[];
 }
 
+export type ServiceProvider = "phala" | "redpill" | "custom";
+
+export type ProfileAuth =
+  | { kind: "apiKey" }
+  | { kind: "oauth"; accountId: string; accountName?: string };
+
+export interface ConfidentialProfile {
+  id: string;
+  name: string;
+  provider: ServiceProvider;
+  remoteUrl: string;
+  auth: ProfileAuth;
+  verifiedAt?: number;
+}
+
+export interface ConfidentialProfileInput {
+  id: string;
+  name: string;
+  provider: ServiceProvider;
+  remoteUrl: string;
+}
+
 export interface StartGatewayConfig {
   remoteUrl: string;
   requireProductionOs: boolean;
@@ -133,6 +155,8 @@ export interface LocalApiConfig {
 
 export interface GatewayState {
   status: GatewayStatus;
+  /** Settings is verifying a candidate without enabling forwarding. */
+  configurationVerification: boolean;
   /** What the gateway is doing while verifying. */
   progress?: string;
   remoteUrl?: string;
@@ -148,6 +172,8 @@ export interface GatewayState {
   usageRevision: number;
   error?: string;
   config: StartGatewayConfig;
+  profiles: ConfidentialProfile[];
+  activeProfileId: string;
   localApi: LocalApiConfig;
   apiKeySaved: boolean;
   catalog?: CatalogSummary;
@@ -206,8 +232,10 @@ export interface DesktopApi {
   /** Open the brand's support page in the system browser. */
   openSupport(): Promise<void>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
+  verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
+  activateProfile(profileId: string): Promise<GatewayState>;
+  deleteProfile(profileId: string): Promise<GatewayState>;
   stop(): Promise<GatewayState>;
-  setApiKey(key: string): Promise<GatewayState>;
   clearApiKey(): Promise<GatewayState>;
   queryUsage(query: UsageQuery): Promise<UsagePage>;
   exportUsageCsv(query: UsageQuery, path: string): Promise<number>;

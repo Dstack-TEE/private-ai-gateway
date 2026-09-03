@@ -16,8 +16,8 @@ import {
   LoaderCircle,
   LockOpen,
   Network,
+  Plus,
   RefreshCw,
-  Server,
   Settings,
   ShieldCheck,
   ShieldX,
@@ -32,12 +32,15 @@ import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
+import phalaServiceIcon from "./assets/service-phala.svg";
+import redpillServiceIcon from "./assets/service-redpill.svg";
 
 import { desktopApi as liveApi } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
 import type {
   AgentStatus,
+  ConfidentialProfileInput,
   DesktopApi,
   GatewayState,
   LocalApiConfig,
@@ -55,8 +58,17 @@ const query = new URLSearchParams(window.location.search);
 const previewMode = query.has("mock");
 const desktopApi: DesktopApi = previewMode ? mockApi(query.get("mock")) : liveApi;
 
+const DEFAULT_PROFILE = {
+  id: "default",
+  name: brand.service.name,
+  provider: (brand.service.defaultUrl === "https://inference.phala.com" ? "phala" : brand.service.defaultUrl === "https://tee.redpill.ai" ? "redpill" : "custom") as ServicePreset,
+  remoteUrl: brand.service.defaultUrl,
+  auth: { kind: "apiKey" as const },
+};
+
 const INITIAL_STATE: GatewayState = {
   status: "stopped",
+  configurationVerification: false,
   checks: [],
   activity: [],
   sessionUsage: {
@@ -71,7 +83,9 @@ const INITIAL_STATE: GatewayState = {
     failedProof: 0,
   },
   usageRevision: 0,
-  config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: false },
+  config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: true },
+  profiles: [DEFAULT_PROFILE],
+  activeProfileId: DEFAULT_PROFILE.id,
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
 };
@@ -101,6 +115,21 @@ const AGENT_ICONS: Record<string, string> = {
   hermes: hermesIcon,
 };
 
+type ServicePreset = "phala" | "redpill" | "custom";
+const SERVICE_PRESETS = [
+  { id: "phala", name: "Phala", url: "https://inference.phala.com", icon: phalaServiceIcon, keyLabel: "Phala API key" },
+  { id: "redpill", name: "RedPill", url: "https://tee.redpill.ai", icon: redpillServiceIcon, keyLabel: "RedPill API key" },
+] as const;
+
+function servicePreset(url: string): (typeof SERVICE_PRESETS)[number] | undefined {
+  const normalized = url.trim().replace(/\/$/, "");
+  return SERVICE_PRESETS.find((service) => service.url === normalized);
+}
+
+function serviceKeyLabel(url: string): string {
+  return servicePreset(url)?.keyLabel ?? "API key";
+}
+
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
   const classes = ["brand-logo", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
   return (
@@ -108,6 +137,24 @@ function BrandMark({ className = "", busy = false }: { className?: string; busy?
       <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />
       <img src={brand.mark.light} alt="" />
     </picture>
+  );
+}
+
+function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" | "large" }): React.JSX.Element {
+  const service = servicePreset(url);
+  if (!service) {
+    return <span className={`service-custom-icon service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
+  }
+  return <span className={`service-logo service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
+}
+
+function ServiceBrand({ url }: { url: string }): React.JSX.Element {
+  const service = servicePreset(url);
+  return (
+    <div className="status-service-brand">
+      <ServiceLogo url={url} />
+      <span>{service?.name ?? "Custom service"}</span>
+    </div>
   );
 }
 
@@ -168,7 +215,10 @@ function useModalDialog(
   useEffect(() => {
     const node = ref.current;
     node?.showModal();
-    initialFocus?.current?.focus();
+    if (node) {
+      node.tabIndex = -1;
+      (initialFocus?.current ?? node).focus();
+    }
     const onCloseEvent = () => closeRef.current();
     node?.addEventListener("close", onCloseEvent);
     return () => {
@@ -186,10 +236,7 @@ function App(): React.JSX.Element {
   const [view, setView] = useState<View>("overview");
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
-  const [remoteUrl, setRemoteUrl] = useState(INITIAL_STATE.config.remoteUrl);
-  const [requireProductionOs, setRequireProductionOs] = useState(false);
-  const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
+  const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
@@ -204,8 +251,8 @@ function App(): React.JSX.Element {
   const [previewOpenAtLogin, setPreviewOpenAtLogin] = useState(true);
   const copyTimer = useRef<number | undefined>(undefined);
   const busy = state.status === "verifying";
-  const running = state.status === "verified" || state.status === "blocked";
-  const verified = state.status === "verified";
+  const running = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
+  const verified = !state.configurationVerification && state.status === "verified";
   const endpointDown = Boolean(state.endpointError);
   const models = state.catalog?.models ?? [];
   const catalogReady = verified && models.length > 0;
@@ -275,12 +322,10 @@ function App(): React.JSX.Element {
 
   // The form mirrors the configuration the backend will start with, so a
   // start from the tray switch shows up here too.
-  const configuredUrl = state.config.remoteUrl;
   const configuredPolicy = state.config.requireProductionOs;
   useEffect(() => {
-    setRemoteUrl(configuredUrl);
-    setRequireProductionOs(configuredPolicy);
-  }, [configuredUrl, configuredPolicy]);
+    setAllowDevelopmentOs(!configuredPolicy);
+  }, [configuredPolicy]);
 
   const loadAgents = useCallback(async () => {
     try {
@@ -309,32 +354,54 @@ function App(): React.JSX.Element {
   };
 
   const toggleGateway = () => {
-    if (!running && !busy && (!state.apiKeySaved || !remoteUrl.trim())) {
+    if (!running && !busy && (!state.apiKeySaved || !state.config.remoteUrl.trim())) {
       setSettingsTarget("confidential");
       return;
     }
     void run(() =>
-      running || busy ? desktopApi.stop() : desktopApi.start({ remoteUrl, requireProductionOs }),
+      running || busy ? desktopApi.stop() : desktopApi.start({ remoteUrl: state.config.remoteUrl, requireProductionOs: !allowDevelopmentOs }),
     );
   };
 
-  const verifyConfiguration = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!state.apiKeySaved && !apiKeyDraft.trim()) {
-      return;
-    }
-    setSavingKey(true);
+  const verifyConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
     setActionError(undefined);
     try {
-      if (apiKeyDraft.trim()) {
-        setState(await desktopApi.setApiKey(apiKeyDraft));
-        setApiKeyDraft("");
-      }
-      setState(running ? await desktopApi.refreshCatalog() : await desktopApi.start({ remoteUrl, requireProductionOs }));
+      setState(await desktopApi.verifyConfiguration(
+        profile,
+        !allowDevelopmentOs,
+        key,
+      ));
+      setNotice({ id: Date.now(), text: `${profile.name.trim()} verified and saved` });
+      return undefined;
     } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setSavingKey(false);
+      const message = errorMessage(error);
+      setActionError(message);
+      return message;
+    }
+  };
+
+  const activateProfile = async (profileId: string): Promise<string | undefined> => {
+    setActionError(undefined);
+    try {
+      setState(await desktopApi.activateProfile(profileId));
+      return undefined;
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      return message;
+    }
+  };
+
+  const deleteProfile = async (profileId: string): Promise<string | undefined> => {
+    setActionError(undefined);
+    try {
+      setState(await desktopApi.deleteProfile(profileId));
+      setNotice({ id: Date.now(), text: "Confidential AI profile deleted" });
+      return undefined;
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      return message;
     }
   };
 
@@ -485,13 +552,11 @@ function App(): React.JSX.Element {
             state={state}
             busy={busy}
             running={running}
-            requireProductionOs={requireProductionOs}
-            copied={copied}
+            allowDevelopmentOs={allowDevelopmentOs}
             anyRecorded={anyRecorded}
             locked={locked}
             problem={problem}
-            onPolicy={setRequireProductionOs}
-            onCopy={copy}
+            onPolicy={setAllowDevelopmentOs}
             onRestoreAll={() => setConfirmRestoreAll(true)}
             onSupport={() => void run(() => desktopApi.openSupport())}
             onOpen={openSettings}
@@ -513,13 +578,9 @@ function App(): React.JSX.Element {
           state={state}
           busy={busy}
           running={running}
-          verified={verified}
-          remoteUrl={remoteUrl}
-          apiKeyDraft={apiKeyDraft}
-          savingKey={savingKey}
-          onRemoteUrl={setRemoteUrl}
-          onApiKeyDraft={setApiKeyDraft}
           onVerify={verifyConfiguration}
+          onActivate={activateProfile}
+          onDelete={deleteProfile}
           onClearKey={() => void run(() => desktopApi.clearApiKey())}
           onClose={() => setSettingsTarget(undefined)}
         />
@@ -561,7 +622,7 @@ function App(): React.JSX.Element {
 
   return (
     <div className="desktop-preview">
-      <MacMenuBar trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
+      <MacMenuBar protected={verified && state.apiKeySaved} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
       <div className="desktop-window">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
@@ -645,7 +706,7 @@ function Sidebar({
   );
 }
 
-function MacMenuBar({ trayOpen, onTray }: { trayOpen: boolean; onTray(): void }): React.JSX.Element {
+function MacMenuBar({ protected: isProtected, trayOpen, onTray }: { protected: boolean; trayOpen: boolean; onTray(): void }): React.JSX.Element {
   const date = new Intl.DateTimeFormat("en-US", {
     weekday: "short",
     month: "short",
@@ -662,7 +723,7 @@ function MacMenuBar({ trayOpen, onTray }: { trayOpen: boolean; onTray(): void })
       </div>
       <div className="mac-menu-right">
         <button className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Gateway menu" aria-expanded={trayOpen} onClick={onTray}>
-          <span className="tray-template-icon" aria-hidden="true" />
+          <span className={`tray-template-icon${isProtected ? " is-protected" : ""}`} aria-hidden="true" />
         </button>
         <Wifi size={15} strokeWidth={1.8} aria-hidden="true" />
         <BatteryMedium size={17} strokeWidth={1.8} aria-hidden="true" />
@@ -696,19 +757,21 @@ function PreviewTrayMenu({
   onQuit(): void;
 }): React.JSX.Element {
   const verdict = presentation(state);
+  const protectionStarting = busy && !state.configurationVerification;
+  const protectionOn = running || protectionStarting;
   return (
     <div className="preview-tray" role="menu" aria-label="Private AI Gateway">
       <div className="preview-tray-heading">
         <BrandMark />
-        <span><strong>{brand.productName}</strong><small>{serviceHost(brand.service.defaultUrl)}</small></span>
+        <span><strong>{brand.productName}</strong><small>{serviceHost(state.remoteUrl ?? state.config.remoteUrl)}</small></span>
       </div>
       <div className="preview-tray-protection">
-        <span><strong>Protected</strong><small>{running ? "On" : busy ? "Starting" : "Off"}</small></span>
+        <span><strong>Protected</strong><small>{running ? "On" : protectionStarting ? "Starting" : "Off"}</small></span>
         <button
           className="switch"
           role="switch"
-          aria-label={running || busy ? "Stop protection" : "Start protection"}
-          aria-checked={running}
+          aria-label={busy ? state.configurationVerification ? "Cancel configuration verification" : "Cancel protection start" : running ? "Stop protection" : "Start protection"}
+          aria-checked={protectionOn}
           disabled={busy || endpointDown}
           onClick={onProtection}
         ><span /></button>
@@ -744,6 +807,7 @@ function PageHeader({
 }): React.JSX.Element {
   const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
   const verdict = presentation(state);
+  const protectionStarting = busy && !state.configurationVerification;
   return (
     <header className="page-header" data-tauri-drag-region>
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
@@ -751,7 +815,7 @@ function PageHeader({
         <div className="page-protection">
           <span className="page-switch-copy">
             <strong>Protected</strong>
-            <small className={verdict.tone === "success" ? "is-on" : verdict.tone === "danger" ? "is-error" : undefined}>{busy ? "Starting" : running ? "On" : "Off"}</small>
+            <small className={verdict.tone === "success" ? "is-on" : verdict.tone === "danger" ? "is-error" : undefined}>{running ? "On" : protectionStarting ? "Starting" : "Off"}</small>
           </span>
           <ProtectedControl
             state={state}
@@ -845,7 +909,7 @@ function Overview({
           />
         </OverviewModule>
         <OverviewModule title="Session usage" meta="This session">
-          <SessionSummary summary={state.sessionUsage} running={running} />
+          <SessionSummary summary={state.sessionUsage} />
         </OverviewModule>
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
           <div className="preview-list">
@@ -905,9 +969,9 @@ function StatusSurface({
   const enabled = agents.filter((agent) => agent.recorded).length;
   const host = serviceHost(state.remoteUrl ?? state.config.remoteUrl);
   return (
-    <section className={`status-surface status-${state.status} ${state.status === "verified" && state.apiKeySaved ? "status-ready" : ""}`} aria-label="Protection status">
-      <TrackLayer side="left" lines={PLAINTEXT_TRACKS} active={state.status === "verified" && state.apiKeySaved} />
-      <TrackLayer side="right" lines={TLS_TRACKS} active={state.status === "verified" && state.apiKeySaved} />
+    <section className={`status-surface status-${state.status} ${state.status === "verified" && !state.configurationVerification && state.apiKeySaved ? "status-ready" : ""}`} aria-label="Protection status">
+      <TrackLayer side="left" lines={PLAINTEXT_TRACKS} active={state.status === "verified" && !state.configurationVerification && state.apiKeySaved} />
+      <TrackLayer side="right" lines={TLS_TRACKS} active={state.status === "verified" && !state.configurationVerification && state.apiKeySaved} />
       <div className="status-glow" aria-hidden="true" />
       <div className="status-edge status-edge-left" aria-hidden="true" />
       <div className="status-edge status-edge-right" aria-hidden="true" />
@@ -942,9 +1006,9 @@ function StatusSurface({
       </div>
 
       <div className="status-segment status-remote">
-        <div className="status-heading"><span>Confidential AI</span><Server size={18} aria-hidden="true" /></div>
+        <ServiceBrand url={state.remoteUrl ?? state.config.remoteUrl} />
         <code className="status-host">{host}</code>
-        {state.status === "verified" ? (
+        {state.status === "verified" && !state.configurationVerification ? (
           <div className="status-facts">
             <span>Verified hardware <Check size={12} aria-hidden="true" /></span>
             <span>{state.sessionUsage.protected.toLocaleString()} answers this session <Check size={12} aria-hidden="true" /></span>
@@ -1013,8 +1077,11 @@ function ProtectedControl({
   iconOnly?: boolean;
   onToggle(): void;
 }): React.JSX.Element {
-  const checked = running || busy;
-  const label = busy ? "Cancel protection start" : running ? "Stop protection" : "Start protection";
+  const protectionStarting = busy && !state.configurationVerification;
+  const checked = running || protectionStarting;
+  const label = busy
+    ? state.configurationVerification ? "Cancel configuration verification" : "Cancel protection start"
+    : running ? "Stop protection" : "Start protection";
   return (
     <div className={`protected-control ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only" : ""}`}>
       {!iconOnly && <span>Protected</span>}
@@ -1113,16 +1180,16 @@ function LocalApiPanel({
   );
 }
 
-function SessionSummary({ summary, running }: { summary: UsageSummary; running: boolean }): React.JSX.Element {
+function SessionSummary({ summary }: { summary: UsageSummary }): React.JSX.Element {
   const forwarded = Math.max(0, summary.requests - summary.blockedLocally);
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
     <div className="session-summary">
-      <div><span>Requests</span><strong>{summary.requests.toLocaleString()}</strong><small>{summary.blockedLocally.toLocaleString()} blocked locally</small></div>
-      <div><span>Tokens</span><strong>{formatTokens(totalTokens)}</strong><small>{formatTokens(summary.inputTokens)} in · {formatTokens(summary.outputTokens)} out</small></div>
-      <div><span>Cost</span><strong>{currency(summary.costUsd)}</strong><small>Estimated from model prices</small></div>
-      <div><span>Protected</span><strong>{forwarded ? `${protectedRate}%` : "—"}</strong><small>{running ? `${summary.protected} of ${forwarded} answers` : `${summary.protected} of ${forwarded} answers`}</small></div>
+      <div><span>Requests</span><strong>{summary.requests.toLocaleString()}</strong></div>
+      <div><span>Tokens</span><strong>{formatTokens(totalTokens)}</strong></div>
+      <div><span>Cost</span><strong>{currency(summary.costUsd)}</strong></div>
+      <div><span>Protected</span><strong>{forwarded ? `${protectedRate}%` : "—"}</strong></div>
     </div>
   );
 }
@@ -1591,13 +1658,11 @@ function SettingsView({
   state,
   busy,
   running,
-  requireProductionOs,
-  copied,
+  allowDevelopmentOs,
   anyRecorded,
   locked,
   problem,
   onPolicy,
-  onCopy,
   onRestoreAll,
   onSupport,
   onOpen,
@@ -1605,18 +1670,17 @@ function SettingsView({
   state: GatewayState;
   busy: boolean;
   running: boolean;
-  requireProductionOs: boolean;
-  copied?: string;
+  allowDevelopmentOs: boolean;
   anyRecorded: boolean;
   locked: boolean;
   problem?: string;
   onPolicy(value: boolean): void;
-  onCopy(label: string, value: string): Promise<void>;
   onRestoreAll(): void;
   onSupport(): void;
   onOpen(target: SettingsTarget): void;
 }): React.JSX.Element {
   const frozen = busy || running;
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body settings-page">
       {problem && <p className="banner" role="alert">{problem}</p>}
@@ -1627,7 +1691,7 @@ function SettingsView({
           <div className="row">
             <span className="row-main">
               <span className="row-title">Confidential AI</span>
-              <span className="row-note">{serviceHost(state.remoteUrl ?? state.config.remoteUrl)} · {state.status === "verified" ? "Verified" : "Verification required"}</span>
+              <span className="row-note">{activeProfile?.name ?? "Profile"} · {serviceHost(state.remoteUrl ?? state.config.remoteUrl)} · {state.status === "verified" && !state.configurationVerification ? "Protected" : state.catalog?.models.length ? "Verified configuration" : activeProfile?.verifiedAt ? "Saved profile" : "Verification required"}</span>
             </span>
             <button type="button" className="button" onClick={() => onOpen("confidential")}><Settings size={15} />Configure…</button>
           </div>
@@ -1638,25 +1702,23 @@ function SettingsView({
         <h2 className="group-title" id="local-api-title">Local API</h2>
         <div className="inset">
           {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
-          <EndpointRow label="Endpoint" value={state.proxyUrl} copied={copied} onCopy={onCopy} />
-          <div className="row"><span className="row-main"><span className="row-title">Status</span><StateLabel tone={state.proxyUrl ? "success" : "neutral"} icon={state.proxyUrl ? Check : undefined} text={state.proxyUrl ? "Available" : "Stopped"} /></span></div>
           <div className="row">
-            <span className="row-main"><span className="row-title">Listen address, port, client host</span><span className="row-note">Only apps on this Mac can connect unless network access is allowed.</span></span>
+            <span className="row-main"><span className="row-title">Listener and client access</span><span className="row-note">Configure the address, port, client key, and managed access.</span></span>
             <button type="button" className="button" onClick={() => onOpen("local-api")}><Settings size={15} />Local API settings…</button>
           </div>
         </div>
       </section>
 
-      <section className="group" aria-labelledby="advanced-title">
-        <h2 className="group-title" id="advanced-title">Advanced</h2>
+      <details className="group settings-advanced">
+        <summary className="group-title"><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></summary>
         <div className="inset">
           <label className="row toggle-row">
-            <span className="row-main"><span className="row-title">Require production OS</span><span className="row-note">Only accept the service when it runs a production OS image.{frozen ? " Stop protection to change this setting." : ""}</span></span>
-            <input type="checkbox" checked={requireProductionOs} onChange={(event) => onPolicy(event.target.checked)} disabled={frozen} />
+            <span className="row-main"><span className="row-title">Allow development OS</span><span className="row-note">Accept development OS images that are not intended for production workloads.{frozen ? " Stop protection to change this setting." : ""}</span></span>
+            <input type="checkbox" checked={allowDevelopmentOs} onChange={(event) => onPolicy(event.target.checked)} disabled={frozen} />
             <span className="toggle-track" aria-hidden="true"><span /></span>
           </label>
         </div>
-      </section>
+      </details>
 
       {anyRecorded && <section className="group" aria-labelledby="agents-settings-title"><h2 className="group-title" id="agents-settings-title">Agents</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><button className="button" disabled={locked} onClick={onRestoreAll}>Restore all</button></div></div></section>}
 
@@ -1669,53 +1731,186 @@ function ServiceConfigurationSheet({
   state,
   busy,
   running,
-  verified,
-  remoteUrl,
-  apiKeyDraft,
-  savingKey,
-  onRemoteUrl,
-  onApiKeyDraft,
   onVerify,
+  onActivate,
+  onDelete,
   onClearKey,
   onClose,
 }: {
   state: GatewayState;
   busy: boolean;
   running: boolean;
-  verified: boolean;
-  remoteUrl: string;
-  apiKeyDraft: string;
-  savingKey: boolean;
-  onRemoteUrl(value: string): void;
-  onApiKeyDraft(value: string): void;
-  onVerify(event: React.FormEvent): Promise<void>;
+  onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
+  onActivate(profileId: string): Promise<string | undefined>;
+  onDelete(profileId: string): Promise<string | undefined>;
   onClearKey(): void;
   onClose(): void;
 }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
   const frozen = busy || running;
   const models = state.catalog?.models ?? [];
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId) ?? DEFAULT_PROFILE;
+  const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
+    id: activeProfile.id,
+    name: activeProfile.name,
+    provider: activeProfile.provider,
+    remoteUrl: activeProfile.remoteUrl,
+  }));
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [isNew, setIsNew] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState<string>();
+  const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
+  const keyLabel = selectedPreset?.keyLabel ?? "API key";
+  const savedProfile = state.profiles.find((profile) => profile.id === draft.id);
+  const draftUrl = draft.remoteUrl.trim().replace(/\/$/, "");
+  const profileChanged = !savedProfile
+    || savedProfile.provider !== draft.provider
+    || savedProfile.remoteUrl.replace(/\/$/, "") !== draftUrl;
+  const savedCredentialApplies = state.apiKeySaved
+    && state.activeProfileId === draft.id
+    && !profileChanged;
+  const configurationReady = models.length > 0
+    && state.activeProfileId === draft.id
+    && !profileChanged;
+  const profileVerified = Boolean(savedProfile?.verifiedAt) && !profileChanged;
+
+  useEffect(() => {
+    if (isNew || saving) return;
+    const profile = state.profiles.find((entry) => entry.id === state.activeProfileId);
+    if (!profile) return;
+    setDraft({
+      id: profile.id,
+      name: profile.name,
+      provider: profile.provider,
+      remoteUrl: profile.remoteUrl,
+    });
+    setApiKeyDraft("");
+    setConfirmDelete(false);
+  }, [isNew, saving, state.activeProfileId, state.profiles]);
+
+  const chooseService = (next: ServicePreset) => {
+    const preset = SERVICE_PRESETS.find((service) => service.id === next);
+    setDraft((current) => ({
+      ...current,
+      provider: next,
+      name: isNew && preset ? preset.name : current.name,
+      remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
+    }));
+    setApiKeyDraft("");
+    setConfirmDelete(false);
+    setError(undefined);
+  };
+  const activate = async (profileId: string) => {
+    setSaving(true);
+    setError(undefined);
+    const message = await onActivate(profileId);
+    setSaving(false);
+    if (message) {
+      setError(message);
+      return;
+    }
+    setIsNew(false);
+    setApiKeyDraft("");
+  };
+  const createProfile = () => {
+    setIsNew(true);
+    setDraft({
+      id: `profile-${crypto.randomUUID()}`,
+      name: "RedPill",
+      provider: "redpill",
+      remoteUrl: "https://tee.redpill.ai",
+    });
+    setApiKeyDraft("");
+    setConfirmDelete(false);
+    setError(undefined);
+  };
+  const removeProfile = async () => {
+    if (isNew) {
+      setIsNew(false);
+      setDraft({
+        id: activeProfile.id,
+        name: activeProfile.name,
+        provider: activeProfile.provider,
+        remoteUrl: activeProfile.remoteUrl,
+      });
+      setApiKeyDraft("");
+      setConfirmDelete(false);
+      return;
+    }
+    setSaving(true);
+    setError(undefined);
+    const message = await onDelete(draft.id);
+    setSaving(false);
+    if (message) {
+      setError(message);
+    } else {
+      setConfirmDelete(false);
+    }
+  };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(undefined);
+    const message = await onVerify(draft, apiKeyDraft.trim() || undefined);
+    setSaving(false);
+    if (message) {
+      setError(message);
+      return;
+    }
+    setIsNew(false);
+    setApiKeyDraft("");
+  };
   return (
     <dialog ref={dialog} className="sheet service-sheet" aria-label="Confidential AI settings">
       <div className="sheet-heading"><h2>Confidential AI settings</h2></div>
-      <form onSubmit={(event) => void onVerify(event)}>
-        <div className="sheet-card">
-          <label className="sheet-field"><span>Service endpoint</span><input value={remoteUrl} onChange={(event) => onRemoteUrl(event.target.value)} disabled={frozen} spellCheck={false} /></label>
-          <label className="sheet-field key-field">
-            <span>{brand.service.keyLabel}{state.apiKeySaved && <button type="button" className="link" onClick={onClearKey} disabled={savingKey || frozen}>Delete</button>}</span>
-            <input type="password" value={apiKeyDraft} onChange={(event) => onApiKeyDraft(event.target.value)} placeholder={state.apiKeySaved ? "Replace the saved key" : `Paste your ${brand.service.keyLabel}`} disabled={frozen} autoComplete="off" spellCheck={false} aria-label={brand.service.keyLabel} />
-            <small>{state.apiKeySaved ? "Using the saved key. Enter a new one to replace it after verification." : "The key is stored in the system credential store and never written into agent configs."}</small>
-          </label>
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="profile-toolbar">
+          <label><span>Profile</span><select aria-label="Profile" value={isNew ? "" : state.activeProfileId} disabled={frozen || saving} onChange={(event) => void activate(event.target.value)}><option value="" disabled>New profile</option>{state.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+          <IconButton label="New profile" disabled={frozen || saving} onClick={createProfile}><Plus size={16} /></IconButton>
+          <IconButton label={isNew ? "Cancel new profile" : "Delete profile"} disabled={frozen || saving || (!isNew && state.profiles.length === 1)} onClick={() => isNew ? void removeProfile() : setConfirmDelete(true)}><Trash2 size={16} /></IconButton>
         </div>
+        {confirmDelete && !isNew && (
+          <div className="profile-delete-confirm" role="alert">
+            <span>Delete “{draft.name}” and its saved credential?</span>
+            <button type="button" className="button" onClick={() => setConfirmDelete(false)}>Cancel</button>
+            <button type="button" className="button destructive" onClick={() => void removeProfile()}>Delete</button>
+          </div>
+        )}
+        <div className="service-presets" role="group" aria-label="Confidential AI provider">
+          {SERVICE_PRESETS.map((service) => (
+            <button key={service.id} type="button" className="service-preset" aria-pressed={draft.provider === service.id} disabled={frozen || saving} onClick={() => chooseService(service.id)}>
+              <ServiceLogo url={service.url} size="large" />
+              <span><strong>{service.name}</strong><small>{service.url}</small></span>
+              {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
+            </button>
+          ))}
+          <button type="button" className="service-preset" aria-pressed={draft.provider === "custom"} disabled={frozen || saving} onClick={() => chooseService("custom")}>
+            <ServiceLogo url="custom://service" size="large" />
+            <span><strong>Custom</strong><small>Use another ACI endpoint</small></span>
+            {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
+          </button>
+        </div>
+        <div className="sheet-card">
+          <label className="sheet-field"><span>Profile name</span><input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></label>
+          <label className="sheet-field"><span>Service endpoint</span><input value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></label>
+          <div className="sheet-field key-field">
+            <span>{keyLabel}{savedCredentialApplies && <button type="button" className="link" onClick={onClearKey} disabled={saving || frozen}>Delete</button>}</span>
+            <input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
+            <small>{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
+          </div>
+        </div>
+        {error && <p className="banner sheet-banner" role="alert">{error}</p>}
         <div className="configuration-submit">
           <span>{frozen ? "Stop protection to change or verify this configuration." : "Verification must succeed before the endpoint and key are used."}</span>
-          <button type="submit" className="button primary" disabled={savingKey || busy || frozen || (!state.apiKeySaved && !apiKeyDraft.trim())}>{savingKey || busy ? "Verifying…" : "Verify and Save"}</button>
+          <button type="submit" className="button primary" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</button>
         </div>
         <div className="verification-summary">
-          <span><strong>{verified ? "Verified service" : busy ? "Verifying service" : "Model discovery unavailable"}</strong><small>{verified ? `${models.length} models discovered from the verified endpoint` : "Verify the endpoint and key to load its model catalog."}</small></span>
-          <StateLabel tone={verified ? "success" : busy ? "neutral" : "warning"} icon={verified ? Check : busy ? LoaderCircle : undefined} text={verified ? "Ready" : busy ? "Verifying" : "Not verified"} />
+          <span><strong>{configurationReady ? "Verified configuration" : busy ? "Verifying service" : profileVerified ? "Saved profile" : "Verification required"}</strong><small>{configurationReady ? `${models.length} models discovered from the verified endpoint` : profileVerified ? "Start protection to verify the service and reload its model catalog." : "Verify the endpoint and key to load its model catalog."}</small></span>
+          <StateLabel tone={configurationReady || profileVerified ? "success" : busy ? "neutral" : "warning"} icon={configurationReady || profileVerified ? Check : busy ? LoaderCircle : undefined} text={configurationReady || profileVerified ? "Saved" : busy ? "Verifying" : "Not verified"} />
         </div>
-        {models.length > 0 && (
+        {configurationReady && (
           <section className="catalog-section" aria-labelledby="model-catalog-heading">
             <div className="catalog-section-heading"><span><h3 id="model-catalog-heading">Model catalog</h3><small>Discovered from this verified service</small></span><span>{models.length} models</span></div>
             <div className="model-list service-model-list" role="region" aria-label="Verified model catalog" tabIndex={0}>
@@ -1723,16 +1918,15 @@ function ServiceConfigurationSheet({
             </div>
           </section>
         )}
-        <div className="sheet-actions"><button type="button" className="button primary" onClick={onClose}>Done</button></div>
+        <div className="sheet-actions"><button type="button" className="button" onClick={onClose} disabled={saving}>Done</button></div>
       </form>
     </dialog>
   );
 }
 
 function PrivacyVerificationSheet({ state, verified, onClose }: { state: GatewayState; verified: boolean; onClose(): void }): React.JSX.Element {
-  const heading = useRef<HTMLHeadingElement>(null);
-  const dialog = useModalDialog(onClose, heading);
-  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2 ref={heading} tabIndex={-1}>Privacy verification</h2></div><PrivacyVerification state={state} verified={verified} /><div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div></dialog>;
+  const dialog = useModalDialog(onClose);
+  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2>Privacy verification</h2></div><PrivacyVerification state={state} verified={verified} /><div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div></dialog>;
 }
 
 function LocalApiSheet({
@@ -1926,33 +2120,6 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
   );
 }
 
-function EndpointRow({
-  label,
-  value,
-  copied,
-  onCopy,
-}: {
-  label: string;
-  value?: string;
-  copied?: string;
-  onCopy(label: string, value: string): Promise<void>;
-}): React.JSX.Element {
-  return (
-    <button
-      className="settings-copy-row"
-      disabled={!value}
-      onClick={() => value && void onCopy(label, value)}
-      aria-label={`${label}: ${value ?? "Unavailable"}. Copy`}
-    >
-      <span className="row-main">
-        <span className="row-title">{label}</span>
-        <code className="row-note" title={value}>{value ?? "Unavailable"}</code>
-      </span>
-      <span className={`copy-feedback-inline ${copied === label ? "is-copied" : ""}`}>{copied === label ? "Copied" : "Copy"}</span>
-    </button>
-  );
-}
-
 function ModelRow({ model }: { model: ModelSummary }): React.JSX.Element {
   const capabilities = [...model.inputModalities, ...model.capabilities];
   const prices = [
@@ -2059,7 +2226,9 @@ function presentation(state: GatewayState): {
   }
   switch (state.status) {
     case "verifying":
-      return { title: "Verifying…", detail: state.progress ?? "Checking the service before anything is sent.", tone: "neutral" };
+      return state.configurationVerification
+        ? { title: "Verifying configuration…", detail: state.progress ?? "Checking the candidate service without enabling forwarding.", tone: "neutral" }
+        : { title: "Verifying…", detail: state.progress ?? "Checking the service before anything is sent.", tone: "neutral" };
     case "blocked":
       return { title: "Protection blocked", detail: state.error ?? "The verified identity or policy changed. Forwarding is fail-closed until a new verification succeeds.", tone: "danger" };
     case "error":
@@ -2067,8 +2236,11 @@ function presentation(state: GatewayState): {
     case "stopped":
       return { title: "Not protected", detail: "Start to verify the service and route your agents through it.", tone: "neutral" };
     case "verified":
+      if (state.configurationVerification) {
+        return { title: "Configuration verified", detail: "The endpoint and model catalog are verified. Protection remains off until you start it.", tone: "neutral" };
+      }
       if (!state.apiKeySaved) {
-        return { title: "API key needed", detail: `The service is verified. Add your ${brand.service.keyLabel} to start sending requests.`, tone: "warning", settings: "Add API key" };
+        return { title: "API key needed", detail: `The service is verified. Add your ${serviceKeyLabel(state.config.remoteUrl)} to start sending requests.`, tone: "warning", settings: "Add API key" };
       }
       return { title: "Protected", detail: "Requests use an SPKI-pinned TLS channel to a verified confidential AI service, with signed response proofs.", tone: "success" };
   }

@@ -1,13 +1,13 @@
 //! Secrets live only in the OS credential store (macOS Keychain, Windows
-//! Credential Manager, Secret Service on Linux): the RedPill API key, and the
-//! previous values of credential fields a connection took over, kept so a
-//! disconnect can put them back. Values are read into memory when needed and
-//! never written to config files, manifests, logs, or the UI.
+//! Credential Manager, Secret Service on Linux): Confidential AI service
+//! credentials, and previous values of credential fields a connection took
+//! over, kept so a disconnect can put them back. Values are read into memory
+//! when needed and never written to config files, manifests, logs, or the UI.
 
 use std::{collections::HashMap, sync::Mutex};
 
 const SERVICE: &str = crate::brand::APP_IDENTIFIER;
-pub const API_KEY_ENTRY: &str = "service-api-key";
+pub const LEGACY_API_KEY_ENTRY: &str = "service-api-key";
 const MAX_KEY_LEN: usize = 512;
 
 /// A named-entry secret store. Entry names are app-chosen, never user input.

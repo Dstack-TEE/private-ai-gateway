@@ -2,20 +2,22 @@ mod contracts;
 mod gateway;
 mod local_api;
 mod menu;
+mod service_config;
 mod tray;
 mod usage;
 
 use std::sync::{Arc, Mutex};
 
 use contracts::{
-    AgentPreview, AgentStatus, ConnectOptions, GatewayState, LocalApiConfig, StartGatewayConfig,
+    AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
+    LocalApiConfig, StartGatewayConfig,
 };
 use desktop_gateway::{
     agents::{app_data_dir, helper_binary_name, Agent, Projector},
     catalog::Catalog,
     lock,
     proxy::{self, ProxyEvent, ProxyState},
-    secrets::{validate_api_key, KeyringStore, SecretStore, API_KEY_ENTRY},
+    secrets::{validate_api_key, KeyringStore, SecretStore, LEGACY_API_KEY_ENTRY},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
 use gateway::GatewayManager;
@@ -25,7 +27,8 @@ use usage::{UsagePage, UsageQuery, UsageStore};
 
 const AUTOSTART_ARG: &str = "--autostart";
 
-/// The OS credential store holding the RedPill API key and parked secrets.
+/// The OS credential store holding Confidential AI profile credentials and
+/// parked agent secrets.
 struct Secrets(Arc<dyn SecretStore>);
 
 struct ClientCredentials(Mutex<TokenFiles>);
@@ -188,8 +191,256 @@ fn start_gateway(
     codex_sync: State<'_, CodexCatalogSync>,
     config: StartGatewayConfig,
 ) -> Result<GatewayState, String> {
+    let config = service_config::resolve_runtime_config(config)?;
+    let state = manager.snapshot()?;
+    if config.remote_url != state.config.remote_url {
+        return Err("Select or verify the Confidential AI profile before starting".to_string());
+    }
+    if !state.api_key_saved {
+        return Err("Add a credential to the active Confidential AI profile".to_string());
+    }
     codex_sync.reset()?;
     manager.start(&app, config)
+}
+
+/// Verify a candidate service without opening the local forwarding session.
+/// The previous saved configuration and credential remain active unless the
+/// attestation and model discovery both succeed.
+#[tauri::command]
+async fn verify_configuration(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    codex_sync: State<'_, CodexCatalogSync>,
+    profile: ConfidentialProfileInput,
+    require_production_os: bool,
+    key: Option<String>,
+) -> Result<GatewayState, String> {
+    if manager.is_running()? {
+        return Err("Stop protection before verifying a different service".to_string());
+    }
+    let previous = manager.snapshot()?;
+    let mut settings = service_config::settings_from_state(
+        previous.profiles.clone(),
+        previous.active_profile_id.clone(),
+        previous.config.require_production_os,
+    )?;
+    let existing = settings
+        .profiles
+        .iter()
+        .find(|entry| entry.id == profile.id)
+        .cloned();
+    let candidate_profile =
+        service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
+    let profile_changed = existing.as_ref().is_none_or(|existing| {
+        existing.provider != candidate_profile.provider
+            || existing.remote_url != candidate_profile.remote_url
+            || existing.auth != candidate_profile.auth
+    });
+    let candidate_entry = service_config::credential_entry(&candidate_profile.id)?;
+    let stored_candidate_key = secrets.0.get(&candidate_entry)?;
+    let previous_entry = service_config::credential_entry(&previous.active_profile_id)?;
+    let previous_key = secrets.0.get(&previous_entry)?;
+    let replace_key = key.is_some();
+    let candidate_key = match key {
+        Some(key) => validate_api_key(&key)?,
+        None if !profile_changed => stored_candidate_key
+            .clone()
+            .ok_or_else(|| "Enter an API key".to_string())?,
+        None => return Err("Enter an API key for this profile".to_string()),
+    };
+    let config = StartGatewayConfig {
+        remote_url: candidate_profile.remote_url.clone(),
+        require_production_os,
+    };
+    settings.upsert(candidate_profile.clone())?;
+    settings.active_profile_id = candidate_profile.id.clone();
+    settings.require_production_os = require_production_os;
+
+    codex_sync.reset()?;
+    proxy.set_api_key(Some(candidate_key.clone()));
+    let started = match manager.begin_verification(&app, config.clone(), profile_changed) {
+        Ok(state) => state,
+        Err(error) => {
+            proxy.set_api_key(previous_key);
+            return Err(error);
+        }
+    };
+    let Some(session_id) = started.session_id.clone() else {
+        let _ = manager.stop(&app);
+        proxy.set_api_key(previous_key);
+        manager.restore_snapshot(&app, previous);
+        return Err("Configuration verification did not start".to_string());
+    };
+    let verified = manager.wait_for_verification(&session_id).await;
+    let stop_result = manager.stop(&app);
+
+    if let Err(error) = verified {
+        proxy.set_api_key(previous_key);
+        manager.restore_snapshot(&app, previous);
+        return Err(match stop_result {
+            Ok(_) => error,
+            Err(stop_error) => format!("{error}. The verifier also could not stop: {stop_error}"),
+        });
+    }
+    if let Err(error) = stop_result {
+        proxy.set_api_key(previous_key);
+        manager.restore_snapshot(&app, previous);
+        return Err(error);
+    }
+
+    if replace_key {
+        if let Err(error) = secrets.0.set(&candidate_entry, &candidate_key) {
+            proxy.set_api_key(previous_key);
+            manager.restore_snapshot(&app, previous);
+            return Err(error);
+        }
+    }
+    let settings = match service_config::save(settings) {
+        Ok(settings) => settings,
+        Err(error) => {
+            let restore_error = if replace_key {
+                restore_secret_entry(
+                    &*secrets.0,
+                    &candidate_entry,
+                    stored_candidate_key.as_deref(),
+                )
+                .err()
+            } else {
+                None
+            };
+            proxy.set_api_key(previous_key);
+            manager.restore_snapshot(&app, previous);
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "{error}. The previous credential could not be restored: {restore_error}"
+                ),
+                None => error,
+            });
+        }
+    };
+    manager.set_service_configuration(
+        &app,
+        config,
+        settings.profiles,
+        settings.active_profile_id,
+        true,
+        true,
+    );
+    manager.snapshot()
+}
+
+#[tauri::command]
+fn activate_profile(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    profile_id: String,
+) -> Result<GatewayState, String> {
+    if manager.is_running()? {
+        return Err("Stop protection before changing profiles".to_string());
+    }
+    let previous = manager.snapshot()?;
+    let mut settings = service_config::settings_from_state(
+        previous.profiles,
+        previous.active_profile_id,
+        previous.config.require_production_os,
+    )?;
+    let profile = settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+    let entry = service_config::credential_entry(&profile.id)?;
+    let key = secrets.0.get(&entry)?;
+    settings.active_profile_id = profile.id.clone();
+    let settings = service_config::save(settings)?;
+    let config = settings.runtime_config()?;
+    proxy.set_api_key(key.clone());
+    manager.set_service_configuration(
+        &app,
+        config,
+        settings.profiles,
+        settings.active_profile_id,
+        key.is_some(),
+        false,
+    );
+    manager.snapshot()
+}
+
+#[tauri::command]
+fn delete_profile(
+    app: AppHandle,
+    manager: State<'_, GatewayManager>,
+    proxy: State<'_, Arc<ProxyState>>,
+    secrets: State<'_, Secrets>,
+    profile_id: String,
+) -> Result<GatewayState, String> {
+    if manager.is_running()? {
+        return Err("Stop protection before deleting a profile".to_string());
+    }
+    let previous = manager.snapshot()?;
+    let mut settings = service_config::settings_from_state(
+        previous.profiles,
+        previous.active_profile_id,
+        previous.config.require_production_os,
+    )?;
+    if settings.profiles.len() == 1 {
+        return Err("At least one Confidential AI profile is required".to_string());
+    }
+    let removed = settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+    let entry = service_config::credential_entry(&removed.id)?;
+    let removed_key = secrets.0.get(&entry)?;
+    secrets.0.delete(&entry)?;
+    settings.profiles.retain(|profile| profile.id != profile_id);
+    if settings.active_profile_id == profile_id {
+        settings.active_profile_id = settings.profiles[0].id.clone();
+    }
+    let active_entry = service_config::credential_entry(&settings.active_profile_id)?;
+    let active_key = secrets.0.get(&active_entry)?;
+    let settings = match service_config::save(settings) {
+        Ok(settings) => settings,
+        Err(error) => {
+            let restore_error =
+                restore_secret_entry(&*secrets.0, &entry, removed_key.as_deref()).err();
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "{error}. The deleted credential could not be restored: {restore_error}"
+                ),
+                None => error,
+            });
+        }
+    };
+    let config = settings.runtime_config()?;
+    proxy.set_api_key(active_key.clone());
+    manager.set_service_configuration(
+        &app,
+        config,
+        settings.profiles,
+        settings.active_profile_id,
+        active_key.is_some(),
+        false,
+    );
+    manager.snapshot()
+}
+
+fn restore_secret_entry(
+    secrets: &dyn SecretStore,
+    entry: &str,
+    value: Option<&str>,
+) -> Result<(), String> {
+    match value {
+        Some(value) => secrets.set(entry, value),
+        None => secrets.delete(entry),
+    }
 }
 
 #[tauri::command]
@@ -244,23 +495,6 @@ fn clear_usage(
     Ok(changed)
 }
 
-/// Save (or replace) the RedPill API key in the OS credential store. The key
-/// is validated, stored, loaded into the proxy, and never returned.
-#[tauri::command]
-fn set_api_key(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    key: String,
-) -> Result<GatewayState, String> {
-    let key = validate_api_key(&key)?;
-    secrets.0.set(API_KEY_ENTRY, &key)?;
-    proxy.set_api_key(Some(key));
-    manager.set_api_key_saved(&app, true);
-    manager.snapshot()
-}
-
 /// Revoke first, then forget: the key leaves proxy memory (and admitted
 /// deliveries are cancelled) before the credential store is touched. If the
 /// store delete fails the key stays revoked for this session; the UI keeps
@@ -272,8 +506,13 @@ fn clear_api_key(
     proxy: State<'_, Arc<ProxyState>>,
     secrets: State<'_, Secrets>,
 ) -> Result<GatewayState, String> {
+    if manager.is_running()? {
+        return Err("Stop protection before deleting a profile credential".to_string());
+    }
+    let state = manager.snapshot()?;
+    let entry = service_config::credential_entry(&state.active_profile_id)?;
     proxy.set_api_key(None);
-    if let Err(error) = secrets.0.delete(API_KEY_ENTRY) {
+    if let Err(error) = secrets.0.delete(&entry) {
         return Err(format!(
             "The key is revoked for this session, but removing it from the credential store \
              failed: {error}. Retry Delete or save a new key"
@@ -561,6 +800,78 @@ pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
+    let (mut service_settings, mut service_config_error, migrated_legacy) =
+        match service_config::load() {
+            Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),
+            Err(error) => (
+                service_config::ServiceSettings::default(),
+                Some(error),
+                false,
+            ),
+        };
+    let service_runtime_config = match service_settings.runtime_config() {
+        Ok(config) => config,
+        Err(error) => {
+            service_config_error = Some(error);
+            service_settings = service_config::ServiceSettings::default();
+            service_settings
+                .runtime_config()
+                .expect("the built-in Confidential AI profile must be valid")
+        }
+    };
+    let active_credential_entry =
+        service_config::credential_entry(&service_settings.active_profile_id)
+            .expect("the resolved active Confidential AI profile ID must be valid");
+    let mut startup_key = match secrets.get(&active_credential_entry) {
+        Ok(key) => key,
+        Err(error) => {
+            service_config_error = Some(error);
+            None
+        }
+    };
+    if startup_key.is_none() && service_config_error.is_none() {
+        match secrets.get(LEGACY_API_KEY_ENTRY) {
+            Ok(Some(legacy_key)) => match secrets.set(&active_credential_entry, &legacy_key) {
+                Ok(()) => match service_config::save(service_settings.clone()) {
+                    Ok(_) => {
+                        startup_key = Some(legacy_key);
+                        if let Err(error) = secrets.delete(LEGACY_API_KEY_ENTRY) {
+                            service_config_error = Some(format!(
+                                    "The previous credential was migrated but its old copy could not be removed: {error}"
+                                ));
+                        }
+                    }
+                    Err(error) => {
+                        let rollback = secrets.delete(&active_credential_entry).err();
+                        service_config_error = Some(match rollback {
+                                Some(rollback) => format!(
+                                    "The previous Confidential AI credential could not be migrated: {error}. The partial credential could not be removed: {rollback}"
+                                ),
+                                None => format!(
+                                    "The previous Confidential AI credential could not be migrated: {error}"
+                                ),
+                            });
+                    }
+                },
+                Err(error) => {
+                    service_config_error = Some(format!(
+                        "The previous Confidential AI credential could not be migrated: {error}"
+                    ));
+                }
+            },
+            Ok(None) if migrated_legacy => {
+                if let Err(error) = service_config::save(service_settings.clone()) {
+                    service_config_error = Some(error);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => service_config_error = Some(error),
+        }
+    } else if migrated_legacy && service_config_error.is_none() {
+        if let Err(error) = service_config::save(service_settings.clone()) {
+            service_config_error = Some(error);
+        }
+    }
     let (local_api, local_api_error) = match local_api::load() {
         Ok(config) => (config, None),
         Err(error) => (
@@ -612,6 +923,9 @@ pub fn run() {
             proxy.clone(),
             usage.clone(),
             local_api.config.clone(),
+            service_runtime_config,
+            service_settings.profiles.clone(),
+            service_settings.active_profile_id.clone(),
         ))
         .manage(proxy.clone())
         .manage(EndpointRuntime(Mutex::new(None)))
@@ -624,13 +938,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
             start_gateway,
+            verify_configuration,
+            activate_profile,
+            delete_profile,
             stop_gateway,
             copy_text,
             query_usage,
             export_usage_csv,
             clear_usage,
             open_support,
-            set_api_key,
             clear_api_key,
             get_client_key,
             rotate_client_key,
@@ -642,9 +958,6 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
@@ -699,17 +1012,15 @@ pub fn run() {
 
             // Load what the proxy needs to admit and forward: the saved key
             // (only its presence reaches the UI) and connected agents' tokens.
-            match secrets.get(API_KEY_ENTRY) {
-                Ok(key) => {
-                    manager.set_api_key_saved(&handle, key.is_some());
-                    proxy.set_api_key(key);
-                }
-                Err(error) => manager.report_error(&handle, error),
-            }
+            manager.set_api_key_saved(&handle, startup_key.is_some());
+            proxy.set_api_key(startup_key.clone());
             if let Some(error) = usage_error.clone() {
                 manager.report_error(&handle, error);
             }
             if let Some(error) = local_api_error.clone() {
+                manager.report_error(&handle, error);
+            }
+            if let Some(error) = service_config_error.clone() {
                 manager.report_error(&handle, error);
             }
             // Startup maintenance (under the config lock) before authorizing

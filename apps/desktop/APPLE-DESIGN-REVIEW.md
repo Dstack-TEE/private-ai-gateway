@@ -67,19 +67,22 @@ tray template.
 The default brand is `dstack`, using the official Dstack logo kit from
 `Dstack-TEE/dstack` at commit `982621521b435cc10b535cb8646efecb8c3fc255`
 (`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
-`brand.json`). The app icon is the official mark on a rounded square; the
-tray uses the official dark mark as a template image. The brand accent is
+`brand.json`). The app icon is the original green mark on one dark-green
+rounded square in every appearance; the tray uses a smaller monochrome
+template mark and adds a lower-right protected badge only while forwarding is
+enabled. The brand accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
 templates; the script refuses to build them until their official assets are
 added.
 
 The brand and the service are deliberately separate layers. The shell (window
-title, About, tray, menus, app icon) is the brand, Dstack TEE by default; the
-service the gateway verifies and relays to is `brand.service` (RedPill by
-default), which is why Settings shows the RedPill service address and API key
-while About shows Dstack TEE. Both come from the same `brand.json`, so a
-brand that serves a different service changes one file, not the code.
+title, About, tray, menus, app icon) is the brand, Dstack TEE by default. The
+active Confidential AI profile selects the service the gateway verifies and
+relays to; a new install starts with `brand.service` (RedPill by default).
+Each profile owns its provider, endpoint, name, and credential reference while
+About continues to identify the app brand. The initial service still comes
+from `brand.json`, so a branded build changes one file, not the code.
 
 The Tauri config is not rewritten: the script emits an ignored
 `src-tauri/tauri.brand.conf.json` overlay that `dev`, `dist`, and the CI

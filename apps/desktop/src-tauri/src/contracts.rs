@@ -134,6 +134,53 @@ pub struct CatalogSummary {
     pub removed: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceProvider {
+    Phala,
+    Redpill,
+    Custom,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ProfileAuth {
+    #[serde(rename = "apiKey")]
+    ApiKey,
+    #[serde(rename = "oauth")]
+    OAuth {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        #[serde(
+            rename = "accountName",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        account_name: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfidentialProfile {
+    pub id: String,
+    pub name: String,
+    pub provider: ServiceProvider,
+    pub remote_url: String,
+    pub auth: ProfileAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfidentialProfileInput {
+    pub id: String,
+    pub name: String,
+    pub provider: ServiceProvider,
+    pub remote_url: String,
+}
+
 impl CatalogSummary {
     pub fn from_catalog(catalog: &Catalog, previous: Option<&CatalogSummary>) -> Self {
         let models: Vec<ModelSummary> = catalog
@@ -183,6 +230,9 @@ pub struct GatewayState {
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
     /// `blocked`, or `error`.
     pub status: String,
+    /// True while Settings is verifying a candidate configuration without
+    /// opening the forwarding session or turning protection on.
+    pub configuration_verification: bool,
     /// What the gateway is doing while `verifying`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,
@@ -209,10 +259,13 @@ pub struct GatewayState {
     pub error: Option<String>,
     /// The configuration the next start (window or tray toggle) will use.
     pub config: StartGatewayConfig,
+    pub profiles: Vec<ConfidentialProfile>,
+    pub active_profile_id: String,
     pub local_api: LocalApiConfig,
     pub api_key_saved: bool,
-    /// The catalog of the current verified session; absent whenever the
-    /// session is not verified.
+    /// The most recently verified catalog. A stopped gateway may retain it so
+    /// Settings can show what a successful configuration check discovered;
+    /// the proxy still requires a live verified session before forwarding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogSummary>,
 }
@@ -221,6 +274,7 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             status: "stopped".to_string(),
+            configuration_verification: false,
             progress: None,
             remote_url: None,
             proxy_url: None,
@@ -233,6 +287,8 @@ impl Default for GatewayState {
             usage_revision: 0,
             error: None,
             config: StartGatewayConfig::default(),
+            profiles: Vec::new(),
+            active_profile_id: String::new(),
             local_api: LocalApiConfig::default(),
             api_key_saved: false,
             catalog: None,
@@ -272,7 +328,7 @@ impl Default for StartGatewayConfig {
     fn default() -> Self {
         Self {
             remote_url: desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string(),
-            require_production_os: false,
+            require_production_os: true,
         }
     }
 }

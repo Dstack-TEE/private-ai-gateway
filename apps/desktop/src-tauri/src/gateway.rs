@@ -10,11 +10,16 @@
 
 use std::{
     collections::VecDeque,
-    net::IpAddr,
     sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::contracts::{
+    CatalogSummary, ConfidentialProfile, GatewayIdentity, GatewayState, LocalApiConfig,
+    RequestActivity, SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
+};
+use crate::usage::UsageStore;
+use crate::{local_api, service_config};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
@@ -22,15 +27,7 @@ use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
-use tokio::sync::mpsc::Receiver;
-use url::Url;
-
-use crate::contracts::{
-    CatalogSummary, GatewayIdentity, GatewayState, LocalApiConfig, RequestActivity,
-    SourceProvenance, StartGatewayConfig, UsageSummary, VerificationCheck,
-};
-use crate::local_api;
-use crate::usage::UsageStore;
+use tokio::sync::{mpsc::Receiver, watch};
 
 const EVENT_SCHEMA_VERSION: u64 = 1;
 const MAX_ACTIVITY: usize = 50;
@@ -41,6 +38,7 @@ pub struct GatewayManager {
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
+    state_tx: watch::Sender<GatewayState>,
 }
 
 struct RuntimeState {
@@ -56,6 +54,9 @@ struct RuntimeState {
     sidecar_url: Option<String>,
     /// The sidecar reported a verified identity for this generation.
     identity_ready: bool,
+    /// A settings verification may attest and discover models, but it never
+    /// opens the local forwarding session to agents.
+    verification_only: bool,
     /// Stable id for one protection run. Overview shows only this run while
     /// the Usage page reads every run from SQLite.
     session_id: String,
@@ -65,11 +66,22 @@ struct RuntimeState {
 }
 
 impl GatewayManager {
-    pub fn new(proxy: Arc<ProxyState>, usage: Arc<UsageStore>, local_api: LocalApiConfig) -> Self {
+    pub fn new(
+        proxy: Arc<ProxyState>,
+        usage: Arc<UsageStore>,
+        local_api: LocalApiConfig,
+        config: StartGatewayConfig,
+        profiles: Vec<ConfidentialProfile>,
+        active_profile_id: String,
+    ) -> Self {
         let state = GatewayState {
             local_api,
+            config,
+            profiles,
+            active_profile_id,
             ..GatewayState::default()
         };
+        let (state_tx, _) = watch::channel(state.clone());
         Self {
             inner: Mutex::new(RuntimeState {
                 child: None,
@@ -79,12 +91,14 @@ impl GatewayManager {
                 diagnostic: VecDeque::with_capacity(MAX_DIAGNOSTIC_BYTES),
                 sidecar_url: None,
                 identity_ready: false,
+                verification_only: false,
                 session_id: "unscoped".to_string(),
                 last_catalog: None,
                 state,
             }),
             proxy,
             usage,
+            state_tx,
         }
     }
 
@@ -97,7 +111,27 @@ impl GatewayManager {
         app: &AppHandle,
         config: StartGatewayConfig,
     ) -> Result<GatewayState, String> {
-        let remote_url = validate_remote_url(&config.remote_url)?;
+        self.start_inner(app, config, false, false)
+    }
+
+    pub fn begin_verification(
+        &self,
+        app: &AppHandle,
+        config: StartGatewayConfig,
+        reset_catalog_history: bool,
+    ) -> Result<GatewayState, String> {
+        self.start_inner(app, config, true, reset_catalog_history)
+    }
+
+    fn start_inner(
+        &self,
+        app: &AppHandle,
+        config: StartGatewayConfig,
+        verification_only: bool,
+        reset_catalog_history: bool,
+    ) -> Result<GatewayState, String> {
+        let config = service_config::resolve_runtime_config(config)?;
+        let remote_url = config.remote_url.clone();
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
@@ -141,8 +175,13 @@ impl GatewayManager {
         runtime.diagnostic.clear();
         runtime.sidecar_url = None;
         runtime.identity_ready = false;
+        runtime.verification_only = verification_only;
+        if reset_catalog_history {
+            runtime.last_catalog = None;
+        }
         runtime.state = GatewayState {
             status: "verifying".to_string(),
+            configuration_verification: verification_only,
             progress: Some("Starting the verifier".to_string()),
             remote_url: Some(remote_url.clone()),
             session_id: Some(session_id.clone()),
@@ -151,6 +190,7 @@ impl GatewayManager {
                 remote_url,
                 require_production_os: config.require_production_os,
             },
+            catalog: None,
             activity: Vec::new(),
             ..Self::carried(&runtime.state)
         };
@@ -163,9 +203,52 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        publish_state(app, &state);
+        self.publish(app, &state);
         spawn_event_reader(app.clone(), generation, receiver);
         Ok(state)
+    }
+
+    pub async fn wait_for_verification(&self, session_id: &str) -> Result<GatewayState, String> {
+        let mut states = self.state_tx.subscribe();
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let state = states.borrow().clone();
+                if state.session_id.as_deref() != Some(session_id) {
+                    return Err("Configuration verification was superseded".to_string());
+                }
+                match state.status.as_str() {
+                    "verified" => return Ok(state),
+                    "blocked" | "error" => {
+                        return Err(state
+                            .error
+                            .unwrap_or_else(|| "Configuration verification failed".to_string()));
+                    }
+                    "stopped" => return Err("Configuration verification was cancelled".to_string()),
+                    _ => {}
+                }
+                states
+                    .changed()
+                    .await
+                    .map_err(|_| "Configuration verification stopped unexpectedly".to_string())?;
+            }
+        })
+        .await
+        .map_err(|_| "Configuration verification timed out".to_string())?
+    }
+
+    pub fn restore_snapshot(&self, app: &AppHandle, state: GatewayState) {
+        let Ok(mut runtime) = self.lock() else {
+            return;
+        };
+        runtime.session_id = state
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unscoped".to_string());
+        runtime.last_catalog = state.catalog.clone();
+        runtime.state = state;
+        let state = runtime.state.clone();
+        drop(runtime);
+        self.publish(app, &state);
     }
 
     /// Stop the sidecar in any state, including while verifying. Requests
@@ -179,6 +262,7 @@ impl GatewayManager {
         runtime.diagnostic.clear();
         runtime.sidecar_url = None;
         runtime.identity_ready = false;
+        runtime.verification_only = false;
         runtime.state = Self::carried(&runtime.state);
         let state = runtime.state.clone();
         let epoch = runtime.epoch;
@@ -196,7 +280,7 @@ impl GatewayManager {
                 .kill()
                 .map_err(|error| format!("Cannot stop ACI executable: {error}"))?;
         }
-        publish_state(app, &state);
+        self.publish(app, &state);
         Ok(state)
     }
 
@@ -206,6 +290,8 @@ impl GatewayManager {
     fn carried(previous: &GatewayState) -> GatewayState {
         GatewayState {
             config: previous.config.clone(),
+            profiles: previous.profiles.clone(),
+            active_profile_id: previous.active_profile_id.clone(),
             local_api: previous.local_api.clone(),
             api_key_saved: previous.api_key_saved,
             proxy_url: previous.proxy_url.clone(),
@@ -214,6 +300,7 @@ impl GatewayManager {
             session_id: previous.session_id.clone(),
             session_usage: previous.session_usage.clone(),
             usage_revision: previous.usage_revision,
+            catalog: previous.catalog.clone(),
             ..GatewayState::default()
         }
     }
@@ -237,6 +324,37 @@ impl GatewayManager {
 
     pub fn set_api_key_saved(&self, app: &AppHandle, saved: bool) {
         self.update(app, |state| state.api_key_saved = saved);
+    }
+
+    pub fn set_service_configuration(
+        &self,
+        app: &AppHandle,
+        config: StartGatewayConfig,
+        profiles: Vec<ConfidentialProfile>,
+        active_profile_id: String,
+        api_key_saved: bool,
+        retain_catalog: bool,
+    ) {
+        let Ok(mut runtime) = self.lock() else {
+            return;
+        };
+        runtime.state.config = config;
+        runtime.state.profiles = profiles;
+        runtime.state.active_profile_id = active_profile_id;
+        runtime.state.api_key_saved = api_key_saved;
+        runtime.state.remote_url = None;
+        runtime.state.identity = None;
+        runtime.state.checks.clear();
+        runtime.state.error = None;
+        if retain_catalog {
+            runtime.last_catalog = runtime.state.catalog.clone();
+        } else {
+            runtime.last_catalog = None;
+            runtime.state.catalog = None;
+        }
+        let state = runtime.state.clone();
+        drop(runtime);
+        self.publish(app, &state);
     }
 
     /// Record whether the stable local endpoint is bound. A failure blocks
@@ -369,14 +487,16 @@ impl GatewayManager {
                 runtime.state.status = "verified".to_string();
                 runtime.state.progress = None;
                 runtime.state.error = None;
-                self.proxy.publish(Session {
-                    generation,
-                    epoch,
-                    session_id: Some(runtime.session_id.clone()),
-                    base_url: Some(sidecar_url),
-                    verified: true,
-                    catalog: Some(catalog),
-                });
+                if !runtime.verification_only {
+                    self.proxy.publish(Session {
+                        generation,
+                        epoch,
+                        session_id: Some(runtime.session_id.clone()),
+                        base_url: Some(sidecar_url),
+                        verified: true,
+                        catalog: Some(catalog),
+                    });
+                }
                 Ok(())
             }
             Err(error) => {
@@ -397,7 +517,7 @@ impl GatewayManager {
         };
         let state = runtime.state.clone();
         drop(runtime);
-        publish_state(app, &state);
+        self.publish(app, &state);
         outcome
     }
 
@@ -408,7 +528,12 @@ impl GatewayManager {
         change(&mut runtime.state);
         let state = runtime.state.clone();
         drop(runtime);
-        publish_state(app, &state);
+        self.publish(app, &state);
+    }
+
+    fn publish(&self, app: &AppHandle, state: &GatewayState) {
+        let _ = self.state_tx.send(state.clone());
+        publish_state(app, state);
     }
 
     fn handle_stdout(&self, app: &AppHandle, generation: u64, bytes: &[u8]) -> Result<(), String> {
@@ -545,7 +670,7 @@ impl GatewayManager {
                 state = runtime.state.clone();
             }
         }
-        publish_state(app, &state);
+        self.publish(app, &state);
         if load_catalog {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -578,6 +703,8 @@ impl GatewayManager {
         runtime.child = None;
         runtime.epoch += 1;
         runtime.identity_ready = false;
+        runtime.verification_only = false;
+        runtime.state.configuration_verification = false;
         runtime.state.catalog = None;
         runtime.state.progress = None;
         if runtime.state.status != "error" {
@@ -602,7 +729,7 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        publish_state(app, &state);
+        self.publish(app, &state);
         Ok(())
     }
 
@@ -614,6 +741,8 @@ impl GatewayManager {
         let child = runtime.child.take();
         runtime.epoch += 1;
         runtime.identity_ready = false;
+        runtime.verification_only = false;
+        runtime.state.configuration_verification = false;
         runtime.state.status = "error".to_string();
         runtime.state.progress = None;
         runtime.state.catalog = None;
@@ -631,7 +760,7 @@ impl GatewayManager {
         if let Some(child) = child {
             let _ = child.kill();
         }
-        publish_state(app, &state);
+        self.publish(app, &state);
         Ok(())
     }
 
@@ -660,34 +789,6 @@ fn spawn_event_reader(app: AppHandle, generation: u64, mut receiver: Receiver<Co
             }
         }
     });
-}
-
-fn validate_remote_url(value: &str) -> Result<String, String> {
-    let mut url = Url::parse(value.trim())
-        .map_err(|_| "Gateway URL must be a valid HTTP or HTTPS URL".to_string())?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(
-            "Gateway URL must use HTTPS (HTTP is allowed only for loopback development)"
-                .to_string(),
-        );
-    }
-    let loopback = url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    if url.scheme() != "https" && !loopback {
-        return Err(
-            "Gateway URL must use HTTPS unless it points to localhost or a loopback address"
-                .to_string(),
-        );
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("Gateway URL must not contain credentials".to_string());
-    }
-    url.set_fragment(None);
-    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 /// Record the sidecar's identity and checks; the status is decided by the
@@ -901,25 +1002,6 @@ fn publish_state(app: &AppHandle, state: &GatewayState) {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn normalizes_remote_url_and_rejects_credentials() {
-        assert_eq!(
-            validate_remote_url(" https://tee.redpill.ai/ ").unwrap(),
-            "https://tee.redpill.ai"
-        );
-        assert!(validate_remote_url("https://token@tee.redpill.ai").is_err());
-        assert!(validate_remote_url("file:///tmp/gateway").is_err());
-        assert!(validate_remote_url("http://tee.redpill.ai").is_err());
-        assert_eq!(
-            validate_remote_url("http://127.0.0.1:8090/").unwrap(),
-            "http://127.0.0.1:8090"
-        );
-        assert_eq!(
-            validate_remote_url("http://localhost:8090/").unwrap(),
-            "http://localhost:8090"
-        );
-    }
 
     #[test]
     fn identity_alone_does_not_verify_and_requests_are_attributed() {

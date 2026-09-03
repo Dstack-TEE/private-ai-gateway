@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AgentPreview,
   AgentStatus,
+  ConfidentialProfileInput,
   ConnectOptions,
   DesktopApi,
   GatewayState,
@@ -42,11 +43,17 @@ export const desktopApi: DesktopApi = {
   start(config: StartGatewayConfig): Promise<GatewayState> {
     return invoke("start_gateway", { config });
   },
+  verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState> {
+    return invoke("verify_configuration", { profile, requireProductionOs, key });
+  },
+  activateProfile(profileId: string): Promise<GatewayState> {
+    return invoke("activate_profile", { profileId });
+  },
+  deleteProfile(profileId: string): Promise<GatewayState> {
+    return invoke("delete_profile", { profileId });
+  },
   stop(): Promise<GatewayState> {
     return invoke("stop_gateway");
-  },
-  setApiKey(key: string): Promise<GatewayState> {
-    return invoke("set_api_key", { key });
   },
   clearApiKey(): Promise<GatewayState> {
     return invoke("clear_api_key");

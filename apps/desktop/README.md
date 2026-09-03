@@ -68,15 +68,27 @@ protocol is the service's own response, shown as such.
   (`private-ai-gateway-helper --agent-token <agent>`). OpenCode reads the
   token file through its `{file:...}` reference; Pi and Hermes use their
   supported command-backed provider credential mechanisms.
-- **RedPill API key** and any credential a connection takes over live only in
-  the OS credential store (`keyring` 4). The key is loaded into the proxy's
-  memory and swapped for the agent token on the way to the sidecar; it never
-  reaches the window. Previews show `Existing secret` /
+- **Confidential AI profile credentials** and any credential a connection
+  takes over live only in the OS credential store (`keyring` 4). Each profile
+  has its own credential entry; the profile JSON stores only its name,
+  provider, endpoint, authentication kind, and verification time. The active
+  credential is loaded into the proxy's memory and swapped for the agent token
+  on the way to the sidecar; it never reaches the window. Previews show `Existing secret` /
   `Managed local credential` in place of values; the connection record stores
   an opaque `secret_ref`. Record, tokens, and temp files are owner-only
   (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
   when read; config writes hold a cross-process file lock from the revision
   check to the final rename.
+- **Confidential AI profiles** are verified before they are saved. A profile
+  combines a user-visible name, provider, endpoint, and authentication method.
+  Settings offers local, self-hosted branding for the Phala and RedPill
+  presets plus a custom HTTPS endpoint. New providers or endpoints require a
+  new key, so a credential is never silently reused. Profile metadata is
+  written atomically and the current API-key authentication model is shaped so
+  an OAuth account can be added as another auth kind later. A successful
+  `Verify and Save` selects the profile but leaves protection off until the
+  user explicitly starts it. Legacy single-service settings and credentials
+  migrate to the default profile on first launch.
 - **Model catalog** is the verified service's `GET /v1/models`, read through
   the sidecar and published atomically with the identity. It is the single
   source of model truth: agents choose from it, the proxy serves it on
@@ -163,10 +175,11 @@ and CI pass to the Tauri CLI as
 neutral, and the window title is set at run time from `brand.rs`. The
 committed outputs are for the default brand; CI regenerates them and fails on
 drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
-the `Assets.car` that supplies native light and dark appearances; the generated
-ICNS keeps the dark appearance as the stable fallback for older macOS versions
-and the other desktop platforms. The scripts validate their inputs and fail
-fast on a missing field, asset, digest, or named app icon.
+the native `Assets.car`; it and the PNG, ICO, and ICNS fallbacks all use one
+dark-green app icon with the original green Dstack mark. The scripts validate
+their inputs and fail fast on a missing field, asset, digest, or named app
+icon. Normal and protected tray templates are generated from the same local
+mark; the protected variant adds a small status badge at the lower right.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit

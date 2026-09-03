@@ -1,6 +1,7 @@
 import type {
   AgentPreview,
   AgentStatus,
+  ConfidentialProfile,
   DesktopApi,
   GatewayState,
   RequestActivity,
@@ -28,8 +29,18 @@ export type MockScenario =
 
 const now = Math.floor(Date.now() / 1000);
 
+const REDPILL_PROFILE: ConfidentialProfile = {
+  id: "default",
+  name: "RedPill",
+  provider: "redpill",
+  remoteUrl: "https://tee.redpill.ai",
+  auth: { kind: "apiKey" },
+  verifiedAt: now - 300,
+};
+
 const BASE: GatewayState = {
   status: "stopped",
+  configurationVerification: false,
   proxyUrl: "http://127.0.0.1:4180",
   checks: [],
   activity: [],
@@ -45,7 +56,9 @@ const BASE: GatewayState = {
     failedProof: 0,
   },
   usageRevision: 0,
-  config: { remoteUrl: "https://tee.redpill.ai", requireProductionOs: false },
+  config: { remoteUrl: "https://tee.redpill.ai", requireProductionOs: true },
+  profiles: [REDPILL_PROFILE],
+  activeProfileId: REDPILL_PROFILE.id,
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: true,
 };
@@ -210,7 +223,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "no-key":
       return {
-        state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, apiKeySaved: false },
+        state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, profiles: [{ ...REDPILL_PROFILE, verifiedAt: undefined }], apiKeySaved: false },
         agents: STOPPED_AGENTS,
       };
     case "verifying":
@@ -271,7 +284,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "interactive":
       return {
-        state: { ...BASE, apiKeySaved: false, remoteUrl: BASE.config.remoteUrl },
+        state: { ...BASE, profiles: [{ ...REDPILL_PROFILE, verifiedAt: undefined }], apiKeySaved: false, remoteUrl: BASE.config.remoteUrl },
         agents: STOPPED_AGENTS,
       };
   }
@@ -287,6 +300,7 @@ export function mockApi(name: string | null): DesktopApi {
   let verifyRun = 0;
   let history = [...USAGE_HISTORY];
   let clientKey = "pag_demo_2f8a19c4d7e6b305";
+  const credentialProfiles = new Set(state.apiKeySaved ? [state.activeProfileId] : []);
   const publish = () => listeners.forEach((listener) => listener(state));
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   return {
@@ -316,7 +330,7 @@ export function mockApi(name: string | null): DesktopApi {
     openSupport: async () => undefined,
     start: async (config) => {
       const run = ++verifyRun;
-      state = { ...state, status: "verifying", progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };
+      state = { ...state, status: "verifying", configurationVerification: false, progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };
       publish();
       window.setTimeout(() => {
         if (run !== verifyRun || state.status !== "verifying") {
@@ -331,21 +345,88 @@ export function mockApi(name: string | null): DesktopApi {
       }, 350);
       return state;
     },
-    stop: async () => {
-      verifyRun += 1;
-      state = { ...state, status: "stopped", progress: undefined, identity: undefined, checks: [], catalog: undefined };
+    verifyConfiguration: async (profile, requireProductionOs, key) => {
+      const existing = state.profiles.find((entry) => entry.id === profile.id);
+      const profileChanged = !existing
+        || existing.provider !== profile.provider
+        || existing.remoteUrl.replace(/\/$/, "") !== profile.remoteUrl.replace(/\/$/, "");
+      if ((!state.apiKeySaved || profileChanged) && !key?.trim()) {
+        throw new Error(profileChanged ? "Enter an API key for this profile" : "Enter an API key");
+      }
+      const run = ++verifyRun;
+      state = { ...state, status: "verifying", configurationVerification: true, progress: "Starting the verifier", remoteUrl: profile.remoteUrl, error: undefined };
+      publish();
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      if (run !== verifyRun) throw new Error("Configuration verification was cancelled");
+      if (profile.remoteUrl.endsWith(".invalid")) {
+        state = { ...state, status: "stopped", configurationVerification: false, progress: undefined };
+        publish();
+        throw new Error("The verified gateway did not answer the model list request");
+      }
+      const savedProfile: ConfidentialProfile = {
+        ...profile,
+        auth: { kind: "apiKey" },
+        verifiedAt: Math.floor(Date.now() / 1000),
+      };
+      const profiles = existing
+        ? state.profiles.map((entry) => entry.id === profile.id ? savedProfile : entry)
+        : [...state.profiles, savedProfile];
+      credentialProfiles.add(profile.id);
+      state = {
+        ...state,
+        status: "stopped",
+        configurationVerification: false,
+        progress: undefined,
+        config: { remoteUrl: profile.remoteUrl, requireProductionOs },
+        profiles,
+        activeProfileId: profile.id,
+        remoteUrl: undefined,
+        identity: undefined,
+        checks: [],
+        catalog: CATALOG,
+        apiKeySaved: credentialProfiles.has(profile.id),
+      };
       publish();
       return state;
     },
-    setApiKey: async (key) => {
-      if (!key.trim()) {
-        throw new Error("Enter an API key");
-      }
-      state = { ...state, apiKeySaved: true };
+    activateProfile: async (profileId) => {
+      const profile = state.profiles.find((entry) => entry.id === profileId);
+      if (!profile) throw new Error("Confidential AI profile not found");
+      state = {
+        ...state,
+        config: { ...state.config, remoteUrl: profile.remoteUrl },
+        activeProfileId: profile.id,
+        apiKeySaved: true,
+        catalog: undefined,
+      };
+      publish();
+      return state;
+    },
+    deleteProfile: async (profileId) => {
+      if (state.profiles.length === 1) throw new Error("At least one Confidential AI profile is required");
+      const profiles = state.profiles.filter((entry) => entry.id !== profileId);
+      credentialProfiles.delete(profileId);
+      const active = state.activeProfileId === profileId ? profiles[0] : state.profiles.find((entry) => entry.id === state.activeProfileId);
+      if (!active) throw new Error("Confidential AI profile not found");
+      state = {
+        ...state,
+        profiles,
+        activeProfileId: active.id,
+        config: { ...state.config, remoteUrl: active.remoteUrl },
+        apiKeySaved: credentialProfiles.has(active.id),
+        catalog: undefined,
+      };
+      publish();
+      return state;
+    },
+    stop: async () => {
+      verifyRun += 1;
+      state = { ...state, status: "stopped", configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
       publish();
       return state;
     },
     clearApiKey: async () => {
+      credentialProfiles.delete(state.activeProfileId);
       state = { ...state, apiKeySaved: false };
       publish();
       return state;

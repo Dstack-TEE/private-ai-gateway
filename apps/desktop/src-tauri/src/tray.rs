@@ -44,8 +44,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         autostart,
     });
 
-    let icon =
-        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
+    let icon = tray_icon(false)?;
     TrayIconBuilder::with_id("gateway")
         .icon(icon)
         .icon_as_template(true)
@@ -53,7 +52,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle" => app.state::<GatewayManager>().toggle(app),
+            "toggle" => toggle_or_open_settings(app),
             "open" => show_window(app),
             "settings" => {
                 show_window(app);
@@ -68,6 +67,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+fn toggle_or_open_settings(app: &AppHandle) {
+    let manager = app.state::<GatewayManager>();
+    let Ok(state) = manager.snapshot() else {
+        return;
+    };
+    let running = matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
+    if !running && !state.api_key_saved {
+        sync(app, &state);
+        show_window(app);
+        let _ = app.emit(crate::menu::NAVIGATE_EVENT, "settings");
+        return;
+    }
+    manager.toggle(app);
 }
 
 fn sync_autostart(app: &AppHandle) {
@@ -94,7 +108,21 @@ pub fn sync(app: &AppHandle, state: &GatewayState) {
     }
     if let Some(tray) = app.tray_by_id("gateway") {
         let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
+        if let Ok(icon) = tray_icon(
+            state.status == "verified" && !state.configuration_verification && state.api_key_saved,
+        ) {
+            let _ = tray.set_icon(Some(icon));
+        }
     }
+}
+
+fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    let bytes = if protected {
+        include_bytes!("../../assets/tray/trayTemplateProtected@2x.png").as_slice()
+    } else {
+        include_bytes!("../../assets/tray/trayTemplate@2x.png").as_slice()
+    };
+    tauri::image::Image::from_bytes(bytes)
 }
 
 pub fn show_window(app: &AppHandle) {
@@ -109,7 +137,9 @@ pub fn show_window(app: &AppHandle) {
 /// Checkmark state and the plain-language status row for the gateway state.
 fn menu_state(state: &GatewayState) -> (bool, &'static str) {
     match state.status.as_str() {
+        "verifying" if state.configuration_verification => (false, "Verifying configuration"),
         "verifying" => (true, "Starting - verifying service"),
+        "verified" if state.configuration_verification => (false, "Configuration verified"),
         "verified" if !state.api_key_saved => (true, "Verified - add your API key"),
         "verified" => (true, "Ready - requests protected"),
         "blocked" => (true, "Blocked - service identity changed"),

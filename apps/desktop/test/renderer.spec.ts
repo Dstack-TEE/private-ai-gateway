@@ -46,18 +46,22 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
     images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
   );
   expect(brandIcons).toHaveLength(3);
-  expect(brandIcons.every(({ source }) => source.includes("brand-mark-light") && !source.startsWith("data:"))).toBe(true);
-  await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark/);
+  expect(brandIcons.every(({ source }) => /brand-mark-(light|dark)/.test(source) && !source.startsWith("data:"))).toBe(true);
+  await expect(page.locator(".tray-template-icon")).toHaveClass(/is-protected/);
+  await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark-protected/);
 
   await tray.getByRole("menuitem", { name: "Settings…" }).click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
 
   await page.getByRole("button", { name: "Configure…" }).click();
-  const dialogBox = await page.getByRole("dialog", { name: "Confidential AI settings" }).boundingBox();
+  const settingsDialog = page.getByRole("dialog", { name: "Confidential AI settings" });
+  const dialogBox = await settingsDialog.boundingBox();
   expect(dialogBox).not.toBeNull();
   const frameCenter = frameBox!.x + frameBox!.width / 2;
   const dialogCenter = dialogBox!.x + dialogBox!.width / 2;
   expect(Math.abs(frameCenter - dialogCenter)).toBeLessThanOrEqual(2);
+  await expect(settingsDialog).toBeFocused();
+  await expect(settingsDialog).toHaveCSS("outline-style", "none");
 
 });
 
@@ -72,11 +76,17 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   const service = page.getByRole("dialog", { name: "Confidential AI settings" });
   await expect(service).toBeVisible();
   await expect(service.getByRole("button", { name: "Verify and Save" })).toBeVisible();
-  await expect(service.getByRole("button", { name: "Done" })).toBeVisible();
+  const done = service.getByRole("button", { name: "Done" });
+  await expect(done).toBeVisible();
+  await expect(done).not.toHaveClass(/primary/);
+  await expect(service).toBeFocused();
   await service.getByLabel("RedPill API key").fill("sk-test-123");
   await service.getByRole("button", { name: "Verify and Save" }).click();
   await expect(service.getByText("6 models discovered from the verified endpoint")).toBeVisible();
-  await service.getByRole("button", { name: "Done" }).click();
+  await done.click();
+
+  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
 
   await nav(page, "Overview").focus();
   await page.keyboard.press("ArrowDown");
@@ -86,7 +96,8 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await nav(page, "Settings").click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
-  await expect(page.getByText("Protected", { exact: true })).toBeVisible();
+  await expect(page.locator("#service-settings-title + .inset .row-note")).toContainText("Verified configuration");
+  await page.getByRole("switch", { name: "Start protection" }).click();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
 
   await nav(page, "Overview").click();
@@ -157,11 +168,16 @@ test("overview shows five agents, five current-session records, truthful copy su
   await overviewProof.getByRole("button", { name: "Done" }).click();
 
   const session = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Session usage" }) });
+  const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
   for (const label of ["Requests", "Tokens", "Cost", "Protected"]) {
     await expect(session.getByText(label, { exact: true })).toBeVisible();
   }
+  await expect(session.locator("small")).toHaveCount(0);
+  for (const module of [localApi, session]) {
+    const height = await module.locator(".module").evaluate((node) => node.getBoundingClientRect().height);
+    expect(height).toBe(136);
+  }
 
-  const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
   const endpoint = localApi.getByRole("button", { name: /Local endpoint/ });
   await endpoint.hover();
   await expect(endpoint.getByText("Copy", { exact: true })).toBeVisible();
@@ -252,6 +268,56 @@ test("model catalog is discovered inside Confidential AI settings, scrollable, p
   await expect(privacy).toContainText("SPKI-pinned TLS");
   await expect(privacy.locator("details")).toHaveCount(0);
   await expect(privacy.getByRole("heading", { name: "Verification checks" })).toBeVisible();
+});
+
+test("Confidential AI presets keep provider credentials scoped and settings stay compact", async ({ page }) => {
+  await page.setViewportSize({ width: 940, height: 720 });
+  await page.goto("/?mock=ready");
+  await nav(page, "Settings").click();
+  await page.getByRole("switch", { name: "Stop protection" }).click();
+  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+
+  const advanced = page.locator("details.settings-advanced");
+  await expect(advanced).not.toHaveAttribute("open", "");
+  await advanced.locator("summary").click();
+  await expect(advanced.getByText("Allow development OS", { exact: true })).toBeVisible();
+  await expect(advanced.getByRole("checkbox")).not.toBeChecked();
+
+  const localApi = page.locator("section", { has: page.getByRole("heading", { name: "Local API", level: 2 }) });
+  await expect(localApi.getByText("Endpoint", { exact: true })).toHaveCount(0);
+  await expect(localApi.getByText("Status", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Configure…" }).click();
+  const service = page.getByRole("dialog", { name: "Confidential AI settings" });
+  await expect(service.getByRole("button", { name: "RedPill https://tee.redpill.ai" })).toHaveAttribute("aria-pressed", "true");
+  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
+  await expect(service.getByLabel("Service endpoint")).toBeDisabled();
+
+  await service.getByRole("button", { name: "Phala https://inference.phala.com" }).click();
+  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
+  await expect(service.getByLabel("Phala API key")).toBeVisible();
+  await expect(service.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
+  await expect(service.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
+
+  await service.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await expect(service.getByLabel("Service endpoint")).toBeEnabled();
+  await service.getByLabel("Service endpoint").fill("https://private.example.com");
+  await expect(service.getByLabel("API key")).toBeVisible();
+
+  await service.getByRole("button", { name: "New profile" }).click();
+  await expect(service.getByLabel("Profile", { exact: true })).toHaveValue("");
+  await service.getByLabel("Profile name").fill("Private Lab");
+  await service.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await service.getByLabel("Service endpoint").fill("https://private.example.com");
+  await service.getByLabel("API key").fill("sk-profile-test");
+  await service.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(service.getByText("Verified configuration", { exact: true })).toBeVisible();
+  await expect(service.getByLabel("Profile", { exact: true }).locator("option", { hasText: "Private Lab" })).toHaveCount(1);
+  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+
+  await service.getByLabel("Profile", { exact: true }).selectOption("default");
+  await expect(service.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
+  await expect(service.getByLabel("RedPill API key")).toBeVisible();
 });
 
 test("fail-closed states stay explicit and never show the success effects", async ({ page }) => {

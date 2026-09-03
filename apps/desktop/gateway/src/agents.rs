@@ -539,9 +539,11 @@ fn codex_catalog(
             );
             value.insert(
                 "default_reasoning_level".to_string(),
-                reasoning
-                    .then(|| serde_json::Value::String("medium".to_string()))
-                    .unwrap_or_default(),
+                if reasoning {
+                    serde_json::Value::String("medium".to_string())
+                } else {
+                    serde_json::Value::Null
+                },
             );
             value.insert(
                 "supported_reasoning_levels".to_string(),
@@ -564,9 +566,11 @@ fn codex_catalog(
             value.insert("support_verbosity".to_string(), serde_json::Value::Bool(verbosity));
             value.insert(
                 "default_verbosity".to_string(),
-                verbosity
-                    .then(|| serde_json::Value::String("medium".to_string()))
-                    .unwrap_or_default(),
+                if verbosity {
+                    serde_json::Value::String("medium".to_string())
+                } else {
+                    serde_json::Value::Null
+                },
             );
             value.insert("supports_image_detail_original".to_string(), serde_json::Value::Bool(image));
             value.insert("context_window".to_string(), context.clone());
@@ -1605,7 +1609,7 @@ fn find_cli_in_paths(agent: Agent, paths: &[PathBuf]) -> Option<PathBuf> {
     agent
         .cli_names()
         .iter()
-        .find_map(|name| cli_in_paths(name, &paths))
+        .find_map(|name| cli_in_paths(name, paths))
 }
 
 fn cli_installed(agent: Agent, home: &Path, tool_env: bool) -> bool {
@@ -1744,8 +1748,7 @@ pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) 
             Err(error) => return Err(error),
         };
         if current.as_deref() != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "the file changed on disk since it was read",
             ));
         }
