@@ -152,15 +152,19 @@ asset files next to it. `npm run prepare:brand` (run automatically by
 brand, default `dstack`) projects it into `src/renderer/generated/` (the
 `brand.ts` module plus the light and dark wordmark SVGs, imported as Vite
 assets so they ship self-hosted under the production CSP),
-`gateway/src/brand.rs`, the five desktop icons in `src-tauri/icons`, the
-template tray icon in `assets/tray`, and an ignored
+`gateway/src/brand.rs`, the cross-platform fallback icons and macOS Icon
+Composer asset in `src-tauri/icons`, the template tray icon in `assets/tray`,
+and an ignored
 `src-tauri/tauri.brand.conf.json` overlay (product name, identifier, bundle
 metadata only) that `dev`, `dist`, and CI pass to the Tauri CLI as
 `--config`; the tracked `tauri.conf.json` keeps the window list and stays
 neutral, and the window title is set at run time from `brand.rs`. The
 committed outputs are for the default brand; CI regenerates them and fails on
-drift. The script validates everything before writing anything and fails fast
-on a missing field, a missing asset, or a changed asset digest.
+drift. On macOS 26 the `.icon` asset supplies native light and dark appearances;
+the generated ICNS keeps the dark appearance as the stable fallback for older
+macOS versions and the other desktop platforms. The script validates everything
+before writing anything and fails fast on a missing field, a missing asset, or a
+changed asset digest.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit
@@ -216,6 +220,6 @@ credential store on macOS, Windows, and (under `dbus-run-session` with
 gnome-keyring) Linux.
 
 The `Desktop macOS` GitHub Actions workflow builds an unsigned DMG and ZIP on
-`macos-latest`, launches the packaged tray app, runs the bundled sidecar
+`macos-26`, launches the packaged tray app, runs the bundled sidecar
 against `https://tee.redpill.ai`, checks the verified local `/v1/models` path,
 and uploads a screenshot plus codesign, Gatekeeper, and size inspection output.

@@ -22,13 +22,14 @@
     "accentDark": "#7fd3a2",
     "brandColor": "#C6EB3D",
     "iconBackground": "#101a12",
-    "iconBackgroundLight": "#e8efe9",
+    "iconBackgroundLight": "#c6eb3d",
     "iconBackgroundDark": "#101a12"
   },
   "assets": {
     "appIconMark": "icon-primary.svg",
     "appIconLightMark": "icon-dark.svg",
     "appIconDarkMark": "icon-primary.svg",
+    "appIconWhiteAsCutout": true,
     "trayTemplate": "icon-dark.svg",
     "wordmarkLight": "horizontal-primary.svg",
     "wordmarkDark": "horizontal-dark.svg"

@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -70,7 +70,12 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run prepare:brand
-          git diff --exit-code -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico assets/tray
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon assets/tray)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons assets/tray
+            exit 1
+          fi
 
       - name: Verify desktop source
         run: |
@@ -168,6 +173,9 @@ jobs:
           test -x "$executable"
           test -x "$aci"
           test -x "$app_bundle/Contents/MacOS/private-ai-gateway-helper"
+          test -f "$app_bundle/Contents/Resources/Assets.car"
+          test -f "$app_bundle/Contents/Resources/icon.icns"
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")"
           test -f "$dmg"
           test -f "$zip"
 
@@ -177,6 +185,9 @@ jobs:
             echo "dmg=$dmg"
             echo "zip=$zip"
             echo "aci=$aci"
+            echo "bundle_icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")"
+            echo "assets_car=$app_bundle/Contents/Resources/Assets.car"
+            echo "legacy_icon=$app_bundle/Contents/Resources/icon.icns"
             echo "app_bytes=$(du -sk "$app_bundle" | awk '{print $1 * 1024}')"
             echo "dmg_bytes=$(stat -f '%z' "$dmg")"
             echo "zip_bytes=$(stat -f '%z' "$zip")"

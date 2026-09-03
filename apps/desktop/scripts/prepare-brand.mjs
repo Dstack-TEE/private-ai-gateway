@@ -7,7 +7,7 @@
 //   src/renderer/generated/          brand.ts, app/tray icons, and wordmark SVGs
 //   gateway/src/brand.rs              Rust constants (tray, menus, data dir)
 //   src-tauri/tauri.brand.conf.json   Tauri config overlay (ignored; passed as --config)
-//   src-tauri/icons/                  the five desktop icons the bundle lists
+//   src-tauri/icons/                  legacy desktop icons and Icon Composer asset
 //   assets/tray/trayTemplate*.png     monochrome template tray icon
 //
 // The default brand is `dstack`; `PRIVATE_AI_GATEWAY_BRAND=<id>` selects
@@ -27,8 +27,8 @@ import { Resvg } from "@resvg/resvg-js";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const brandId = process.env.PRIVATE_AI_GATEWAY_BRAND ?? "dstack";
-/** The icon files the desktop bundle actually ships (tauri.conf.json bundle.icon). */
-const DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
+/** Cross-platform and legacy icon files listed alongside the native `.icon` asset. */
+const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
 if (!/^[a-z][a-z0-9-]*$/.test(brandId)) {
   throw new Error(`PRIVATE_AI_GATEWAY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
 }
@@ -64,6 +64,7 @@ const optional = {
   "theme.iconBackgroundDark": "color",
   "assets.appIconLightMark": "file",
   "assets.appIconDarkMark": "file",
+  "assets.appIconWhiteAsCutout": "boolean",
 };
 const problems = [];
 for (const [key, kind] of Object.entries(required)) {
@@ -81,7 +82,9 @@ for (const [key, kind] of Object.entries(optional)) {
   if (value === undefined) {
     continue;
   }
-  if (typeof value !== "string" || !value.trim()) {
+  if (kind === "boolean" && typeof value !== "boolean") {
+    problems.push(`${key} must be a boolean when provided`);
+  } else if (kind !== "boolean" && (typeof value !== "string" || !value.trim())) {
     problems.push(`${key} must be a non-empty string when provided`);
   } else if (kind === "color" && !/^#[0-9a-f]{6}$/i.test(value)) {
     problems.push(`${key} must be a #rrggbb colour`);
@@ -115,14 +118,30 @@ const appIconDarkMark = await readFile(
   path.join(brandDir, brand.assets.appIconDarkMark ?? brand.assets.appIconMark),
   "utf8",
 );
+const appIconWhiteAsCutout = brand.assets.appIconWhiteAsCutout ?? false;
 const appIconLightSvg = composeAppIcon(
   appIconLightMark,
   brand.theme.iconBackgroundLight ?? brand.theme.iconBackground,
+  appIconWhiteAsCutout,
 );
 const appIconDarkSvg = composeAppIcon(
   appIconDarkMark,
   brand.theme.iconBackgroundDark ?? brand.theme.iconBackground,
+  appIconWhiteAsCutout,
 );
+const appIconComposerManifest = composeIconComposerManifest(
+  brand.theme.iconBackgroundLight ?? brand.theme.iconBackground,
+  brand.theme.iconBackgroundDark ?? brand.theme.iconBackground,
+);
+const appIconLightLayer = render(
+  composeIconLayer(appIconLightMark, appIconWhiteAsCutout),
+  1024,
+);
+const appIconDarkLayer = render(
+  composeIconLayer(appIconDarkMark, appIconWhiteAsCutout),
+  1024,
+);
+const trayTemplateSvg = withWhiteCutouts(await asset("trayTemplate"), appIconWhiteAsCutout);
 
 // --- renderer -------------------------------------------------------------
 // Renderer images are generated next to the module and imported as Vite assets,
@@ -132,7 +151,7 @@ const generatedDir = path.join(appRoot, "src/renderer/generated");
 await mkdir(generatedDir, { recursive: true });
 await writeFile(path.join(generatedDir, "app-icon-light.svg"), appIconLightSvg);
 await writeFile(path.join(generatedDir, "app-icon-dark.svg"), appIconDarkSvg);
-await copyFile(path.join(brandDir, brand.assets.trayTemplate), path.join(generatedDir, "tray-mark.svg"));
+await writeFile(path.join(generatedDir, "tray-mark.svg"), trayTemplateSvg);
 await copyFile(path.join(brandDir, brand.assets.wordmarkLight), path.join(generatedDir, "wordmark-light.svg"));
 await copyFile(path.join(brandDir, brand.assets.wordmarkDark), path.join(generatedDir, "wordmark-dark.svg"));
 const rendererBrand = {
@@ -208,9 +227,18 @@ await writeFile(
 );
 
 // --- icons ------------------------------------------------------------------
-// App icon: the official mark centred on a brand-coloured rounded square
-// (macOS icon grid: 1024 canvas, 824 shape, 232 corner radius). The mark is
-// embedded unchanged.
+// The macOS 26 Icon Composer package provides native light/dark materials.
+// Tauri compiles it to Assets.car and keeps the ICNS below as the fallback for
+// older macOS versions. Other desktop platforms continue to use the generated
+// PNG/ICO set.
+const composerDir = path.join(appRoot, "src-tauri/icons/AppIcon.icon");
+await rm(composerDir, { recursive: true, force: true });
+await mkdir(path.join(composerDir, "Assets"), { recursive: true });
+await writeFile(path.join(composerDir, "icon.json"), `${JSON.stringify(appIconComposerManifest, null, 2)}\n`);
+await writeFile(path.join(composerDir, "Assets/mark-light.png"), appIconLightLayer);
+await writeFile(path.join(composerDir, "Assets/mark-dark.png"), appIconDarkLayer);
+
+// Legacy app icon: the dark appearance is the stable cross-platform fallback.
 const scratch = path.join(appRoot, "brand/.generated");
 await rm(scratch, { recursive: true, force: true });
 await mkdir(scratch, { recursive: true });
@@ -220,7 +248,7 @@ await writeFile(appIconPng, render(appIconDarkSvg, 1024));
 // lists (tauri.conf.json `bundle.icon`) are copied into the tracked set.
 const iconSet = path.join(scratch, "icons");
 execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "icon", appIconPng, "-o", iconSet], { stdio: "ignore" });
-for (const file of DESKTOP_ICONS) {
+for (const file of LEGACY_DESKTOP_ICONS) {
   const source = path.join(iconSet, file);
   const target = path.join(appRoot, "src-tauri/icons", file);
   if (file === "icon.icns") {
@@ -234,11 +262,10 @@ for (const file of DESKTOP_ICONS) {
 
 // Menu bar: a monochrome template of the official mark (alpha only; macOS
 // tints it), never the coloured logo.
-const tray = await asset("trayTemplate");
 const trayDir = path.join(appRoot, "assets/tray");
 await mkdir(trayDir, { recursive: true });
-await writeFile(path.join(trayDir, "trayTemplate.png"), render(tray, 18));
-await writeFile(path.join(trayDir, "trayTemplate@2x.png"), render(tray, 36));
+await writeFile(path.join(trayDir, "trayTemplate.png"), render(trayTemplateSvg, 18));
+await writeFile(path.join(trayDir, "trayTemplate@2x.png"), render(trayTemplateSvg, 36));
 await rm(scratch, { recursive: true, force: true });
 
 console.log(`Prepared brand ${brandId}: ${brand.productName} (${brand.bundle.identifier})`);
@@ -262,16 +289,80 @@ function render(svg, size) {
   return new Resvg(svg, { fitTo: { mode: "width", value: size } }).render().asPng();
 }
 
-function composeAppIcon(mark, background) {
+function composeAppIcon(mark, background, whiteAsCutout) {
   const { width, height } = svgSize(mark);
   const inset = 824 * 0.62;
   const scale = inset / Math.max(width, height);
   const offsetX = 512 - (width * scale) / 2;
   const offsetY = 512 - (height * scale) / 2;
+  const highlight = mixHex(background, "#ffffff", 0.18);
+  const shade = mixHex(background, "#000000", 0.12);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-<rect x="100" y="100" width="824" height="824" rx="185" fill="${background}"/>
-<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${inner(mark)}</g>
+<defs>
+<linearGradient id="icon-background" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${highlight}"/><stop offset="1" stop-color="${shade}"/></linearGradient>
+<linearGradient id="icon-highlight" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff" stop-opacity=".22"/><stop offset=".45" stop-color="#fff" stop-opacity="0"/></linearGradient>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#icon-background)"/>
+<rect x="101" y="101" width="822" height="822" rx="184" fill="url(#icon-highlight)" stroke="#fff" stroke-opacity=".16" stroke-width="2"/>
+<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>
 </svg>`;
+}
+
+function composeIconLayer(mark, whiteAsCutout) {
+  const { width, height } = svgSize(mark);
+  const inset = 1024 * 0.5;
+  const scale = inset / Math.max(width, height);
+  const offsetX = 512 - (width * scale) / 2;
+  const offsetY = 512 - (height * scale) / 2;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>
+</svg>`;
+}
+
+function composeIconComposerManifest(lightBackground, darkBackground) {
+  return {
+    fill: { "automatic-gradient": iconComposerColor(lightBackground) },
+    "fill-specializations": [
+      { appearance: "dark", value: { "automatic-gradient": iconComposerColor(darkBackground) } },
+    ],
+    groups: [
+      {
+        "blur-material": 0.08,
+        layers: [
+          {
+            hidden: false,
+            "hidden-specializations": [{ appearance: "dark", value: true }],
+            "image-name": "mark-light.png",
+            name: "Dstack mark light",
+            position: { scale: 1, "translation-in-points": [0, 0] },
+          },
+          {
+            hidden: true,
+            "hidden-specializations": [{ appearance: "dark", value: false }],
+            "image-name": "mark-dark.png",
+            name: "Dstack mark dark",
+            position: { scale: 1, "translation-in-points": [0, 0] },
+          },
+        ],
+        lighting: "individual",
+        name: "Dstack mark",
+        shadow: { kind: "layer-color", opacity: 0.28 },
+        specular: true,
+        translucency: { enabled: true, value: 0.12 },
+      },
+    ],
+    "supported-platforms": { circles: ["watchOS"], squares: "shared" },
+  };
+}
+
+function iconComposerColor(hex) {
+  const [red, green, blue] = hex.slice(1).match(/../g).map((part) => Number.parseInt(part, 16) / 255);
+  return `extended-srgb:${red.toFixed(5)},${green.toFixed(5)},${blue.toFixed(5)},1.00000`;
+}
+
+function mixHex(source, target, ratio) {
+  const channels = [source, target].map((color) => color.slice(1).match(/../g).map((part) => Number.parseInt(part, 16)));
+  return `#${channels[0].map((value, index) => Math.round(value + (channels[1][index] - value) * ratio).toString(16).padStart(2, "0")).join("")}`;
 }
 
 function svgSize(svg) {
@@ -294,6 +385,30 @@ function inner(svg) {
     throw new Error("The app icon mark is not an SVG document");
   }
   return svg.slice(open + 1, close);
+}
+
+function markContent(svg, whiteAsCutout) {
+  const content = inner(svg);
+  if (!whiteAsCutout) {
+    return content;
+  }
+  const whitePath = /<path\b[^>]*\bfill="(?:white|#fff(?:fff)?)"[^>]*\/>/gi;
+  const cutouts = content.match(whitePath) ?? [];
+  if (cutouts.length === 0) {
+    throw new Error("assets.appIconWhiteAsCutout requires at least one white path in the app icon mark");
+  }
+  const { width, height } = svgSize(svg);
+  const maskPaths = cutouts.map((path) => path.replace(/fill="[^"]+"/i, 'fill="black"')).join("");
+  return `<defs><mask id="app-icon-cutouts" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"><rect width="${width}" height="${height}" fill="white"/>${maskPaths}</mask></defs><g mask="url(#app-icon-cutouts)">${content.replace(whitePath, "")}</g>`;
+}
+
+function withWhiteCutouts(svg, whiteAsCutout) {
+  if (!whiteAsCutout) {
+    return svg;
+  }
+  const open = svg.indexOf(">", svg.indexOf("<svg"));
+  const close = svg.lastIndexOf("</svg>");
+  return `${svg.slice(0, open + 1)}${markContent(svg, true)}${svg.slice(close)}`;
 }
 
 async function exists(file) {
