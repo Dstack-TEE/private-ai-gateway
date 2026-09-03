@@ -30,7 +30,7 @@ use private_ai_gateway::middleware::control::ControlClient;
 use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
-use private_ai_gateway::middleware::types::{OrganizationScope, Payer, TenantIdentity};
+use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
 use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -613,7 +613,6 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "userId": 7,
             "organizationId": 11,
             "workspaceId": 13,
-            "payer": "organization",
             "virtualKeyId": 3
         }),
     )
@@ -629,7 +628,6 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     assert_eq!(report["userId"], json!(7));
     assert_eq!(report["organizationId"], json!(11));
     assert_eq!(report["workspaceId"], json!(13));
-    assert_eq!(report["payer"], json!("organization"));
     assert!(report.get("billingOwnerType").is_none());
     assert!(report.get("billingOwnerId").is_none());
     assert_eq!(report["virtualKeyId"], json!(3));
@@ -947,7 +945,8 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "report usage must be pre-cost-injection"
     );
     assert_eq!(report["userId"], json!(7));
-    assert_eq!(report["payer"], json!("user"));
+    assert!(report.get("organizationId").is_none());
+    assert!(report.get("workspaceId").is_none());
     assert_eq!(report["isStreaming"], json!(false));
 }
 
@@ -974,7 +973,6 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         spend_mode: None,
         tenant: TenantIdentity {
             user_id: Some(9),
-            payer: Some(Payer::Organization),
             organization: Some(OrganizationScope {
                 organization_id: 11,
                 workspace_id: 13,
@@ -1024,7 +1022,6 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     assert_eq!(report["userId"], json!(9));
     assert_eq!(report["organizationId"], json!(11));
     assert_eq!(report["workspaceId"], json!(13));
-    assert_eq!(report["payer"], json!("organization"));
 }
 
 #[tokio::test]
@@ -1686,10 +1683,9 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
     let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
     assert_eq!(report["status"], json!(502), "internal failure, not 499");
     assert_eq!(report["errorSource"], json!("gateway"));
-    assert!(
-        report.get("payer").is_none(),
-        "anonymous failure reports must not claim a payer"
-    );
+    assert!(report.get("userId").is_none());
+    assert!(report.get("organizationId").is_none());
+    assert!(report.get("workspaceId").is_none());
     assert_eq!(
         report["selectedRouteId"],
         json!("openai:gpt"),
