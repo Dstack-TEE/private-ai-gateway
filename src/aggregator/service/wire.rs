@@ -390,14 +390,15 @@ pub struct GatewayRequestContext {
     pub user_tier: Option<String>,
 }
 
-/// One ordered failover candidate: a route id to try plus the request
-/// body to send to it. Callers may share a single body across candidates
-/// or give each candidate its own body. Candidates are tried in order
-/// until one succeeds.
+/// One ordered failover candidate: a route id to try, the request body to
+/// send to it, and the upstream path the body is shaped for. Callers may
+/// share a single body across candidates or give each candidate its own.
+/// Candidates are tried in order until one succeeds.
 #[derive(Debug, Clone)]
 pub struct ForwardCandidate {
     pub route_id: String,
     pub body: Vec<u8>,
+    pub path: &'static str,
 }
 
 /// Provider HTTP statuses that trigger failover to the next candidate when

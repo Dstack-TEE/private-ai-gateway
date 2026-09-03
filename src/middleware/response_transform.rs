@@ -1079,6 +1079,260 @@ fn anthropic_complete_to_openai(response: Value) -> Value {
     })
 }
 
+// ── OpenAI chat.completion → Responses API object ────────────────────────────
+
+/// The request fields a Responses object echoes back, taken from the client's
+/// Responses request. `store` is always false: the gateway keeps nothing.
+pub fn responses_echo(params: &Value) -> Value {
+    let mut echo = serde_json::Map::new();
+    for key in [
+        "instructions",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "text",
+        "reasoning",
+        "metadata",
+        "truncation",
+        "user",
+    ] {
+        if let Some(value) = params.get(key) {
+            echo.insert(key.into(), value.clone());
+        }
+    }
+    echo.insert("store".into(), Value::Bool(false));
+    Value::Object(echo)
+}
+
+/// Rebuild a chat completion as the Responses object answering the client:
+/// the first choice's reasoning, text (or refusal) and tool calls become
+/// output items in that order, `finish_reason` becomes `status`, and the
+/// usage buckets take their Responses names. `echo` supplies the request
+/// fields the object repeats.
+pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
+    let choice = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .cloned();
+    let message = choice
+        .as_ref()
+        .and_then(|choice| choice.get("message"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let id = match response.get("id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => format!("resp_{}", now_millis()),
+    };
+
+    let mut output: Vec<Value> = Vec::new();
+    if let Some(text) = reasoning_text(&message) {
+        let item_id = item_id("rs", &id, output.len());
+        output.push(reasoning_item(&item_id, text, "completed"));
+    }
+    if choice.is_some() {
+        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
+        let refusal = message
+            .get("refusal")
+            .and_then(Value::as_str)
+            .filter(|refusal| !refusal.is_empty());
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let part = match refusal {
+            Some(refusal) => Some(refusal_part(refusal)),
+            // A turn with neither text nor tool calls is still an (empty) message.
+            None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
+            None => None,
+        };
+        if let Some(part) = part {
+            let item_id = item_id("msg", &id, output.len());
+            output.push(message_item(&item_id, part, "completed"));
+        }
+        for call in &tool_calls {
+            let function = call.get("function");
+            output.push(function_call_item(
+                call.get("id").and_then(Value::as_str).unwrap_or(""),
+                function
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                "completed",
+            ));
+        }
+    }
+
+    let error = response
+        .get("error")
+        .filter(|error| !error.is_null())
+        .cloned();
+    let (status, incomplete_details) = match &error {
+        Some(_) => ("failed", Value::Null),
+        None => responses_terminal(
+            choice
+                .as_ref()
+                .and_then(|choice| choice.get("finish_reason"))
+                .and_then(Value::as_str),
+        ),
+    };
+    responses_object(
+        echo,
+        ResponsesHead {
+            id: &id,
+            created_at: now_secs(),
+            model: response.get("model").cloned().unwrap_or(Value::Null),
+            status,
+            incomplete_details,
+            error: error.unwrap_or(Value::Null),
+        },
+        output,
+        Some(responses_usage(response.get("usage"))),
+    )
+}
+
+/// The per-response fields of a Responses object, beside the echoed request
+/// fields and the output.
+pub(super) struct ResponsesHead<'a> {
+    pub id: &'a str,
+    pub created_at: u64,
+    pub model: Value,
+    pub status: &'a str,
+    pub incomplete_details: Value,
+    pub error: Value,
+}
+
+/// Assemble a Responses object: the echoed request fields, the head, the
+/// output items, and usage where the lifecycle has produced one (`null` on the
+/// snapshots a stream opens with).
+pub(super) fn responses_object(
+    echo: &Value,
+    head: ResponsesHead<'_>,
+    output: Vec<Value>,
+    usage: Option<Value>,
+) -> Value {
+    let mut object = echo.as_object().cloned().unwrap_or_default();
+    object.extend(
+        [
+            ("id", json!(head.id)),
+            ("object", json!("response")),
+            ("created_at", json!(head.created_at)),
+            ("model", head.model),
+            ("status", json!(head.status)),
+            ("incomplete_details", head.incomplete_details),
+            ("error", head.error),
+            ("output", Value::Array(output)),
+            ("usage", usage.unwrap_or(Value::Null)),
+        ]
+        .map(|(key, value)| (key.to_string(), value)),
+    );
+    Value::Object(object)
+}
+
+/// An output item id: the kind, the response id, and the item's output index,
+/// so a response with two messages names them apart.
+pub(super) fn item_id(kind: &str, response_id: &str, output_index: usize) -> String {
+    format!("{kind}_{response_id}_{output_index}")
+}
+
+/// The reasoning a chat message or delta carries, under either wire spelling.
+pub(super) fn reasoning_text(message: &Value) -> Option<&str> {
+    ["reasoning_content", "reasoning"]
+        .into_iter()
+        .find_map(|key| message.get(key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "reasoning",
+        "summary": [],
+        "content": [{ "type": "reasoning_text", "text": text }],
+        "status": status,
+    })
+}
+
+pub(super) fn message_item(id: &str, part: Value, status: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "status": status,
+        "content": [part],
+    })
+}
+
+pub(super) fn output_text_part(text: &str) -> Value {
+    json!({ "type": "output_text", "text": text, "annotations": [] })
+}
+
+pub(super) fn refusal_part(refusal: &str) -> Value {
+    json!({ "type": "refusal", "refusal": refusal })
+}
+
+pub(super) fn function_call_item(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    status: &str,
+) -> Value {
+    json!({
+        "id": format!("fc_{call_id}"),
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "status": status,
+    })
+}
+
+/// How a chat `finish_reason` ends a response: the `status`, and the
+/// `incomplete_details` that say why a cut-off one stopped.
+pub(super) fn responses_terminal(finish_reason: Option<&str>) -> (&'static str, Value) {
+    match finish_reason {
+        Some("length") => ("incomplete", json!({ "reason": "max_output_tokens" })),
+        Some("content_filter") => ("incomplete", json!({ "reason": "content_filter" })),
+        _ => ("completed", Value::Null),
+    }
+}
+
+/// Responses `usage` from chat `usage`: the token buckets renamed, with the
+/// cache-read and reasoning counts nested where the Responses schema keeps them.
+pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let input = i64_field(usage, "prompt_tokens");
+    let output = i64_field(usage, "completion_tokens");
+    let cached = usage
+        .get("prompt_tokens_details")
+        .map(|details| i64_field(details, "cached_tokens"))
+        .filter(|cached| *cached != 0)
+        .unwrap_or_else(|| i64_field(usage, "cache_read_input_tokens"));
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .map(|details| i64_field(details, "reasoning_tokens"))
+        .unwrap_or(0);
+    let total = match i64_field(usage, "total_tokens") {
+        0 => input + output,
+        total => total,
+    };
+    json!({
+        "input_tokens": input,
+        "input_tokens_details": { "cached_tokens": cached },
+        "output_tokens": output,
+        "output_tokens_details": { "reasoning_tokens": reasoning },
+        "total_tokens": total,
+    })
+}
+
 fn openai_to_anthropic_messages(response: Value) -> Value {
     let choice = response
         .get("choices")

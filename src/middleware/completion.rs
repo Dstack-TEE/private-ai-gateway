@@ -34,7 +34,7 @@ use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_features;
-use super::request_transform::{build_candidates, Endpoint};
+use super::request_transform::{build_candidates, responses_to_chat_params, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
 use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
@@ -274,6 +274,60 @@ pub async fn run(
     });
 
     let started = Instant::now();
+    let client_endpoint = endpoint;
+    let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
+    let params = if let Some(original) = responses.as_ref() {
+        match responses_to_chat_params(original) {
+            Ok(params) => params,
+            Err(err) => {
+                let model = original.get("model").and_then(Value::as_str).unwrap_or("");
+                let message = err.to_string();
+                log_generated_outcome(
+                    &request_id,
+                    model,
+                    "request_transform",
+                    400,
+                    0,
+                    "",
+                    0,
+                    started,
+                    &detail_snippet(message.as_bytes()),
+                );
+                let body = errors::envelope_bytes(
+                    surface,
+                    errors::error_type(surface, 400),
+                    &message,
+                    Some(&request_id),
+                );
+                return finalize_generated(
+                    400,
+                    body,
+                    &[],
+                    e2ee,
+                    OutcomeCtx {
+                        surface,
+                        service,
+                        endpoint_path,
+                        request_id: &request_id,
+                        model,
+                        started,
+                        received_body: received_body.as_slice(),
+                        requester: &requester,
+                    },
+                );
+            }
+        }
+    } else {
+        params
+    };
+    let endpoint = if responses.is_some() {
+        Endpoint::ChatComplete
+    } else {
+        endpoint
+    };
+    let echo = responses
+        .as_ref()
+        .map(|params| Arc::new(response_transform::responses_echo(params)));
     let (params, reasoning_requirements, exclude_reasoning) = if endpoint == Endpoint::ChatComplete
     {
         match reasoning::normalize_chat_request(&params) {
@@ -449,6 +503,7 @@ pub async fn run(
         endpoint,
         &candidates,
         reasoning_requirements.as_ref(),
+        responses.as_ref(),
     ) {
         Ok(shaped) => shaped,
         Err(err) => {
@@ -488,9 +543,10 @@ pub async fn run(
     };
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
-        .map(|(route_id, body)| ForwardCandidate {
+        .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {
             route_id,
             body: serde_json::to_vec(&body).unwrap_or_default(),
+            path: upstream_endpoint.path(),
         })
         .collect();
 
@@ -585,11 +641,12 @@ pub async fn run(
                         continue;
                     }
                     let pipeline_inputs = StreamPipelineInputs {
-                        endpoint,
+                        endpoint: client_endpoint,
                         endpoint_path,
                         identity: identity.clone(),
                         exclude_reasoning,
                         candidates: candidates.clone(),
+                        echo: echo.clone(),
                     };
                     return build_early_streaming_response(
                         service.clone(),
@@ -630,12 +687,20 @@ pub async fn run(
             // may name a route twice) cannot disagree on format — and
             // same-id copies shape identically, so a skip can never split
             // them either.
-            let selected_format = candidates
+            let selected_candidate = candidates
                 .iter()
                 .find(|c| c.route_id == forward.selected_route)
-                .or_else(|| candidates.first())
-                .map(|c| c.format)
+                .or_else(|| candidates.first());
+            let selected_format = selected_candidate
+                .map(|candidate| candidate.format)
                 .unwrap_or(ProviderFormat::Openai);
+            let native_responses = selected_candidate
+                .is_some_and(|candidate| echo.is_some() && candidate.native_responses);
+            let upstream_endpoint = if echo.is_some() && !native_responses {
+                Endpoint::ChatComplete
+            } else {
+                client_endpoint
+            };
 
             // The buffered forward commits the candidate even on non-2xx; a
             // non-2xx body is normalized rather than transformed, but the receipt
@@ -673,7 +738,7 @@ pub async fn run(
                 };
                 let mut transformed = response_transform::transform_response(
                     selected_format,
-                    endpoint,
+                    upstream_endpoint,
                     upstream_json,
                 );
                 if exclude_reasoning {
@@ -732,6 +797,10 @@ pub async fn run(
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
 
+                if let Some(echo) = echo.as_ref().filter(|_| !native_responses) {
+                    transformed = response_transform::openai_chat_to_responses(transformed, echo);
+                }
+
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
                     if let Some(usage) = transformed.get("usage").cloned() {
                         let cost = pricing::compute_cost(&usage, pricing_config);
@@ -748,7 +817,7 @@ pub async fn run(
                 // seen — can leak.
                 response_transform::canonicalize(
                     &mut transformed,
-                    endpoint,
+                    client_endpoint,
                     Some(request_id.as_str()),
                 );
                 (
@@ -900,11 +969,12 @@ pub async fn run(
             // comments are injected downstream and never enter its line reassembly.
             let response_header_map = gateway_owned_headers(&content_type);
             let pipeline_inputs = StreamPipelineInputs {
-                endpoint,
+                endpoint: client_endpoint,
                 endpoint_path,
                 identity: identity.clone(),
                 exclude_reasoning,
                 candidates: candidates.clone(),
+                echo: echo.clone(),
             };
             let metered = build_metered_pipeline(
                 forward.body,
@@ -1508,6 +1578,7 @@ pub(super) struct StreamPipelineInputs {
     pub identity: Arc<response_transform::ResponseIdentity>,
     pub exclude_reasoning: bool,
     pub candidates: Vec<RouteCandidate>,
+    pub echo: Option<Arc<Value>>,
 }
 
 /// Assemble the client-facing streaming pipeline for one committed upstream
@@ -1524,15 +1595,23 @@ pub(super) fn build_metered_pipeline(
     // candidates: a route id names one deployment and a deployment has one
     // format, so a repeated id cannot disagree on format, and same-id copies
     // shape identically.
-    let selected_format = inputs
+    let selected_candidate = inputs
         .candidates
         .iter()
         .find(|c| c.route_id == selected_route)
-        .or_else(|| inputs.candidates.first())
-        .map(|c| c.format)
+        .or_else(|| inputs.candidates.first());
+    let selected_format = selected_candidate
+        .map(|candidate| candidate.format)
         .unwrap_or(ProviderFormat::Openai);
+    let native_responses = selected_candidate
+        .is_some_and(|candidate| inputs.echo.is_some() && candidate.native_responses);
+    let upstream_endpoint = if inputs.echo.is_some() && !native_responses {
+        Endpoint::ChatComplete
+    } else {
+        inputs.endpoint
+    };
     let transformed: ServiceResponseStream =
-        match stream_transform::select_stream_transform(selected_format, inputs.endpoint) {
+        match stream_transform::select_stream_transform(selected_format, upstream_endpoint) {
             Some(transform) => Box::pin(SseTransformStream::new(body, transform)),
             None => body,
         };
@@ -1544,11 +1623,18 @@ pub(super) fn build_metered_pipeline(
     } else {
         transformed
     };
+    let surfaced: ServiceResponseStream = match inputs.echo.as_ref().filter(|_| !native_responses) {
+        Some(echo) => Box::pin(SseTransformStream::new(
+            visible,
+            StreamTransform::OpenaiChatToResponses(echo.clone()),
+        )),
+        None => visible,
+    };
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the
     // provider's bytes to the client verbatim.
     let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
-        visible,
+        surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
     ));
     Box::pin(MeterStream::new(
@@ -2015,6 +2101,7 @@ mod tests {
     fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
         RouteCandidate {
             route_id: route_id.into(),
+            native_responses: false,
             format,
             engine: None,
             reasoning_format: None,

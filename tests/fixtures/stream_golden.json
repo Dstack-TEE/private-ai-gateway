@@ -241,5 +241,118 @@
         ]
       }
     ]
+  },
+  {
+    "name": "openai_chat_to_responses_stream",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "events": [
+      "data: {\"id\":\"resp_src\",\"created\":1700000000,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"more\"},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer \"},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\"}},{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"units\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"\\\"system\\\":\\\"metric\\\"}\"}},{\"index\":0,\"function\":{\"arguments\":\"\\\"city\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6,\"total_tokens\":16,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
+      "data: [DONE]"
+    ],
+    "types": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.reasoning_text.delta",
+      "response.reasoning_text.delta",
+      "response.reasoning_text.done",
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed"
+    ],
+    "terminal": {
+      "status": "completed",
+      "output": [
+        { "id": "rs_resp_src_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think more" }], "status": "completed" },
+        { "id": "msg_resp_src_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer done", "annotations": [] }] },
+        { "id": "fc_call_1", "type": "function_call", "call_id": "call_1", "name": "weather", "arguments": "{\"city\":\"SF\"}", "status": "completed" },
+        { "id": "fc_call_2", "type": "function_call", "call_id": "call_2", "name": "units", "arguments": "{\"system\":\"metric\"}", "status": "completed" }
+      ],
+      "usage": {
+        "input_tokens": 10,
+        "input_tokens_details": { "cached_tokens": 2 },
+        "output_tokens": 6,
+        "output_tokens_details": { "reasoning_tokens": 3 },
+        "total_tokens": 16
+      }
+    }
+  },
+  {
+    "name": "openai_chat_to_responses_eof_tail",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "eof": true,
+    "events": [
+      "data: {\"id\":\"resp_eof\",\"created\":1700000000,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}"
+    ],
+    "types": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed"
+    ],
+    "terminal": {
+      "status": "completed",
+      "output": [{
+        "id": "msg_resp_eof_0",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{ "type": "output_text", "text": "done", "annotations": [] }]
+      }],
+      "usage": {
+        "input_tokens": 1,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 1,
+        "output_tokens_details": { "reasoning_tokens": 0 },
+        "total_tokens": 2
+      }
+    }
+  },
+  {
+    "name": "openai_chat_to_responses_missing_finish_reason",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "eof": true,
+    "error": true,
+    "events": [
+      "data: {\"id\":\"resp_truncated\",\"created\":1700000000,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}"
+    ],
+    "types": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta"
+    ]
   }
 ]

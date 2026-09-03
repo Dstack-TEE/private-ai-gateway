@@ -45,6 +45,59 @@ struct MockUpstream {
     extra_headers: Vec<(&'static str, &'static str)>,
 }
 
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    path: Option<String>,
+    body: Value,
+}
+
+struct RecordingUpstream {
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+}
+
+#[async_trait]
+impl UpstreamBackend for RecordingUpstream {
+    fn name(&self) -> &str {
+        "recording-upstream"
+    }
+
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://recording-upstream.example")
+    }
+
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        self.requests.lock().unwrap().push(RecordedRequest {
+            path: req.path,
+            body: serde_json::from_slice(&req.body).unwrap(),
+        });
+        Ok(UpstreamResponse {
+            status_code: self.status,
+            body: self.body.clone(),
+            headers: HashMap::from([("content-type".to_string(), self.content_type.to_string())]),
+            served_instance_id: None,
+        })
+    }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
+}
+
 #[async_trait]
 impl UpstreamBackend for MockUpstream {
     fn name(&self) -> &str {
@@ -287,6 +340,32 @@ fn build_service_with_upstream_headers(
     )
 }
 
+fn build_recording_service(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(RecordingUpstream {
+                requests: requests.clone(),
+                status,
+                body,
+                content_type,
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    (service, requests)
+}
+
 fn temp_config_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "private-ai-gateway-middleware-completion-{}-{}.json",
@@ -481,6 +560,31 @@ fn chat_input() -> CompletionInput {
     }
 }
 
+fn responses_input(stream: bool) -> CompletionInput {
+    let params = json!({
+        "model": "gpt-test",
+        "input": "hello",
+        "stream": stream,
+        "max_output_tokens": 16
+    });
+    CompletionInput {
+        endpoint: Endpoint::CreateModelResponse,
+        endpoint_path: "/v1/responses",
+        surface: Surface::Openai,
+        received_body: serde_json::to_vec(&params).unwrap(),
+        params,
+        api_key_hash: Some("deadbeef".to_string()),
+        requester: None,
+        e2ee: None,
+        aci_required: false,
+        aci_session_ids: Vec::new(),
+        request_id: "req-responses".to_string(),
+        user_model: Some("gpt-test".to_string()),
+        stream,
+        tee_only: false,
+    }
+}
+
 async fn response_parts(response: axum::response::Response) -> (u16, axum::http::HeaderMap, Value) {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
@@ -516,6 +620,14 @@ async fn raw_body(response: axum::response::Response) -> (axum::http::HeaderMap,
     let headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (headers, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn sse_events(body: &str) -> Vec<Value> {
+    body.split("\n\n")
+        .filter_map(|block| block.lines().find_map(|line| line.strip_prefix("data: ")))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect()
 }
 
 #[tokio::test]
@@ -583,6 +695,110 @@ async fn streamed_success_hides_which_upstream_served_it() {
     // Framing and content survive intact.
     assert!(body.contains(r#""content":"hi""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+}
+
+#[tokio::test]
+async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "compatible:gpt-test", "format": "openai" }],
+            "pricing": { "inputCostPerToken": "1", "outputCostPerToken": "2" }
+        }),
+    )
+    .await;
+    let upstream = concat!(
+        "data: {\"id\":\"chatcmpl-upstream\",\"created\":1700000000,\"model\":\"internal-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (service, requests) =
+        build_recording_service(200, upstream.as_bytes().to_vec(), "text/event-stream");
+    let response = middleware(control_url)
+        .handle_completion(&service, responses_input(true))
+        .await;
+    assert_eq!(response.status(), 200);
+    let (headers, body) = raw_body(response).await;
+    assert!(headers.get("x-receipt-id").is_some());
+    assert!(!body.contains("[DONE]"), "{body}");
+
+    let events = sse_events(&body);
+    let types: Vec<&str> = events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+    );
+    for (sequence, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence_number"], json!(sequence));
+    }
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["response"]["status"], json!("completed"));
+    assert_eq!(terminal["response"]["usage"]["input_tokens"], json!(1));
+    assert_eq!(terminal["response"]["usage"]["output_tokens"], json!(2));
+    assert_eq!(terminal["response"]["usage"]["cost"], json!(5));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path.as_deref(), Some("/v1/chat/completions"));
+    assert!(requests[0].body.get("messages").is_some());
+    assert!(requests[0].body.get("input").is_none());
+}
+
+#[tokio::test]
+async fn native_responses_candidate_keeps_protocol_and_path() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "openai:gpt-test",
+                "format": "openai",
+                "nativeResponses": true
+            }]
+        }),
+    )
+    .await;
+    let upstream = br#"{
+        "id":"resp-upstream",
+        "object":"response",
+        "created_at":1700000000,
+        "model":"internal-model",
+        "status":"completed",
+        "incomplete_details":null,
+        "error":null,
+        "output":[],
+        "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+    }"#;
+    let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, responses_input(false))
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["id"], json!("req-responses"));
+    assert_eq!(body["object"], json!("response"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path.as_deref(), Some("/v1/responses"));
+    assert_eq!(requests[0].body["input"], json!("hello"));
+    assert!(requests[0].body.get("messages").is_none());
 }
 
 #[tokio::test]
@@ -1278,6 +1494,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
     };
     let candidate = || ForwardCandidate {
         route_id: "tee-a:gpt-test".to_string(),
+        path: "/v1/chat/completions",
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     };
 
@@ -1883,6 +2100,7 @@ fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'sta
 fn plain_candidate(route: &str) -> ForwardCandidate {
     ForwardCandidate {
         route_id: route.to_string(),
+        path: "/v1/chat/completions",
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     }
 }
@@ -2034,6 +2252,7 @@ async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
     let (service, forwarded, bodies) = build_sequenced_service(vec![500, 429, 200]);
     let twin = |body: &[u8]| ForwardCandidate {
         route_id: "dup:gpt-test".to_string(),
+        path: "/v1/chat/completions",
         body: body.to_vec(),
     };
     let result = service

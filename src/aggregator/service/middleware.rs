@@ -389,7 +389,7 @@ impl AciService {
                 let prepared = match self.upstream.prepare(UpstreamRequest {
                     body: candidate.body.clone(),
                     headers: upstream_headers.clone(),
-                    path: Some(endpoint_path.to_string()),
+                    path: Some(candidate.path.to_string()),
                     target_route_id: Some(route_id.clone()),
                 }) {
                     Ok(prepared) => prepared,
