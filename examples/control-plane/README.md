@@ -22,6 +22,10 @@ endpoints below).
   its legacy behavior: managed routes use nested `reasoning`, while SGLang and
   vLLM routes use `reasoning_effort`.
 
+  Set `nativeResponses: true` on a candidate whose upstream serves
+  `/v1/responses` directly; otherwise the gateway converts through Chat
+  Completions.
+
   Declaring a dialect also opts the route into reading a caller's
   `chat_template_kwargs` thinking switch. Some callers can only express "no
   thinking" that way, and left untranslated the switch reaches the upstream as
