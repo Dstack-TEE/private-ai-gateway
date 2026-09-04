@@ -145,7 +145,16 @@ jobs:
         run: |
           $process = Start-Process -FilePath 'release/native-windows/Private-AI-Gateway/PrivateAIGateway.Windows.exe' -ArgumentList '--autostart' -PassThru
           Start-Sleep -Seconds 5
-          if ($process.HasExited) { throw "Native Windows client exited during launch smoke" }
+          if ($process.HasExited) {
+            Write-Host "Native Windows client exit code: $($process.ExitCode)"
+            $crashLog = Join-Path $env:LOCALAPPDATA 'Private AI Gateway\crash.log'
+            if (Test-Path $crashLog) { Get-Content $crashLog }
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-2) } -ErrorAction SilentlyContinue |
+              Where-Object LevelDisplayName -eq 'Error' |
+              Select-Object -First 5 TimeCreated, ProviderName, Id, Message |
+              Format-List
+            throw "Native Windows client exited during launch smoke"
+          }
           Stop-Process -Id $process.Id -Force
       - uses: actions/upload-artifact@v6
         with:

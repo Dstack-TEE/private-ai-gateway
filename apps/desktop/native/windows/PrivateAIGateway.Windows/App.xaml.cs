@@ -15,7 +15,11 @@ public partial class App : Application
         IsFirstInstance = firstInstance;
     }
 
-    public App() => InitializeComponent();
+    public App()
+    {
+        UnhandledException += (_, args) => WriteCrashLog(args.Exception);
+        InitializeComponent();
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -28,6 +32,17 @@ public partial class App : Application
         MainWindow = new MainWindow();
         MainWindow.Activate();
         if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideMainWindow();
+    }
+
+    private static void WriteCrashLog(Exception error)
+    {
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Private AI Gateway");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "crash.log"), $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{error}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     private static class NativeMethods
