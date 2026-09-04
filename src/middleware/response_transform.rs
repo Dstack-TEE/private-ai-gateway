@@ -1130,6 +1130,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
     };
 
     let mut output: Vec<Value> = Vec::new();
+    let mut invalid_function_arguments = false;
     if let Some(text) = reasoning_text(&message) {
         let item_id = item_id("rs", &id, output.len());
         output.push(reasoning_item(&item_id, text, "completed"));
@@ -1174,30 +1175,45 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                     "completed",
                 ));
             } else {
+                let Some(arguments) = normalize_function_call_arguments(arguments) else {
+                    invalid_function_arguments = true;
+                    continue;
+                };
                 let namespace = tool_map.namespace(name);
                 output.push(function_call_item(
                     call_id,
                     namespace.map_or(name, |tool| tool.name.as_str()),
                     namespace.map(|tool| tool.namespace.as_str()),
-                    arguments,
+                    &arguments,
                     "completed",
                 ));
             }
         }
     }
 
-    let error = response
+    let upstream_error = response
         .get("error")
         .filter(|error| !error.is_null())
         .cloned();
-    let (status, incomplete_details) = match &error {
-        Some(_) => ("failed", Value::Null),
-        None => responses_terminal(
-            choice
-                .as_ref()
-                .and_then(|choice| choice.get("finish_reason"))
-                .and_then(Value::as_str),
-        ),
+    let (status, incomplete_details, error) = match upstream_error {
+        Some(error) => ("failed", Value::Null, error),
+        None => {
+            let (status, details) = responses_terminal(
+                choice
+                    .as_ref()
+                    .and_then(|choice| choice.get("finish_reason"))
+                    .and_then(Value::as_str),
+            );
+            if invalid_function_arguments && status == "completed" {
+                (
+                    "failed",
+                    Value::Null,
+                    invalid_function_call_arguments_error(),
+                )
+            } else {
+                (status, details, Value::Null)
+            }
+        }
     };
     responses_object(
         echo,
@@ -1207,7 +1223,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
             model: response.get("model").cloned().unwrap_or(Value::Null),
             status,
             incomplete_details,
-            error: error.unwrap_or(Value::Null),
+            error,
         },
         output,
         Some(responses_usage(response.get("usage"))),
@@ -1340,6 +1356,27 @@ pub(super) fn custom_tool_input(arguments: &str) -> String {
             .unwrap_or_else(|| trimmed.to_string()),
         _ => trimmed.to_string(),
     }
+}
+
+/// Normalize Chat function arguments for a Responses function-call item.
+/// Empty arguments mean an empty object; every other value must be a JSON
+/// object so a later Responses history replay remains valid.
+pub(super) fn normalize_function_call_arguments(arguments: &str) -> Option<String> {
+    if arguments.trim().is_empty() {
+        return Some("{}".to_string());
+    }
+    matches!(
+        serde_json::from_str::<Value>(arguments),
+        Ok(Value::Object(_))
+    )
+    .then(|| arguments.to_string())
+}
+
+pub(super) fn invalid_function_call_arguments_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider returned invalid function-call arguments",
+    })
 }
 
 /// How a chat `finish_reason` ends a response: the `status`, and the

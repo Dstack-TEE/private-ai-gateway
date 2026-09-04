@@ -22,8 +22,9 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field, item_id,
-    map_finish_reason, message_item, now_millis, now_secs, output_text_part, reasoning_item,
+    self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field,
+    invalid_function_call_arguments_error, item_id, map_finish_reason, message_item,
+    normalize_function_call_arguments, now_millis, now_secs, output_text_part, reasoning_item,
     reasoning_text, refusal_part, responses_object, responses_terminal, responses_usage,
     transform_finish_reason, ResponseIdentity, ResponsesHead,
 };
@@ -161,10 +162,12 @@ struct ResponsesStream {
     output: Vec<Value>,
     open: Option<TextItem>,
     calls: BTreeMap<i64, CallItem>,
+    next_call_index_to_add: i64,
     tools: ResponsesToolMap,
     usage: Option<Value>,
     finish_reason: Option<String>,
     error: Option<Value>,
+    invalid_function_arguments: bool,
 }
 
 struct TextItem {
@@ -998,7 +1001,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        let (should_start, was_started) = {
+        let was_started = {
             let call = state.calls.entry(index).or_default();
             if !call_id.is_empty() {
                 call.call_id.push_str(call_id);
@@ -1009,19 +1012,8 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
             if !arguments.is_empty() {
                 call.arguments.push_str(arguments);
             }
-            let was_started = call.output_index.is_some();
-            (
-                !was_started
-                    && !call.call_id.is_empty()
-                    && !call.chat_name.is_empty()
-                    && !call.arguments.is_empty(),
-                was_started,
-            )
+            call.output_index.is_some()
         };
-
-        if should_start {
-            output.push_str(&open_responses_call(index, state));
-        }
 
         if was_started && !arguments.is_empty() {
             let call = state.calls.get(&index).expect("tool call exists");
@@ -1040,6 +1032,26 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
                 }
             }
         }
+        output.push_str(&flush_ready_responses_calls(state));
+    }
+    output
+}
+
+fn flush_ready_responses_calls(state: &mut ResponsesStream) -> String {
+    let mut output = String::new();
+    loop {
+        let index = state.next_call_index_to_add;
+        let ready = state.calls.get(&index).is_some_and(|call| {
+            call.output_index.is_none()
+                && !call.call_id.is_empty()
+                && !call.chat_name.is_empty()
+                && !call.arguments.is_empty()
+        });
+        if !ready {
+            break;
+        }
+        output.push_str(&open_responses_call(index, state));
+        state.next_call_index_to_add += 1;
     }
     output
 }
@@ -1125,6 +1137,10 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
             ));
             continue;
         }
+        let Some(arguments) = normalize_function_call_arguments(&call.arguments) else {
+            state.invalid_function_arguments = true;
+            continue;
+        };
         output.push_str(&responses_event(
             state,
             "response.function_call_arguments.done",
@@ -1132,10 +1148,10 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
                 "item_id": item_id,
                 "output_index": output_index,
                 "name": call.response_name,
-                "arguments": call.arguments,
+                "arguments": arguments,
             }),
         ));
-        let item = call.item(&call.arguments, "completed");
+        let item = call.item(&arguments, "completed");
         state.output[output_index] = item.clone();
         output.push_str(&responses_event(
             state,
@@ -1154,16 +1170,26 @@ fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
     let mut output = close_responses_text(state);
     output.push_str(&close_responses_calls(state));
 
+    let (terminal_status, terminal_details) = responses_terminal(state.finish_reason.as_deref());
+    if state.error.is_none() && state.invalid_function_arguments && terminal_status == "completed" {
+        state.error = Some(invalid_function_call_arguments_error());
+    }
+
     let (status, incomplete_details, event) = if state.error.is_some() {
         ("failed", Value::Null, "response.failed")
     } else {
-        let (status, details) = responses_terminal(state.finish_reason.as_deref());
-        let event = match status {
+        let event = match terminal_status {
             "incomplete" => "response.incomplete",
             _ => "response.completed",
         };
-        (status, details, event)
+        (terminal_status, terminal_details, event)
     };
+    let terminal_output = state
+        .output
+        .iter()
+        .filter(|item| item.get("status").and_then(Value::as_str) == Some("completed"))
+        .cloned()
+        .collect();
     let response = responses_object(
         echo,
         ResponsesHead {
@@ -1174,7 +1200,7 @@ fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
             incomplete_details,
             error: state.error.clone().unwrap_or(Value::Null),
         },
-        state.output.clone(),
+        terminal_output,
         Some(responses_usage(state.usage.as_ref())),
     );
     output.push_str(&responses_event(

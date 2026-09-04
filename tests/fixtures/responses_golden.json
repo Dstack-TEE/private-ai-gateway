@@ -468,12 +468,71 @@
       }
     },
     {
+      "name": "invalid_function_arguments",
+      "echo": {
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_bad_args",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+              "id": "call_bad",
+              "type": "function",
+              "function": { "name": "lookup", "arguments": "{\"x\":" }
+            }]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_bad_args",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider returned invalid function-call arguments"
+        },
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false,
+        "output": [],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
       "name": "length",
-      "echo": { "max_output_tokens": 8, "store": false },
+      "echo": {
+        "max_output_tokens": 8,
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
       "input": {
         "id": "chatcmpl_4",
         "model": "gpt-test",
-        "choices": [{ "message": { "role": "assistant", "content": "partial" }, "finish_reason": "length" }]
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": "partial",
+            "tool_calls": [{
+              "id": "call_truncated",
+              "type": "function",
+              "function": { "name": "lookup", "arguments": "{\"x\":" }
+            }]
+          },
+          "finish_reason": "length"
+        }]
       },
       "output": {
         "id": "chatcmpl_4",
@@ -483,6 +542,7 @@
         "incomplete_details": { "reason": "max_output_tokens" },
         "error": null,
         "max_output_tokens": 8,
+        "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [{
           "id": "msg_chatcmpl_4_0",
