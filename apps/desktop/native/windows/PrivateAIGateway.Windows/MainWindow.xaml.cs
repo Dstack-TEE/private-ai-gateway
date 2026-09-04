@@ -13,7 +13,7 @@ public sealed partial class MainWindow : Window
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
     private readonly NavigationView Navigation = new();
-    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Windows.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
     private readonly Border DevBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
     private readonly TextBlock StatusText = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
     private readonly ToggleSwitch ProtectionSwitch = new();
@@ -58,7 +58,7 @@ public sealed partial class MainWindow : Window
             Height = 34,
         });
         var brandText = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        brandText.Children.Add(new TextBlock { Text = "Private AI Gateway", FontWeight = global::Windows.UI.Text.FontWeights.SemiBold });
+        brandText.Children.Add(new TextBlock { Text = "Private AI Gateway", FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold });
         brandText.Children.Add(new TextBlock { Text = "Confidential inference", FontSize = 12, Opacity = 0.65 });
         brand.Children.Add(brandText);
         Navigation.PaneHeader = brand;
@@ -71,7 +71,7 @@ public sealed partial class MainWindow : Window
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.Children.Add(PageTitle);
 
-        DevBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Windows.UI.Text.FontWeights.SemiBold };
+        DevBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold };
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
         controls.Children.Add(DevBadge);
         controls.Children.Add(StatusText);
