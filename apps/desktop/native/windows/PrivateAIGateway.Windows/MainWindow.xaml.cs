@@ -37,6 +37,8 @@ public sealed partial class MainWindow : Window
         Activate();
     }
 
+    public void HideMainWindow() => appWindow.Hide();
+
     public void ShowSettings()
     {
         ShowMainWindow();

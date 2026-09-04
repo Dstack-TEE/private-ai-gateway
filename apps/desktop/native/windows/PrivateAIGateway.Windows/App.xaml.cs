@@ -26,10 +26,8 @@ public partial class App : Application
             return;
         }
         MainWindow = new MainWindow();
-        if (!Environment.GetCommandLineArgs().Contains("--autostart"))
-        {
-            MainWindow.Activate();
-        }
+        MainWindow.Activate();
+        if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideMainWindow();
     }
 
     private static class NativeMethods
