@@ -89,18 +89,8 @@ impl GatewayManager {
         usage: Arc<UsageStore>,
         launcher: Arc<dyn SidecarLauncher>,
         task_runtime: Handle,
-        local_api: LocalApiConfig,
-        config: StartGatewayConfig,
-        profiles: Vec<ConfidentialProfile>,
-        active_profile_id: String,
+        state: GatewayState,
     ) -> Self {
-        let state = GatewayState {
-            local_api,
-            config,
-            profiles,
-            active_profile_id,
-            ..GatewayState::default()
-        };
         let (state_tx, _) = watch::channel(state.clone());
         Self {
             inner: Mutex::new(RuntimeState {

@@ -249,15 +249,19 @@ impl DesktopRuntime {
             },
         };
         let task_runtime = options.task_runtime;
+        let initial_state = GatewayState {
+            local_api: local.config.clone(),
+            config: runtime_config,
+            profiles: settings.profiles.clone(),
+            active_profile_id: settings.active_profile_id.clone(),
+            ..GatewayState::default()
+        };
         let manager = Arc::new(GatewayManager::new(
             proxy.clone(),
             usage.clone(),
             options.launcher,
             task_runtime.clone(),
-            local.config.clone(),
-            runtime_config,
-            settings.profiles.clone(),
-            settings.active_profile_id.clone(),
+            initial_state,
         ));
         let runtime = Arc::new(Self {
             manager: manager.clone(),
