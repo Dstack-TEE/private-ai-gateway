@@ -1,72 +1,146 @@
-# Control plane
+# Minimal Control Plane
 
-A **minimal, config-driven** implementation of the gateway's control plane — the
-decision plane the gateway consults. It exists so the stack runs end-to-end and
-gives a working, testable example of the gateway↔control HTTP surface (the three
-endpoints below).
+This directory contains a config-backed server for local middleware integration. It implements the smallest useful subset of the gateway's control-plane HTTP contract. It is not a production authorization, billing, catalog, or high-availability service.
 
-## What it does
+See the complete [control-plane contract](../../docs/control-plane-contract.md) before implementing another control plane.
 
-- `GET /models` — lists the models from the config.
-- `POST /consult/pre` — `{apiKeyHash?, model, reasoning?}` → allow/deny + pricing
-  + ordered route candidates, all from the config. Denies unknown models; if
-  `keys` is non-empty it requires the request's `apiKeyHash` to be in the list
-  (empty list = anonymous allowed). Reasoning-aware routing is optional and this
-  minimal example does not implement it. A candidate can return
-  `effectiveReasoning` to override the normalized request. Candidates can set
-  `reasoningFormat` to `"reasoning_effort"`, `"reasoning"`,
-  `"chat_template_thinking"`, `"chat_template_enable_thinking"` or
-  `"thinking_type"` (DeepSeek's `thinking: {"type": ...}` switch, with
-  `reasoning_effort` as the level) to select the upstream parameter dialect
-  explicitly. When omitted, the gateway preserves
-  its legacy behavior: managed routes use nested `reasoning`, while SGLang and
-  vLLM routes use `reasoning_effort`.
+## Implemented behavior
 
-  Declaring a dialect also opts the route into reading a caller's
-  `chat_template_kwargs` thinking switch. Some callers can only express "no
-  thinking" that way, and left untranslated the switch reaches the upstream as
-  an opaque key that only a real vLLM/SGLang server acts on — a vendor API
-  behind the same route ignores it and keeps thinking. On a route that declares
-  a dialect, a switch set to `false` is re-encoded in that dialect. An explicit
-  `reasoning`/`reasoning_effort` still wins, and a switch set to `true` is never
-  translated: encoding "on" would have to invent an effort the caller did not
-  ask for.
-- `POST /consult/post` — accepts the usage report and drops it (no billing).
+The example exposes:
 
-No database; configuration only.
+| Route | Behavior |
+| --- | --- |
+| `GET /` | Plain-text liveness response. |
+| `GET /models` | Lists every configured model as an OpenAI-shaped catalog. |
+| `POST /consult/pre` | Checks the optional API-key-hash allowlist, resolves a model, and returns its pricing and ordered candidates, including any route-specific reasoning dialect. |
+| `POST /consult/post` | Parses and discards a usage report, then returns `{"ok":true}`. |
 
-## Config
+When `keys` is missing or empty, anonymous inference is allowed. When it contains hashes, `apiKeyHash` must match one of them.
 
-Reads JSON from `CONTROL_CONFIG_PATH` (default `/etc/pag/control.config.json`).
-See [`control.config.example.json`](./control.config.example.json).
+The example does not implement:
+
+- `/models/*` sub-catalogs;
+- `/embeddings/models`;
+- `tee=true` catalog filtering;
+- `provider.only` or other provider-routing policy;
+- special TEE-only denial behavior;
+- rate limits, spending, durable usage ingestion, or idempotency;
+- config reload;
+- direct TLS or mutual TLS.
+
+Do not use this server as the policy component of a production TEE-only hostname without implementing and testing those missing controls.
+
+## Configure
+
+Copy the example file:
+
+```sh
+cp control.config.example.json control.config.json
+```
+
+The schema is:
+
+```json
+{
+  "keys": ["<lowercase sha256 of an accepted bearer token>"],
+  "models": {
+    "public-model": {
+      "pricing": {
+        "inputCostPerToken": "0.000001",
+        "outputCostPerToken": "0.000002"
+      },
+      "candidates": [
+        {
+          "routeId": "upstream-name:public-model",
+          "format": "openai",
+          "engine": "vllm",
+          "reasoningFormat": "reasoning_effort"
+        }
+      ]
+    }
+  }
+}
+```
+
+`format` must be `openai` or `anthropic`. Optional `engine` must be `sglang` or
+`vllm`. Optional `reasoningFormat` selects `reasoning_effort`, the nested
+`reasoning` object, `chat_template_thinking`,
+`chat_template_enable_thinking`, or `thinking_type`. The last value uses
+DeepSeek's `thinking: {"type": ...}` switch and carries the effort level in
+`reasoning_effort`. When omitted, the gateway uses nested `reasoning` for
+managed routes and `reasoning_effort` for routes with an `engine`.
+
+Declaring a reasoning format also lets the gateway interpret a caller's
+`chat_template_kwargs` thinking switch. A `false` switch is re-encoded in the
+declared upstream dialect. An explicit `reasoning` or `reasoning_effort` value
+wins. A `true` switch is not translated because doing so would require the
+gateway to invent an effort level.
+
+Candidate route IDs must match the active gateway upstream config exactly:
+
+```text
+<upstream name>:<public model ID>
+```
+
+The server reads its config once at startup from `CONTROL_CONFIG_PATH`, defaulting to `/etc/pag/control.config.json`.
 
 ## Run
 
-The control plane listens on a TCP port; the gateway reaches it over HTTP(S) at
-the `middleware.control_url` from its static config.
+Node.js 18 or newer is required.
 
-```bash
-npm install && npm run build
+```sh
+npm ci
+npm run typecheck
+npm run build
+
 CONTROL_CONFIG_PATH=./control.config.example.json \
 PRIVATE_AI_GATEWAY_CONTROL_PORT=8789 \
 node build/server.js
 ```
 
-Then point the gateway at it by setting `middleware.control_url` to
-`http://127.0.0.1:8789` in the static gateway config.
+Point the gateway at the server:
 
-## Remote mode
+```json
+{
+  "middleware": {
+    "control_url": "http://127.0.0.1:8789"
+  }
+}
+```
 
-The control plane can run on a separate host that the gateway reaches over the
-network. The consult payloads carry only request metadata, including
-`apiKeyHash`, `model`, optional normalized `reasoning`, and usage counts.
+The public gateway `GET /v1/models` request is relayed to this server as `GET /models`.
 
-- **Authentication** — set `PRIVATE_AI_GATEWAY_CONTROL_TOKEN` on the control. When
-  set, it enforces `Authorization: Bearer <token>` on `/consult/*` and `/models`;
-  the gateway sends it via `middleware.control_token`. Unset = local dev, no auth.
-- **TLS** — terminate TLS at a reverse proxy in front of this process (the
-  gateway dials `https://…`). The process itself speaks plain HTTP + token, so
-  the code change stays minimal; optional hardening is direct TLS / mTLS.
-- **Availability** — the gateway fails **closed** (503) if the control is
-  unreachable, since the pre-request consult gates authorization. Deploy it near
-  the gateway, with HA.
+## Data boundary
+
+The gateway does not send prompts, responses, raw bearer tokens, or provider
+credentials to the control plane. Pre-consult receives the bearer-token hash,
+public model, the caller's provider-routing object, the TEE-only flag, and
+optional derived features such as token estimates, closed-enum modalities,
+reasoning intent, and a prefix hash. Post-consult receives status, route,
+timing, usage, pricing, and bounded operational error detail.
+
+Treat the caller's provider-routing object and post-consult error detail as
+sensitive metadata. The provider object is forwarded without schema reduction,
+and provider error text can contain request fragments. Do not place prompts or
+secrets in routing fields, and restrict control-plane logs and retention.
+
+## Authenticate a remote connection
+
+Set a bearer token on both sides:
+
+```sh
+export PRIVATE_AI_GATEWAY_CONTROL_TOKEN='<long-random-token>'
+```
+
+```json
+{
+  "middleware": {
+    "control_url": "https://control.example",
+    "control_token": "<same-token>"
+  }
+}
+```
+
+When the server variable is set, it protects `/consult/*` and `/models`. It does not protect the root liveness route. The server itself speaks plain HTTP, so a remote deployment must terminate authenticated TLS at a trusted proxy or run inside another protected transport.
+
+The gateway denies inference with `503` when pre-consult times out, fails transport, returns non-200, or returns invalid JSON. Post-consult delivery is best effort and does not roll back a response already served.

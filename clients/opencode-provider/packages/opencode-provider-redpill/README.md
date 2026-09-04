@@ -21,10 +21,8 @@ OpenCode persists the plugin entry and credential in its own configuration and
 auth store. `REDPILL_AI_API_KEY` is also supported for the current process, but
 environment variables are not copied into the auth store. RedPill does not
 currently expose account OAuth. Select `redpill/<model-id>` in OpenCode. The
-plugin discovers current TEE models and sends
-inference only through an attested, TLS-pinned connection. Every response
-receipt is verified before OpenCode can finish the model turn or continue its
-tool loop.
+plugin discovers current TEE models and sends inference only through an
+attested, TLS-pinned connection.
 
 Attestation is verified before model discovery, and each response receipt is
 verified before OpenCode can finish the turn. These commands display the local

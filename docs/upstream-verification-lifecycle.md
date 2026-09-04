@@ -1,294 +1,145 @@
-# Upstream Verification and Lease Lifecycle
+# Upstream Verification Lifecycle
 
-This note records the current high-level design and the Chutes throughput
-findings from the live probes on 2026-05-18 UTC. It is implementation-facing:
-ACI should stay simpler than this document.
+This page explains when the gateway verifies an upstream, how long a verified result is reused, and how channel-binding failures affect forwarding. It applies to the direct-upstream configuration managed by `UpstreamConfigManager`.
 
-## What We Proved
+For field definitions and defaults, see [Configuration reference](configuration-reference.md). For the resulting audit record, see [Attested sessions](attested-session-system.md).
 
-The gateway can run Chutes through config-backed credentials and E2EE
-transport without provider credentials in the gateway process environment.
-The live launcher writes the provider key into upstream config as
-`bearer_token`, starts the gateway, and strips the provider key env var from
-the child process. The Rust Chutes adapter passes the config-backed key and
-Chutes tuning to the verifier bridge as structured stdin input.
+## Security property
 
-Live artifacts:
+A request is fail closed only when it requires ACI verification:
 
-- Config-path sanity: `/tmp/private-ai-gateway-live-e2e/20260518-042641-chutes-rate-probe`
-- Warmed ramp: `/tmp/private-ai-gateway-live-e2e/20260518-043114-chutes-rate-probe`
-- Lease/session refresh check: `/tmp/private-ai-gateway-live-e2e/20260518-052653-chutes-rate-probe`
-- Tinfoil TLS-binding lifecycle: `/tmp/private-ai-gateway-live-e2e/20260518-053809`
-- NEAR AI TLS-binding lifecycle: `/tmp/private-ai-gateway-live-e2e/20260518-053819`
+- `provider.aci_verified` is `true`;
+- `provider.aci_session_ids` is a non-empty allowlist; or
+- middleware marks the selected route as TEE-only.
 
-Measured against `google/gemma-4-31B-turbo-TEE` through the public alias
-`gemma-chutes`:
+For a required request, the gateway does not forward the prompt unless a verifier returns `verified` and the current request can be sent through an enforced channel binding. An unconstrained request can still run the configured verifier and record its result, but a failed or missing result does not by itself block forwarding.
 
-| Stage | Requests | Result | Rate limit | Latency |
-| --- | ---: | --- | ---: | --- |
-| Cold verification warmup | 1 | 200 | 0 | 138.247s |
-| Fixed 60 rpm | 10 | 10/10 200 | 0 | avg 1.052s, max 1.453s |
-| Fixed 120 rpm | 20 | 20/20 200 | 0 | avg 1.171s, max 2.057s |
-| Burst, concurrency 10 | 25 | 25/25 200 | 0 | avg 1.152s, max 1.649s |
+## Verification keys and scope
 
-The lease/session refresh check used explicit upstream config fields:
-`verification_refresh_seconds: 0`, `session_refresh_seconds: 30`, and
-`chutes_e2ee_discovery_rounds: 3`. It sent two warmed requests 65 seconds
-apart, beyond the local fallback nonce TTL. Both requests stayed fast:
-1.543s and 1.062s. Gateway logs showed background session refreshes at
-05:29:13, 05:29:43, and 05:30:13 UTC with 20, 30, and 10 refreshed nonces.
+The verifier input contains the upstream config name, origin, upstream model identifier, hash of the body that will be forwarded, and whether verification is required.
 
-This is a lower bound, not a ceiling. It proves the warmed path can sustain at
-least a short 120 rpm stage and a 25-request burst without 429s. It does not
-yet prove long-window throughput over many nonce TTL cycles.
+Caching follows the provider's attestation scope:
 
-The main latency split is clear:
+- Router-scoped providers use one verification key for the origin. The model is omitted because all routed models share the same attested channel.
+- Per-model or per-instance providers include the model in the verification key.
 
-- Cold Chutes evidence and verification is very slow: roughly 138-145 seconds
-  in the latest probes.
-- Warmed encrypted invocation is fast: roughly 1 second for the small probe
-  prompts.
+Only successful verification events are cached. Failed verification is returned to the caller and is not stored as a reusable success.
 
-So Chutes evidence verification must stay off the user request path in normal
-operation.
+## Startup and configuration replacement
 
-Non-Chutes live checks also passed:
+After startup, the manager prewarms verification for configured targets. Replacing upstream configuration through the admin API constructs and validates a new runtime snapshot, publishes it, and starts another prewarm.
 
-- Tinfoil verified `kimi-k2-6`, returned one TLS SPKI channel binding, served a
-  real chat completion, and the receipt/report verification example accepted
-  the full response chain.
-- NEAR AI verified `google/gemma-4-31B-it`, returned one TLS SPKI channel
-  binding, served a real chat completion, and the receipt/report verification
-  example accepted the full response chain.
+For a router-scoped upstream, prewarm chooses one deterministic representative model. For per-model providers, it verifies each distinct upstream model.
 
-These providers do not have a separate provider session lease in the current
-implementation. Their lease is the cached verification result plus channel
-binding. The backend enforces the TLS binding against the actual upstream HTTPS
-connection before sending the request.
+A successful prewarm also records the corresponding attested session. This makes the audit surface useful before the first user request. Request-time verification records the same content-addressed session idempotently.
 
-## Terms
+Prewarm results are logged after the background task finishes. They are not
+included in the startup or admin response. A failed prewarm does not prevent
+the process from serving unrelated routes. A later constrained request still
+applies the fail-closed gate.
 
-This implementation has two different kinds of cached state.
+## Cache and background refresh
 
-Verification lease:
+`verifier_cache_seconds` controls the maximum reuse period for provider-verifier results. Its default is 300 seconds.
 
-The cached result of verifying an upstream workload identity and its channel
-binding. A valid verification lease says, "this upstream identity and binding
-were verified under this provider adapter's rules until the verifier cache
-expires." It never authorizes a different transport key.
+`verification_refresh_seconds` controls proactive refresh:
 
-Provider session lease:
+- omitted: refresh at `max(verifier_cache_seconds - 60, 1)` seconds;
+- positive integer: use that interval;
+- `0`: disable proactive refresh for that upstream.
 
-Provider-specific material needed to send requests after the identity has been
-verified. For Chutes this is a pool of single-use invocation nonces, each tied
-to an instance id and E2EE public-key digest. A session lease is only usable
-when it matches a currently verified channel binding.
+The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
 
-Tinfoil and NEAR AI currently have no provider session lease. After
-verification, each request creates a normal HTTPS connection and enforces the
-verified TLS binding on that connection.
+The ACI-service verifier also limits its cached result to the workload keyset's
+`not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and
+the configured cache deadline.
 
-The session lease is subordinate to the verification lease. Session material
-cannot extend trust after verification expires.
+Cache lifetime is not a promise that a connection remains safe for that duration. Every forward still enforces the cached channel binding against the connection it uses.
 
-Attested session record:
+## Request-time flow
 
-A separate, read-only audit artifact written when a verified upstream event is
-recorded (`record_attested_upstream_session`). The verified material — upstream
-name, endpoint, verifier id, identity, channel bindings, typed claims, and
-evidence — is serialized once; the served bytes are stored, and `session_id` is
-their SHA-256 (spec §8). The id is attached to the receipt. A relying party
-fetches the record from `/v1/aci/sessions/{session_id}` and recomputes the hash to
-confirm it is exactly what the receipt cited.
+For a constrained request, the gateway follows this sequence:
 
-Its `expires_at` bounds validity for new forwarding decisions, not retention.
-The record is a per-receipt historical attestation, so it must stay resolvable
-for as long as any receipt that cites it (the validity period reuses the
-receipt TTL, and retention extends per citation); expiring it with the ~300 s
-lease would strand `session_id`s in still-valid receipts. The record is not a claim that
-the binding is still live now — `established_at` records when it was verified,
-and the forwarding path only ever uses a binding from a fresh verification
-lease.
+1. Resolve the candidate upstream and the body that would be forwarded.
+2. Obtain a cached successful verifier event or perform verification.
+3. Require a verified result.
+4. Derive current attested sessions and apply any `aci_session_ids` allowlist.
+5. Connect through a client that enforces the verified channel binding.
+6. Forward the prompt only after the binding is satisfied.
+7. Record the verification event and selected session in the signed receipt.
 
-## Current No-Middleware Lifecycle
+TLS SPKI bindings are enforced by the pinned TLS client. Chutes E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
 
-The implementation today is equivalent to the framework's middleware-disabled
-mode: the public frontend and provider backend are one request path in the same
-process. The client `body.model` is both the user-facing model and the target
-route id.
+## Binding mismatch and reverification
 
-Startup:
+A channel-binding mismatch can indicate normal rotation or an attack. The gateway handles it as a state transition that must be reverified:
 
-1. Load the single upstream config file.
-2. Build a provider backend and verifier per configured upstream.
-3. Prewarm upstream verification in the background.
-4. Provider verifiers may record provider session material during prewarm.
+1. Invalidate the cached verifier event owned by the gateway.
+2. Run one fresh verification.
+3. Retry only if the new result verifies and its binding can be enforced.
+4. Treat another mismatch as terminal for that candidate and leave the stale cache entry invalidated.
 
-Request path:
+Caller-supplied verification events are not placed in the gateway cache, so the gateway does not invalidate or silently replace them.
 
-1. Treat the public model id as the target route id.
-2. Rewrite the target route id to the upstream model id.
-3. Verify the selected upstream, usually from a cached verification lease.
-4. Refuse forwarding if verification is required and no verified binding exists.
-5. Forward only through a backend that can enforce the verified binding.
-6. Record the verified upstream event and request/response hashes in the
-   receipt.
+For a request with an explicit session allowlist, the allowlist is applied again to the freshly derived sessions. A rotated binding therefore cannot pass by citing its historical session identifier.
 
-## Framework Lifecycle Target
+## Chutes provider sessions
 
-The frontend/middleware/backend framework keeps the same lease semantics but
-moves responsibility boundaries:
+Chutes has a second lifecycle because its router discovers a changing set of attested instances. `session_refresh_seconds` controls proactive provider-session refresh:
 
-1. Frontend terminates downstream E2EE and records the user-facing request.
-2. Optional middleware sees plaintext and may choose a target route id.
-3. Backend validates the target route id, then runs the same verification lease
-   and provider session lease path described here.
-4. Backend records provider verification and provider-facing forwarding facts in
-   shared request context.
-5. Frontend finalizes the user-facing response and signs the receipt.
+- omitted for Chutes: 45 seconds;
+- positive integer: use that interval;
+- `0`: disable proactive session refresh.
 
-The verifier lease never belongs to middleware. Middleware may request a route;
-backend decides whether that route is configured, verified, and enforceable.
+The refresh job obtains the verified provider event, refreshes model session nonces through the Chutes backend, and records a result per model. If the backend finds a channel-binding mismatch, the manager forces verifier refresh before considering the session refreshed.
 
-Verification refresh:
+This provider-session refresh is separate from the general verifier cache refresh. One maintains instance discovery and nonces; the other renews the attestation result used to authorize those instances.
 
-The background refresh loop renews verification before cache expiry. The
-default cadence is verifier cache TTL minus 60 seconds, so the normal 300
-second cache refreshes every 240 seconds. If an upstream sets
-`verification_refresh_seconds: 0`, it is skipped by the proactive refresh loop.
-When multiple positive intervals exist, the current loop wakes at the shortest
-active interval.
+Provider-session material is subordinate to the verification result. A pooled
+nonce cannot extend trust after verification expires, and every selected
+instance must still match a current verified E2EE-key binding.
 
-Refresh is non-destructive: a failed refresh does not delete the previous good
-verification lease. User traffic can continue using the old verified identity
-until that cache entry expires.
+For each request, the Chutes backend:
 
-Provider session refresh:
+1. Resolves the provider model to a chute ID, with a five-minute local cache.
+2. Removes one unexpired, single-use nonce whose instance ID and E2EE public-key
+   digest match the current verified binding set.
+3. Refills the pool through verified instance discovery when no matching nonce
+   remains.
+4. Encapsulates to the selected ML-KEM-768 key, derives the request key with
+   HKDF-SHA256, encrypts with ChaCha20-Poly1305, and calls `/e2e/invoke`.
+5. Decrypts the buffered or streaming provider response before normal receipt
+   finalization.
 
-For Chutes, the default session refresh interval is 45 seconds. Refresh uses
-the cached verified binding to fetch a fresh `/e2e/instances` batch and records
-only nonces whose instance key matches the verified binding. If Chutes returns
-only keys outside the verified set, the refresh asks the verifier to refresh
-evidence and widen the accepted key set.
+The pool uses the provider's `nonce_expires_in` value when present and a
+55-second fallback otherwise. Expired entries are discarded, and selecting a
+nonce removes it from the pool. The model cache and nonce pools are in memory;
+a process restart rebuilds them through prewarm, refresh, or the next request.
 
-Chutes nonce use:
+A dated live probe on 2026-05-18 observed roughly 138 to 145 seconds for cold
+Chutes evidence verification and roughly one second for warmed small prompts.
+A short 120 requests-per-minute stage and a 25-request burst completed without
+provider `429` responses. These measurements are a lower bound from one model
+and account, not a current latency or throughput guarantee. They explain why
+prewarm and background session refresh keep evidence discovery off the normal
+request path.
 
-1. Resolve model id to chute id, cached for 300 seconds.
-2. Pop one unexpired nonce whose instance id and E2EE public-key digest match
-   the verified binding.
-3. If none exists, fetch `/e2e/instances`, filter by the verified binding, and
-   record matching nonces.
-4. Encrypt the OpenAI request body with Chutes ML-KEM-768 + HKDF-SHA256 +
-   ChaCha20-Poly1305 and send `/e2e/invoke`.
-5. Decrypt the buffered or streaming Chutes response before normal ACI receipt
-   hashing.
+## Failover interaction
 
-The nonce pool uses the provider-reported `nonce_expires_in` when present,
-otherwise it uses a local 55 second TTL. Expired nonces are discarded. Nonces
-are single-use locally: popping a nonce removes it from the usable pool.
+Middleware mode can evaluate several candidate routes. Verification failure on a route required to be attested makes that candidate ineligible. The router can try another eligible candidate without forwarding the prompt to the failed one.
 
-## Design Review
+After a request reaches an upstream, the gateway can fail over on configured transient and account-specific statuses: `401`, `402`, `403`, `429`, `500`, `502`, `503`, and `504`. Recognized capacity bodies are also failover signals. Non-basic user tiers can receive one delayed capacity retry within the initial ten-second window.
 
-The good parts:
+Each candidate goes through its own verification and binding checks. A verified event for one upstream never authorizes another.
 
-- Verification and transport enforcement are separated cleanly. The verifier
-  decides what identity and binding to trust; the backend must prove it can
-  enforce that binding before forwarding.
-- Chutes is handled as a provider adapter, not forced into ACI service. That keeps
-  ACI clean and makes provider adoption practical.
-- Config is the operator-owned source of truth for provider credentials and
-  provider-specific tuning. Verifier commands are not user-configured.
-- Request forwarding is fail-closed when verification is required.
-- Background refresh keeps cold provider evidence latency off the normal
-  request path.
+## Operational signals
 
-The current compromises:
+Use these surfaces when diagnosing lifecycle behavior:
 
-- Verification refresh scheduling is coarse. The loop wakes at the shortest
-  active configured interval, while individual targets opt in or out. This is
-  simple, but not a precise per-upstream scheduler.
-- Chutes session refresh is only as good as the intersection between the
-  verified E2EE key set and Chutes' sampled `/e2e/instances` response. Multiple
-  discovery rounds improve this, but do not make the provider's sampling
-  deterministic.
-- Chutes verification can record fresh nonces during verifier refresh, but the
-  session refresh result currently reports `refreshed_nonces: 0` for the
-  `refreshed_via_verifier` path. That is an instrumentation gap.
-- All provider sessions are in memory. Restarting the gateway loses warmed
-  nonces and model-id cache, which is acceptable for now because those leases
-  are short-lived.
-- We have short-window throughput lower bounds, not a long-window ceiling.
+- gateway logs for prewarm, refresh, invalidation, and binding-mismatch messages;
+- `GET /v1/aci/sessions` for current materialized sessions;
+- `GET /v1/admin/upstreams` for redacted active configuration and its digest;
+- `GET /v1/metrics` for gateway-owned request metrics;
+- the receipt's `upstream.verified` events for the decision made on a specific request.
 
-## Provider verification soundness
-
-A soundness pass (2026-06) tamper-tested each provider's attestation verification
-against the live upstream APIs. Per-provider "how it is verified and bound" references
-live in [`providers/`](providers/README.md). Findings and the resulting state:
-
-- **NEAR AI (TDX):** the quote is verified by the dstack verifier, but the
-  `report_data` binding was being skipped (the check was gated on a field the dstack
-  verifier never returns), so a wrong nonce or a swapped TLS fingerprint still
-  verified. Fixed: `report_data` is now parsed from the verified quote and the nonce
-  + signing-address + TLS-SPKI binding is enforced (fail-closed).
-- **Chutes (TDX):** sound. The quote signature is verified with `dcap_qvl` (real DCAP
-  collateral; `UpToDate` required) and `report_data` binds `SHA256(nonce‖e2e_pubkey)`.
-- **Tinfoil (SEV-SNP, router mode):** the previous hand-rolled `_verify_snp` did **no**
-  AMD signature verification — it only compared the measurement to a public Sigstore
-  value, so a forged report with any `report_data` (TLS-SPKI) passed. Replaced with
-  Tinfoil's official Python verifier (`tinfoil` SDK), which performs the full
-  reference chain: AMD report signature + VCEK→ASK→ARK certificate chain and policy,
-  Sigstore-verified code-measurement provenance bound to the GitHub repo/workflow
-  identity, and the TLS public-key binding. The enforced binding value
-  (`report_data[0:32]`) is unchanged; it is now cryptographically proven. Tamper tests
-  confirm a modified `report_data`, measurement, or signature are all rejected.
-- **NVIDIA GPU (NRAS), all providers:** tokens are fetched online from NRAS over TLS
-  and the request nonce is checked (Chutes via `eat_nonce`, NEAR AI via the component
-  nonce). The JWT signature is not additionally verified against NRAS' JWKS — a
-  defense-in-depth follow-up, not a forgeable hole.
-
-The principle: lean on the hardware/vendor reference verifier (Intel DCAP via
-`dcap_qvl`, AMD via the `tinfoil`/`go-sev-guest` chain, NVIDIA via NRAS) rather than
-re-implementing attestation crypto, and always bind the result to the transport.
-
-## Next Measurements
-
-To understand Chutes throughput better, run a long warmed test across several
-nonce TTLs:
-
-```bash
-python3 scripts/live_e2e/chutes_rate_probe.py \
-  --providers-file /tmp/chutes-gemma-provider.json \
-  --provider chutes \
-  --stage 120@0.5 \
-  --stage 180@0.333 \
-  --burst-concurrency 20 \
-  --warmup 1 \
-  --no-build \
-  --keep-going-after-429 \
-  --port 0
-```
-
-The signal to watch is not just 429s. Also check whether background session
-refresh keeps the nonce pool healthy after the first minute and whether any
-request falls back into slow evidence refresh.
-
-## Open Questions
-
-- P0: preserve this lifecycle across the frontend/backend split with the
-  middleware. The middleware-disabled path must remain
-  behavior-compatible with the direct request path.
-- P0: finish strict-release pins from the provider reports under
-  [providers/](providers/README.md): NEAR AI gateway
-  provenance/runtime policy, Tinfoil router compose/image identity, and Chutes
-  exact model-to-chute resolution. The first-pass soundness reviews are saved,
-  but these provider-specific TODOs still gate general production inclusion.
-- Should verification refresh become a real per-upstream scheduler before we
-  add more providers?
-- Should Chutes expose pool metrics: verified key count, pooled nonce count,
-  nonce refresh success/failure, and channel-binding mismatch count?
-- Should `refreshed_via_verifier` report the number of nonces recorded by the
-  verifier bridge?
-- Should we maintain a small proactive low-watermark refresh in addition to the
-  fixed 45 second session refresh?
-- What sustained Chutes request rate can the current account/model support over
-  10-15 minutes without nonce starvation or provider-side 429s?
+Do not infer a successful current verification from the mere presence of an unexpired session. Sessions are audit artifacts. The request path obtains and enforces current verifier state independently.

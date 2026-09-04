@@ -1,18 +1,28 @@
 # `@phala/aci-provider`
 
-Framework-neutral provider kernel for ACI gateways. It owns verified connection
-lifecycle, live model discovery, TEE-only filtering, model capability mapping,
-bounded receipt history, optional response-completion receipt verification, and
-content-addressed session inspection. It also exposes structured inspection
-results and a shared text formatter, so host adapters do not duplicate ACI
-audit semantics.
+Use this package to add ACI provider behavior to a host that already owns its
+authentication UI, model picker, and persistence. It combines the verified
+transport with live model discovery, TEE filtering, capability mapping, bounded
+receipt history, optional response-completion verification, and session
+inspection.
 
 Host adapters such as Pi and OpenCode supply their native configuration and UI.
 Applications normally install a host adapter rather than this package directly.
+Use `connectAci()` from `@phala/aci-verifier/runtime` instead when you need only
+a verified `fetch` transport.
+
+## Install
+
+```bash
+npm install @phala/aci-provider
+```
+
 Shared RedPill and Phala Cloud profiles are exported from
 `@phala/aci-provider/profiles`. Phala Cloud's account API and device
 authorization flow are isolated under `@phala/aci-provider/phala-cloud`; they
 are not part of the ACI protocol or verifier.
+
+## Create a provider
 
 ```ts
 import {
@@ -30,14 +40,21 @@ await provider.connect();
 const response = await provider.fetch("https://gateway.example.com/v1/chat/completions", {
   method: "POST",
   headers: { Authorization: `Bearer ${process.env.ACI_API_KEY}` },
-  body: JSON.stringify({ model: "model-id", messages: [] }),
+  body: JSON.stringify({
+    model: "model-id",
+    messages: [{ role: "user", content: "Say hi" }],
+  }),
 });
+
+await provider.close();
 ```
 
 The provider fails closed: model traffic is sent only after workload attestation
 and TLS SPKI binding succeed. Set `receipts.verification` to `"response"` to
 make a response stream finish or settle consumer cancellation only after its
 signed receipt and cited session have verified.
+
+## Model catalog
 
 Model discovery uses the verified connection but sends no inference API key;
 the gateway's `/v1/models` catalog is public. Host adapters own credentials and
@@ -49,6 +66,8 @@ The catalog is authoritative. The provider maps reasoning and tools only from
 limits, modalities, or request dialects from model ids. Malformed required
 metadata fails discovery instead of being replaced with guessed defaults.
 Optional cache prices remain absent when the catalog omits them.
+
+## Receipts, sessions, and inspection
 
 `provider.receipts()` returns the bounded in-process exchange history, newest
 first. `provider.verifyReceipt()` verifies the latest exchange when no id is
@@ -65,6 +84,8 @@ import { formatAciInspection, inspectAciProvider } from "@phala/aci-provider";
 const result = await inspectAciProvider(provider, { action: "receipt" });
 console.log(formatAciInspection(result));
 ```
+
+## Product authentication
 
 Products that exchange account authorization for an inference API key implement
 the host-neutral `AccountApiKeyAuth` contract. It describes the browser/device
