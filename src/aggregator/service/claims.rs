@@ -71,8 +71,8 @@ pub(super) fn chutes_instance_id<'a>(
 }
 
 /// Typed claims for one Chutes instance: the verifier's facts for that instance
-/// only. The session separately retains the shared verification evidence bundle
-/// that proves those facts.
+/// only, so its session is content-addressed on its own data and survives fleet
+/// churn (a sibling instance joining or failing does not change it).
 pub(super) fn per_instance_session_claims(
     event: &UpstreamVerifiedEvent,
     instance_id: &str,
@@ -779,8 +779,8 @@ mod claim_mapping_tests {
             c1.extra.get("gpu_verified").and_then(Value::as_bool),
             Some(true)
         );
-        // Fleet-wide fields are dropped, so this claim slice does not change
-        // when a sibling instance does.
+        // Fleet-wide fields are dropped, so the slice (and the session content id)
+        // does not change when a sibling instance does (per-instance idempotency).
         assert!(!c1.extra.contains_key("verified_instance_ids"));
         assert!(!c1.extra.contains_key("instance_tcb_statuses"));
         assert!(!c1.extra.contains_key("instance_measurements"));
