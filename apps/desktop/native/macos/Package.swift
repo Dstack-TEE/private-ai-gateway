@@ -19,5 +19,10 @@ let package = Package(
             path: "Sources/PrivateAIGatewayLoginItem",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "PrivateAIGatewayMacTests",
+            dependencies: ["PrivateAIGatewayMac"],
+            path: "Tests/PrivateAIGatewayMacTests"
+        ),
     ]
 )

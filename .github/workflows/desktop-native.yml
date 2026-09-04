@@ -173,6 +173,9 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Test native macOS protocol codec
+        working-directory: apps/desktop
+        run: swift test --package-path native/macos
       - name: Package native macOS client
         working-directory: apps/desktop
         run: npm run dist:native:macos

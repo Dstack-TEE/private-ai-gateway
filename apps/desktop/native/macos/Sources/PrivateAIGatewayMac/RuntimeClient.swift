@@ -6,6 +6,41 @@ struct RuntimeFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+enum RuntimeProtocolCodec {
+    static func encodeRequest<Params: Encodable>(
+        id: String,
+        method: String,
+        params: Params
+    ) throws -> Data {
+        var data = try JSONEncoder().encode(RuntimeRequest(
+            schemaVersion: 1,
+            id: id,
+            method: method,
+            params: params
+        ))
+        data.append(0x0A)
+        return data
+    }
+
+    static func decodeResult<ResultType: Decodable>(
+        _ type: ResultType.Type,
+        from value: Any
+    ) throws -> ResultType {
+        let data = try JSONSerialization.data(
+            withJSONObject: value,
+            options: [.fragmentsAllowed]
+        )
+        return try JSONDecoder().decode(type, from: data)
+    }
+}
+
+private struct RuntimeRequest<Params: Encodable>: Encodable {
+    let schemaVersion: Int
+    let id: String
+    let method: String
+    let params: Params
+}
+
 final class RuntimeClient {
     private let process = Process()
     private let input = Pipe()
@@ -56,8 +91,10 @@ final class RuntimeClient {
             switch result {
             case .success(let value):
                 do {
-                    let data = try JSONSerialization.data(withJSONObject: value)
-                    completion(.success(try JSONDecoder().decode(ResultType.self, from: data)))
+                    completion(.success(try RuntimeProtocolCodec.decodeResult(
+                        ResultType.self,
+                        from: value
+                    )))
                 } catch {
                     completion(.failure(error))
                 }
@@ -67,16 +104,11 @@ final class RuntimeClient {
         lock.unlock()
 
         do {
-            let paramsData = try JSONEncoder().encode(params)
-            let paramsObject = try JSONSerialization.jsonObject(with: paramsData)
-            let message: [String: Any] = [
-                "schemaVersion": 1,
-                "id": id,
-                "method": method,
-                "params": paramsObject,
-            ]
-            var data = try JSONSerialization.data(withJSONObject: message)
-            data.append(0x0A)
+            let data = try RuntimeProtocolCodec.encodeRequest(
+                id: id,
+                method: method,
+                params: params
+            )
             try input.fileHandleForWriting.write(contentsOf: data)
         } catch {
             resolve(id: id, result: .failure(error))
