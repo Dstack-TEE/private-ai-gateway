@@ -76,9 +76,8 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   const editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
-  const editorHeight = await editor.evaluate((node) => node.getBoundingClientRect().height);
-  await editor.getByLabel("RedPill API key").fill("sk-test-123");
-  expect(await editor.evaluate((node) => node.getBoundingClientRect().height)).toBe(editorHeight);
+  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
   const profiles = page.getByRole("dialog", { name: "Profiles" });
@@ -197,7 +196,7 @@ test("overview shows five agents, five current-session records, truthful copy su
   await clientKey.click();
   await expect(page.locator('.sr-only[role="status"]')).toContainText("Client key copied");
   await localApi.getByRole("button", { name: "Reveal client key" }).click();
-  await expect(clientKey).toContainText("pag_demo_");
+  await expect(clientKey).toContainText("sk-pag-");
 
   await localApi.getByRole("button", { name: "Local API settings" }).click();
   const localSheet = page.getByRole("dialog", { name: "Local API settings" });
@@ -207,7 +206,7 @@ test("overview shows five agents, five current-session records, truthful copy su
   }
   await expect(localSheet.getByRole("button", { name: "Copy OpenAI-style endpoint" })).toBeVisible();
   await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
-  await expect(localSheet.getByRole("button", { name: "Manage agents" })).toBeVisible();
+  await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
@@ -215,6 +214,12 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await page.setViewportSize({ width: 940, height: 760 });
   await page.goto("/?mock=ready");
   await nav(page, "Usage").click();
+
+  await expect(page.locator(".chart-column")).toHaveCount(7);
+  const chartDays = await page.locator(".chart-column").evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("title")?.slice(0, 10)),
+  );
+  expect(new Set(chartDays).size).toBe(7);
 
   const history = page.locator('ul[aria-label="Usage history"]');
   await expect(history.getByRole("button")).toHaveCount(20);
@@ -278,7 +283,7 @@ test("service settings stay focused while privacy verification exposes the compl
   expect(await redpillLogo.evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain(".png");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   await expect(page.getByRole("dialog", { name: "Edit profile" }).getByText("Verified configuration", { exact: true })).toBeVisible();
-  await page.getByRole("dialog", { name: "Edit profile" }).getByRole("button", { name: "Done" }).click();
+  await page.getByRole("dialog", { name: "Edit profile" }).getByRole("button", { name: "Cancel" }).click();
   await profiles.getByRole("button", { name: "Done" }).click();
   await page.getByRole("switch", { name: "Start protection" }).click();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
@@ -319,26 +324,28 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(redpill).toHaveAttribute("aria-pressed", "true");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   let editor = page.getByRole("dialog", { name: "Edit profile" });
-  await expect(editor.getByRole("button", { name: "RedPill https://tee.redpill.ai" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "RedPill" })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
   await expect(editor.getByLabel("Service endpoint")).toBeDisabled();
 
-  await editor.getByRole("button", { name: "Phala https://inference.phala.com" }).click();
+  await editor.getByRole("button", { name: "Phala" }).click();
   await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
-  await expect(editor.getByLabel("Phala API key")).toBeVisible();
+  await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
   await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
   await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
 
-  await editor.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await editor.getByRole("button", { name: "Custom" }).click();
   await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await expect(editor.getByLabel("API key")).toBeVisible();
-  await editor.getByRole("button", { name: "Done" }).click();
+  await editor.getByRole("button", { name: "Cancel" }).click();
 
   await profiles.getByRole("button", { name: "New Profile" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
+  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");
-  await editor.getByRole("button", { name: "Custom Use another ACI endpoint" }).click();
+  await editor.getByRole("button", { name: "Custom" }).click();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await editor.getByLabel("API key").fill("sk-profile-test");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
@@ -347,6 +354,21 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
   await profiles.locator(".profile-select", { hasText: "RedPill" }).click();
   await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
+  await profiles.getByRole("button", { name: "Edit Private Lab" }).click();
+  editor = page.getByRole("dialog", { name: "Edit profile" });
+  page.once("dialog", (dialog) => dialog.accept());
+  await editor.getByRole("button", { name: "Delete Profile" }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(profiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveCount(0);
+
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor.getByRole("button", { name: "Delete Profile" })).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.accept());
+  await editor.getByRole("button", { name: "Delete Profile" }).click();
+  await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage…" }).click();
+  await expect(page.getByRole("dialog", { name: "New profile" })).toBeVisible();
 });
 
 test("fail-closed states stay explicit and never show the success effects", async ({ page }) => {

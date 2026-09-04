@@ -36,6 +36,7 @@ const REDPILL_PROFILE: ConfidentialProfile = {
   provider: "redpill",
   remoteUrl: "https://tee.redpill.ai",
   auth: { kind: "apiKey" },
+  credentialSaved: true,
   verifiedAt: now - 300,
 };
 
@@ -229,7 +230,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "no-key":
       return {
-        state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, profiles: [{ ...REDPILL_PROFILE, verifiedAt: undefined }], apiKeySaved: false },
+        state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, profiles: [{ ...REDPILL_PROFILE, credentialSaved: false, verifiedAt: undefined }], apiKeySaved: false },
         agents: STOPPED_AGENTS,
       };
     case "verifying":
@@ -290,7 +291,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "interactive":
       return {
-        state: { ...BASE, profiles: [{ ...REDPILL_PROFILE, verifiedAt: undefined }], apiKeySaved: false, remoteUrl: BASE.config.remoteUrl },
+        state: { ...BASE, profiles: [{ ...REDPILL_PROFILE, credentialSaved: false, verifiedAt: undefined }], apiKeySaved: false, remoteUrl: BASE.config.remoteUrl },
         agents: STOPPED_AGENTS,
       };
   }
@@ -305,7 +306,7 @@ export function mockApi(name: string | null): DesktopApi {
   // pending timer a no-op instead of completing the wrong run.
   let verifyRun = 0;
   let history = [...USAGE_HISTORY];
-  let clientKey = "pag_demo_2f8a19c4d7e6b305";
+  let clientKey = "sk-pag-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
   const credentialProfiles = new Set(state.apiKeySaved ? [state.activeProfileId] : []);
   const publish = () => listeners.forEach((listener) => listener(state));
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
@@ -313,7 +314,7 @@ export function mockApi(name: string | null): DesktopApi {
     copyText: async () => undefined,
     getClientKey: async () => clientKey,
     rotateClientKey: async () => {
-      clientKey = `pag_demo_${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
+      clientKey = `sk-pag-${Array.from({ length: 4 }, () => Math.random().toString(16).slice(2).padEnd(16, "0")).join("").slice(0, 64)}`;
       return clientKey;
     },
     saveLocalApiConfig: async (config) => {
@@ -373,6 +374,7 @@ export function mockApi(name: string | null): DesktopApi {
       const savedProfile: ConfidentialProfile = {
         ...profile,
         auth: { kind: "apiKey" },
+        credentialSaved: true,
         verifiedAt: Math.floor(Date.now() / 1000),
       };
       const profiles = existing
@@ -403,24 +405,22 @@ export function mockApi(name: string | null): DesktopApi {
         ...state,
         config: { ...state.config, remoteUrl: profile.remoteUrl },
         activeProfileId: profile.id,
-        apiKeySaved: true,
+        apiKeySaved: profile.credentialSaved ?? Boolean(profile.verifiedAt),
         catalog: undefined,
       };
       publish();
       return state;
     },
     deleteProfile: async (profileId) => {
-      if (state.profiles.length === 1) throw new Error("At least one Confidential AI profile is required");
       const profiles = state.profiles.filter((entry) => entry.id !== profileId);
       credentialProfiles.delete(profileId);
       const active = state.activeProfileId === profileId ? profiles[0] : state.profiles.find((entry) => entry.id === state.activeProfileId);
-      if (!active) throw new Error("Confidential AI profile not found");
       state = {
         ...state,
         profiles,
-        activeProfileId: active.id,
-        config: { ...state.config, remoteUrl: active.remoteUrl },
-        apiKeySaved: credentialProfiles.has(active.id),
+        activeProfileId: active?.id ?? "",
+        config: { ...state.config, remoteUrl: active?.remoteUrl ?? "" },
+        apiKeySaved: active ? credentialProfiles.has(active.id) : false,
         catalog: undefined,
       };
       publish();
@@ -434,7 +434,11 @@ export function mockApi(name: string | null): DesktopApi {
     },
     clearApiKey: async () => {
       credentialProfiles.delete(state.activeProfileId);
-      state = { ...state, apiKeySaved: false };
+      state = {
+        ...state,
+        profiles: state.profiles.map((profile) => profile.id === state.activeProfileId ? { ...profile, credentialSaved: false } : profile),
+        apiKeySaved: false,
+      };
       publish();
       return state;
     },

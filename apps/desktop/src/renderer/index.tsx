@@ -59,14 +59,6 @@ const query = new URLSearchParams(window.location.search);
 const previewMode = query.has("mock");
 const desktopApi: DesktopApi = previewMode ? mockApi(query.get("mock")) : liveApi;
 
-const DEFAULT_PROFILE = {
-  id: "default",
-  name: brand.service.name,
-  provider: (brand.service.defaultUrl === "https://inference.phala.com" ? "phala" : brand.service.defaultUrl === "https://tee.redpill.ai" ? "redpill" : "custom") as ServicePreset,
-  remoteUrl: brand.service.defaultUrl,
-  auth: { kind: "apiKey" as const },
-};
-
 const INITIAL_STATE: GatewayState = {
   status: "stopped",
   configurationVerification: false,
@@ -85,8 +77,8 @@ const INITIAL_STATE: GatewayState = {
   },
   usageRevision: 0,
   config: { remoteUrl: brand.service.defaultUrl, requireProductionOs: true },
-  profiles: [DEFAULT_PROFILE],
-  activeProfileId: DEFAULT_PROFILE.id,
+  profiles: [],
+  activeProfileId: "",
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
 };
@@ -118,7 +110,7 @@ const AGENT_ICONS: Record<string, string> = {
 
 type ServicePreset = "phala" | "redpill" | "custom";
 const SERVICE_PRESETS = [
-  { id: "phala", name: "Phala", url: "https://inference.phala.com", icon: phalaServiceIcon, keyLabel: "Phala API key" },
+  { id: "phala", name: "Phala", url: "https://inference.phala.com", icon: phalaServiceIcon, keyLabel: "Phala AI API key" },
   { id: "redpill", name: "RedPill", url: "https://tee.redpill.ai", icon: redpillServiceIcon, keyLabel: "RedPill API key" },
 ] as const;
 
@@ -129,6 +121,10 @@ function servicePreset(url: string): (typeof SERVICE_PRESETS)[number] | undefine
 
 function serviceKeyLabel(url: string): string {
   return servicePreset(url)?.keyLabel ?? "API key";
+}
+
+function profileHasCredential(profile: ConfidentialProfile): boolean {
+  return profile.credentialSaved ?? Boolean(profile.verifiedAt);
 }
 
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
@@ -609,7 +605,6 @@ function App(): React.JSX.Element {
       {settingsTarget === "local-api" && (
         <LocalApiSheet
           state={state}
-          agents={agents}
           frozen={busy || running}
           clientKey={clientKey}
           clientKeyVisible={clientKeyVisible}
@@ -618,10 +613,6 @@ function App(): React.JSX.Element {
           onToggleKey={() => setClientKeyVisible((visible) => !visible)}
           onRotate={rotateClientKey}
           onSave={saveLocalApi}
-          onManageAgents={() => {
-            setSettingsTarget(undefined);
-            changeView("agents");
-          }}
           onClose={() => setSettingsTarget(undefined)}
         />
       )}
@@ -1518,7 +1509,7 @@ function UsageView({
       <UsageStats page={page} />
       <section className="group usage-over-time" aria-labelledby="usage-chart-title">
         <h2 className="group-title" id="usage-chart-title">Usage over time <span>{rangeLabel(range)}</span></h2>
-        <UsageChart page={page} metric={metric} onMetric={setMetric} />
+        <UsageChart page={page} range={range} metric={metric} onMetric={setMetric} />
       </section>
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
@@ -1579,14 +1570,16 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
 
 function UsageChart({
   page,
+  range,
   metric,
   onMetric,
 }: {
   page?: UsagePage;
+  range: string;
   metric: UsageMetric;
   onMetric(metric: UsageMetric): void;
 }): React.JSX.Element {
-  const series = page?.series.slice(-30) ?? [];
+  const series = completeDailySeries(page?.series ?? [], range).slice(-30);
   const value = (point: UsagePage["series"][number]) => metric === "tokens" ? point.tokens : metric === "cost" ? point.costUsd : point.requests;
   const peak = Math.max(1, ...series.map(value));
   const labelIndexes = chartLabelIndexes(series.length);
@@ -1605,7 +1598,7 @@ function UsageChart({
       <div className="chart-bars" aria-hidden="true">
         {series.map((point, index) => (
           <div key={point.day} className="chart-column" title={`${point.day}: ${point.tokens.toLocaleString()} tokens, ${point.requests} requests, ${currency(point.costUsd)}`}>
-            <span className="chart-stack" style={{ height: `${Math.max(3, value(point) / peak * 100)}%` }}>
+            <span className={`chart-stack${value(point) === 0 ? " is-empty" : ""}`} style={{ height: `${value(point) / peak * 100}%` }}>
               {metric === "tokens" ? (
                 <><i className="output" style={{ flexGrow: point.outputTokens }} /><i className="input" style={{ flexGrow: point.inputTokens }} /></>
               ) : <i className="single" />}
@@ -1620,6 +1613,44 @@ function UsageChart({
       {series.length === 0 && <EmptyState text="No saved usage to chart for this range." />}
     </figure>
   );
+}
+
+function completeDailySeries(series: UsagePage["series"], range: string): UsagePage["series"] {
+  if (series.length === 0 && range === "all") return [];
+  const byDay = new Map(series.map((point) => [point.day, point]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const fixedDays = range === "24h" ? 1 : range === "7d" ? 7 : range === "30d" ? 30 : undefined;
+  const start = fixedDays
+    ? new Date(today.getFullYear(), today.getMonth(), today.getDate() - fixedDays + 1)
+    : parseLocalDay(series[0]?.day) ?? today;
+  const completed: UsagePage["series"] = [];
+  for (const cursor = new Date(start); cursor <= today; cursor.setDate(cursor.getDate() + 1)) {
+    const day = localDay(cursor);
+    completed.push(byDay.get(day) ?? {
+      day,
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      tokens: 0,
+      costUsd: 0,
+    });
+  }
+  return completed;
+}
+
+function parseLocalDay(day?: string): Date | undefined {
+  const match = day?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return undefined;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function localDay(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function chartLabelIndexes(length: number): Set<number> {
@@ -1829,6 +1860,7 @@ function ProfilesSheet({
           onDelete={onDelete}
           onClearKey={onClearKey}
           onComplete={completeEditor}
+          onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
           onClose={state.profiles.length === 0 ? onClose : completeEditor}
         />
       )}
@@ -1882,13 +1914,13 @@ function ProfileListSheet({
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
-          const status = active && state.apiKeySaved
+          const status = profile.verifiedAt && profileHasCredential(profile)
             ? "Verified configuration"
             : profile.verifiedAt
               ? "Verified profile"
               : "Verification required";
           return (
-            <div className="profile-list-row" role="listitem" key={profile.id}>
+            <div className={`profile-list-row${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <button
                 type="button"
                 className="profile-select"
@@ -1924,6 +1956,7 @@ function ProfileEditorSheet({
   onDelete,
   onClearKey,
   onComplete,
+  onDeleted,
   onClose,
 }: {
   state: GatewayState;
@@ -1934,6 +1967,7 @@ function ProfileEditorSheet({
   onDelete(profileId: string): Promise<string | undefined>;
   onClearKey(): Promise<string | undefined>;
   onComplete(): void;
+  onDeleted(): void;
   onClose(): void;
 }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
@@ -1941,9 +1975,9 @@ function ProfileEditorSheet({
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
     id: profile?.id ?? `profile-${crypto.randomUUID()}`,
-    name: profile?.name ?? "RedPill",
-    provider: profile?.provider ?? "redpill",
-    remoteUrl: profile?.remoteUrl ?? "https://tee.redpill.ai",
+    name: profile?.name ?? "Phala",
+    provider: profile?.provider ?? "phala",
+    remoteUrl: profile?.remoteUrl ?? "https://inference.phala.com",
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1955,8 +1989,7 @@ function ProfileEditorSheet({
     || profile.provider !== draft.provider
     || profile.remoteUrl.replace(/\/$/, "") !== draftUrl;
   const savedCredentialApplies = !isNew
-    && state.activeProfileId === draft.id
-    && state.apiKeySaved
+    && profileHasCredential(profile)
     && !profileChanged;
   const verifiedConfiguration = Boolean(profile?.verifiedAt) && savedCredentialApplies && !apiKeyDraft.trim();
 
@@ -1991,7 +2024,7 @@ function ProfileEditorSheet({
     if (message) {
       setError(message);
     } else {
-      onComplete();
+      onDeleted();
     }
   };
   const clearKey = async () => {
@@ -2031,15 +2064,15 @@ function ProfileEditorSheet({
       <form onSubmit={(event) => void submit(event)}>
         <div className="service-presets" role="group" aria-label="Confidential AI provider">
           {SERVICE_PRESETS.map((service) => (
-            <button key={service.id} type="button" className="service-preset" aria-pressed={draft.provider === service.id} disabled={frozen || saving} onClick={() => chooseService(service.id)}>
+            <button key={service.id} type="button" className="service-preset" aria-label={service.name} title={service.url} aria-pressed={draft.provider === service.id} disabled={frozen || saving} onClick={() => chooseService(service.id)}>
               <ServiceLogo url={service.url} size="large" />
-              <span><strong>{service.name}</strong><small>{service.url}</small></span>
+              <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
             </button>
           ))}
-          <button type="button" className="service-preset" aria-pressed={draft.provider === "custom"} disabled={frozen || saving} onClick={() => chooseService("custom")}>
+          <button type="button" className="service-preset" aria-label="Custom" title="Use another ACI endpoint" aria-pressed={draft.provider === "custom"} disabled={frozen || saving} onClick={() => chooseService("custom")}>
             <ServiceLogo url="custom://service" size="large" />
-            <span><strong>Custom</strong><small>Use another ACI endpoint</small></span>
+            <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
           </button>
         </div>
@@ -2054,17 +2087,15 @@ function ProfileEditorSheet({
                 {savedCredentialApplies && <button type="button" className="link" onClick={() => void clearKey()} disabled={saving || frozen}>Delete credential</button>}
               </span>
             </span>
-            <div className="credential-input-action">
-              <input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
-              <button type="submit" className="button primary" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</button>
-            </div>
+            <input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
             <small>{frozen ? "Stop protection before changing or verifying this profile." : verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
           </div>
         </div>
         {error && <p className="banner sheet-banner" role="alert">{error}</p>}
         <div className="sheet-actions profile-editor-actions">
-          {!isNew && <button type="button" className="button destructive" disabled={saving || frozen || state.profiles.length === 1} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
-          <button type="button" className="button" onClick={onClose} disabled={saving}>Done</button>
+          {!isNew && <button type="button" className="button destructive" disabled={saving || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
+          <button type="button" className="button" onClick={onClose} disabled={saving}>Cancel</button>
+          <button type="submit" className="button primary" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</button>
         </div>
       </form>
     </dialog>
@@ -2078,7 +2109,6 @@ function PrivacyVerificationSheet({ state, verified, onClose }: { state: Gateway
 
 function LocalApiSheet({
   state,
-  agents,
   frozen,
   clientKey,
   clientKeyVisible,
@@ -2087,11 +2117,9 @@ function LocalApiSheet({
   onToggleKey,
   onRotate,
   onSave,
-  onManageAgents,
   onClose,
 }: {
   state: GatewayState;
-  agents: AgentStatus[];
   frozen: boolean;
   clientKey: string;
   clientKeyVisible: boolean;
@@ -2100,7 +2128,6 @@ function LocalApiSheet({
   onToggleKey(): void;
   onRotate(): Promise<void>;
   onSave(config: LocalApiConfig): Promise<string | undefined>;
-  onManageAgents(): void;
   onClose(): void;
 }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
@@ -2109,7 +2136,6 @@ function LocalApiSheet({
   const [error, setError] = useState<string>();
   const endpoint = localEndpoint(draft) ?? "";
   const openAi = openAiEndpoint(endpoint) ?? "";
-  const managed = agents.filter((agent) => agent.recorded).length;
   const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }));
     setError(undefined);
@@ -2172,9 +2198,6 @@ function LocalApiSheet({
             <span className="row-main"><span className="row-title">Anthropic-style endpoint</span><code className="row-note">{endpoint || "Invalid settings"}</code></span>
             <IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
           </div>
-        </div>
-        <div className="sheet-card access-keys-card">
-          <div className="row"><span className="row-main"><span className="row-title-line"><span className="row-title">Access keys</span><span className="row-side">{managed} managed</span></span><span className="row-note">Created per agent when it is connected and revoked when it is disconnected. Keys are never shown.</span></span><button type="button" className="button" onClick={onManageAgents}><SquareTerminal size={15} />Manage agents</button></div>
         </div>
         {frozen && <p className="sheet-text">Stop protection before changing the listener.</p>}
         {error && <p className="sheet-text error" role="alert">{error}</p>}
@@ -2411,7 +2434,7 @@ function currency(value: number): string {
 
 function maskClientKey(key: string): string {
   if (!key) return "Unavailable";
-  const prefix = key.startsWith("pag_") ? "pag_" : "";
+  const prefix = key.startsWith("sk-pag-") ? "sk-pag-" : key.startsWith("pag_") ? "pag_" : "";
   return `${prefix}${"•".repeat(12)}`;
 }
 

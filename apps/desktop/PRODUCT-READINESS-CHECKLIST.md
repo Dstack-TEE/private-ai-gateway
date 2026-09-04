@@ -27,8 +27,8 @@ platform verification result.
 
 - [x] The verified `/v1/models` response is the only model source.
 - [x] Invalid price, TEE, modality, and capability metadata is omitted rather than invented.
-- [x] Catalog is collapsed by default, scrollable, counted, and has a sticky header.
-- [x] TEE badges appear only when the service returned `is_tee: true`.
+- [x] The catalog stays out of profile settings and is consumed by enforcement and agent discovery.
+- [x] `/v1/models` discovery traffic is excluded from Usage history.
 
 ## Agents
 

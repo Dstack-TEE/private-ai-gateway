@@ -168,6 +168,10 @@ pub struct ConfidentialProfile {
     pub provider: ServiceProvider,
     pub remote_url: String,
     pub auth: ProfileAuth,
+    /// Non-secret presence metadata. `None` identifies a profile written by
+    /// an early beta, where `verified_at` remains the compatibility hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_saved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<u64>,
 }

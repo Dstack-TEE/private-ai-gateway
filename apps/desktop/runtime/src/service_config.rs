@@ -19,7 +19,7 @@ use crate::contracts::{
 
 const CONFIG_FILE: &str = "confidential-ai.json";
 const CONFIG_VERSION: u8 = 1;
-const DEFAULT_PROFILE_ID: &str = "default";
+const LEGACY_DEFAULT_PROFILE_ID: &str = "default";
 const MAX_PROFILES: usize = 50;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,19 +38,10 @@ pub struct LoadedSettings {
 
 impl Default for ServiceSettings {
     fn default() -> Self {
-        let remote_url = desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string();
-        let provider = provider_for_url(&remote_url);
         Self {
             version: CONFIG_VERSION,
-            active_profile_id: DEFAULT_PROFILE_ID.to_string(),
-            profiles: vec![ConfidentialProfile {
-                id: DEFAULT_PROFILE_ID.to_string(),
-                name: provider_name(&provider).to_string(),
-                provider,
-                remote_url,
-                auth: ProfileAuth::ApiKey,
-                verified_at: None,
-            }],
+            active_profile_id: String::new(),
+            profiles: Vec::new(),
             require_production_os: true,
         }
     }
@@ -66,7 +57,12 @@ impl ServiceSettings {
 
     pub fn runtime_config(&self) -> Result<StartGatewayConfig, String> {
         Ok(StartGatewayConfig {
-            remote_url: self.active_profile()?.remote_url.clone(),
+            remote_url: self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == self.active_profile_id)
+                .map(|profile| profile.remote_url.clone())
+                .unwrap_or_else(|| desktop_gateway::brand::SERVICE_DEFAULT_URL.to_string()),
             require_production_os: self.require_production_os,
         })
     }
@@ -88,6 +84,29 @@ impl ServiceSettings {
         }
         Ok(())
     }
+}
+
+pub fn profile_has_credential(profile: &ConfidentialProfile) -> bool {
+    profile
+        .credential_saved
+        .unwrap_or(profile.verified_at.is_some())
+}
+
+pub fn set_profile_credential_saved(
+    settings: &mut ServiceSettings,
+    profile_id: &str,
+    saved: bool,
+) -> Result<bool, String> {
+    let profile = settings
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+    if profile.credential_saved == Some(saved) {
+        return Ok(false);
+    }
+    profile.credential_saved = Some(saved);
+    Ok(true)
 }
 
 pub fn load() -> Result<LoadedSettings, String> {
@@ -114,13 +133,14 @@ pub fn load() -> Result<LoadedSettings, String> {
     let provider = provider_for_url(&legacy.remote_url);
     let settings = ServiceSettings {
         version: CONFIG_VERSION,
-        active_profile_id: DEFAULT_PROFILE_ID.to_string(),
+        active_profile_id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
         profiles: vec![ConfidentialProfile {
-            id: DEFAULT_PROFILE_ID.to_string(),
+            id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
             name: provider_name(&provider).to_string(),
             provider,
             remote_url: legacy.remote_url,
             auth: ProfileAuth::ApiKey,
+            credential_saved: None,
             verified_at: None,
         }],
         require_production_os: legacy.require_production_os,
@@ -171,6 +191,7 @@ pub fn resolve_profile(
         provider: input.provider,
         remote_url,
         auth: ProfileAuth::ApiKey,
+        credential_saved: None,
         verified_at,
     })
 }
@@ -211,8 +232,10 @@ fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, St
     if settings.version != CONFIG_VERSION {
         return Err("The saved Confidential AI settings use an unsupported version".to_string());
     }
-    if settings.profiles.is_empty() || settings.profiles.len() > MAX_PROFILES {
-        return Err("Confidential AI settings must contain between 1 and 50 profiles".to_string());
+    if settings.profiles.len() > MAX_PROFILES {
+        return Err(format!(
+            "Confidential AI settings may contain at most {MAX_PROFILES} profiles"
+        ));
     }
     let mut ids = HashSet::new();
     for profile in &mut settings.profiles {
@@ -240,7 +263,9 @@ fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, St
         profile.provider = resolved.provider;
         profile.remote_url = resolved.remote_url;
     }
-    if !ids.contains(&settings.active_profile_id) {
+    if settings.profiles.is_empty() {
+        settings.active_profile_id.clear();
+    } else if !ids.contains(&settings.active_profile_id) {
         return Err("The active Confidential AI profile does not exist".to_string());
     }
     Ok(settings)
@@ -356,16 +381,31 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_have_one_active_api_key_profile() {
+    fn default_settings_start_without_a_profile() {
         let settings = resolve_settings(ServiceSettings::default()).unwrap();
-        assert_eq!(settings.profiles.len(), 1);
+        assert!(settings.profiles.is_empty());
+        assert!(settings.active_profile_id.is_empty());
         assert_eq!(
             settings.runtime_config().unwrap().remote_url,
             "https://tee.redpill.ai"
         );
-        assert!(matches!(
-            settings.active_profile().unwrap().auth,
-            ProfileAuth::ApiKey
-        ));
+    }
+
+    #[test]
+    fn credential_presence_is_explicit_and_profile_scoped() {
+        let mut profile = resolve_profile(input("https://private.example.com"), Some(42)).unwrap();
+        assert!(profile_has_credential(&profile));
+        profile.credential_saved = Some(false);
+        let mut settings = ServiceSettings {
+            active_profile_id: profile.id.clone(),
+            profiles: vec![profile],
+            ..ServiceSettings::default()
+        };
+
+        assert!(!profile_has_credential(settings.active_profile().unwrap()));
+        assert!(set_profile_credential_saved(&mut settings, "work-profile", true).unwrap());
+        assert!(profile_has_credential(settings.active_profile().unwrap()));
+        assert!(!set_profile_credential_saved(&mut settings, "work-profile", true).unwrap());
+        assert!(set_profile_credential_saved(&mut settings, "missing", true).is_err());
     }
 }

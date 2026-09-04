@@ -328,6 +328,21 @@ impl GatewayManager {
         self.update(|state| state.api_key_saved = saved);
     }
 
+    pub fn set_profile_credential_saved(&self, profile_id: &str, saved: bool) {
+        self.update(|state| {
+            if let Some(profile) = state
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.id == profile_id)
+            {
+                profile.credential_saved = Some(saved);
+            }
+            if state.active_profile_id == profile_id {
+                state.api_key_saved = saved;
+            }
+        });
+    }
+
     pub fn set_service_configuration(
         &self,
         config: StartGatewayConfig,

@@ -80,7 +80,7 @@ impl TokenFiles {
 
     fn issue(&self, agent: &str) -> Result<String, String> {
         let token = if agent == LOCAL_TOOLS_AGENT {
-            format!("pag_{}", generate())
+            format!("sk-pag-{}", generate())
         } else {
             generate()
         };
@@ -377,7 +377,8 @@ mod tests {
         assert_eq!(set.agent_for("nope"), None);
         assert_eq!(set.without("codex").agent_for(&codex), None);
         let client = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
-        assert!(client.starts_with("pag_"));
+        assert!(client.starts_with("sk-pag-"));
+        assert_eq!(client.len(), "sk-pag-".len() + TOKEN_BYTES * 2);
         files.revoke("codex").unwrap();
         assert!(files.read("codex").unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);

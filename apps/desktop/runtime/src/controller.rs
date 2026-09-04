@@ -36,6 +36,7 @@ pub struct DesktopRuntime {
     usage: Arc<UsageStore>,
     secrets: Arc<dyn SecretStore>,
     credentials: ClientCredentials,
+    legacy_credential_pending: Mutex<bool>,
     endpoint: EndpointRuntime,
     codex_sync: CodexCatalogSync,
     helper_path: PathBuf,
@@ -187,22 +188,10 @@ impl DesktopRuntime {
                 })?
             }
         };
-        let active_entry = service_config::credential_entry(&settings.active_profile_id)?;
-        let mut startup_key = match secrets.get(&active_entry) {
-            Ok(key) => key,
-            Err(error) => {
-                settings_error = Some(error);
-                None
-            }
-        };
-        migrate_legacy_credential(
-            &*secrets,
-            &mut settings,
-            &active_entry,
-            &mut startup_key,
-            migrated_legacy,
-            &mut settings_error,
-        );
+        let credential_saved = migrated_legacy
+            || settings
+                .active_profile()
+                .is_ok_and(service_config::profile_has_credential);
 
         let (local, local_error) = match local_api::load() {
             Ok(config) => (config, None),
@@ -269,6 +258,7 @@ impl DesktopRuntime {
             usage,
             secrets,
             credentials: ClientCredentials::new()?,
+            legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
             helper_path: options.helper_path,
@@ -291,8 +281,10 @@ impl DesktopRuntime {
                 Err("The Local API listener was not created".to_string()),
             ),
         }
-        manager.set_api_key_saved(startup_key.is_some());
-        proxy.set_api_key(startup_key);
+        // Opening the app must not touch the OS credential store. The active
+        // key is loaded only when verification or protection actually uses it.
+        manager.set_api_key_saved(credential_saved);
+        proxy.set_api_key(None);
         for error in [usage_error, local_error, settings_error]
             .into_iter()
             .flatten()
@@ -318,21 +310,93 @@ impl DesktopRuntime {
         self.manager.snapshot()
     }
 
+    fn persist_profile_credential_saved(
+        &self,
+        profile_id: &str,
+        saved: bool,
+    ) -> Result<(), String> {
+        let state = self.manager.snapshot()?;
+        let mut settings = service_config::settings_from_state(
+            state.profiles,
+            state.active_profile_id,
+            state.config.require_production_os,
+        )?;
+        if service_config::set_profile_credential_saved(&mut settings, profile_id, saved)? {
+            service_config::save(settings)?;
+        }
+        self.manager.set_profile_credential_saved(profile_id, saved);
+        Ok(())
+    }
+
+    fn load_profile_key(&self, profile_id: &str) -> Result<Option<String>, String> {
+        let entry = service_config::credential_entry(profile_id)?;
+        let stored_key = self.secrets.get(&entry)?;
+
+        let mut pending = self
+            .legacy_credential_pending
+            .lock()
+            .map_err(|_| "The credential migration state is unavailable".to_string())?;
+        if !*pending {
+            self.persist_profile_credential_saved(profile_id, stored_key.is_some())?;
+            return Ok(stored_key);
+        }
+
+        let had_stored_key = stored_key.is_some();
+        let legacy_key = self.secrets.get(LEGACY_API_KEY_ENTRY)?;
+        let key = stored_key.or(legacy_key.clone());
+        let wrote_profile_key = !had_stored_key && legacy_key.is_some();
+        if let (true, Some(key)) = (wrote_profile_key, key.as_deref()) {
+            self.secrets.set(&entry, key)?;
+        }
+        if let Err(error) = self.persist_profile_credential_saved(profile_id, key.is_some()) {
+            if wrote_profile_key {
+                let _ = self.secrets.delete(&entry);
+            }
+            return Err(format!(
+                "The previous Confidential AI credential could not be migrated: {error}"
+            ));
+        }
+        if legacy_key.is_some() {
+            if let Err(error) = self.secrets.delete(LEGACY_API_KEY_ENTRY) {
+                return Err(format!(
+                    "The previous Confidential AI credential was migrated, but its old copy could not be removed: {error}"
+                ));
+            }
+        }
+        *pending = false;
+        Ok(key)
+    }
+
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let config = service_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
             return Err("Select or verify the Confidential AI profile before starting".to_string());
         }
-        if !state.api_key_saved {
-            return Err("Add a credential to the active Confidential AI profile".to_string());
-        }
+        let profile = state
+            .profiles
+            .iter()
+            .find(|profile| profile.id == state.active_profile_id)
+            .ok_or_else(|| "Create a Confidential AI profile before starting".to_string())?;
+        let key = self
+            .load_profile_key(&profile.id)?
+            .ok_or_else(|| "Add a credential to the active Confidential AI profile".to_string())?;
+        self.proxy.set_api_key(Some(key));
+        self.manager.set_api_key_saved(true);
         self.codex_sync.reset()?;
-        self.manager.clone().start(config)
+        match self.manager.clone().start(config) {
+            Ok(state) => Ok(state),
+            Err(error) => {
+                self.proxy.set_api_key(None);
+                Err(error)
+            }
+        }
     }
 
     pub fn stop(&self) -> Result<GatewayState, String> {
-        self.manager.stop()
+        let result = self.manager.stop();
+        self.proxy.set_api_key(None);
+        result
     }
 
     pub fn toggle(self: &Arc<Self>) {
@@ -356,7 +420,7 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let gateway = self.manager.stop().map(|_| ());
+        let gateway = self.stop().map(|_| ());
         let endpoint = self.endpoint.stop().await;
         gateway.and(endpoint)
     }
@@ -416,28 +480,33 @@ impl DesktopRuntime {
         if self.manager.is_running()? {
             return Err("Stop protection before verifying a different service".to_string());
         }
-        let previous = self.manager.snapshot()?;
-        let mut settings = service_config::settings_from_state(
-            previous.profiles.clone(),
-            previous.active_profile_id.clone(),
-            previous.config.require_production_os,
+        let initial = self.manager.snapshot()?;
+        let initial_settings = service_config::settings_from_state(
+            initial.profiles.clone(),
+            initial.active_profile_id.clone(),
+            initial.config.require_production_os,
         )?;
-        let existing = settings
+        let existing = initial_settings
             .profiles
             .iter()
             .find(|entry| entry.id == profile.id)
             .cloned();
-        let candidate = service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
+        let mut candidate =
+            service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
         let profile_changed = existing.as_ref().is_none_or(|existing| {
             existing.provider != candidate.provider
                 || existing.remote_url != candidate.remote_url
                 || existing.auth != candidate.auth
         });
         let candidate_entry = service_config::credential_entry(&candidate.id)?;
-        let stored_candidate_key = self.secrets.get(&candidate_entry)?;
-        let previous_entry = service_config::credential_entry(&previous.active_profile_id)?;
-        let previous_key = self.secrets.get(&previous_entry)?;
         let replace_key = key.is_some();
+        let stored_candidate_key = if replace_key {
+            self.secrets.get(&candidate_entry)?
+        } else if !profile_changed {
+            self.load_profile_key(&candidate.id)?
+        } else {
+            None
+        };
         let candidate_key = match key {
             Some(key) => validate_api_key(&key)?,
             None if !profile_changed => stored_candidate_key
@@ -445,10 +514,17 @@ impl DesktopRuntime {
                 .ok_or_else(|| "Enter an API key".to_string())?,
             None => return Err("Enter an API key for this profile".to_string()),
         };
+        let previous = self.manager.snapshot()?;
+        let mut settings = service_config::settings_from_state(
+            previous.profiles.clone(),
+            previous.active_profile_id.clone(),
+            previous.config.require_production_os,
+        )?;
         let config = StartGatewayConfig {
             remote_url: candidate.remote_url.clone(),
             require_production_os,
         };
+        candidate.credential_saved = Some(true);
         settings.upsert(candidate.clone())?;
         settings.active_profile_id = candidate.id.clone();
         settings.require_production_os = require_production_os;
@@ -462,20 +538,20 @@ impl DesktopRuntime {
         {
             Ok(state) => state,
             Err(error) => {
-                self.proxy.set_api_key(previous_key);
+                self.proxy.set_api_key(None);
                 return Err(error);
             }
         };
         let Some(session_id) = started.session_id.clone() else {
             let _ = self.manager.stop();
-            self.proxy.set_api_key(previous_key);
+            self.proxy.set_api_key(None);
             self.manager.restore_snapshot(previous);
             return Err("Configuration verification did not start".to_string());
         };
         let verified = self.manager.wait_for_verification(&session_id).await;
         let stop_result = self.manager.stop();
         if let Err(error) = verified {
-            self.proxy.set_api_key(previous_key);
+            self.proxy.set_api_key(None);
             self.manager.restore_snapshot(previous);
             return Err(match stop_result {
                 Ok(_) => error,
@@ -485,14 +561,14 @@ impl DesktopRuntime {
             });
         }
         if let Err(error) = stop_result {
-            self.proxy.set_api_key(previous_key);
+            self.proxy.set_api_key(None);
             self.manager.restore_snapshot(previous);
             return Err(error);
         }
 
         if replace_key {
             if let Err(error) = self.secrets.set(&candidate_entry, &candidate_key) {
-                self.proxy.set_api_key(previous_key);
+                self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(error);
             }
@@ -510,7 +586,7 @@ impl DesktopRuntime {
                         .err()
                     })
                     .flatten();
-                self.proxy.set_api_key(previous_key);
+                self.proxy.set_api_key(None);
                 self.manager.restore_snapshot(previous);
                 return Err(match restore_error {
                     Some(restore_error) => format!(
@@ -546,17 +622,18 @@ impl DesktopRuntime {
             .find(|profile| profile.id == profile_id)
             .cloned()
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-        let entry = service_config::credential_entry(&profile.id)?;
-        let key = self.secrets.get(&entry)?;
         settings.active_profile_id = profile.id;
         let settings = service_config::save(settings)?;
         let config = settings.runtime_config()?;
-        self.proxy.set_api_key(key.clone());
+        let credential_saved = settings
+            .active_profile()
+            .is_ok_and(service_config::profile_has_credential);
+        self.proxy.set_api_key(None);
         self.manager.set_service_configuration(
             config,
             settings.profiles,
             settings.active_profile_id,
-            key.is_some(),
+            credential_saved,
             false,
         );
         self.manager.snapshot()
@@ -572,9 +649,6 @@ impl DesktopRuntime {
             previous.active_profile_id,
             previous.config.require_production_os,
         )?;
-        if settings.profiles.len() == 1 {
-            return Err("At least one Confidential AI profile is required".to_string());
-        }
         let removed = settings
             .profiles
             .iter()
@@ -585,11 +659,11 @@ impl DesktopRuntime {
         let removed_key = self.secrets.get(&entry)?;
         self.secrets.delete(&entry)?;
         settings.profiles.retain(|profile| profile.id != profile_id);
-        if settings.active_profile_id == profile_id {
+        if settings.profiles.is_empty() {
+            settings.active_profile_id.clear();
+        } else if settings.active_profile_id == profile_id {
             settings.active_profile_id = settings.profiles[0].id.clone();
         }
-        let active_entry = service_config::credential_entry(&settings.active_profile_id)?;
-        let active_key = self.secrets.get(&active_entry)?;
         let settings = match service_config::save(settings) {
             Ok(settings) => settings,
             Err(error) => {
@@ -604,12 +678,15 @@ impl DesktopRuntime {
             }
         };
         let config = settings.runtime_config()?;
-        self.proxy.set_api_key(active_key.clone());
+        let credential_saved = settings
+            .active_profile()
+            .is_ok_and(service_config::profile_has_credential);
+        self.proxy.set_api_key(None);
         self.manager.set_service_configuration(
             config,
             settings.profiles,
             settings.active_profile_id,
-            active_key.is_some(),
+            credential_saved,
             false,
         );
         self.manager.snapshot()
@@ -620,14 +697,36 @@ impl DesktopRuntime {
             return Err("Stop protection before deleting a profile credential".to_string());
         }
         let state = self.manager.snapshot()?;
-        let entry = service_config::credential_entry(&state.active_profile_id)?;
-        self.proxy.set_api_key(None);
-        if let Err(error) = self.secrets.delete(&entry) {
-            return Err(format!(
-                "The key is revoked for this session, but removing it from the credential store failed: {error}. Retry Delete or save a new key"
-            ));
+        if state.active_profile_id.is_empty() {
+            return Err("There is no active Confidential AI profile".to_string());
         }
-        self.manager.set_api_key_saved(false);
+        let entry = service_config::credential_entry(&state.active_profile_id)?;
+        let previous_key = self.secrets.get(&entry)?;
+        self.secrets.delete(&entry)?;
+        let mut settings = service_config::settings_from_state(
+            state.profiles,
+            state.active_profile_id.clone(),
+            state.config.require_production_os,
+        )?;
+        if let Some(profile) = settings
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == state.active_profile_id)
+        {
+            profile.credential_saved = Some(false);
+        }
+        if let Err(error) = service_config::save(settings) {
+            let restore = restore_secret_entry(&*self.secrets, &entry, previous_key.as_deref());
+            return Err(match restore {
+                Ok(()) => error,
+                Err(restore_error) => {
+                    format!("{error}. The credential could not be restored: {restore_error}")
+                }
+            });
+        }
+        self.proxy.set_api_key(None);
+        self.manager
+            .set_profile_credential_saved(&state.active_profile_id, false);
         self.manager.snapshot()
     }
 
@@ -844,59 +943,6 @@ impl DesktopRuntime {
                 "Start the gateway and wait until it is verified; the model list for {} comes from it",
                 agent.name()
             )),
-        }
-    }
-}
-
-fn migrate_legacy_credential(
-    secrets: &dyn SecretStore,
-    settings: &mut service_config::ServiceSettings,
-    active_entry: &str,
-    startup_key: &mut Option<String>,
-    migrated_legacy: bool,
-    error: &mut Option<String>,
-) {
-    if startup_key.is_none() && error.is_none() {
-        match secrets.get(LEGACY_API_KEY_ENTRY) {
-            Ok(Some(legacy_key)) => match secrets.set(active_entry, &legacy_key) {
-                Ok(()) => match service_config::save(settings.clone()) {
-                    Ok(_) => {
-                        *startup_key = Some(legacy_key);
-                        if let Err(delete_error) = secrets.delete(LEGACY_API_KEY_ENTRY) {
-                            *error = Some(format!(
-                                "The previous credential was migrated but its old copy could not be removed: {delete_error}"
-                            ));
-                        }
-                    }
-                    Err(save_error) => {
-                        let rollback = secrets.delete(active_entry).err();
-                        *error = Some(match rollback {
-                            Some(rollback) => format!(
-                                "The previous Confidential AI credential could not be migrated: {save_error}. The partial credential could not be removed: {rollback}"
-                            ),
-                            None => format!(
-                                "The previous Confidential AI credential could not be migrated: {save_error}"
-                            ),
-                        });
-                    }
-                },
-                Err(set_error) => {
-                    *error = Some(format!(
-                        "The previous Confidential AI credential could not be migrated: {set_error}"
-                    ));
-                }
-            },
-            Ok(None) if migrated_legacy => {
-                if let Err(save_error) = service_config::save(settings.clone()) {
-                    *error = Some(save_error);
-                }
-            }
-            Ok(None) => {}
-            Err(get_error) => *error = Some(get_error),
-        }
-    } else if migrated_legacy && error.is_none() {
-        if let Err(save_error) = service_config::save(settings.clone()) {
-            *error = Some(save_error);
         }
     }
 }

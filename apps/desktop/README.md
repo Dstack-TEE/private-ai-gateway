@@ -76,9 +76,12 @@ protocol is the service's own response, shown as such.
 - **Confidential AI profile credentials** and any credential a connection
   takes over live only in the OS credential store (`keyring` 4). Each profile
   has its own credential entry; the profile JSON stores only its name,
-  provider, endpoint, authentication kind, and verification time. The active
-  credential is loaded into the proxy's memory and swapped for the agent token
-  on the way to the sidecar; it never reaches the window. Previews show `Existing secret` /
+  provider, endpoint, authentication kind, credential-presence metadata, and
+  verification time. Launching the app does not read the credential store;
+  the selected credential is loaded only when verification or protection uses
+  it, then cleared from proxy memory when protection stops. It is swapped for
+  the agent token on the way to the sidecar and never reaches the window.
+  Previews show `Existing secret` /
   `Managed local credential` in place of values; the connection record stores
   an opaque `secret_ref`. Record, tokens, and temp files are owner-only
   (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
@@ -86,14 +89,17 @@ protocol is the service's own response, shown as such.
   check to the final rename.
 - **Confidential AI profiles** are verified before they are saved. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
+  A fresh install starts without a profile and opens New Profile when settings
+  are first needed; every profile can be deleted, including the last one.
   Settings offers local, self-hosted branding for the Phala and RedPill
   presets plus a custom HTTPS endpoint. New providers or endpoints require a
   new key, so a credential is never silently reused. Profile metadata is
   written atomically and the current API-key authentication model is shaped so
   an OAuth account can be added as another auth kind later. A successful
   `Verify and Save` selects the profile but leaves protection off until the
-  user explicitly starts it. Legacy single-service settings and credentials
-  migrate to the default profile on first launch.
+  user explicitly starts it. Legacy single-service settings are recognized at
+  launch, while their credential migrates to the profile entry on first use so
+  opening the app does not request credential-store access.
 - **Model catalog** is the verified service's `GET /v1/models`, read through
   the sidecar and published atomically with the identity. It is the single
   source of model truth: agents choose from it, the proxy serves it on
@@ -108,6 +114,10 @@ protocol is the service's own response, shown as such.
   and deletes records only after explicit confirmation. CSV cells that could
   be interpreted as spreadsheet formulas are escaped. Token and cost fields
   remain absent when the provider did not report them.
+- **The Local API client key** uses `sk-pag-` followed by 64 lowercase hex
+  characters generated from 32 random bytes. Existing beta `pag_` keys remain
+  valid so upgrades do not silently break configured clients; newly created or
+  rotated keys use the current format.
 - **What a receipt proves.** The verifier applies its ACI policy to inference
   bodies (`provider.aci_verified`, pinned sessions) and re-serializes them;
   the receipt binds those bytes, shown as `Policy applied`, not the agent's
