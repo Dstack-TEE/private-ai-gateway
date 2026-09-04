@@ -1,10 +1,12 @@
 # Private AI Gateway Desktop
 
-Desktop clients that turn the bundled `aci serve` verifier into a local gateway
-for Codex, Claude Code, OpenCode, Pi, and Hermes. One Rust runtime owns policy,
-persistence, credentials, usage, agent projection, and process lifecycle;
-SwiftUI/AppKit, WinUI 3, GTK4/libadwaita, and the migration Tauri client are
-presentation adapters over the same versioned protocol.
+Cross-platform Tauri desktop app that turns the bundled `aci serve` verifier
+into a local gateway for Codex, Claude Code, OpenCode, Pi, and Hermes. One Rust
+runtime owns policy, persistence, credentials, usage, agent projection, and
+process lifecycle. A shared React renderer owns the dense product UI, while
+Tauri delegates windows, menus, tray integration, file dialogs, confirmation
+dialogs, clipboard, autostart, and application lifecycle to each operating
+system.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -193,12 +195,7 @@ add the official assets they reference before selecting them.
 
 ## Development
 
-The native clients launch `private-ai-gateway-desktop-service` and communicate
-over versioned NDJSON on stdin/stdout. No management HTTP listener is opened.
-See [`native/ARCHITECTURE.md`](native/ARCHITECTURE.md) for the platform boundary
-and parity contract.
-
-Build the Rust CLI once, then run the Tauri migration client:
+Install dependencies and run the Tauri app:
 
 ```bash
 cargo build --bin aci
@@ -208,22 +205,10 @@ npm run dev
 ```
 
 Tauri launches the target-triple-specific `aci` binary as an external sidecar.
-The development command builds a debug sidecar; packaged builds always compile
-and bundle a release sidecar from this repository.
-
-Build platform-native packages on their target operating system:
-
-```bash
-npm run dist:native:macos
-npm run dist:native:windows
-npm run dist:native:linux
-```
-
-The outputs are a macOS app plus DMG/ZIP, a self-contained Windows x64 ZIP, and
-a Linux amd64 DEB plus tar.gz. Each contains the GUI, shared runtime service,
-`aci`, helper, and local brand/provider/agent assets. A native client is counted
-as release-ready only after its platform CI runner compiles, packages, launches,
-and runs the real runtime protocol smoke test.
+The development command builds debug sidecars; packaged builds compile release
+sidecars from this repository. `npm run dist` produces the native bundle for
+the current platform. CI builds the same Tauri application as a macOS DMG and
+app, a Windows NSIS installer, and Linux DEB and AppImage packages.
 
 Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
 covers the proxy (token scope, fail-closed session, revocation gate, and a
@@ -234,35 +219,25 @@ body, status, and streamed bytes through unchanged), the projections
 Playwright against the stateful in-page mock. It covers protection start/stop,
 five-agent discovery and reversible config previews, current-session Overview
 usage, persistent-history filters and cursor pagination, CSV/clear flows,
-proof and local-block semantics, profile management, native dialog focus,
+proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
 media, 200% zoom, and
-940/720/540/320 widths. CI runs it on the macOS package job.
+940/720/540/320 widths. CI runs it before all three platform packages.
 
 ## Packaging
 
-`npm run dist` remains the Tauri migration package. It builds the release `aci`
-sidecar and runs `tauri build`. Xcode 26 or newer is required to package the
-adaptive macOS app icon. A macOS runner produces `Private AI Gateway.app`, a
-DMG, and a ZIP artifact.
+`npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
+newer is required to package the adaptive macOS app icon. The platform bundle
+contains the shared renderer, Rust runtime, `aci`, and the credential helper;
+there is no second GUI or management service process.
 
-`scripts/bundle-native.mjs` builds two sidecars with `--locked`: the `aci`
+`scripts/bundle-sidecars.mjs` builds two sidecars with `--locked`: the `aci`
 verifier and `private-ai-gateway-helper`, a console binary from the gateway
 crate that prints an agent's local token (kept separate from the GUI app so
 stdout works on Windows). The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
-The root `aci` follows the root workspace toolchain and currently targets Unix
-because the dstack SDK transport uses a Unix-domain socket. CI tests the
-gateway crate and helper on Rust 1.89 on Ubuntu and Windows, checks the Tauri
-backend on Ubuntu, builds the complete app on macOS, and smoke-tests the
-credential store on macOS, Windows, and (under `dbus-run-session` with
-gnome-keyring) Linux.
-
-The `Desktop native clients` workflow independently builds and launches the
-SwiftUI/AppKit, WinUI 3, and GTK4/libadwaita packages, runs one shared protocol
-fixture plus the packaged runtime smoke, and uploads each platform artifact.
-The existing `Desktop macOS` workflow continues to build the Tauri migration
-package on `macos-26`, launches the packaged tray app, runs the bundled sidecar
-against `https://tee.redpill.ai`, checks the verified local `/v1/models` path,
-and uploads a screenshot plus codesign, Gatekeeper, and size inspection output.
+The root `aci` follows the root workspace toolchain. CI tests the gateway,
+runtime, renderer, and Tauri backend, then compiles and bundles the same app on
+macOS, Windows, and Linux. macOS additionally verifies the compiled asset
+catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.

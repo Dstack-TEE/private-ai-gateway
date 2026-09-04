@@ -220,6 +220,13 @@ export interface AgentPreview {
   revision: string;
 }
 
+export interface ConfirmationOptions {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+}
+
 export interface DesktopApi {
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
@@ -231,6 +238,8 @@ export interface DesktopApi {
   onNavigate(listener: (section: "settings") => void): () => void;
   /** Open the brand's support page in the system browser. */
   openSupport(): Promise<void>;
+  /** Use the platform confirmation dialog for destructive actions. */
+  confirm(options: ConfirmationOptions): Promise<boolean>;
   start(config: StartGatewayConfig): Promise<GatewayState>;
   verifyConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): Promise<GatewayState>;
   activateProfile(profileId: string): Promise<GatewayState>;

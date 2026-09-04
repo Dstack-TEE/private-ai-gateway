@@ -334,6 +334,7 @@ export function mockApi(name: string | null): DesktopApi {
     },
     onNavigate: () => () => undefined,
     openSupport: async () => undefined,
+    confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {
       const run = ++verifyRun;
       state = { ...state, status: "verifying", configurationVerification: false, progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };

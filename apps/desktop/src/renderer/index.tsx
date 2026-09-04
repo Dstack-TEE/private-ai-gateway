@@ -198,7 +198,7 @@ const TLS_TRACKS = [
   "17 03 03 00 3c   7a0d 2c95 f6e3 41b8 d9c0 3f5e 8a2b 6e17 c4d8 0b93 5a6f e1d2 7c04 93ab 5e8f 21c6 d0a3 7b19",
 ];
 
-/** Native modal dialog: `showModal()` gives browser-native focus
+/** HTML modal dialog: `showModal()` gives browser-native focus
  * containment, Escape handling, and an inert background. Focus returns to
  * the opener on close. */
 function useModalDialog(
@@ -246,7 +246,6 @@ function App(): React.JSX.Element {
   const [agentBusy, setAgentBusy] = useState<string>();
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
-  const [confirmRestoreAll, setConfirmRestoreAll] = useState(false);
   const [notice, setNotice] = useState<{ id: number; text: string }>();
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const [previewOpenAtLogin, setPreviewOpenAtLogin] = useState(true);
@@ -475,11 +474,22 @@ function App(): React.JSX.Element {
   };
 
   const restoreAll = async () => {
-    setApplying(true);
     setActionError(undefined);
+    let confirmed: boolean;
+    try {
+      confirmed = await desktopApi.confirm({
+        title: "Restore all agents?",
+        message: "Every agent token will be revoked first, then every configuration managed by Private AI Gateway will be restored.",
+        confirmLabel: "Restore All",
+      });
+    } catch (error) {
+      setActionError(errorMessage(error));
+      return;
+    }
+    if (!confirmed) return;
+    setApplying(true);
     try {
       setAgents(await desktopApi.disconnectAllAgents());
-      setConfirmRestoreAll(false);
       setNotice({ id: Date.now(), text: "All agent configurations restored" });
       window.setTimeout(() => document.getElementById("page-title-settings")?.focus(), 0);
     } catch (error) {
@@ -573,7 +583,7 @@ function App(): React.JSX.Element {
             locked={locked}
             problem={problem}
             onPolicy={setAllowDevelopmentOs}
-            onRestoreAll={() => setConfirmRestoreAll(true)}
+            onRestoreAll={() => void restoreAll()}
             onSupport={() => void run(() => desktopApi.openSupport())}
             onOpen={openSettings}
           />
@@ -581,14 +591,6 @@ function App(): React.JSX.Element {
         </div>
       </section>
 
-      {confirmRestoreAll && (
-        <RestoreAllSheet
-          applying={applying}
-          error={actionError}
-          onCancel={() => setConfirmRestoreAll(false)}
-          onConfirm={() => void restoreAll()}
-        />
-      )}
       {settingsTarget === "confidential" && (
         <ProfilesSheet
           state={state}
@@ -1419,7 +1421,6 @@ function UsageView({
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [confirmClear, setConfirmClear] = useState(false);
   const focusAfterPage = useRef(false);
   const requestGeneration = useRef(0);
   const currentCursor = cursors[cursors.length - 1];
@@ -1477,8 +1478,13 @@ function UsageView({
   };
   const clear = async () => {
     try {
+      const confirmed = await desktopApi.confirm({
+        title: "Clear usage history?",
+        message: "This permanently deletes local usage records. Provider billing and remote receipt retention are not affected.",
+        confirmLabel: "Clear History",
+      });
+      if (!confirmed) return;
       const count = await desktopApi.clearUsage();
-      setConfirmClear(false);
       resetPagination();
       setPage(undefined);
       onNotice(`Deleted ${count.toLocaleString()} usage ${count === 1 ? "record" : "records"}`);
@@ -1520,7 +1526,7 @@ function UsageView({
           <span aria-live="polite">{loading ? "Loading" : `${page?.summary.requests ?? 0} records · kept on this Mac`}</span>
           <span className="group-actions">
             <IconButton label="Export usage as CSV" onClick={() => void exportCsv()}><Download size={16} /></IconButton>
-            <IconButton label="Clear usage history" onClick={() => setConfirmClear(true)}><Trash2 size={16} /></IconButton>
+            <IconButton label="Clear usage history" onClick={() => void clear()}><Trash2 size={16} /></IconButton>
           </span>
         </h2>
         <div className="inset list" aria-busy={loading}>
@@ -1558,7 +1564,6 @@ function UsageView({
           ><ChevronRight size={16} /></IconButton>
         </div>
       </section>
-      {confirmClear && <ClearUsageSheet onCancel={() => setConfirmClear(false)} onConfirm={() => void clear()} />}
     </div>
   );
 }
@@ -1622,11 +1627,6 @@ function chartLabelIndexes(length: number): Set<number> {
     return new Set(Array.from({ length }, (_, index) => index));
   }
   return new Set(Array.from({ length: 4 }, (_, index) => Math.round(index * (length - 1) / 3)));
-}
-
-function ClearUsageSheet({ onCancel, onConfirm }: { onCancel(): void; onConfirm(): void }): React.JSX.Element {
-  const dialog = useModalDialog(onCancel);
-  return <dialog ref={dialog} className="sheet" aria-label="Clear usage history"><div className="sheet-heading"><h2>Clear usage history?</h2></div><p className="sheet-text">This permanently deletes the local usage database records. It does not affect provider billing or remote receipt retention.</p><div className="sheet-actions"><button className="button" onClick={onCancel}>Cancel</button><button className="button destructive" onClick={onConfirm}>Clear History</button></div></dialog>;
 }
 
 function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {
@@ -1947,7 +1947,6 @@ function ProfileEditorSheet({
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string>();
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
@@ -1970,10 +1969,21 @@ function ProfileEditorSheet({
       remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
     }));
     setApiKeyDraft("");
-    setConfirmDelete(false);
     setError(undefined);
   };
   const removeProfile = async () => {
+    let confirmed: boolean;
+    try {
+      confirmed = await desktopApi.confirm({
+        title: `Delete “${draft.name}”?`,
+        message: "The profile and its saved credential will be permanently removed from this device.",
+        confirmLabel: "Delete Profile",
+      });
+    } catch (confirmError) {
+      setError(errorMessage(confirmError));
+      return;
+    }
+    if (!confirmed) return;
     setSaving(true);
     setError(undefined);
     const message = await onDelete(draft.id);
@@ -1985,6 +1995,18 @@ function ProfileEditorSheet({
     }
   };
   const clearKey = async () => {
+    let confirmed: boolean;
+    try {
+      confirmed = await desktopApi.confirm({
+        title: `Delete the credential for “${draft.name}”?`,
+        message: "Protection cannot start with this profile until a new credential is verified and saved.",
+        confirmLabel: "Delete Credential",
+      });
+    } catch (confirmError) {
+      setError(errorMessage(confirmError));
+      return;
+    }
+    if (!confirmed) return;
     setSaving(true);
     setError(undefined);
     const message = await onClearKey();
@@ -2007,13 +2029,6 @@ function ProfileEditorSheet({
     <dialog ref={dialog} className="sheet profile-editor-sheet" aria-label={isNew ? "New profile" : "Edit profile"}>
       <div className="sheet-heading"><h2>{isNew ? "New Profile" : "Edit Profile"}</h2></div>
       <form onSubmit={(event) => void submit(event)}>
-        {confirmDelete && !isNew && (
-          <div className="profile-delete-confirm" role="alert">
-            <span>Delete “{draft.name}” and its saved credential?</span>
-            <button type="button" className="button" onClick={() => setConfirmDelete(false)}>Cancel</button>
-            <button type="button" className="button destructive" onClick={() => void removeProfile()}>Delete</button>
-          </div>
-        )}
         <div className="service-presets" role="group" aria-label="Confidential AI provider">
           {SERVICE_PRESETS.map((service) => (
             <button key={service.id} type="button" className="service-preset" aria-pressed={draft.provider === service.id} disabled={frozen || saving} onClick={() => chooseService(service.id)}>
@@ -2048,7 +2063,7 @@ function ProfileEditorSheet({
         </div>
         {error && <p className="banner sheet-banner" role="alert">{error}</p>}
         <div className="sheet-actions profile-editor-actions">
-          {!isNew && <button type="button" className="button destructive" disabled={saving || frozen || state.profiles.length === 1} onClick={() => setConfirmDelete(true)}><Trash2 size={14} />Delete Profile</button>}
+          {!isNew && <button type="button" className="button destructive" disabled={saving || frozen || state.profiles.length === 1} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
           <button type="button" className="button" onClick={onClose} disabled={saving}>Done</button>
         </div>
       </form>
@@ -2248,38 +2263,6 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
         </section>
       )}
     </section>
-  );
-}
-
-function RestoreAllSheet({
-  applying,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  applying: boolean;
-  error?: string;
-  onCancel(): void;
-  onConfirm(): void;
-}): React.JSX.Element {
-  const dialog = useModalDialog(onCancel);
-  return (
-    <dialog ref={dialog} className="sheet" aria-label="Restore all agents">
-      <div className="sheet-heading"><h2>Restore all agents?</h2></div>
-      <p className="sheet-text">
-        Every agent token is revoked first, then every recorded agent config is put back. This works
-        even when the endpoint is unavailable or protection is off.
-      </p>
-      {error && <p className="sheet-text error" role="alert">{error}</p>}
-      <div className="sheet-actions">
-        <button className="button" onClick={onCancel} disabled={applying}>
-          Cancel
-        </button>
-        <button className="button destructive" onClick={onConfirm} disabled={applying}>
-          {applying ? "Restoring…" : "Restore All"}
-        </button>
-      </div>
-    </dialog>
   );
 }
 

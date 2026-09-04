@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm } from "@tauri-apps/plugin-dialog";
 
 import type {
   AgentPreview,
@@ -38,6 +39,14 @@ export const desktopApi: DesktopApi = {
   },
   openSupport(): Promise<void> {
     return invoke("open_support");
+  },
+  confirm(options): Promise<boolean> {
+    return confirm(options.message, {
+      title: options.title,
+      kind: "warning",
+      okLabel: options.confirmLabel,
+      cancelLabel: options.cancelLabel ?? "Cancel",
+    });
   },
 
   start(config: StartGatewayConfig): Promise<GatewayState> {

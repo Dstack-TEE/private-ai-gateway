@@ -1,7 +1,7 @@
 [package]
 name = "private-ai-gateway-desktop-runtime"
 version = "0.1.0"
-description = "Platform-neutral state, persistence, and protocol for Private AI Gateway desktop clients"
+description = "Platform-neutral state and persistence for Private AI Gateway desktop"
 license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.89"
@@ -10,16 +10,12 @@ rust-version = "1.89"
 name = "desktop_runtime"
 path = "src/lib.rs"
 
-[[bin]]
-name = "private-ai-gateway-desktop-service"
-path = "src/bin/private-ai-gateway-desktop-service.rs"
-
 [dependencies]
 desktop-gateway = { package = "private-ai-gateway-desktop-gateway", path = "../gateway" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 url = "2"
 
 [dev-dependencies]

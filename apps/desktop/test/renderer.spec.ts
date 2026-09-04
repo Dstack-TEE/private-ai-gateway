@@ -149,9 +149,12 @@ test("five agents connect and disconnect directly from the verified discovered c
   await expect(pi.getByText("Not connected", { exact: true })).toBeVisible();
 
   await nav(page, "Settings").click();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    expect(dialog.message()).toContain("Restore all agents?");
+    await dialog.accept();
+  });
   await page.getByRole("button", { name: "Restore all" }).click();
-  const restore = page.getByRole("dialog", { name: "Restore all agents" });
-  await restore.getByRole("button", { name: "Restore All" }).click();
   await expect(page.locator('.sr-only[role="status"]')).toContainText("All agent configurations restored");
 });
 
@@ -241,10 +244,19 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await page.getByRole("button", { name: "Export usage as CSV" }).click();
   await expect(page.locator('.sr-only[role="status"]')).toContainText(/Exported \d+ usage records/);
 
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Clear usage history?");
+    await dialog.dismiss();
+  });
   await page.getByRole("button", { name: "Clear usage history" }).click();
-  const clear = page.getByRole("dialog", { name: "Clear usage history" });
-  await expect(clear.getByText(/permanently deletes the local usage database records/i)).toBeVisible();
-  await clear.getByRole("button", { name: "Clear History" }).click();
+  await expect(history.getByRole("button")).toHaveCount(20);
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    expect(dialog.message()).toContain("Clear usage history?");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Clear usage history" }).click();
   await expect(page.locator(".usage-history")).toContainText("No saved usage matches these filters.");
   await expect(page.locator('.sr-only[role="status"]')).toContainText(/Deleted \d+ usage records/);
 });

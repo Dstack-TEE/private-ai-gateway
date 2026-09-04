@@ -1,4 +1,4 @@
-name: Desktop native clients
+name: Desktop Tauri
 
 on:
   workflow_dispatch:
@@ -28,30 +28,7 @@ permissions:
   contents: read
 
 jobs:
-  runtime:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: '1.89'
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            apps/desktop/gateway -> target
-            apps/desktop/runtime -> target
-      - name: Verify shared desktop runtime
-        run: |
-          cargo +1.89 fmt --manifest-path apps/desktop/gateway/Cargo.toml -- --check
-          cargo +1.89 fmt --manifest-path apps/desktop/runtime/Cargo.toml -- --check
-          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/gateway/Cargo.toml -- -D warnings
-          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/runtime/Cargo.toml -- -D warnings
-          cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
-          cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
-
-  linux:
+  verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -61,170 +38,129 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt
+          toolchain: '1.89'
+          components: rustfmt, clippy
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             . -> target
             apps/desktop/gateway -> target
             apps/desktop/runtime -> target
-            apps/desktop/native/linux -> target
-      - name: Install Linux native dependencies
+            apps/desktop/src-tauri -> target
+      - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libdbus-1-dev libsecret-1-dev dbus-x11 xauth xvfb
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
-      - name: Package native Linux client
+      - name: Verify generated brand assets
         working-directory: apps/desktop
-        run: npm run dist:native:linux
-      - name: Smoke runtime protocol
-        working-directory: apps/desktop
-        run: dbus-run-session -- node scripts/native-runtime-smoke.mjs release/native-linux/Private-AI-Gateway/private-ai-gateway-desktop-service
-      - name: Launch native Linux client
-        working-directory: apps/desktop
-        shell: bash
         run: |
-          set -euo pipefail
-          dbus-run-session -- bash -c '
-            export GTK_A11Y=none
-            log="$RUNNER_TEMP/private-ai-gateway-linux.log"
-            xvfb-run -a release/native-linux/Private-AI-Gateway/private-ai-gateway --autostart >"$log" 2>&1 &
-            pid=$!
-            sleep 5
-            if ! kill -0 "$pid" 2>/dev/null; then
-              cat "$log"
-              wait "$pid"
-            fi
-            kill "$pid"
-            wait "$pid" || true
-          '
-      - uses: actions/upload-artifact@v6
-        with:
-          name: private-ai-gateway-native-linux-${{ github.sha }}
-          retention-days: 14
-          path: |
-            apps/desktop/release/*.deb
-            apps/desktop/release/*native-linux*.tar.gz
-
-  windows:
-    runs-on: windows-2025
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '8.0.x'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            apps/desktop/gateway -> target
-            apps/desktop/runtime -> target
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci
-      - name: Package native Windows client
-        working-directory: apps/desktop
-        run: npm run dist:native:windows
-      - name: Smoke runtime protocol
-        working-directory: apps/desktop
-        run: node scripts/native-runtime-smoke.mjs release/native-windows/Private-AI-Gateway/private-ai-gateway-desktop-service.exe
-      - name: Launch native Windows client
-        working-directory: apps/desktop
-        shell: pwsh
-        run: |
-          $env:PRIVATE_AI_GATEWAY_LAUNCH_TRACE = Join-Path $env:RUNNER_TEMP 'private-ai-gateway-launch.log'
-          $process = Start-Process -FilePath 'release/native-windows/Private-AI-Gateway/PrivateAIGateway.Windows.exe' -ArgumentList '--autostart' -PassThru
-          Start-Sleep -Seconds 5
-          if ($process.HasExited) {
-            Write-Host "Native Windows client exit code: $($process.ExitCode)"
-            if (Test-Path $env:PRIVATE_AI_GATEWAY_LAUNCH_TRACE) { Get-Content $env:PRIVATE_AI_GATEWAY_LAUNCH_TRACE }
-            $crashLog = Join-Path $env:LOCALAPPDATA 'Private AI Gateway\crash.log'
-            if (Test-Path $crashLog) { Get-Content $crashLog }
-            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-2) } -ErrorAction SilentlyContinue |
-              Where-Object LevelDisplayName -eq 'Error' |
-              Select-Object -First 5 TimeCreated, ProviderName, Id, Message |
-              Format-List
-            throw "Native Windows client exited during launch smoke"
-          }
-          Stop-Process -Id $process.Id -Force
-      - uses: actions/upload-artifact@v6
-        with:
-          name: private-ai-gateway-native-windows-${{ github.sha }}
-          retention-days: 14
-          path: apps/desktop/release/*native-windows*.zip
-
-  macos:
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            apps/desktop/gateway -> target
-            apps/desktop/runtime -> target
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci
-      - name: Test native macOS protocol codec
-        working-directory: apps/desktop
-        run: swift test --package-path native/macos
-      - name: Package native macOS client
-        working-directory: apps/desktop
-        run: npm run dist:native:macos
-      - name: Smoke runtime protocol
-        working-directory: apps/desktop
-        run: node scripts/native-runtime-smoke.mjs 'release/native-macos/Private AI Gateway.app/Contents/MacOS/private-ai-gateway-desktop-service'
-      - name: Launch native macOS client
-        working-directory: apps/desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          app='release/native-macos/Private AI Gateway.app'
-          log="$RUNNER_TEMP/private-ai-gateway-macos.log"
-          "$app/Contents/MacOS/Private AI Gateway" >"$log" 2>&1 &
-          pid=$!
-          sleep 5
-          if ! kill -0 "$pid" 2>/dev/null; then
-            cat "$log"
-            wait "$pid"
+          npm run prepare:brand
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon assets/tray)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons assets/tray
+            exit 1
           fi
-          kill "$pid"
-          wait "$pid" || true
-      - name: Inspect native macOS package
+      - name: Verify renderer
         working-directory: apps/desktop
         run: |
-          app='release/native-macos/Private AI Gateway.app'
-          test -x "$app/Contents/MacOS/Private AI Gateway"
-          test -x "$app/Contents/MacOS/private-ai-gateway-desktop-service"
-          test -f "$app/Contents/Resources/Assets.car"
-          test -f "$app/Contents/Resources/icon.icns"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app/Contents/Info.plist")" = Icon
-          codesign --verify --deep --strict "$app"
-          hdiutil verify release/Private-AI-Gateway-native-macos.dmg
-          unzip -tq release/Private-AI-Gateway-native-macos.zip
-      - uses: actions/upload-artifact@v6
+          npm run check
+          npx playwright install chromium
+          npm run test:renderer
+      - name: Stage Tauri sidecars
+        working-directory: apps/desktop
+        run: npm run build:sidecars:debug
+      - name: Verify Rust sources
+        run: |
+          cargo +1.89 fmt --manifest-path apps/desktop/gateway/Cargo.toml -- --check
+          cargo +1.89 fmt --manifest-path apps/desktop/runtime/Cargo.toml -- --check
+          cargo +1.89 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/gateway/Cargo.toml -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/runtime/Cargo.toml -- -D warnings
+          cargo +1.89 clippy --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
+          cargo +1.89 test --locked --manifest-path apps/desktop/gateway/Cargo.toml
+          cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
+          cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --bin aci
+
+  package:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            platform: macos-arm64
+            bundles: app,dmg
+          - os: windows-2025
+            platform: windows-x64
+            bundles: nsis
+          - os: ubuntu-24.04
+            platform: linux-x64
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          name: private-ai-gateway-native-macos-${{ github.sha }}
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/gateway -> target
+            apps/desktop/runtime -> target
+            apps/desktop/src-tauri -> target
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Build Tauri package
+        working-directory: apps/desktop
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+      - name: Stage and inspect macOS package
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
+          dmg="$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          test -d "$app_bundle"
+          test -f "$dmg"
+          test -x "$app_bundle/Contents/MacOS/private-ai-gateway-helper"
+          test -f "$app_bundle/Contents/Resources/Assets.car"
+          test -f "$app_bundle/Contents/Resources/icon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
+          codesign --verify --deep --strict "$app_bundle"
+          hdiutil verify "$dmg"
+          cp "$dmg" release/
+          ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "release/Private-AI-Gateway-macos-arm64.zip"
+          unzip -tq release/Private-AI-Gateway-macos-arm64.zip
+      - name: Upload desktop package
+        uses: actions/upload-artifact@v6
+        with:
+          name: private-ai-gateway-beta-0.1.0-${{ github.sha }}-${{ matrix.platform }}
+          if-no-files-found: error
           retention-days: 14
           path: |
-            apps/desktop/release/Private-AI-Gateway-native-macos.dmg
-            apps/desktop/release/Private-AI-Gateway-native-macos.zip
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
