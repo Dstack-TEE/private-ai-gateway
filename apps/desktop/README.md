@@ -251,3 +251,26 @@ The root `aci` follows the root workspace toolchain. CI tests the gateway,
 runtime, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. macOS additionally verifies the compiled asset
 catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.
+
+### macOS distribution signing
+
+Normal CI packages use an explicit ad-hoc identity and are beta artifacts. A
+production macOS package must be started manually from the `Desktop Tauri`
+workflow with `production_macos` enabled. That path fails closed unless all of
+these repository secrets are present:
+
+- `APPLE_CERTIFICATE`: base64-encoded PKCS#12 containing a Developer ID
+  Application certificate and its private key
+- `APPLE_CERTIFICATE_PASSWORD`: password used when exporting the PKCS#12
+- `KEYCHAIN_PASSWORD`: temporary CI keychain password
+- `APPLE_API_ISSUER`: App Store Connect API issuer ID
+- `APPLE_API_KEY`: App Store Connect API key ID
+- `APPLE_API_PRIVATE_KEY`: complete contents of the matching `AuthKey_*.p8`
+
+The certificate must be created by the Apple Developer team Account Holder
+from a CSR whose private key remains with the person exporting the PKCS#12.
+The Tauri bundler imports the certificate, infers the signing identity, signs
+the nested sidecars and app with hardened runtime, notarizes and staples the
+app, then signs the DMG. CI submits and staples the final DMG separately because
+it is the downloaded distribution container. The release artifact is uploaded
+only after `codesign`, Gatekeeper assessment, and stapler validation all pass.

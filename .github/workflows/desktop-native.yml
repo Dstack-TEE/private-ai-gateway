@@ -2,6 +2,12 @@ name: Desktop Tauri
 
 on:
   workflow_dispatch:
+    inputs:
+      production_macos:
+        description: Sign and notarize the macOS package for distribution
+        required: true
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
@@ -129,13 +135,80 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
-      - name: Build Tauri package
+      - name: Prepare Apple notarization key
+        if: runner.os == 'macOS' && inputs.production_macos
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing required macOS release secret: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build production macOS package
+        if: runner.os == 'macOS' && inputs.production_macos
+        working-directory: apps/desktop
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Build ad-hoc macOS package
+        if: runner.os == 'macOS' && inputs.production_macos != true
+        working-directory: apps/desktop
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Build non-macOS package
+        if: runner.os != 'macOS'
         working-directory: apps/desktop
         run: npm run dist -- --bundles ${{ matrix.bundles }}
+
+      - name: Notarize production macOS disk image
+        if: runner.os == 'macOS' && inputs.production_macos
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          dmg="$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          test -f "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
       - name: Stage and inspect macOS package
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         shell: bash
+        env:
+          PRODUCTION_MACOS: ${{ inputs.production_macos }}
         run: |
           set -euo pipefail
           mkdir -p release
@@ -147,7 +220,21 @@ jobs:
           test -f "$app_bundle/Contents/Resources/Assets.car"
           test -f "$app_bundle/Contents/Resources/icon.icns"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
-          codesign --verify --deep --strict "$app_bundle"
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
+          codesign_details="$(codesign --display --verbose=4 "$app_bundle" 2>&1)"
+          if [[ "$PRODUCTION_MACOS" == "true" ]]; then
+            grep -q '^Authority=Developer ID Application:' <<<"$codesign_details"
+            if grep -q '^Signature=adhoc$' <<<"$codesign_details"; then
+              echo 'Production package was signed ad-hoc instead of with Developer ID'
+              exit 1
+            fi
+            xcrun stapler validate "$app_bundle"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type execute --verbose=4 "$app_bundle"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          else
+            grep -q '^Signature=adhoc$' <<<"$codesign_details"
+          fi
           launch_log="$RUNNER_TEMP/private-ai-gateway-launch.log"
           "$app_bundle/Contents/MacOS/private-ai-gateway-desktop" >"$launch_log" 2>&1 &
           app_pid=$!
@@ -170,7 +257,7 @@ jobs:
       - name: Upload desktop package
         uses: actions/upload-artifact@v6
         with:
-          name: private-ai-gateway-beta-0.1.0-${{ github.sha }}-${{ matrix.platform }}
+          name: private-ai-gateway-${{ runner.os == 'macOS' && inputs.production_macos && 'release' || 'beta' }}-0.1.0-${{ github.sha }}-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -179,3 +266,8 @@ jobs:
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
             apps/desktop/src-tauri/target/release/bundle/deb/*.deb
             apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Remove Apple notarization key
+        if: always() && runner.os == 'macOS' && inputs.production_macos
+        shell: bash
+        run: rm -f "${APPLE_API_KEY_PATH:-}"
