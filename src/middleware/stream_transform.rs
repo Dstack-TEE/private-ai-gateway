@@ -23,10 +23,10 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
     self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field,
-    invalid_function_call_arguments_error, item_id, map_finish_reason, message_item,
-    normalize_function_call_arguments, now_millis, now_secs, output_text_part, reasoning_item,
-    reasoning_text, refusal_part, responses_object, responses_terminal, responses_usage,
-    transform_finish_reason, ResponseIdentity, ResponsesHead,
+    invalid_function_call_arguments_error, invalid_tool_call_identity_error, item_id,
+    map_finish_reason, message_item, normalize_function_call_arguments, now_millis, now_secs,
+    output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
+    responses_terminal, responses_usage, transform_finish_reason, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -168,6 +168,7 @@ struct ResponsesStream {
     finish_reason: Option<String>,
     error: Option<Value>,
     invalid_function_arguments: bool,
+    invalid_tool_call_identity: bool,
 }
 
 struct TextItem {
@@ -241,6 +242,17 @@ impl CallItem {
             )
         }
     }
+}
+
+/// Accept both true fragments and providers that repeat a cumulative id/name.
+fn merge_tool_identity(current: &mut String, fragment: &str) {
+    if fragment.trim().is_empty() {
+        return;
+    }
+    if fragment.starts_with(current.as_str()) {
+        current.clear();
+    }
+    current.push_str(fragment);
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -1003,12 +1015,8 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
 
         let was_started = {
             let call = state.calls.entry(index).or_default();
-            if !call_id.is_empty() {
-                call.call_id.push_str(call_id);
-            }
-            if !name.is_empty() {
-                call.chat_name.push_str(name);
-            }
+            merge_tool_identity(&mut call.call_id, call_id);
+            merge_tool_identity(&mut call.chat_name, name);
             if !arguments.is_empty() {
                 call.arguments.push_str(arguments);
             }
@@ -1043,8 +1051,8 @@ fn flush_ready_responses_calls(state: &mut ResponsesStream) -> String {
         let index = state.next_call_index_to_add;
         let ready = state.calls.get(&index).is_some_and(|call| {
             call.output_index.is_none()
-                && !call.call_id.is_empty()
-                && !call.chat_name.is_empty()
+                && !call.call_id.trim().is_empty()
+                && !call.chat_name.trim().is_empty()
                 && !call.arguments.is_empty()
         });
         if !ready {
@@ -1088,11 +1096,19 @@ fn open_responses_call(index: i64, state: &mut ResponsesStream) -> String {
 }
 
 fn close_responses_calls(state: &mut ResponsesStream) -> String {
+    state.invalid_tool_call_identity |= state.calls.values().any(|call| {
+        let has_payload = !call.call_id.trim().is_empty()
+            || !call.chat_name.trim().is_empty()
+            || !call.arguments.trim().is_empty();
+        has_payload && (call.call_id.trim().is_empty() || call.chat_name.trim().is_empty())
+    });
     let pending = state
         .calls
         .iter()
         .filter(|(_, call)| {
-            call.output_index.is_none() && !call.call_id.is_empty() && !call.chat_name.is_empty()
+            call.output_index.is_none()
+                && !call.call_id.trim().is_empty()
+                && !call.chat_name.trim().is_empty()
         })
         .map(|(index, _)| *index)
         .collect::<Vec<_>>();
@@ -1171,8 +1187,12 @@ fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
     output.push_str(&close_responses_calls(state));
 
     let (terminal_status, terminal_details) = responses_terminal(state.finish_reason.as_deref());
-    if state.error.is_none() && state.invalid_function_arguments && terminal_status == "completed" {
-        state.error = Some(invalid_function_call_arguments_error());
+    if state.error.is_none() && terminal_status == "completed" {
+        if state.invalid_tool_call_identity {
+            state.error = Some(invalid_tool_call_identity_error());
+        } else if state.invalid_function_arguments {
+            state.error = Some(invalid_function_call_arguments_error());
+        }
     }
 
     let (status, incomplete_details, event) = if state.error.is_some() {

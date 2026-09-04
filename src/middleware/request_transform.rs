@@ -245,16 +245,19 @@ pub fn build_candidates(
             ),
             _ => (
                 endpoint,
-                candidate_params(params, endpoint, candidate, requested_reasoning).and_then(
-                    |candidate_params| {
+                responses
+                    .map_or(Ok(()), validate_responses_chat_compatibility)
+                    .and_then(|()| {
+                        candidate_params(params, endpoint, candidate, requested_reasoning)
+                    })
+                    .and_then(|candidate_params| {
                         transform_to_provider_request(
                             candidate.format,
                             &candidate_params,
                             endpoint,
                             candidate.engine,
                         )
-                    },
-                ),
+                    }),
             ),
         };
         match body {
@@ -1498,6 +1501,69 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
     Ok(Value::Object(chat))
 }
 
+/// Reject request controls whose behavior Chat Completions cannot preserve.
+/// This runs per candidate because a mixed failover chain may still send the
+/// original request to a route that implements Responses directly.
+fn validate_responses_chat_compatibility(params: &Value) -> Result<(), TransformError> {
+    let input = params
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+
+    if input.get("prompt").is_some_and(|value| !value.is_null()) {
+        return Err(TransformError::invalid_request(
+            "prompt templates require an upstream that supports /v1/responses",
+        ));
+    }
+    if let Some(value) = input.get("truncation").filter(|value| !value.is_null()) {
+        if value.as_str() != Some("disabled") {
+            return Err(TransformError::invalid_request(
+                "truncation must be disabled when /v1/responses is served through Chat Completions",
+            ));
+        }
+    }
+    if let Some(value) = input.get("modalities").filter(|value| !value.is_null()) {
+        let text_only = value
+            .as_array()
+            .is_some_and(|items| items.len() == 1 && items[0].as_str() == Some("text"));
+        if !text_only {
+            return Err(TransformError::invalid_request(
+                "only text output is supported when /v1/responses is served through Chat Completions",
+            ));
+        }
+    }
+    if let Some(value) = input.get("include").filter(|value| !value.is_null()) {
+        let supported = value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| item.as_str() == Some("reasoning.encrypted_content"))
+        });
+        if !supported {
+            return Err(TransformError::invalid_request(
+                "the requested include values require an upstream that supports /v1/responses",
+            ));
+        }
+    }
+    if let Some(format) = input
+        .get("text")
+        .and_then(Value::as_object)
+        .and_then(|text| text.get("format"))
+        .filter(|format| !format.is_null())
+    {
+        let supported = format.as_object().is_some_and(|format| {
+            matches!(
+                format.get("type").and_then(Value::as_str),
+                Some("text" | "json_object" | "json_schema")
+            )
+        });
+        if !supported {
+            return Err(TransformError::invalid_request(
+                "text.format is not supported by the Chat Completions bridge",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Append the chat message(s) for one Responses input item: a `message` (or
 /// the role-only shorthand), a `function_call` the model made, its
 /// `function_call_output`, or a `reasoning` item. Clear reasoning text is
@@ -2210,6 +2276,60 @@ mod tests {
         // 400 the all-or-nothing version produced.
         let err = build_candidates(&params, Endpoint::Embed, &[unshapeable], None, None);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn responses_bridge_rejects_lossy_controls_per_candidate() {
+        let original = json!({
+            "model": "m",
+            "input": "hello",
+            "prompt": { "id": "pmpt_1" }
+        });
+        let chat = responses_to_chat_params(&original).unwrap();
+        let bridge: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "chat:m",
+            "format": "openai"
+        }))
+        .unwrap();
+        let native: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "responses:m",
+            "format": "openai",
+            "supportedEndpoints": ["/v1/responses"]
+        }))
+        .unwrap();
+
+        let bodies = build_candidates(
+            &chat,
+            Endpoint::ChatComplete,
+            &[bridge.clone(), native],
+            None,
+            Some(&original),
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "responses:m");
+        assert_eq!(bodies[0].2, Endpoint::CreateModelResponse);
+        assert_eq!(bodies[0].1["prompt"]["id"], "pmpt_1");
+
+        for incompatible in [
+            original,
+            json!({ "model": "m", "input": "hello", "truncation": "auto" }),
+            json!({ "model": "m", "input": "hello", "modalities": ["audio"] }),
+            json!({ "model": "m", "input": "hello", "include": ["file_search_call.results"] }),
+            json!({ "model": "m", "input": "hello", "text": { "format": { "type": "future_format" } } }),
+        ] {
+            assert!(validate_responses_chat_compatibility(&incompatible).is_err());
+        }
+
+        let compatible = json!({
+            "model": "m",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "modalities": ["text"],
+            "truncation": "disabled",
+            "text": { "format": { "type": "text" } }
+        });
+        assert!(validate_responses_chat_compatibility(&compatible).is_ok());
     }
 
     #[test]

@@ -512,6 +512,50 @@
       }
     },
     {
+      "name": "missing_tool_identity",
+      "echo": {
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_bad_tool",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+              "id": "call_bad",
+              "type": "function",
+              "function": { "arguments": "{}" }
+            }]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_bad_tool",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider returned a tool call without a valid id or name"
+        },
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false,
+        "output": [],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
       "name": "length",
       "echo": {
         "max_output_tokens": 8,

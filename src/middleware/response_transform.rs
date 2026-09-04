@@ -1131,6 +1131,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
 
     let mut output: Vec<Value> = Vec::new();
     let mut invalid_function_arguments = false;
+    let mut invalid_tool_call_identity = false;
     if let Some(text) = reasoning_text(&message) {
         let item_id = item_id("rs", &id, output.len());
         output.push(reasoning_item(&item_id, text, "completed"));
@@ -1167,6 +1168,10 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                 .and_then(|f| f.get("arguments"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if call_id.trim().is_empty() || name.trim().is_empty() {
+                invalid_tool_call_identity = true;
+                continue;
+            }
             if tool_map.is_custom(name) {
                 output.push(custom_tool_call_item(
                     call_id,
@@ -1204,7 +1209,9 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                     .and_then(|choice| choice.get("finish_reason"))
                     .and_then(Value::as_str),
             );
-            if invalid_function_arguments && status == "completed" {
+            if invalid_tool_call_identity && status == "completed" {
+                ("failed", Value::Null, invalid_tool_call_identity_error())
+            } else if invalid_function_arguments && status == "completed" {
                 (
                     "failed",
                     Value::Null,
@@ -1376,6 +1383,13 @@ pub(super) fn invalid_function_call_arguments_error() -> Value {
     json!({
         "code": "server_error",
         "message": "The upstream provider returned invalid function-call arguments",
+    })
+}
+
+pub(super) fn invalid_tool_call_identity_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider returned a tool call without a valid id or name",
     })
 }
 

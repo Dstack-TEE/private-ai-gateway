@@ -252,8 +252,8 @@
       "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer \"},\"finish_reason\":null}]}",
       "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}",
       "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"wea\"}},{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"uni\"}}]},\"finish_reason\":null}]}",
-      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"ts\",\"arguments\":\"{\\\"system\\\":\\\"metric\\\"}\"}}]},\"finish_reason\":null}]}",
-      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"ther\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"units\",\"arguments\":\"{\\\"system\\\":\\\"metric\\\"}\"}}]},\"finish_reason\":null}]}",
+      "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"ther\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}",
       "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"city\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":null}]}",
       "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6,\"total_tokens\":16,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
       "data: [DONE]"
@@ -314,6 +314,31 @@
       "response.in_progress",
       "response.output_item.added",
       "response.function_call_arguments.delta",
+      "response.failed"
+    ],
+    "terminal": {
+      "status": "failed",
+      "output": [],
+      "usage": {
+        "input_tokens": 0,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 0,
+        "output_tokens_details": { "reasoning_tokens": 0 },
+        "total_tokens": 0
+      }
+    }
+  },
+  {
+    "name": "openai_chat_to_responses_missing_tool_identity",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "events": [
+      "data: {\"id\":\"resp_bad_tool\",\"created\":1700000000,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_bad\",\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+      "data: [DONE]"
+    ],
+    "types": [
+      "response.created",
+      "response.in_progress",
       "response.failed"
     ],
     "terminal": {
