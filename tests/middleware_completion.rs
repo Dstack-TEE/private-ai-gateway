@@ -716,6 +716,21 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
     let (service, requests) =
         build_recording_service(200, upstream.as_bytes().to_vec(), "text/event-stream");
     let mut input = responses_input(true);
+    input.params["input"] = json!([
+        {
+            "type": "additional_tools",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__example",
+                    "description": "Optional plugin tools",
+                    "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
+                },
+                { "type": "custom", "name": "shell", "description": "Run shell input" }
+            ]
+        },
+        { "type": "message", "role": "user", "content": "hello" }
+    ]);
     input.params["tools"] = json!([
         {
             "type": "function",
@@ -727,13 +742,6 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                 "required": ["cmd"]
             }
         },
-        {
-            "type": "namespace",
-            "name": "mcp__example",
-            "description": "Optional plugin tools",
-            "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
-        },
-        { "type": "custom", "name": "shell", "description": "Run shell input" },
         { "type": "web_search", "external_web_access": false }
     ]);
     input.params["tool_choice"] = json!("auto");

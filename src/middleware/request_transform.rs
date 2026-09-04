@@ -1424,7 +1424,8 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
         .as_object()
         .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
 
-    let (chat_tools, tool_map, function_names) = chat_tools(input.get("tools"))?;
+    let effective_tools = effective_responses_tools(params)?;
+    let (chat_tools, tool_map, function_names) = chat_tools(&effective_tools)?;
 
     let mut messages = Vec::new();
     let mut input_state = ResponsesInputState::default();
@@ -1742,6 +1743,7 @@ fn push_input_item(
                     .push_str(&reasoning);
             }
         }
+        Some("additional_tools") => {}
         Some(other) => {
             return Err(TransformError::invalid_request(format!(
                 "input item type {other} is not supported"
@@ -2029,15 +2031,32 @@ impl ResponsesToolMap {
     }
 }
 
-fn chat_tools(
-    tools: Option<&Value>,
-) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
-    let Some(tools) = tools else {
-        return Ok(Default::default());
+/// Merge ordinary Responses tools with the `additional_tools` input item used
+/// by newer Codex clients. Keeping this in one helper makes request lowering
+/// and response tool-name restoration use the same declaration set.
+pub(super) fn effective_responses_tools(params: &Value) -> Result<Vec<Value>, TransformError> {
+    let mut tools = match params.get("tools") {
+        None => Vec::new(),
+        Some(Value::Array(tools)) => tools.clone(),
+        Some(_) => return Err(TransformError::invalid_request("tools must be an array")),
     };
-    let tools = tools
-        .as_array()
-        .ok_or_else(|| TransformError::invalid_request("tools must be an array"))?;
+    if let Some(items) = params.get("input").and_then(Value::as_array) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            let additional = item.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                TransformError::invalid_request("additional_tools requires a tools array")
+            })?;
+            tools.extend(additional.iter().cloned());
+        }
+    }
+    Ok(tools)
+}
+
+fn chat_tools(
+    tools: &[Value],
+) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
     let tool_map = ResponsesToolMap::from_tools(tools);
     let mut translated = Vec::new();
     let mut function_names = HashSet::new();

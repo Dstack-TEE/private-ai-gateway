@@ -17,7 +17,7 @@ use super::errors::{
     is_quota_exhausted_error, looks_identifying, map_upstream_status, responses_error_event,
     responses_gateway_code, upstream_message, Surface,
 };
-use super::request_transform::{Endpoint, ResponsesToolMap};
+use super::request_transform::{effective_responses_tools, Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
 
@@ -1087,7 +1087,6 @@ pub fn responses_echo(params: &Value) -> Value {
     let mut echo = serde_json::Map::new();
     for key in [
         "instructions",
-        "tools",
         "tool_choice",
         "parallel_tool_calls",
         "temperature",
@@ -1101,6 +1100,11 @@ pub fn responses_echo(params: &Value) -> Value {
     ] {
         if let Some(value) = params.get(key) {
             echo.insert(key.into(), value.clone());
+        }
+    }
+    if let Ok(tools) = effective_responses_tools(params) {
+        if !tools.is_empty() {
+            echo.insert("tools".into(), Value::Array(tools));
         }
     }
     echo.insert("store".into(), Value::Bool(false));

@@ -136,6 +136,15 @@
         "model": "gpt-test",
         "instructions": "Act as a coding agent.",
         "input": [
+          {
+            "type": "additional_tools",
+            "tools": [{
+              "type": "namespace",
+              "name": "mcp__example",
+              "description": "Optional plugin tools",
+              "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
+            }]
+          },
           { "type": "message", "role": "developer", "content": "Follow repository rules." },
           { "type": "message", "role": "user", "content": "Inspect the project." }
         ],
@@ -151,12 +160,6 @@
               "required": ["cmd"]
             },
             "strict": false
-          },
-          {
-            "type": "namespace",
-            "name": "mcp__example",
-            "description": "Optional plugin tools",
-            "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
           },
           { "type": "web_search", "external_web_access": false }
         ],
