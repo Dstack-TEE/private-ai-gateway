@@ -2,47 +2,6 @@
     x:Class="PrivateAIGateway.Windows.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:PrivateAIGateway.Windows"
     Title="Private AI Gateway">
-  <Grid>
-    <NavigationView x:Name="Navigation" IsBackButtonVisible="Collapsed" IsSettingsVisible="True"
-                    PaneDisplayMode="Left" OpenPaneLength="220" SelectionChanged="Navigation_SelectionChanged">
-      <NavigationView.MenuItems>
-        <NavigationViewItem Content="Overview" Tag="overview">
-          <NavigationViewItem.Icon><SymbolIcon Symbol="Home" /></NavigationViewItem.Icon>
-        </NavigationViewItem>
-        <NavigationViewItem Content="Agents" Tag="agents">
-          <NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" /></NavigationViewItem.Icon>
-        </NavigationViewItem>
-        <NavigationViewItem Content="Usage" Tag="usage">
-          <NavigationViewItem.Icon><FontIcon Glyph="&#xE9D2;" /></NavigationViewItem.Icon>
-        </NavigationViewItem>
-      </NavigationView.MenuItems>
-      <NavigationView.PaneHeader>
-        <StackPanel Orientation="Horizontal" Spacing="10" Padding="4,8,0,16">
-          <Grid x:Name="BrandIconHost" Width="34" Height="34" />
-          <StackPanel VerticalAlignment="Center">
-            <TextBlock Text="Private AI Gateway" FontWeight="SemiBold" />
-            <TextBlock Text="Confidential inference" FontSize="12" Opacity="0.65" />
-          </StackPanel>
-        </StackPanel>
-      </NavigationView.PaneHeader>
-      <Grid>
-        <Grid.RowDefinitions><RowDefinition Height="58"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-        <Grid Grid.Row="0" Padding="24,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <TextBlock x:Name="PageTitle" Text="Overview" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
-          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-            <Border x:Name="DevBadge" Background="#33E9A400" CornerRadius="4" Padding="7,3" Visibility="Collapsed">
-              <TextBlock Text="Dev mode" Foreground="#B87800" FontWeight="SemiBold" />
-            </Border>
-            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Opacity="0.7" />
-            <TextBlock Text="Protected" VerticalAlignment="Center" />
-            <ToggleSwitch x:Name="ProtectionSwitch" Toggled="ProtectionSwitch_Toggled" />
-          </StackPanel>
-        </Grid>
-        <ContentPresenter x:Name="PageHost" Grid.Row="1" />
-      </Grid>
-    </NavigationView>
-  </Grid>
+  <Grid />
 </Window>

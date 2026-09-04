@@ -12,6 +12,12 @@ public sealed partial class MainWindow : Window
 {
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
+    private readonly NavigationView Navigation = new();
+    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Windows.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Border DevBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
+    private readonly TextBlock StatusText = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
+    private readonly ToggleSwitch ProtectionSwitch = new();
+    private readonly ContentPresenter PageHost = new();
     private string page = "overview";
     private bool syncingSwitch;
     private bool initialized;
@@ -20,12 +26,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        BrandIconHost.Children.Add(new Image
-        {
-            Source = new SvgImageSource(new Uri("ms-appx:///Assets/brand/mark.svg")),
-            Width = 34,
-            Height = 34,
-        });
+        BuildShell();
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.Resize(new global::Windows.Graphics.SizeInt32(1052, 820));
@@ -37,6 +38,68 @@ public sealed partial class MainWindow : Window
         Activated += async (_, _) => { if (!initialized) { initialized = true; await InitializeAsync(); } };
         Navigation.SelectedItem = Navigation.MenuItems[0];
     }
+
+    private void BuildShell()
+    {
+        Navigation.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed;
+        Navigation.IsSettingsVisible = true;
+        Navigation.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
+        Navigation.OpenPaneLength = 220;
+        Navigation.SelectionChanged += Navigation_SelectionChanged;
+        Navigation.MenuItems.Add(NavigationItem("Overview", "overview", new SymbolIcon(Symbol.Home)));
+        Navigation.MenuItems.Add(NavigationItem("Agents", "agents", new FontIcon { Glyph = "\uE756" }));
+        Navigation.MenuItems.Add(NavigationItem("Usage", "usage", new FontIcon { Glyph = "\uE9D2" }));
+
+        var brand = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Padding = new Thickness(4, 8, 0, 16) };
+        brand.Children.Add(new Image
+        {
+            Source = new SvgImageSource(new Uri("ms-appx:///Assets/brand/mark.svg")),
+            Width = 34,
+            Height = 34,
+        });
+        var brandText = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        brandText.Children.Add(new TextBlock { Text = "Private AI Gateway", FontWeight = global::Windows.UI.Text.FontWeights.SemiBold });
+        brandText.Children.Add(new TextBlock { Text = "Confidential inference", FontSize = 12, Opacity = 0.65 });
+        brand.Children.Add(brandText);
+        Navigation.PaneHeader = brand;
+
+        var shell = new Grid();
+        shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(58) });
+        shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var header = new Grid { Padding = new Thickness(24, 0, 24, 0) };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(PageTitle);
+
+        DevBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Windows.UI.Text.FontWeights.SemiBold };
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
+        controls.Children.Add(DevBadge);
+        controls.Children.Add(StatusText);
+        controls.Children.Add(new TextBlock { Text = "Protected", VerticalAlignment = VerticalAlignment.Center });
+        ProtectionSwitch.Toggled += ProtectionSwitch_Toggled;
+        controls.Children.Add(ProtectionSwitch);
+        Grid.SetColumn(controls, 1);
+        header.Children.Add(controls);
+
+        var headerBorder = new Border
+        {
+            BorderBrush = new SolidColorBrush(ColorHelper.FromArgb(0x20, 0x80, 0x80, 0x80)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = header,
+        };
+        shell.Children.Add(headerBorder);
+        Grid.SetRow(PageHost, 1);
+        shell.Children.Add(PageHost);
+        Navigation.Content = shell;
+        Content = Navigation;
+    }
+
+    private static NavigationViewItem NavigationItem(string title, string tag, IconElement icon) => new()
+    {
+        Content = title,
+        Tag = tag,
+        Icon = icon,
+    };
 
     public void ShowMainWindow()
     {
