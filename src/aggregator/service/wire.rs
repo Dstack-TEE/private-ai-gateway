@@ -127,6 +127,8 @@ pub struct MiddlewareForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
+    /// Upstream API path used by the committed candidate.
+    pub selected_path: &'static str,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
@@ -143,6 +145,8 @@ pub struct MiddlewareStreamingForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
+    /// Upstream API path used by the committed candidate.
+    pub selected_path: &'static str,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.

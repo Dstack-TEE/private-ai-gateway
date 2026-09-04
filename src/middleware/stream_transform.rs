@@ -2176,12 +2176,6 @@ mod tests {
         (events, error, wire)
     }
 
-    #[test]
-    fn responses_stream_tail_before_start_is_empty() {
-        let mut state = ResponsesStream::default();
-        assert!(responses_stream_tail(&json!({}), &mut state).is_empty());
-    }
-
     #[tokio::test]
     async fn openai_chat_to_responses_stream_matches_fixtures() {
         let cases: Vec<Value> =

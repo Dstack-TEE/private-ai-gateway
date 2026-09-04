@@ -11,7 +11,8 @@
         "stream": true,
         "parallel_tool_calls": false,
         "user": "user-1",
-        "prompt_cache_key": "cache-1"
+        "prompt_cache_key": "cache-1",
+        "provider": { "aci_verified": true }
       },
       "output": {
         "model": "gpt-test",
@@ -22,7 +23,8 @@
         "stream": true,
         "parallel_tool_calls": false,
         "user": "user-1",
-        "prompt_cache_key": "cache-1"
+        "prompt_cache_key": "cache-1",
+        "provider": { "aci_verified": true }
       }
     },
     {
@@ -261,6 +263,20 @@
       "error": true
     },
     {
+      "name": "namespace_tool_choice_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "crm",
+          "tools": [{ "type": "function", "name": "lookup" }]
+        }],
+        "tool_choice": { "type": "namespace", "name": "crm" }
+      },
+      "error": true
+    },
+    {
       "name": "custom_tool_and_history",
       "input": {
         "model": "gpt-test",
@@ -322,6 +338,42 @@
           { "type": "custom_tool_call", "call_id": "call_shell", "name": "shell", "input": "pwd" },
           { "type": "function_call_output", "call_id": "call_shell", "output": "/workspace" }
         ]
+      },
+      "error": true
+    },
+    {
+      "name": "non_text_tool_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "function_call", "call_id": "call_1", "name": "inspect", "arguments": "{}" },
+          { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_image", "image_url": "https://example.com/a.png" }] }
+        ]
+      },
+      "error": true
+    },
+    {
+      "name": "assistant_refusal_history_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "assistant",
+          "content": [{ "type": "refusal", "refusal": "cannot comply" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "custom_tool_grammar_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "custom",
+          "name": "sql",
+          "format": { "type": "grammar", "syntax": "lark", "definition": "start: /.+/" }
+        }]
       },
       "error": true
     },

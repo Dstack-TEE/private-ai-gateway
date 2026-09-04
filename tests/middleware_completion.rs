@@ -876,9 +876,12 @@ async fn supported_responses_endpoint_keeps_protocol_and_path() {
         "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
     }"#;
     let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
+    let mut input = responses_input(false);
+    input.params["reasoning"] = json!({ "effort": "future-native-value" });
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
     let (status, _, body) = response_parts(
         middleware(control_url)
-            .handle_completion(&service, responses_input(false))
+            .handle_completion(&service, input)
             .await,
     )
     .await;
@@ -890,6 +893,10 @@ async fn supported_responses_endpoint_keeps_protocol_and_path() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path.as_deref(), Some("/v1/responses"));
     assert_eq!(requests[0].body["input"], json!("hello"));
+    assert_eq!(
+        requests[0].body["reasoning"]["effort"],
+        json!("future-native-value")
+    );
     assert!(requests[0].body.get("messages").is_none());
 }
 

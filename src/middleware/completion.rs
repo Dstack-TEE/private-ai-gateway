@@ -34,7 +34,10 @@ use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
 use super::request_features;
-use super::request_transform::{build_candidates, responses_to_chat_params, Endpoint};
+use super::request_transform::{
+    build_candidates, responses_to_chat_params, validate_responses_request, Endpoint,
+    ResponsesCandidateInput, TransformError,
+};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
 use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
@@ -276,103 +279,119 @@ pub async fn run(
     let started = Instant::now();
     let client_endpoint = endpoint;
     let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
-    let params = if let Some(original) = responses.as_ref() {
-        match responses_to_chat_params(original) {
-            Ok(params) => params,
-            Err(err) => {
-                let model = original.get("model").and_then(Value::as_str).unwrap_or("");
-                let message = err.to_string();
-                log_generated_outcome(
-                    &request_id,
-                    model,
-                    "request_transform",
-                    400,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(message.as_bytes()),
-                );
-                let body = errors::envelope_bytes(
+    if let Some(original) = responses.as_ref() {
+        if let Err(err) = validate_responses_request(original) {
+            let model = original.get("model").and_then(Value::as_str).unwrap_or("");
+            let message = err.to_string();
+            log_generated_outcome(
+                &request_id,
+                model,
+                "request_validation",
+                400,
+                0,
+                "",
+                0,
+                started,
+                &detail_snippet(message.as_bytes()),
+            );
+            let body = errors::envelope_bytes(
+                surface,
+                errors::error_type(surface, 400),
+                &message,
+                Some(&request_id),
+            );
+            return finalize_generated(
+                400,
+                body,
+                &[],
+                e2ee,
+                OutcomeCtx {
                     surface,
-                    errors::error_type(surface, 400),
-                    &message,
-                    Some(&request_id),
-                );
-                return finalize_generated(
-                    400,
-                    body,
-                    &[],
-                    e2ee,
-                    OutcomeCtx {
-                        surface,
-                        service,
-                        endpoint_path,
-                        request_id: &request_id,
-                        model,
-                        started,
-                        received_body: received_body.as_slice(),
-                        requester: &requester,
-                    },
-                );
-            }
+                    service,
+                    endpoint_path,
+                    request_id: &request_id,
+                    model,
+                    started,
+                    received_body: received_body.as_slice(),
+                    requester: &requester,
+                },
+            );
         }
-    } else {
-        params
     };
-    let endpoint = if responses.is_some() {
-        Endpoint::ChatComplete
-    } else {
-        endpoint
+    // A bridge-only conversion failure is retained until candidates are known:
+    // native Responses routes can still receive the original request, while
+    // Chat-only routes are skipped by `build_candidates`.
+    let (params, endpoint, responses_bridge_error) = match responses.as_ref() {
+        Some(original) => match responses_to_chat_params(original) {
+            Ok(chat) => (chat, Endpoint::ChatComplete, None),
+            Err(err) => (original.clone(), Endpoint::CreateModelResponse, Some(err)),
+        },
+        None => (params, endpoint, None),
     };
     let echo = responses
         .as_ref()
         .map(|params| Arc::new(response_transform::responses_echo(params)));
-    let (params, reasoning_requirements, exclude_reasoning) = if endpoint == Endpoint::ChatComplete
-    {
-        match reasoning::normalize_chat_request(&params) {
-            Ok(normalized) => normalized,
-            Err(err) => {
-                let model = params.get("model").and_then(Value::as_str).unwrap_or("");
-                let message = err.to_string();
-                log_generated_outcome(
-                    &request_id,
-                    model,
-                    "reasoning_validation",
-                    400,
-                    0,
-                    "",
-                    0,
-                    started,
-                    &detail_snippet(message.as_bytes()),
-                );
-                let body = errors::envelope_bytes(
-                    surface,
-                    errors::error_type(surface, 400),
-                    &message,
-                    Some(&request_id),
-                );
-                return finalize_generated(
-                    400,
-                    body,
-                    &[],
-                    e2ee,
-                    OutcomeCtx {
-                        surface,
-                        service,
-                        endpoint_path,
-                        request_id: &request_id,
-                        model,
-                        started,
-                        received_body: received_body.as_slice(),
-                        requester: &requester,
-                    },
-                );
+    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge_error) =
+        if endpoint == Endpoint::ChatComplete {
+            match reasoning::normalize_chat_request(&params) {
+                Ok((params, requirements, exclude)) => (
+                    params,
+                    endpoint,
+                    requirements,
+                    exclude,
+                    responses_bridge_error,
+                ),
+                Err(err) => {
+                    if let Some(original) = responses.as_ref() {
+                        (
+                            original.clone(),
+                            Endpoint::CreateModelResponse,
+                            None,
+                            false,
+                            Some(TransformError::invalid_request(err)),
+                        )
+                    } else {
+                        let model = params.get("model").and_then(Value::as_str).unwrap_or("");
+                        let message = err.to_string();
+                        log_generated_outcome(
+                            &request_id,
+                            model,
+                            "reasoning_validation",
+                            400,
+                            0,
+                            "",
+                            0,
+                            started,
+                            &detail_snippet(message.as_bytes()),
+                        );
+                        let body = errors::envelope_bytes(
+                            surface,
+                            errors::error_type(surface, 400),
+                            &message,
+                            Some(&request_id),
+                        );
+                        return finalize_generated(
+                            400,
+                            body,
+                            &[],
+                            e2ee,
+                            OutcomeCtx {
+                                surface,
+                                service,
+                                endpoint_path,
+                                request_id: &request_id,
+                                model,
+                                started,
+                                received_body: received_body.as_slice(),
+                                requester: &requester,
+                            },
+                        );
+                    }
+                }
             }
-        }
-    } else {
-        (params, None, false)
-    };
+        } else {
+            (params, endpoint, None, false, responses_bridge_error)
+        };
     let model = params.get("model").and_then(Value::as_str);
     let outcome_ctx = OutcomeCtx {
         surface,
@@ -503,7 +522,10 @@ pub async fn run(
         endpoint,
         &candidates,
         reasoning_requirements.as_ref(),
-        responses.as_ref(),
+        responses.as_ref().map(|original| ResponsesCandidateInput {
+            original,
+            bridge_error: responses_bridge_error.as_ref(),
+        }),
     ) {
         Ok(shaped) => shaped,
         Err(err) => {
@@ -694,9 +716,7 @@ pub async fn run(
             let selected_format = selected_candidate
                 .map(|candidate| candidate.format)
                 .unwrap_or(ProviderFormat::Openai);
-            let responses_passthrough = selected_candidate.is_some_and(|candidate| {
-                echo.is_some() && candidate.supports_endpoint(RESPONSES_PATH)
-            });
+            let responses_passthrough = echo.is_some() && forward.selected_path == RESPONSES_PATH;
             let upstream_endpoint = if echo.is_some() && !responses_passthrough {
                 Endpoint::ChatComplete
             } else {
@@ -980,6 +1000,7 @@ pub async fn run(
             let metered = build_metered_pipeline(
                 forward.body,
                 &forward.selected_route,
+                forward.selected_path,
                 report,
                 &pipeline_inputs,
             );
@@ -1433,7 +1454,13 @@ fn build_early_streaming_response(
                     stream_abort.clone(),
                     stream_settled.clone(),
                 );
-                let mut pipeline = build_metered_pipeline(f.body, &selected_route, report, &inputs);
+                let mut pipeline = build_metered_pipeline(
+                    f.body,
+                    &selected_route,
+                    f.selected_path,
+                    report,
+                    &inputs,
+                );
                 while let Some(item) = pipeline.next().await {
                     yield item;
                 }
@@ -1589,13 +1616,12 @@ pub(super) struct StreamPipelineInputs {
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
     selected_route: &str,
+    selected_path: &'static str,
     report: StreamReport,
     inputs: &StreamPipelineInputs,
 ) -> ServiceResponseStream {
-    // Looked up in the ORIGINAL list even though shaping may have skipped
-    // candidates: a route id names one deployment and a deployment has one
-    // format, so a repeated id cannot disagree on format, and same-id copies
-    // shape identically.
+    // Format is deployment metadata; the selected upstream path is carried by
+    // the forward result because it is a per-request shaping outcome.
     let selected_candidate = inputs
         .candidates
         .iter()
@@ -1604,9 +1630,7 @@ pub(super) fn build_metered_pipeline(
     let selected_format = selected_candidate
         .map(|candidate| candidate.format)
         .unwrap_or(ProviderFormat::Openai);
-    let responses_passthrough = selected_candidate.is_some_and(|candidate| {
-        inputs.echo.is_some() && candidate.supports_endpoint(RESPONSES_PATH)
-    });
+    let responses_passthrough = inputs.echo.is_some() && selected_path == RESPONSES_PATH;
     let upstream_endpoint = if inputs.echo.is_some() && !responses_passthrough {
         Endpoint::ChatComplete
     } else {
