@@ -6,7 +6,7 @@ pub use desktop_gateway::agents::{AgentPreview, AgentStatus, ConnectOptions};
 use desktop_gateway::catalog::Catalog;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationCheck {
     pub id: String,
@@ -16,7 +16,7 @@ pub struct VerificationCheck {
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,7 +27,7 @@ pub struct SourceProvenance {
     pub image_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayIdentity {
     pub tee_type: String,
@@ -43,7 +43,7 @@ pub struct GatewayIdentity {
 
 /// One request seen by the local gateway: forwarded through the sidecar (with
 /// its receipt verdict) or answered locally (rejected before any receipt).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestActivity {
     pub id: String,
@@ -84,7 +84,7 @@ pub struct RequestActivity {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
     pub requests: u64,
@@ -98,7 +98,7 @@ pub struct UsageSummary {
     pub failed_proof: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
     pub id: String,
@@ -124,7 +124,7 @@ pub struct ModelSummary {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSummary {
     pub revision: String,
@@ -172,7 +172,7 @@ pub struct ConfidentialProfile {
     pub verified_at: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfidentialProfileInput {
     pub id: String,
@@ -224,7 +224,7 @@ impl CatalogSummary {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayState {
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,

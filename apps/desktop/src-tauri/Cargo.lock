@@ -3229,7 +3229,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "private-ai-gateway-desktop-gateway",
- "rusqlite",
+ "private-ai-gateway-desktop-runtime",
  "serde",
  "serde_json",
  "tauri",
@@ -3242,7 +3242,6 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -3265,6 +3264,18 @@ dependencies = [
  "tokio-util",
  "toml_edit 0.25.13+spec-1.1.0",
  "yaml-edit",
+]
+
+[[package]]
+name = "private-ai-gateway-desktop-runtime"
+version = "0.1.0"
+dependencies = [
+ "private-ai-gateway-desktop-gateway",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -4806,6 +4817,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

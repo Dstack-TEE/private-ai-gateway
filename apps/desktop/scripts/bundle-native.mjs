@@ -27,14 +27,19 @@ if (!targetTriple) {
 const destinationDir = path.join(appRoot, "src-tauri/binaries");
 await mkdir(destinationDir, { recursive: true });
 
-// Two sidecars: the ACI verifier and the console credential helper that
-// prints an agent's local token (kept separate so stdout works on Windows).
+// Runtime executables shared by Tauri and the native platform clients. The
+// helper remains a console process so credential commands work on Windows.
 const sidecars = [
   { name: "aci", manifestPath: path.join(repoRoot, "Cargo.toml"), targetDir: path.join(repoRoot, "target") },
   {
     name: "private-ai-gateway-helper",
     manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
     targetDir: path.join(appRoot, "gateway/target"),
+  },
+  {
+    name: "private-ai-gateway-desktop-service",
+    manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
+    targetDir: path.join(appRoot, "runtime/target"),
   },
 ];
 

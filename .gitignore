@@ -21,4 +21,10 @@ clients/pi-provider/packages/*/dist/
 /apps/desktop/src-tauri/binaries/*
 /ci-artifacts/
 /apps/desktop/gateway/target/
+/apps/desktop/runtime/target/
 /apps/desktop/src-tauri/target/
+/apps/desktop/native/macos/.build/
+/apps/desktop/native/.generated-assets/
+/apps/desktop/native/windows/**/bin/
+/apps/desktop/native/windows/**/obj/
+/apps/desktop/native/linux/target/

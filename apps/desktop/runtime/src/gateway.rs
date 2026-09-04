@@ -1,12 +1,12 @@
-//! Sidecar lifecycle and the desktop's view of the gateway.
+//! Sidecar lifecycle and the platform-neutral desktop view of the gateway.
 //!
 //! The ACI verifier sidecar listens on a private loopback port; the stable
 //! local endpoint belongs to the in-process proxy. A session is only opened
 //! for requests once the sidecar's verified identity and the catalog read
 //! through it are both in, and they are published to the proxy together under
 //! one generation; any loss of verification revokes the session and clears
-//! the catalog at once. Every state change is published to the window and
-//! mirrored into the tray menu.
+//! the catalog at once. Platform clients subscribe to state changes and map
+//! them to their own window and tray surfaces.
 
 use std::{
     collections::VecDeque,
@@ -22,11 +22,6 @@ use crate::usage::UsageStore;
 use crate::{local_api, service_config};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
-};
 use tokio::sync::{mpsc::Receiver, watch};
 
 const EVENT_SCHEMA_VERSION: u64 = 1;
@@ -38,11 +33,30 @@ pub struct GatewayManager {
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
+    launcher: Arc<dyn SidecarLauncher>,
     state_tx: watch::Sender<GatewayState>,
 }
 
+pub enum SidecarEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Error(String),
+    Terminated,
+}
+
+pub trait SidecarChild: Send {
+    fn kill(&mut self) -> Result<(), String>;
+}
+
+pub trait SidecarLauncher: Send + Sync {
+    fn spawn(
+        &self,
+        args: Vec<String>,
+    ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String>;
+}
+
 struct RuntimeState {
-    child: Option<CommandChild>,
+    child: Option<Box<dyn SidecarChild>>,
     /// Bumped on every start and stop; doubles as the proxy session generation.
     generation: u64,
     /// Bumped on every identity report and catalog refresh; only the newest
@@ -69,6 +83,7 @@ impl GatewayManager {
     pub fn new(
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
+        launcher: Arc<dyn SidecarLauncher>,
         local_api: LocalApiConfig,
         config: StartGatewayConfig,
         profiles: Vec<ConfidentialProfile>,
@@ -98,6 +113,7 @@ impl GatewayManager {
             }),
             proxy,
             usage,
+            launcher,
             state_tx,
         }
     }
@@ -106,26 +122,24 @@ impl GatewayManager {
         Ok(self.lock()?.state.clone())
     }
 
-    pub fn start(
-        &self,
-        app: &AppHandle,
-        config: StartGatewayConfig,
-    ) -> Result<GatewayState, String> {
-        self.start_inner(app, config, false, false)
+    pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
+        self.state_tx.subscribe()
+    }
+
+    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+        self.start_inner(config, false, false)
     }
 
     pub fn begin_verification(
-        &self,
-        app: &AppHandle,
+        self: &Arc<Self>,
         config: StartGatewayConfig,
         reset_catalog_history: bool,
     ) -> Result<GatewayState, String> {
-        self.start_inner(app, config, true, reset_catalog_history)
+        self.start_inner(config, true, reset_catalog_history)
     }
 
     fn start_inner(
-        &self,
-        app: &AppHandle,
+        self: &Arc<Self>,
         config: StartGatewayConfig,
         verification_only: bool,
         reset_catalog_history: bool,
@@ -156,15 +170,7 @@ impl GatewayManager {
             "--verify-receipts".to_string(),
         ]);
 
-        let command = app
-            .shell()
-            .sidecar("aci")
-            .map_err(|error| format!("Cannot locate bundled ACI executable: {error}"))?
-            .args(args)
-            .set_raw_out(true);
-        let (receiver, child) = command
-            .spawn()
-            .map_err(|error| format!("Cannot start bundled ACI executable: {error}"))?;
+        let (receiver, child) = self.launcher.spawn(args)?;
 
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
@@ -203,8 +209,8 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        self.publish(app, &state);
-        spawn_event_reader(app.clone(), generation, receiver);
+        self.publish(&state);
+        spawn_event_reader(Arc::clone(self), generation, receiver);
         Ok(state)
     }
 
@@ -236,7 +242,7 @@ impl GatewayManager {
         .map_err(|_| "Configuration verification timed out".to_string())?
     }
 
-    pub fn restore_snapshot(&self, app: &AppHandle, state: GatewayState) {
+    pub fn restore_snapshot(&self, state: GatewayState) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
@@ -248,12 +254,12 @@ impl GatewayManager {
         runtime.state = state;
         let state = runtime.state.clone();
         drop(runtime);
-        self.publish(app, &state);
+        self.publish(&state);
     }
 
     /// Stop the sidecar in any state, including while verifying. Requests
     /// already forwarded fail with the sidecar; no new request is accepted.
-    pub fn stop(&self, app: &AppHandle) -> Result<GatewayState, String> {
+    pub fn stop(&self) -> Result<GatewayState, String> {
         let mut runtime = self.lock()?;
         let child = runtime.child.take();
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -275,12 +281,12 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        if let Some(child) = child {
+        if let Some(mut child) = child {
             child
                 .kill()
                 .map_err(|error| format!("Cannot stop ACI executable: {error}"))?;
         }
-        self.publish(app, &state);
+        self.publish(&state);
         Ok(state)
     }
 
@@ -307,28 +313,27 @@ impl GatewayManager {
 
     /// Tray switch: stop when a sidecar is running, otherwise start with the
     /// last configuration. Failures surface in the state instead of a result.
-    pub fn toggle(&self, app: &AppHandle) {
+    pub fn toggle(self: &Arc<Self>) {
         let (running, config) = match self.lock() {
             Ok(runtime) => (runtime.child.is_some(), runtime.state.config.clone()),
             Err(_) => return,
         };
         let result = if running {
-            self.stop(app)
+            self.stop()
         } else {
-            self.start(app, config)
+            self.start(config)
         };
         if let Err(message) = result {
-            self.report_error(app, message);
+            self.report_error(message);
         }
     }
 
-    pub fn set_api_key_saved(&self, app: &AppHandle, saved: bool) {
-        self.update(app, |state| state.api_key_saved = saved);
+    pub fn set_api_key_saved(&self, saved: bool) {
+        self.update(|state| state.api_key_saved = saved);
     }
 
     pub fn set_service_configuration(
         &self,
-        app: &AppHandle,
         config: StartGatewayConfig,
         profiles: Vec<ConfidentialProfile>,
         active_profile_id: String,
@@ -354,18 +359,13 @@ impl GatewayManager {
         }
         let state = runtime.state.clone();
         drop(runtime);
-        self.publish(app, &state);
+        self.publish(&state);
     }
 
     /// Record whether the stable local endpoint is bound. A failure blocks
     /// starting and connecting until the app is relaunched.
-    pub fn set_endpoint(
-        &self,
-        app: &AppHandle,
-        config: LocalApiConfig,
-        bound: Result<String, String>,
-    ) {
-        self.update(app, |state| match bound {
+    pub fn set_endpoint(&self, config: LocalApiConfig, bound: Result<String, String>) {
+        self.update(|state| match bound {
             Ok(endpoint) => {
                 state.local_api = config;
                 state.proxy_url = Some(endpoint);
@@ -387,12 +387,12 @@ impl GatewayManager {
         Ok(self.lock()?.child.is_some())
     }
 
-    pub fn report_error(&self, app: &AppHandle, message: String) {
-        self.update(app, |state| state.error = Some(message));
+    pub fn report_error(&self, message: String) {
+        self.update(|state| state.error = Some(message));
     }
 
-    pub fn clear_session_usage(&self, app: &AppHandle) {
-        self.update(app, |state| {
+    pub fn clear_session_usage(&self) {
+        self.update(|state| {
             state.activity.clear();
             state.session_usage = UsageSummary::default();
             state.usage_revision = state.usage_revision.wrapping_add(1);
@@ -400,7 +400,7 @@ impl GatewayManager {
     }
 
     /// A request the local proxy answered itself, before any receipt.
-    pub fn record_proxy_event(&self, app: &AppHandle, event: ProxyEvent) {
+    pub fn record_proxy_event(&self, event: ProxyEvent) {
         if event.path == "/v1/models" {
             return;
         }
@@ -430,7 +430,7 @@ impl GatewayManager {
             .usage
             .upsert(&activity)
             .and_then(|()| self.usage.session_summary(&activity.session_id));
-        self.update(app, |state| {
+        self.update(|state| {
             merge_activity(state, activity.clone());
             state.usage_revision = state.usage_revision.wrapping_add(1);
             match summary {
@@ -447,7 +447,7 @@ impl GatewayManager {
 
     /// Re-read the catalog under a new epoch and republish the session. A
     /// result from an older epoch or generation is dropped.
-    pub async fn refresh_catalog(&self, app: &AppHandle) -> Result<GatewayState, String> {
+    pub async fn refresh_catalog(self: &Arc<Self>) -> Result<GatewayState, String> {
         let (generation, epoch) = {
             let mut runtime = self.lock()?;
             if !runtime.identity_ready {
@@ -461,16 +461,11 @@ impl GatewayManager {
             self.proxy.publish(Session { epoch, ..current });
             (runtime.generation, epoch)
         };
-        self.load_catalog(app, generation, epoch).await?;
+        self.load_catalog(generation, epoch).await?;
         self.snapshot()
     }
 
-    async fn load_catalog(
-        &self,
-        app: &AppHandle,
-        generation: u64,
-        epoch: u64,
-    ) -> Result<(), String> {
+    async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
         let result = self.proxy.fetch_catalog(generation, epoch).await;
         let mut runtime = self.lock()?;
         if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready {
@@ -510,33 +505,32 @@ impl GatewayManager {
                     // sidecar behind a stopped-looking UI. Terminate it and
                     // land in a plain, retryable error state.
                     drop(runtime);
-                    let _ = self.fail(app, generation, message.clone());
+                    let _ = self.fail(generation, message.clone());
                     return Err(message);
                 }
             }
         };
         let state = runtime.state.clone();
         drop(runtime);
-        self.publish(app, &state);
+        self.publish(&state);
         outcome
     }
 
-    fn update(&self, app: &AppHandle, change: impl FnOnce(&mut GatewayState)) {
+    fn update(&self, change: impl FnOnce(&mut GatewayState)) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
         change(&mut runtime.state);
         let state = runtime.state.clone();
         drop(runtime);
-        self.publish(app, &state);
+        self.publish(&state);
     }
 
-    fn publish(&self, app: &AppHandle, state: &GatewayState) {
+    fn publish(&self, state: &GatewayState) {
         let _ = self.state_tx.send(state.clone());
-        publish_state(app, state);
     }
 
-    fn handle_stdout(&self, app: &AppHandle, generation: u64, bytes: &[u8]) -> Result<(), String> {
+    fn handle_stdout(self: &Arc<Self>, generation: u64, bytes: &[u8]) -> Result<(), String> {
         let lines = {
             let mut runtime = self.lock()?;
             if runtime.generation != generation {
@@ -544,11 +538,7 @@ impl GatewayManager {
             }
             if runtime.stdout.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES {
                 drop(runtime);
-                self.fail(
-                    app,
-                    generation,
-                    "ACI emitted an oversized event".to_string(),
-                )?;
+                self.fail(generation, "ACI emitted an oversized event".to_string())?;
                 return Ok(());
             }
             runtime.stdout.extend_from_slice(bytes);
@@ -566,13 +556,13 @@ impl GatewayManager {
                 .map_err(|_| "ACI emitted non-UTF-8 event data".to_string())?;
             let line = line.trim();
             if !line.is_empty() {
-                self.handle_line(app, generation, line)?;
+                self.handle_line(generation, line)?;
             }
         }
         Ok(())
     }
 
-    fn handle_line(&self, app: &AppHandle, generation: u64, line: &str) -> Result<(), String> {
+    fn handle_line(self: &Arc<Self>, generation: u64, line: &str) -> Result<(), String> {
         let event: Value = serde_json::from_str(line)
             .map_err(|_| "ACI emitted invalid JSON event data".to_string())?;
         let object = event
@@ -670,12 +660,11 @@ impl GatewayManager {
                 state = runtime.state.clone();
             }
         }
-        self.publish(app, &state);
+        self.publish(&state);
         if load_catalog {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let manager = app.state::<GatewayManager>();
-                let _ = manager.load_catalog(&app, generation, epoch).await;
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                let _ = manager.load_catalog(generation, epoch).await;
             });
         }
         Ok(())
@@ -695,7 +684,7 @@ impl GatewayManager {
         Ok(())
     }
 
-    fn terminated(&self, app: &AppHandle, generation: u64) -> Result<(), String> {
+    fn terminated(&self, generation: u64) -> Result<(), String> {
         let mut runtime = self.lock()?;
         if runtime.generation != generation {
             return Ok(());
@@ -729,11 +718,11 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        self.publish(app, &state);
+        self.publish(&state);
         Ok(())
     }
 
-    fn fail(&self, app: &AppHandle, generation: u64, message: String) -> Result<(), String> {
+    fn fail(&self, generation: u64, message: String) -> Result<(), String> {
         let mut runtime = self.lock()?;
         if runtime.generation != generation {
             return Ok(());
@@ -757,10 +746,10 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        if let Some(child) = child {
+        if let Some(mut child) = child {
             let _ = child.kill();
         }
-        self.publish(app, &state);
+        self.publish(&state);
         Ok(())
     }
 
@@ -771,21 +760,23 @@ impl GatewayManager {
     }
 }
 
-fn spawn_event_reader(app: AppHandle, generation: u64, mut receiver: Receiver<CommandEvent>) {
-    tauri::async_runtime::spawn(async move {
+fn spawn_event_reader(
+    manager: Arc<GatewayManager>,
+    generation: u64,
+    mut receiver: Receiver<SidecarEvent>,
+) {
+    tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
-            let manager = app.state::<GatewayManager>();
             let result = match event {
-                CommandEvent::Stdout(bytes) => manager.handle_stdout(&app, generation, &bytes),
-                CommandEvent::Stderr(bytes) => manager.append_diagnostic(generation, &bytes),
-                CommandEvent::Error(error) => {
-                    manager.fail(&app, generation, format!("ACI process error: {error}"))
+                SidecarEvent::Stdout(bytes) => manager.handle_stdout(generation, &bytes),
+                SidecarEvent::Stderr(bytes) => manager.append_diagnostic(generation, &bytes),
+                SidecarEvent::Error(error) => {
+                    manager.fail(generation, format!("ACI process error: {error}"))
                 }
-                CommandEvent::Terminated(_) => manager.terminated(&app, generation),
-                _ => Ok(()),
+                SidecarEvent::Terminated => manager.terminated(generation),
             };
             if let Err(error) = result {
-                let _ = manager.fail(&app, generation, error);
+                let _ = manager.fail(generation, error);
             }
         }
     });
@@ -991,11 +982,6 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn publish_state(app: &AppHandle, state: &GatewayState) {
-    crate::tray::sync(app, state);
-    let _ = app.emit("gateway://state", state);
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use crate::contracts::{RequestActivity, UsageSummary};
 const DEFAULT_PAGE_SIZE: usize = 20;
 const MAX_PAGE_SIZE: usize = 100;
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageQuery {
     #[serde(default)]
@@ -31,7 +31,7 @@ pub struct UsageQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePoint {
     pub day: String,
@@ -42,7 +42,7 @@ pub struct UsagePoint {
     pub cost_usd: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
     pub items: Vec<RequestActivity>,

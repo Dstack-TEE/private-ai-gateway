@@ -51,7 +51,7 @@ pub fn helper_binary_name() -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub id: String,
@@ -74,7 +74,7 @@ pub struct AgentStatus {
 
 /// One config field a connection changes. Sensitive fields never show their
 /// values; `None` means absent.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConfigChange {
     pub key: String,
     pub before: Option<String>,
@@ -82,7 +82,7 @@ pub struct ConfigChange {
     pub sensitive: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPreview {
     pub agent: AgentStatus,
@@ -95,7 +95,7 @@ pub struct AgentPreview {
 }
 
 /// User choices a connection is projected with.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectOptions {
     /// Optional default selected from the verified catalog. The full model

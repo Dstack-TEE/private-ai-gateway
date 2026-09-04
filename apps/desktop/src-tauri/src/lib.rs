@@ -1,457 +1,155 @@
-mod contracts;
-mod gateway;
-mod local_api;
 mod menu;
-mod service_config;
+mod runtime_adapter;
 mod tray;
-mod usage;
 
-use std::sync::{Arc, Mutex};
+use std::{path::PathBuf, sync::Arc};
 
-use contracts::{
-    AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-    LocalApiConfig, StartGatewayConfig,
+use desktop_gateway::agents::helper_binary_name;
+use desktop_runtime::{
+    contracts::{
+        AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
+        LocalApiConfig, StartGatewayConfig,
+    },
+    controller::{DesktopRuntime, RuntimeOptions},
+    usage::{UsagePage, UsageQuery},
 };
-use desktop_gateway::{
-    agents::{app_data_dir, helper_binary_name, Agent, Projector},
-    catalog::Catalog,
-    lock,
-    proxy::{self, ProxyEvent, ProxyState},
-    secrets::{validate_api_key, KeyringStore, SecretStore, LEGACY_API_KEY_ENTRY},
-    tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
-};
-use gateway::GatewayManager;
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use runtime_adapter::TauriSidecarLauncher;
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use usage::{UsagePage, UsageQuery, UsageStore};
 
 const AUTOSTART_ARG: &str = "--autostart";
 
-/// The OS credential store holding Confidential AI profile credentials and
-/// parked agent secrets.
-struct Secrets(Arc<dyn SecretStore>);
-
-struct ClientCredentials(Mutex<TokenFiles>);
-
-impl ClientCredentials {
-    fn token(&self) -> Result<String, String> {
-        self.0
-            .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .ensure(LOCAL_TOOLS_AGENT)
-    }
-
-    fn rotate(&self) -> Result<String, String> {
-        self.0
-            .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .rotate(LOCAL_TOOLS_AGENT)
-    }
-}
-
-fn with_client_token(
-    mut tokens: TokenSet,
-    credentials: &ClientCredentials,
-) -> Result<TokenSet, String> {
-    tokens.insert(credentials.token()?, LOCAL_TOOLS_AGENT.to_string());
-    Ok(tokens)
-}
-
-/// What the launch established before the window: the bound endpoint. `Err`
-/// means nothing may start or connect this launch; the window still opens to
-/// say so and to allow disconnecting agents.
-struct Launch(Mutex<Result<Option<Bound>, String>>);
-
-/// The primary-instance lock, held for the whole process lifetime whether or
-/// not the endpoint or identity could be established, so a failed launch
-/// still keeps a second instance from claiming the port meanwhile.
-struct Instance(#[allow(dead_code)] Option<lock::InstanceLock>);
-
-struct Bound {
-    listener: std::net::TcpListener,
-}
-
-struct EndpointRuntime(Mutex<Option<tauri::async_runtime::JoinHandle<()>>>);
-
-impl EndpointRuntime {
-    fn start(
-        &self,
-        app: AppHandle,
-        proxy: Arc<ProxyState>,
-        listener: std::net::TcpListener,
-        config: LocalApiConfig,
-    ) -> Result<(), String> {
-        let mut runtime = self
-            .0
-            .lock()
-            .map_err(|_| "The Local API runtime is unavailable".to_string())?;
-        if runtime.is_some() {
-            return Err("The Local API runtime is already active".to_string());
-        }
-        let task = tauri::async_runtime::spawn(async move {
-            if let Err(error) = proxy::serve(proxy, listener).await {
-                let manager = app.state::<GatewayManager>();
-                manager.set_endpoint(&app, config, Err(error));
-            }
-        });
-        *runtime = Some(task);
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<(), String> {
-        let previous = self
-            .0
-            .lock()
-            .map_err(|_| "The Local API runtime is unavailable".to_string())?
-            .take();
-        if let Some(previous) = previous {
-            previous.abort();
-            let _ = previous.await;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct CodexCatalogSyncAttempt {
-    revision: String,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-struct CodexCatalogSync(Mutex<Option<CodexCatalogSyncAttempt>>);
-
-impl CodexCatalogSync {
-    fn reset(&self) -> Result<(), String> {
-        *self
-            .0
-            .lock()
-            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? = None;
-        Ok(())
-    }
-
-    fn remember_success(&self, revision: &str) -> Result<(), String> {
-        *self
-            .0
-            .lock()
-            .map_err(|_| "The Codex model metadata state is unavailable".to_string())? =
-            Some(CodexCatalogSyncAttempt {
-                revision: revision.to_string(),
-                error: None,
-            });
-        Ok(())
-    }
-
-    fn refresh_error(&self, projector: &Projector, catalog: &Catalog) -> Option<String> {
-        let mut previous = match self.0.lock() {
-            Ok(previous) => previous,
-            Err(_) => {
-                return Some("The Codex model metadata state is unavailable".to_string());
-            }
-        };
-        if let Some(attempt) = previous.as_ref() {
-            if attempt.revision == catalog.revision {
-                return attempt.error.clone();
-            }
-        }
-        let error = projector.sync_codex_catalog(catalog).err();
-        *previous = Some(CodexCatalogSyncAttempt {
-            revision: catalog.revision.clone(),
-            error: error.clone(),
-        });
-        error
-    }
-}
-
-/// The projection engine for this installation: agent configs reference the
-/// bundled console helper next to this executable.
-fn projector(secrets: &Secrets, endpoint: &str) -> Result<Projector, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("Cannot locate the app executable: {error}"))?;
-    let helper = exe
-        .parent()
-        .ok_or_else(|| "Cannot locate the app directory".to_string())?
-        .join(helper_binary_name());
-    Projector::new(helper, endpoint, secrets.0.clone())
-}
-
-fn current_projector(manager: &GatewayManager, secrets: &Secrets) -> Result<Projector, String> {
-    projector(secrets, &manager.local_api()?.endpoint)
-}
-
 #[tauri::command]
-fn get_gateway_state(manager: State<'_, GatewayManager>) -> Result<GatewayState, String> {
-    manager.snapshot()
+fn get_gateway_state(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
+    runtime.state()
 }
 
 #[tauri::command]
 fn start_gateway(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    codex_sync: State<'_, CodexCatalogSync>,
+    runtime: State<'_, Arc<DesktopRuntime>>,
     config: StartGatewayConfig,
 ) -> Result<GatewayState, String> {
-    let config = service_config::resolve_runtime_config(config)?;
-    let state = manager.snapshot()?;
-    if config.remote_url != state.config.remote_url {
-        return Err("Select or verify the Confidential AI profile before starting".to_string());
-    }
-    if !state.api_key_saved {
-        return Err("Add a credential to the active Confidential AI profile".to_string());
-    }
-    codex_sync.reset()?;
-    manager.start(&app, config)
+    runtime.inner().clone().start(config)
 }
 
-/// Verify a candidate service without opening the local forwarding session.
-/// The previous saved configuration and credential remain active unless the
-/// attestation and model discovery both succeed.
 #[tauri::command]
 async fn verify_configuration(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    codex_sync: State<'_, CodexCatalogSync>,
+    runtime: State<'_, Arc<DesktopRuntime>>,
     profile: ConfidentialProfileInput,
     require_production_os: bool,
     key: Option<String>,
 ) -> Result<GatewayState, String> {
-    if manager.is_running()? {
-        return Err("Stop protection before verifying a different service".to_string());
-    }
-    let previous = manager.snapshot()?;
-    let mut settings = service_config::settings_from_state(
-        previous.profiles.clone(),
-        previous.active_profile_id.clone(),
-        previous.config.require_production_os,
-    )?;
-    let existing = settings
-        .profiles
-        .iter()
-        .find(|entry| entry.id == profile.id)
-        .cloned();
-    let candidate_profile =
-        service_config::resolve_profile(profile, Some(service_config::now_secs()))?;
-    let profile_changed = existing.as_ref().is_none_or(|existing| {
-        existing.provider != candidate_profile.provider
-            || existing.remote_url != candidate_profile.remote_url
-            || existing.auth != candidate_profile.auth
-    });
-    let candidate_entry = service_config::credential_entry(&candidate_profile.id)?;
-    let stored_candidate_key = secrets.0.get(&candidate_entry)?;
-    let previous_entry = service_config::credential_entry(&previous.active_profile_id)?;
-    let previous_key = secrets.0.get(&previous_entry)?;
-    let replace_key = key.is_some();
-    let candidate_key = match key {
-        Some(key) => validate_api_key(&key)?,
-        None if !profile_changed => stored_candidate_key
-            .clone()
-            .ok_or_else(|| "Enter an API key".to_string())?,
-        None => return Err("Enter an API key for this profile".to_string()),
-    };
-    let config = StartGatewayConfig {
-        remote_url: candidate_profile.remote_url.clone(),
-        require_production_os,
-    };
-    settings.upsert(candidate_profile.clone())?;
-    settings.active_profile_id = candidate_profile.id.clone();
-    settings.require_production_os = require_production_os;
-
-    codex_sync.reset()?;
-    proxy.set_api_key(Some(candidate_key.clone()));
-    let started = match manager.begin_verification(&app, config.clone(), profile_changed) {
-        Ok(state) => state,
-        Err(error) => {
-            proxy.set_api_key(previous_key);
-            return Err(error);
-        }
-    };
-    let Some(session_id) = started.session_id.clone() else {
-        let _ = manager.stop(&app);
-        proxy.set_api_key(previous_key);
-        manager.restore_snapshot(&app, previous);
-        return Err("Configuration verification did not start".to_string());
-    };
-    let verified = manager.wait_for_verification(&session_id).await;
-    let stop_result = manager.stop(&app);
-
-    if let Err(error) = verified {
-        proxy.set_api_key(previous_key);
-        manager.restore_snapshot(&app, previous);
-        return Err(match stop_result {
-            Ok(_) => error,
-            Err(stop_error) => format!("{error}. The verifier also could not stop: {stop_error}"),
-        });
-    }
-    if let Err(error) = stop_result {
-        proxy.set_api_key(previous_key);
-        manager.restore_snapshot(&app, previous);
-        return Err(error);
-    }
-
-    if replace_key {
-        if let Err(error) = secrets.0.set(&candidate_entry, &candidate_key) {
-            proxy.set_api_key(previous_key);
-            manager.restore_snapshot(&app, previous);
-            return Err(error);
-        }
-    }
-    let settings = match service_config::save(settings) {
-        Ok(settings) => settings,
-        Err(error) => {
-            let restore_error = if replace_key {
-                restore_secret_entry(
-                    &*secrets.0,
-                    &candidate_entry,
-                    stored_candidate_key.as_deref(),
-                )
-                .err()
-            } else {
-                None
-            };
-            proxy.set_api_key(previous_key);
-            manager.restore_snapshot(&app, previous);
-            return Err(match restore_error {
-                Some(restore_error) => format!(
-                    "{error}. The previous credential could not be restored: {restore_error}"
-                ),
-                None => error,
-            });
-        }
-    };
-    manager.set_service_configuration(
-        &app,
-        config,
-        settings.profiles,
-        settings.active_profile_id,
-        true,
-        true,
-    );
-    manager.snapshot()
+    runtime
+        .inner()
+        .clone()
+        .verify_configuration(profile, require_production_os, key)
+        .await
 }
 
 #[tauri::command]
 fn activate_profile(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
+    runtime: State<'_, Arc<DesktopRuntime>>,
     profile_id: String,
 ) -> Result<GatewayState, String> {
-    if manager.is_running()? {
-        return Err("Stop protection before changing profiles".to_string());
-    }
-    let previous = manager.snapshot()?;
-    let mut settings = service_config::settings_from_state(
-        previous.profiles,
-        previous.active_profile_id,
-        previous.config.require_production_os,
-    )?;
-    let profile = settings
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)
-        .cloned()
-        .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-    let entry = service_config::credential_entry(&profile.id)?;
-    let key = secrets.0.get(&entry)?;
-    settings.active_profile_id = profile.id.clone();
-    let settings = service_config::save(settings)?;
-    let config = settings.runtime_config()?;
-    proxy.set_api_key(key.clone());
-    manager.set_service_configuration(
-        &app,
-        config,
-        settings.profiles,
-        settings.active_profile_id,
-        key.is_some(),
-        false,
-    );
-    manager.snapshot()
+    runtime.activate_profile(profile_id)
 }
 
 #[tauri::command]
 fn delete_profile(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
+    runtime: State<'_, Arc<DesktopRuntime>>,
     profile_id: String,
 ) -> Result<GatewayState, String> {
-    if manager.is_running()? {
-        return Err("Stop protection before deleting a profile".to_string());
-    }
-    let previous = manager.snapshot()?;
-    let mut settings = service_config::settings_from_state(
-        previous.profiles,
-        previous.active_profile_id,
-        previous.config.require_production_os,
-    )?;
-    if settings.profiles.len() == 1 {
-        return Err("At least one Confidential AI profile is required".to_string());
-    }
-    let removed = settings
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)
-        .cloned()
-        .ok_or_else(|| "Confidential AI profile not found".to_string())?;
-    let entry = service_config::credential_entry(&removed.id)?;
-    let removed_key = secrets.0.get(&entry)?;
-    secrets.0.delete(&entry)?;
-    settings.profiles.retain(|profile| profile.id != profile_id);
-    if settings.active_profile_id == profile_id {
-        settings.active_profile_id = settings.profiles[0].id.clone();
-    }
-    let active_entry = service_config::credential_entry(&settings.active_profile_id)?;
-    let active_key = secrets.0.get(&active_entry)?;
-    let settings = match service_config::save(settings) {
-        Ok(settings) => settings,
-        Err(error) => {
-            let restore_error =
-                restore_secret_entry(&*secrets.0, &entry, removed_key.as_deref()).err();
-            return Err(match restore_error {
-                Some(restore_error) => format!(
-                    "{error}. The deleted credential could not be restored: {restore_error}"
-                ),
-                None => error,
-            });
-        }
-    };
-    let config = settings.runtime_config()?;
-    proxy.set_api_key(active_key.clone());
-    manager.set_service_configuration(
-        &app,
-        config,
-        settings.profiles,
-        settings.active_profile_id,
-        active_key.is_some(),
-        false,
-    );
-    manager.snapshot()
-}
-
-fn restore_secret_entry(
-    secrets: &dyn SecretStore,
-    entry: &str,
-    value: Option<&str>,
-) -> Result<(), String> {
-    match value {
-        Some(value) => secrets.set(entry, value),
-        None => secrets.delete(entry),
-    }
+    runtime.delete_profile(profile_id)
 }
 
 #[tauri::command]
-fn stop_gateway(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-) -> Result<GatewayState, String> {
-    manager.stop(&app)
+fn stop_gateway(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
+    runtime.stop()
 }
 
-/// Open the brand's support page in the system browser.
+#[tauri::command]
+fn clear_api_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
+    runtime.clear_api_key()
+}
+
+#[tauri::command]
+fn query_usage(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    query: UsageQuery,
+) -> Result<UsagePage, String> {
+    runtime.query_usage(query)
+}
+
+#[tauri::command]
+fn export_usage_csv(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    query: UsageQuery,
+    path: String,
+) -> Result<usize, String> {
+    runtime.export_usage_csv(query, PathBuf::from(path))
+}
+
+#[tauri::command]
+fn clear_usage(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<u64, String> {
+    runtime.clear_usage()
+}
+
+#[tauri::command]
+fn get_client_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<String, String> {
+    runtime.client_key()
+}
+
+#[tauri::command]
+fn rotate_client_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<String, String> {
+    runtime.rotate_client_key()
+}
+
+#[tauri::command]
+async fn save_local_api_config(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    config: LocalApiConfig,
+) -> Result<GatewayState, String> {
+    runtime.inner().clone().save_local_api_config(config).await
+}
+
+#[tauri::command]
+async fn refresh_catalog(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
+    runtime.inner().clone().refresh_catalog().await
+}
+
+#[tauri::command]
+fn list_agents(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<Vec<AgentStatus>, String> {
+    runtime.list_agents()
+}
+
+#[tauri::command]
+fn preview_agent_connection(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    agent_id: String,
+    connect: bool,
+    options: ConnectOptions,
+) -> Result<AgentPreview, String> {
+    runtime.preview_agent(agent_id, connect, options)
+}
+
+#[tauri::command]
+fn apply_agent_connection(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    agent_id: String,
+    connect: bool,
+    revision: String,
+    options: ConnectOptions,
+) -> Result<AgentStatus, String> {
+    runtime.apply_agent(agent_id, connect, revision, options)
+}
+
+#[tauri::command]
+fn disconnect_all_agents(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+) -> Result<Vec<AgentStatus>, String> {
+    runtime.disconnect_all_agents()
+}
+
 #[tauri::command]
 fn open_support(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -470,442 +168,12 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
         .map_err(|error| format!("Cannot copy text: {error}"))
 }
 
-#[tauri::command]
-fn query_usage(store: State<'_, Arc<UsageStore>>, query: UsageQuery) -> Result<UsagePage, String> {
-    store.page(&query)
-}
-
-#[tauri::command]
-fn export_usage_csv(
-    store: State<'_, Arc<UsageStore>>,
-    query: UsageQuery,
-    path: String,
-) -> Result<usize, String> {
-    store.export_csv(&query, std::path::Path::new(&path))
-}
-
-#[tauri::command]
-fn clear_usage(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    store: State<'_, Arc<UsageStore>>,
-) -> Result<u64, String> {
-    let changed = store.clear()?;
-    manager.clear_session_usage(&app);
-    Ok(changed)
-}
-
-/// Revoke first, then forget: the key leaves proxy memory (and admitted
-/// deliveries are cancelled) before the credential store is touched. If the
-/// store delete fails the key stays revoked for this session; the UI keeps
-/// showing it as saved so the user can retry Delete or save a new key.
-#[tauri::command]
-fn clear_api_key(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-) -> Result<GatewayState, String> {
-    if manager.is_running()? {
-        return Err("Stop protection before deleting a profile credential".to_string());
-    }
-    let state = manager.snapshot()?;
-    let entry = service_config::credential_entry(&state.active_profile_id)?;
-    proxy.set_api_key(None);
-    if let Err(error) = secrets.0.delete(&entry) {
-        return Err(format!(
-            "The key is revoked for this session, but removing it from the credential store \
-             failed: {error}. Retry Delete or save a new key"
-        ));
-    }
-    manager.set_api_key_saved(&app, false);
-    manager.snapshot()
-}
-
-#[tauri::command]
-fn get_client_key(credentials: State<'_, Arc<ClientCredentials>>) -> Result<String, String> {
-    credentials.token()
-}
-
-#[tauri::command]
-fn rotate_client_key(
-    proxy: State<'_, Arc<ProxyState>>,
-    credentials: State<'_, Arc<ClientCredentials>>,
-) -> Result<String, String> {
-    proxy.set_tokens(proxy.tokens().without(LOCAL_TOOLS_AGENT));
-    let token = credentials.rotate()?;
-    let mut tokens = proxy.tokens();
-    tokens.insert(token.clone(), LOCAL_TOOLS_AGENT.to_string());
-    proxy.set_tokens(tokens);
-    Ok(token)
-}
-
-#[tauri::command]
-async fn save_local_api_config(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    endpoint_runtime: State<'_, EndpointRuntime>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    config: LocalApiConfig,
-) -> Result<GatewayState, String> {
-    if manager.is_running()? {
-        return Err("Stop protection before changing Local API settings".to_string());
-    }
-    let current = manager.local_api()?;
-    let resolved = local_api::resolve(config.clone())?;
-    if current.endpoint != resolved.endpoint {
-        let statuses = projector(&secrets, &current.endpoint)?.scan(None)?.0;
-        if statuses.iter().any(|agent| agent.recorded) {
-            return Err(
-                "Disconnect managed agents before changing the endpoint they use".to_string(),
-            );
-        }
-    }
-    let needs_bind = current.bind != resolved.bind || manager.snapshot()?.proxy_url.is_none();
-    if !needs_bind {
-        let resolved = local_api::save(config)?;
-        manager.set_endpoint(&app, resolved.config, Ok(resolved.endpoint));
-        return manager.snapshot();
-    }
-
-    endpoint_runtime.stop().await?;
-    let listener = match proxy::bind_std(resolved.bind) {
-        Ok(listener) => listener,
-        Err(error) => {
-            if let Err(restore_error) = restore_endpoint(
-                &endpoint_runtime,
-                &app,
-                proxy.inner().clone(),
-                current.clone(),
-            ) {
-                manager.set_endpoint(&app, current.config, Err(restore_error.clone()));
-                return Err(format!("{error}; {restore_error}"));
-            }
-            return Err(error);
-        }
-    };
-    let resolved = match local_api::save(config) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            drop(listener);
-            if let Err(restore_error) = restore_endpoint(
-                &endpoint_runtime,
-                &app,
-                proxy.inner().clone(),
-                current.clone(),
-            ) {
-                manager.set_endpoint(&app, current.config, Err(restore_error.clone()));
-                return Err(format!("{error}; {restore_error}"));
-            }
-            return Err(error);
-        }
-    };
-    endpoint_runtime.start(
-        app.clone(),
-        proxy.inner().clone(),
-        listener,
-        resolved.config.clone(),
-    )?;
-    manager.set_endpoint(&app, resolved.config, Ok(resolved.endpoint));
-    manager.snapshot()
-}
-
-fn restore_endpoint(
-    runtime: &EndpointRuntime,
-    app: &AppHandle,
-    proxy: Arc<ProxyState>,
-    previous: local_api::ResolvedLocalApi,
-) -> Result<(), String> {
-    let listener = proxy::bind_std(previous.bind).map_err(|restore_error| {
-        format!("The new Local API settings failed and the previous listener could not be restored: {restore_error}")
-    })?;
-    runtime.start(app.clone(), proxy, listener, previous.config)
-}
-
-#[tauri::command]
-async fn refresh_catalog(
-    app: AppHandle,
-    manager: State<'_, GatewayManager>,
-    codex_sync: State<'_, CodexCatalogSync>,
-) -> Result<GatewayState, String> {
-    let state = manager.refresh_catalog(&app).await?;
-    codex_sync.reset()?;
-    Ok(state)
-}
-
-/// One refresh: scan the agents and publish exactly the tokens those
-/// statuses authorize. Publishing cancels admitted-but-unsent deliveries,
-/// so a config that drifted or broke stops opening the proxy in the same
-/// operation that reports it. Startup takes this path too.
-#[tauri::command]
-fn list_agents(
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    credentials: State<'_, Arc<ClientCredentials>>,
-    codex_sync: State<'_, CodexCatalogSync>,
-) -> Result<Vec<AgentStatus>, String> {
-    let session = proxy.session();
-    let catalog = session.verified.then_some(session.catalog).flatten();
-    let projector = current_projector(&manager, &secrets)?;
-    let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
-    if let Some(catalog) = catalog.as_ref() {
-        if let Some(codex) = statuses
-            .iter_mut()
-            .find(|status| status.id == Agent::Codex.id() && status.connected)
-        {
-            if let Some(error) = codex_sync.refresh_error(&projector, catalog) {
-                let refresh = format!(
-                    "Codex model metadata could not be refreshed: {error}. Disconnect remains available"
-                );
-                codex.attention = Some(match codex.attention.take() {
-                    Some(attention) => format!("{attention} {refresh}"),
-                    None => refresh,
-                });
-            }
-        }
-    }
-    proxy.set_tokens(with_client_token(tokens, &credentials)?);
-    Ok(statuses)
-}
-
-#[tauri::command]
-fn preview_agent_connection(
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    agent_id: String,
-    connect: bool,
-    options: ConnectOptions,
-) -> Result<AgentPreview, String> {
-    let agent = Agent::from_id(&agent_id)?;
-    let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
-    current_projector(&manager, &secrets)?.preview(agent, connect, catalog.as_ref(), &options)
-}
-
-#[tauri::command]
-fn apply_agent_connection(
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    credentials: State<'_, Arc<ClientCredentials>>,
-    codex_sync: State<'_, CodexCatalogSync>,
-    agent_id: String,
-    connect: bool,
-    revision: String,
-    options: ConnectOptions,
-) -> Result<AgentStatus, String> {
-    let agent = Agent::from_id(&agent_id)?;
-    let catalog = connection_catalog(&manager, &proxy, agent, connect)?;
-    let projector = current_projector(&manager, &secrets)?;
-    if !connect {
-        // Revoke in memory first; a disconnect that fails part-way leaves the
-        // agent disabled rather than still authorized.
-        proxy.set_tokens(proxy.tokens().without(agent.id()));
-    }
-    let status = projector.apply(agent, connect, &revision, catalog.as_ref(), &options)?;
-    if agent == Agent::Codex && connect {
-        if let Some(catalog) = catalog.as_ref() {
-            codex_sync.remember_success(&catalog.revision)?;
-        }
-    }
-    proxy.set_tokens(with_client_token(projector.scan(None)?.1, &credentials)?);
-    Ok(status)
-}
-
-/// Emergency restore: revoke every agent in memory, then disconnect and
-/// restore all recorded agents regardless of support, endpoint, or gateway
-/// state (token files are deleted before anything else is touched). Returns
-/// the statuses afterwards; failures are reported as an error once every
-/// agent was attempted.
-#[tauri::command]
-fn disconnect_all_agents(
-    manager: State<'_, GatewayManager>,
-    proxy: State<'_, Arc<ProxyState>>,
-    secrets: State<'_, Secrets>,
-    credentials: State<'_, Arc<ClientCredentials>>,
-) -> Result<Vec<AgentStatus>, String> {
-    proxy.set_tokens(with_client_token(TokenSet::default(), &credentials)?);
-    let projector = current_projector(&manager, &secrets)?;
-    match projector.disconnect_all() {
-        // Durable revocation or the tombstone step failed: keep every token
-        // revoked in memory rather than reloading from the store.
-        Err(error) => Err(format!(
-            "Restore all could not revoke the agents ({error}); access stays revoked until \
-             it is retried"
-        )),
-        Ok(failures) => {
-            let (statuses, tokens) = projector.scan(None)?;
-            proxy.set_tokens(with_client_token(tokens, &credentials)?);
-            if failures.is_empty() {
-                Ok(statuses)
-            } else {
-                Err(failures
-                    .into_iter()
-                    .map(|(agent, error)| format!("{agent}: {error}"))
-                    .collect::<Vec<_>>()
-                    .join("; "))
-            }
-        }
-    }
-}
-
-/// The catalog a connection may project from: only the one published with
-/// the current verified session, and only while the local endpoint is bound.
-/// Disconnecting never needs either.
-fn connection_catalog(
-    manager: &GatewayManager,
-    proxy: &ProxyState,
-    agent: Agent,
-    connect: bool,
-) -> Result<Option<Catalog>, String> {
-    if !connect {
-        return Ok(None);
-    }
-    if let Some(error) = manager.snapshot()?.endpoint_error {
-        return Err(format!("The local endpoint is unavailable: {error}"));
-    }
-    let session = proxy.session();
-    match (session.verified, session.catalog) {
-        (true, Some(catalog)) => Ok(Some(catalog)),
-        _ => Err(format!(
-            "Start the gateway and wait until it is verified; the model list for {} comes from it",
-            agent.name()
-        )),
-    }
-}
-
-/// Become the primary instance and claim the endpoint before the window
-/// exists. The instance lock is returned separately so it outlives any later
-/// failure.
-fn launch(
-    bind: std::net::SocketAddr,
-) -> (Option<lock::InstanceLock>, Result<Option<Bound>, String>) {
-    let data_dir = match app_data_dir() {
-        Ok(dir) => dir,
-        Err(error) => return (None, Err(error)),
-    };
-    let instance = match lock::instance(&data_dir) {
-        Ok(Some(instance)) => instance,
-        Ok(None) => return (None, Ok(None)),
-        Err(error) => return (None, Err(format!("Cannot take the instance lock: {error}"))),
-    };
-    let bound = proxy::bind_std(bind).map(|listener| Some(Bound { listener }));
-    (Some(instance), bound)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-    let (mut service_settings, mut service_config_error, migrated_legacy) =
-        match service_config::load() {
-            Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),
-            Err(error) => (
-                service_config::ServiceSettings::default(),
-                Some(error),
-                false,
-            ),
-        };
-    let service_runtime_config = match service_settings.runtime_config() {
-        Ok(config) => config,
-        Err(error) => {
-            service_config_error = Some(error);
-            service_settings = service_config::ServiceSettings::default();
-            service_settings
-                .runtime_config()
-                .expect("the built-in Confidential AI profile must be valid")
-        }
-    };
-    let active_credential_entry =
-        service_config::credential_entry(&service_settings.active_profile_id)
-            .expect("the resolved active Confidential AI profile ID must be valid");
-    let mut startup_key = match secrets.get(&active_credential_entry) {
-        Ok(key) => key,
-        Err(error) => {
-            service_config_error = Some(error);
-            None
-        }
-    };
-    if startup_key.is_none() && service_config_error.is_none() {
-        match secrets.get(LEGACY_API_KEY_ENTRY) {
-            Ok(Some(legacy_key)) => match secrets.set(&active_credential_entry, &legacy_key) {
-                Ok(()) => match service_config::save(service_settings.clone()) {
-                    Ok(_) => {
-                        startup_key = Some(legacy_key);
-                        if let Err(error) = secrets.delete(LEGACY_API_KEY_ENTRY) {
-                            service_config_error = Some(format!(
-                                    "The previous credential was migrated but its old copy could not be removed: {error}"
-                                ));
-                        }
-                    }
-                    Err(error) => {
-                        let rollback = secrets.delete(&active_credential_entry).err();
-                        service_config_error = Some(match rollback {
-                                Some(rollback) => format!(
-                                    "The previous Confidential AI credential could not be migrated: {error}. The partial credential could not be removed: {rollback}"
-                                ),
-                                None => format!(
-                                    "The previous Confidential AI credential could not be migrated: {error}"
-                                ),
-                            });
-                    }
-                },
-                Err(error) => {
-                    service_config_error = Some(format!(
-                        "The previous Confidential AI credential could not be migrated: {error}"
-                    ));
-                }
-            },
-            Ok(None) if migrated_legacy => {
-                if let Err(error) = service_config::save(service_settings.clone()) {
-                    service_config_error = Some(error);
-                }
-            }
-            Ok(None) => {}
-            Err(error) => service_config_error = Some(error),
-        }
-    } else if migrated_legacy && service_config_error.is_none() {
-        if let Err(error) = service_config::save(service_settings.clone()) {
-            service_config_error = Some(error);
-        }
-    }
-    let (local_api, local_api_error) = match local_api::load() {
-        Ok(config) => (config, None),
-        Err(error) => (
-            local_api::resolve(LocalApiConfig::default())
-                .expect("the built-in Local API settings must be valid"),
-            Some(error),
-        ),
-    };
-    let (instance, launched) = launch(local_api.bind);
-    let (events, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
-    let proxy = ProxyState::new(events);
-    let client_credentials = match app_data_dir() {
-        Ok(dir) => Arc::new(ClientCredentials(Mutex::new(TokenFiles::new(&dir)))),
-        Err(error) => {
-            eprintln!("Cannot initialize client credentials: {error}");
-            return;
-        }
-    };
-    let (usage, usage_error) =
-        match app_data_dir().and_then(|dir| UsageStore::open(dir.join("usage.sqlite3"))) {
-            Ok(store) => (Arc::new(store), None),
-            Err(error) => match UsageStore::memory() {
-                Ok(store) => (
-                    Arc::new(store),
-                    Some(format!(
-                        "Usage history is unavailable for this launch: {error}"
-                    )),
-                ),
-                Err(fallback_error) => {
-                    eprintln!("Cannot initialize usage storage: {error}; {fallback_error}");
-                    return;
-                }
-            },
-        };
+    let launcher = Arc::new(TauriSidecarLauncher::default());
+    let launcher_for_setup = launcher.clone();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -919,22 +187,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(GatewayManager::new(
-            proxy.clone(),
-            usage.clone(),
-            local_api.config.clone(),
-            service_runtime_config,
-            service_settings.profiles.clone(),
-            service_settings.active_profile_id.clone(),
-        ))
-        .manage(proxy.clone())
-        .manage(EndpointRuntime(Mutex::new(None)))
-        .manage(CodexCatalogSync::default())
-        .manage(client_credentials.clone())
-        .manage(usage)
-        .manage(Secrets(secrets.clone()))
-        .manage(Instance(instance))
-        .manage(Launch(Mutex::new(launched)))
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
             start_gateway,
@@ -958,13 +210,22 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
+            launcher_for_setup.initialize(app.handle().clone())?;
+            let helper_path = std::env::current_exe()
+                .map_err(|error| format!("Cannot locate the app executable: {error}"))?
+                .parent()
+                .ok_or_else(|| "Cannot locate the app directory".to_string())?
+                .join(helper_binary_name());
+            let runtime = DesktopRuntime::launch(RuntimeOptions {
+                launcher: launcher_for_setup.clone(),
+                helper_path,
+            })?;
+            app.manage(runtime.clone());
+
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
-            // The tracked config keeps the window geometry; the brand owns the
-            // title, applied here while the window is still hidden.
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
-            // Closing the window only hides it; the tray keeps the app alive.
             let window_for_events = window.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
@@ -974,86 +235,21 @@ pub fn run() {
             });
             tray::setup(app.handle())?;
             menu::setup(app.handle())?;
-            if show_on_launch {
-                // Present the UI before startup maintenance so a normal app
-                // launch always gives immediate visual feedback. Login-item
-                // launches keep running quietly in the tray.
-                tray::show_window(app.handle());
-            }
 
             let handle = app.handle().clone();
-            let manager = app.state::<GatewayManager>();
-            let launched = app
-                .state::<Launch>()
-                .0
-                .lock()
-                .map_err(|_| "launch state unavailable".to_string())?
-                .as_mut()
-                .map(Option::take)
-                .map_err(|error| error.clone());
-            match launched {
-                Ok(Some(bound)) => {
-                    manager.set_endpoint(
-                        &handle,
-                        local_api.config.clone(),
-                        Ok(local_api.endpoint.clone()),
-                    );
-                    app.state::<EndpointRuntime>().start(
-                        handle.clone(),
-                        proxy.clone(),
-                        bound.listener,
-                        local_api.config.clone(),
-                    )?;
-                }
-                Ok(None) => manager.set_endpoint(
-                    &handle,
-                    local_api.config.clone(),
-                    Err(format!(
-                        "Another instance of {} is the primary instance",
-                        desktop_gateway::brand::PRODUCT_NAME
-                    )),
-                ),
-                Err(error) => manager.set_endpoint(&handle, local_api.config.clone(), Err(error)),
-            }
-
-            // Load what the proxy needs to admit and forward: the saved key
-            // (only its presence reaches the UI) and connected agents' tokens.
-            manager.set_api_key_saved(&handle, startup_key.is_some());
-            proxy.set_api_key(startup_key.clone());
-            if let Some(error) = usage_error.clone() {
-                manager.report_error(&handle, error);
-            }
-            if let Some(error) = local_api_error.clone() {
-                manager.report_error(&handle, error);
-            }
-            if let Some(error) = service_config_error.clone() {
-                manager.report_error(&handle, error);
-            }
-            // Startup maintenance (under the config lock) before authorizing
-            // any token.
-            let store = Secrets(secrets.clone());
-            match with_client_token(TokenSet::default(), &client_credentials) {
-                Ok(tokens) => proxy.set_tokens(tokens),
-                Err(error) => manager.report_error(&handle, error),
-            }
-            match projector(&store, &local_api.endpoint).and_then(|projector| {
-                projector.migrate_legacy()?;
-                projector.scan(None)
-            }) {
-                Ok((_, tokens)) => match with_client_token(tokens, &client_credentials) {
-                    Ok(tokens) => proxy.set_tokens(tokens),
-                    Err(error) => manager.report_error(&handle, error),
-                },
-                Err(error) => manager.report_error(&handle, error),
-            }
-
-            let events_handle = handle.clone();
+            let mut states = runtime.subscribe();
+            let initial = runtime.state()?;
+            tray::sync(&handle, &initial);
             tauri::async_runtime::spawn(async move {
-                while let Some(event) = proxy_events.recv().await {
-                    let manager = events_handle.state::<GatewayManager>();
-                    manager.record_proxy_event(&events_handle, event);
+                while states.changed().await.is_ok() {
+                    let state = states.borrow().clone();
+                    tray::sync(&handle, &state);
+                    let _ = handle.emit("gateway://state", state);
                 }
             });
+            if show_on_launch {
+                tray::show_window(app.handle());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1061,8 +257,9 @@ pub fn run() {
 
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { .. } => {
-            let manager = app.state::<GatewayManager>();
-            let _ = manager.stop(app);
+            if let Some(runtime) = app.try_state::<Arc<DesktopRuntime>>() {
+                let _ = runtime.stop();
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => tray::show_window(app),

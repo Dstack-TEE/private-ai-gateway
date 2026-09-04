@@ -6,8 +6,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
-
-use crate::{contracts::GatewayState, gateway::GatewayManager};
+use desktop_runtime::{contracts::GatewayState, controller::DesktopRuntime};
 
 /// Live handles to the two menu rows that mirror gateway state.
 pub struct TrayMenu {
@@ -60,7 +59,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             "autostart" => sync_autostart(app),
             "quit" => {
-                let _ = app.state::<GatewayManager>().stop(app);
+                let _ = app.state::<std::sync::Arc<DesktopRuntime>>().stop();
                 app.exit(0);
             }
             _ => {}
@@ -70,8 +69,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn toggle_or_open_settings(app: &AppHandle) {
-    let manager = app.state::<GatewayManager>();
-    let Ok(state) = manager.snapshot() else {
+    let runtime = app.state::<std::sync::Arc<DesktopRuntime>>();
+    let Ok(state) = runtime.state() else {
         return;
     };
     let running = matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
@@ -81,7 +80,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
         let _ = app.emit(crate::menu::NAVIGATE_EVENT, "settings");
         return;
     }
-    manager.toggle(app);
+    runtime.inner().clone().toggle();
 }
 
 fn sync_autostart(app: &AppHandle) {
@@ -94,8 +93,8 @@ fn sync_autostart(app: &AppHandle) {
     };
     if let Err(error) = result {
         let _ = menu.autostart.set_checked(!checked);
-        app.state::<GatewayManager>()
-            .report_error(app, format!("Open at Login could not be changed: {error}"));
+        app.state::<std::sync::Arc<DesktopRuntime>>()
+            .report_error(format!("Open at Login could not be changed: {error}"));
     }
 }
 
@@ -168,7 +167,7 @@ fn activate_app() {}
 #[cfg(test)]
 mod tests {
     use super::menu_state;
-    use crate::contracts::GatewayState;
+    use desktop_runtime::contracts::GatewayState;
 
     fn state(status: &str, api_key_saved: bool) -> GatewayState {
         GatewayState {
