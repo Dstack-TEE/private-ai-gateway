@@ -43,7 +43,7 @@ private struct TrayMenu: View {
     @ObservedObject var store: RuntimeStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
-    @State private var openAtLogin = loginItem.status == .enabled
+    @State private var openAtLogin = false
 
     private var loginItem: SMAppService {
         SMAppService.loginItem(identifier: "org.dstack.private-ai-gateway.login-item")
@@ -72,6 +72,7 @@ private struct TrayMenu: View {
         ))
         Divider()
         Button("Quit Private AI Gateway") { NSApp.terminate(nil) }
+        .onAppear { openAtLogin = loginItem.status == .enabled }
     }
 
     private func setOpenAtLogin(_ enabled: Bool) {
@@ -92,7 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = NSRunningApplication
             .runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .first(where: { $0.processIdentifier != current }) {
-            existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            existing.activate(options: [.activateAllWindows])
             NSApp.terminate(nil)
             return
         }
