@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using WinRT.Interop;
 
 namespace PrivateAIGateway.Windows;
@@ -19,6 +20,12 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        BrandIconHost.Children.Add(new Image
+        {
+            Source = new SvgImageSource(new Uri("ms-appx:///Assets/brand/mark.svg")),
+            Width = 34,
+            Height = 34,
+        });
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.Resize(new global::Windows.Graphics.SizeInt32(1052, 820));
