@@ -20,11 +20,12 @@ use serde_json::{json, Value};
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
-use super::request_transform::Endpoint;
+use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, function_call_item, i64_field, item_id, map_finish_reason, message_item, now_millis,
-    now_secs, output_text_part, reasoning_item, reasoning_text, refusal_part, responses_object,
-    responses_terminal, responses_usage, transform_finish_reason, ResponseIdentity, ResponsesHead,
+    self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field, item_id,
+    map_finish_reason, message_item, now_millis, now_secs, output_text_part, reasoning_item,
+    reasoning_text, refusal_part, responses_object, responses_terminal, responses_usage,
+    transform_finish_reason, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -160,6 +161,7 @@ struct ResponsesStream {
     output: Vec<Value>,
     open: Option<TextItem>,
     calls: BTreeMap<i64, CallItem>,
+    tools: ResponsesToolMap,
     usage: Option<Value>,
     finish_reason: Option<String>,
     error: Option<Value>,
@@ -179,12 +181,63 @@ enum TextKind {
     Refusal,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CallKind {
+    #[default]
+    Function,
+    Custom,
+}
+
 #[derive(Default)]
 struct CallItem {
     call_id: String,
-    name: String,
+    chat_name: String,
+    response_name: String,
+    namespace: Option<String>,
+    kind: CallKind,
     arguments: String,
     output_index: Option<usize>,
+}
+
+impl CallItem {
+    fn resolve_name(&mut self, tools: &ResponsesToolMap) {
+        if tools.is_custom(&self.chat_name) {
+            self.kind = CallKind::Custom;
+            self.response_name.clone_from(&self.chat_name);
+            self.namespace = None;
+        } else if let Some(tool) = tools.namespace(&self.chat_name) {
+            self.kind = CallKind::Function;
+            self.response_name = tool.name.clone();
+            self.namespace = Some(tool.namespace.clone());
+        } else {
+            self.kind = CallKind::Function;
+            self.response_name.clone_from(&self.chat_name);
+            self.namespace = None;
+        }
+    }
+
+    fn item_id(&self) -> String {
+        let prefix = if self.kind == CallKind::Custom {
+            "ctc"
+        } else {
+            "fc"
+        };
+        format!("{prefix}_{}", self.call_id)
+    }
+
+    fn item(&self, value: &str, status: &str) -> Value {
+        if self.kind == CallKind::Custom {
+            custom_tool_call_item(&self.call_id, &self.response_name, value, status)
+        } else {
+            function_call_item(
+                &self.call_id,
+                &self.response_name,
+                self.namespace.as_deref(),
+                value,
+                status,
+            )
+        }
+    }
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -730,6 +783,7 @@ fn start_responses_stream(
     state.started = true;
     state.id = identity.request_id.clone();
     state.model = parsed.get("model").cloned().unwrap_or(Value::Null);
+    state.tools = ResponsesToolMap::from_echo(echo);
     state.created_at = parsed
         .get("created")
         .and_then(Value::as_u64)
@@ -944,71 +998,144 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        let should_start = {
+        let (should_start, was_started) = {
             let call = state.calls.entry(index).or_default();
             if !call_id.is_empty() {
-                call.call_id = call_id.to_string();
+                call.call_id.push_str(call_id);
             }
             if !name.is_empty() {
-                call.name = name.to_string();
+                call.chat_name.push_str(name);
+            }
+            if !arguments.is_empty() {
+                call.arguments.push_str(arguments);
             }
             let was_started = call.output_index.is_some();
-            !was_started && !call.call_id.is_empty() && !call.name.is_empty()
+            (
+                !was_started
+                    && !call.call_id.is_empty()
+                    && !call.chat_name.is_empty()
+                    && !call.arguments.is_empty(),
+                was_started,
+            )
         };
 
         if should_start {
-            output.push_str(&close_responses_text(state));
-            let output_index = state.output.len();
-            let call = state.calls.get_mut(&index).expect("tool call exists");
-            call.output_index = Some(output_index);
-            let item = function_call_item(&call.call_id, &call.name, "", "in_progress");
-            state.output.push(item.clone());
-            output.push_str(&responses_event(
-                state,
-                "response.output_item.added",
-                json!({ "output_index": output_index, "item": item }),
-            ));
+            output.push_str(&open_responses_call(index, state));
         }
 
-        if !arguments.is_empty() {
-            let call = state.calls.get_mut(&index).expect("tool call exists");
-            call.arguments.push_str(arguments);
-            if let Some(output_index) = call.output_index {
-                let item_id = format!("fc_{}", call.call_id);
-                output.push_str(&responses_event(
-                    state,
-                    "response.function_call_arguments.delta",
-                    json!({
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "delta": arguments,
-                    }),
-                ));
+        if was_started && !arguments.is_empty() {
+            let call = state.calls.get(&index).expect("tool call exists");
+            if call.kind == CallKind::Function {
+                if let Some(output_index) = call.output_index {
+                    let item_id = call.item_id();
+                    output.push_str(&responses_event(
+                        state,
+                        "response.function_call_arguments.delta",
+                        json!({
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "delta": arguments,
+                        }),
+                    ));
+                }
             }
         }
     }
     output
 }
 
+fn open_responses_call(index: i64, state: &mut ResponsesStream) -> String {
+    let mut output = close_responses_text(state);
+    let output_index = state.output.len();
+    let call = state.calls.get_mut(&index).expect("tool call exists");
+    call.resolve_name(&state.tools);
+    call.output_index = Some(output_index);
+    let item = call.item("", "in_progress");
+    let pending_arguments =
+        (call.kind == CallKind::Function).then(|| (call.item_id(), call.arguments.clone()));
+    state.output.push(item.clone());
+    output.push_str(&responses_event(
+        state,
+        "response.output_item.added",
+        json!({ "output_index": output_index, "item": item }),
+    ));
+    if let Some((item_id, arguments)) =
+        pending_arguments.filter(|(_, arguments)| !arguments.is_empty())
+    {
+        output.push_str(&responses_event(
+            state,
+            "response.function_call_arguments.delta",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "delta": arguments,
+            }),
+        ));
+    }
+    output
+}
+
 fn close_responses_calls(state: &mut ResponsesStream) -> String {
-    let calls = std::mem::take(&mut state.calls);
+    let pending = state
+        .calls
+        .iter()
+        .filter(|(_, call)| {
+            call.output_index.is_none() && !call.call_id.is_empty() && !call.chat_name.is_empty()
+        })
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
     let mut output = String::new();
+    for index in pending {
+        output.push_str(&open_responses_call(index, state));
+    }
+    let calls = std::mem::take(&mut state.calls);
     for (_, call) in calls {
         let Some(output_index) = call.output_index else {
             continue;
         };
-        let item_id = format!("fc_{}", call.call_id);
+        let item_id = call.item_id();
+        if call.kind == CallKind::Custom {
+            let input = custom_tool_input(&call.arguments);
+            if !input.is_empty() {
+                output.push_str(&responses_event(
+                    state,
+                    "response.custom_tool_call_input.delta",
+                    json!({
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": input,
+                    }),
+                ));
+            }
+            output.push_str(&responses_event(
+                state,
+                "response.custom_tool_call_input.done",
+                json!({
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "input": input,
+                }),
+            ));
+            let item = call.item(&input, "completed");
+            state.output[output_index] = item.clone();
+            output.push_str(&responses_event(
+                state,
+                "response.output_item.done",
+                json!({ "output_index": output_index, "item": item }),
+            ));
+            continue;
+        }
         output.push_str(&responses_event(
             state,
             "response.function_call_arguments.done",
             json!({
                 "item_id": item_id,
                 "output_index": output_index,
-                "name": call.name,
+                "name": call.response_name,
                 "arguments": call.arguments,
             }),
         ));
-        let item = function_call_item(&call.call_id, &call.name, &call.arguments, "completed");
+        let item = call.item(&call.arguments, "completed");
         state.output[output_index] = item.clone();
         output.push_str(&responses_event(
             state,
@@ -1923,6 +2050,20 @@ mod tests {
                 "output_index",
                 "name",
                 "arguments",
+            ],
+            "response.custom_tool_call_input.delta" => &[
+                "type",
+                "sequence_number",
+                "item_id",
+                "output_index",
+                "delta",
+            ],
+            "response.custom_tool_call_input.done" => &[
+                "type",
+                "sequence_number",
+                "item_id",
+                "output_index",
+                "input",
             ],
             other => panic!("unexpected Responses event type {other}"),
         };

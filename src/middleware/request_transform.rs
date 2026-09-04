@@ -10,7 +10,10 @@
 //! Strongly typed endpoint structs may replace `serde_json::Value` later; for now
 //! the dynamic shape keeps behavior aligned with the source.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
@@ -1423,7 +1426,10 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
         }
     }
 
+    let (chat_tools, tool_map, function_names) = chat_tools(input.get("tools"))?;
+
     let mut messages = Vec::new();
+    let mut input_state = ResponsesInputState::default();
     if let Some(instructions) = input
         .get("instructions")
         .and_then(Value::as_str)
@@ -1435,8 +1441,9 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
         Some(Value::String(text)) => messages.push(json!({ "role": "user", "content": text })),
         Some(Value::Array(items)) => {
             for item in items {
-                push_input_item(item, &mut messages)?;
+                push_input_item(item, &mut messages, &mut input_state)?;
             }
+            input_state.finish()?;
         }
         _ => {
             return Err(TransformError::invalid_request(
@@ -1463,12 +1470,13 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
             chat.insert(chat_key.into(), value.clone());
         }
     }
-    if let Some(tools) = input.get("tools").and_then(Value::as_array) {
-        let tools = tools.iter().map(chat_tool).collect::<Result<Vec<_>, _>>()?;
-        chat.insert("tools".into(), Value::Array(tools));
+    if !chat_tools.is_empty() {
+        chat.insert("tools".into(), Value::Array(chat_tools));
     }
     if let Some(choice) = input.get("tool_choice") {
-        chat.insert("tool_choice".into(), chat_tool_choice(choice)?);
+        if let Some(choice) = chat_tool_choice(choice, &function_names, &tool_map)? {
+            chat.insert("tool_choice".into(), choice);
+        }
     }
     if let Some(text) = input.get("text").and_then(Value::as_object) {
         if let Some(format) = text.get("format").and_then(Value::as_object) {
@@ -1492,10 +1500,32 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
 
 /// Append the chat message(s) for one Responses input item: a `message` (or
 /// the role-only shorthand), a `function_call` the model made, its
-/// `function_call_output`, or a `reasoning` item. Reasoning has no chat
-/// spelling an upstream could replay, so it is dropped; any other item type
-/// is refused.
-fn push_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), TransformError> {
+/// `function_call_output`, or a `reasoning` item. Clear reasoning text is
+/// attached to the following assistant turn; encrypted-only reasoning cannot
+/// be replayed through Chat Completions and is omitted.
+#[derive(Default)]
+struct ResponsesInputState {
+    calls: HashSet<String>,
+    outputs: HashSet<String>,
+    pending_reasoning: Option<String>,
+}
+
+impl ResponsesInputState {
+    fn finish(&self) -> Result<(), TransformError> {
+        if let Some(call_id) = self.calls.difference(&self.outputs).next() {
+            return Err(TransformError::invalid_request(format!(
+                "function call {call_id} is missing its output"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn push_input_item(
+    item: &Value,
+    messages: &mut Vec<Value>,
+    state: &mut ResponsesInputState,
+) -> Result<(), TransformError> {
     match item.get("type").and_then(Value::as_str) {
         Some("message") | None => {
             let role = item
@@ -1503,33 +1533,72 @@ fn push_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), Transf
                 .and_then(Value::as_str)
                 .ok_or_else(|| TransformError::invalid_request("input message requires a role"))?;
             let content = chat_message_content(role, item.get("content"))?;
-            messages.push(json!({ "role": role, "content": content }));
+            let mut message = json!({ "role": role, "content": content });
+            if role == "assistant" {
+                if let Some(reasoning) = state.pending_reasoning.take() {
+                    message["reasoning_content"] = json!(reasoning);
+                }
+            } else {
+                state.pending_reasoning = None;
+            }
+            messages.push(message);
         }
         Some("function_call") => {
-            let call = json!({
-                "id": item.get("call_id").cloned().unwrap_or(Value::Null),
-                "type": "function",
-                "function": {
-                    "name": item.get("name").cloned().unwrap_or(Value::Null),
-                    "arguments": item.get("arguments").cloned().unwrap_or_else(|| json!("{}")),
-                },
-            });
-            // Consecutive calls are one assistant turn, as the model made them.
-            match messages
-                .last_mut()
-                .and_then(|message| message.get_mut("tool_calls"))
-                .and_then(Value::as_array_mut)
-            {
-                Some(calls) => calls.push(call),
-                None => messages.push(json!({ "role": "assistant", "tool_calls": [call] })),
+            let call_id = required_string(item, "call_id", "function_call")?;
+            let name = response_call_name(item, "function_call")?;
+            let arguments = required_string(item, "arguments", "function_call")?;
+            if !matches!(
+                serde_json::from_str::<Value>(arguments),
+                Ok(Value::Object(_))
+            ) {
+                return Err(TransformError::invalid_request(format!(
+                    "function call {call_id} arguments must be a JSON object"
+                )));
+            }
+            push_chat_call(call_id, &name, arguments, messages, state)?;
+        }
+        Some("custom_tool_call") => {
+            let call_id = required_string(item, "call_id", "custom_tool_call")?;
+            let name = required_string(item, "name", "custom_tool_call")?;
+            let input = item.get("input").and_then(Value::as_str).ok_or_else(|| {
+                TransformError::invalid_request("custom_tool_call requires a string input")
+            })?;
+            let arguments = serde_json::to_string(&json!({ "input": input })).unwrap_or_default();
+            push_chat_call(call_id, name, &arguments, messages, state)?;
+        }
+        Some("function_call_output" | "custom_tool_call_output") => {
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            let call_id = required_string(item, "call_id", item_type)?;
+            if !state.calls.contains(call_id) {
+                return Err(TransformError::invalid_request(format!(
+                    "function output references unknown call {call_id}"
+                )));
+            }
+            if !state.outputs.insert(call_id.to_string()) {
+                return Err(TransformError::invalid_request(format!(
+                    "duplicate function output for call {call_id}"
+                )));
+            }
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": text_of(item.get("output")),
+            }));
+        }
+        Some("reasoning") => {
+            let content = text_of(item.get("content"));
+            let reasoning = if content.is_empty() {
+                text_of(item.get("summary"))
+            } else {
+                content
+            };
+            if !reasoning.is_empty() {
+                state
+                    .pending_reasoning
+                    .get_or_insert_with(String::new)
+                    .push_str(&reasoning);
             }
         }
-        Some("function_call_output") => messages.push(json!({
-            "role": "tool",
-            "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
-            "content": text_of(item.get("output")),
-        })),
-        Some("reasoning") => {}
         Some(other) => {
             return Err(TransformError::invalid_request(format!(
                 "input item type {other} is not supported"
@@ -1537,6 +1606,65 @@ fn push_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), Transf
         }
     }
     Ok(())
+}
+
+fn push_chat_call(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    messages: &mut Vec<Value>,
+    state: &mut ResponsesInputState,
+) -> Result<(), TransformError> {
+    if !state.calls.insert(call_id.to_string()) {
+        return Err(TransformError::invalid_request(format!(
+            "duplicate tool call id {call_id}"
+        )));
+    }
+    let call = json!({
+        "id": call_id,
+        "type": "function",
+        "function": { "name": name, "arguments": arguments },
+    });
+    // Consecutive calls are one assistant turn, as the model made them.
+    let calls = state
+        .pending_reasoning
+        .is_none()
+        .then(|| messages.last_mut())
+        .flatten()
+        .and_then(|message| message.get_mut("tool_calls"))
+        .and_then(Value::as_array_mut);
+    if let Some(calls) = calls {
+        calls.push(call);
+    } else {
+        let mut message = json!({ "role": "assistant", "tool_calls": [call] });
+        if let Some(reasoning) = state.pending_reasoning.take() {
+            message["reasoning_content"] = json!(reasoning);
+        }
+        messages.push(message);
+    }
+    Ok(())
+}
+
+fn required_string<'a>(
+    object: &'a Value,
+    key: &str,
+    item_type: &str,
+) -> Result<&'a str, TransformError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TransformError::invalid_request(format!("{item_type} requires a non-empty {key}"))
+        })
+}
+
+fn response_call_name(item: &Value, item_type: &str) -> Result<String, TransformError> {
+    let name = required_string(item, "name", item_type)?;
+    Ok(match item.get("namespace").and_then(Value::as_str) {
+        Some(namespace) if !namespace.is_empty() => flatten_namespace_tool_name(namespace, name),
+        _ => name.to_string(),
+    })
 }
 
 /// Chat `content` for a Responses message: a string stays one; content parts
@@ -1616,38 +1744,253 @@ fn text_of(value: Option<&Value>) -> String {
     }
 }
 
-fn chat_tool(tool: &Value) -> Result<Value, TransformError> {
-    match tool.get("type").and_then(Value::as_str) {
-        Some("function") => {}
-        other => {
-            return Err(TransformError::invalid_request(format!(
-                "tool type {} is not supported",
-                other.unwrap_or("(none)")
-            )))
+const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NamespacedTool {
+    pub namespace: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResponsesToolMap {
+    custom: HashSet<String>,
+    namespaces: HashMap<String, NamespacedTool>,
+}
+
+impl ResponsesToolMap {
+    pub(super) fn from_echo(echo: &Value) -> Self {
+        let Some(tools) = echo.get("tools").and_then(Value::as_array) else {
+            return Self::default();
+        };
+        Self::from_tools(tools)
+    }
+
+    fn from_tools(tools: &[Value]) -> Self {
+        let mut map = Self::default();
+        for tool in tools {
+            match tool.get("type").and_then(Value::as_str) {
+                Some("custom") => {
+                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                        map.custom.insert(name.to_string());
+                    }
+                }
+                Some("namespace") => {
+                    let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(children) = tool.get("tools").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for child in children {
+                        if child.get("type").and_then(Value::as_str) != Some("function") {
+                            continue;
+                        }
+                        let Some(name) = child.get("name").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        map.namespaces.insert(
+                            flatten_namespace_tool_name(namespace, name),
+                            NamespacedTool {
+                                namespace: namespace.to_string(),
+                                name: name.to_string(),
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        map
+    }
+
+    pub(super) fn is_custom(&self, name: &str) -> bool {
+        self.custom.contains(name)
+    }
+
+    pub(super) fn namespace(&self, name: &str) -> Option<&NamespacedTool> {
+        self.namespaces.get(name)
+    }
+
+    fn has_namespace(&self, namespace: &str) -> bool {
+        self.namespaces
+            .values()
+            .any(|tool| tool.namespace == namespace)
+    }
+}
+
+fn chat_tools(
+    tools: Option<&Value>,
+) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
+    let Some(tools) = tools else {
+        return Ok(Default::default());
+    };
+    let tools = tools
+        .as_array()
+        .ok_or_else(|| TransformError::invalid_request("tools must be an array"))?;
+    let tool_map = ResponsesToolMap::from_tools(tools);
+    let mut translated = Vec::new();
+    let mut function_names = HashSet::new();
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {
+                let name = required_string(tool, "name", "function tool")?;
+                push_chat_tool(tool, name, None, &mut translated, &mut function_names)?;
+            }
+            Some("custom") => {
+                let name = required_string(tool, "name", "custom tool")?;
+                push_chat_tool(
+                    tool,
+                    name,
+                    Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "The raw input for this tool, passed through verbatim."
+                            }
+                        },
+                        "required": ["input"]
+                    })),
+                    &mut translated,
+                    &mut function_names,
+                )?;
+            }
+            Some("namespace") => {
+                let namespace = required_string(tool, "name", "namespace tool")?;
+                let children = tool.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                    TransformError::invalid_request("namespace tool requires a tools array")
+                })?;
+                for child in children {
+                    let child_type = child.get("type").and_then(Value::as_str);
+                    if child_type != Some("function") {
+                        return Err(TransformError::invalid_request(format!(
+                            "namespace tool child type {} is not supported",
+                            child_type.unwrap_or("(none)")
+                        )));
+                    }
+                    let name = required_string(child, "name", "namespace function tool")?;
+                    let flat = flatten_namespace_tool_name(namespace, name);
+                    push_chat_tool(child, &flat, None, &mut translated, &mut function_names)?;
+                }
+            }
+            // Hosted tools have no equivalent on a Chat-only upstream. Codex
+            // advertises them alongside client tools even when a turn does not
+            // need them, so preserve the client-executed tools and omit these.
+            Some("tool_search" | "web_search") => {}
+            other => {
+                return Err(TransformError::invalid_request(format!(
+                    "tool type {} is not supported",
+                    other.unwrap_or("(none)")
+                )))
+            }
         }
     }
+    Ok((translated, tool_map, function_names))
+}
+
+fn push_chat_tool(
+    source: &Value,
+    name: &str,
+    parameters: Option<Value>,
+    translated: &mut Vec<Value>,
+    function_names: &mut HashSet<String>,
+) -> Result<(), TransformError> {
+    if !function_names.insert(name.to_string()) {
+        return Err(TransformError::invalid_request(format!(
+            "duplicate function tool name {name}"
+        )));
+    }
     let mut function = Map::new();
-    for key in ["name", "description", "parameters", "strict"] {
-        if let Some(value) = tool.get(key) {
+    function.insert("name".into(), json!(name));
+    for key in ["description", "parameters", "strict"] {
+        if let Some(value) = source.get(key) {
             function.insert(key.into(), value.clone());
         }
     }
-    Ok(json!({ "type": "function", "function": function }))
+    if let Some(parameters) = parameters {
+        function.insert("parameters".into(), parameters);
+        function.remove("strict");
+    }
+    translated.push(json!({ "type": "function", "function": function }));
+    Ok(())
 }
 
-fn chat_tool_choice(choice: &Value) -> Result<Value, TransformError> {
-    match choice {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none" | "required") => {
-            Ok(json!(choice))
+fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
+    let full = format!("{namespace}__{name}");
+    if full.len() <= CHAT_TOOL_NAME_MAX_LEN {
+        return full;
+    }
+    let digest = Sha256::digest(full.as_bytes());
+    let suffix = format!("__{}", hex::encode(&digest[..4]));
+    let prefix_len = CHAT_TOOL_NAME_MAX_LEN - suffix.len();
+    let mut end = 0;
+    for (index, character) in full.char_indices() {
+        let next = index + character.len_utf8();
+        if next > prefix_len {
+            break;
         }
-        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("function") => {
-            Ok(json!({
+        end = next;
+    }
+    format!("{}{}", &full[..end], suffix)
+}
+
+fn chat_tool_choice(
+    choice: &Value,
+    function_names: &HashSet<String>,
+    tool_map: &ResponsesToolMap,
+) -> Result<Option<Value>, TransformError> {
+    match choice {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
+            Ok((!function_names.is_empty()).then(|| json!(choice)))
+        }
+        Value::String(choice) if choice == "required" && function_names.is_empty() => Err(
+            TransformError::invalid_request("tool_choice required needs a function tool"),
+        ),
+        Value::String(choice) if choice == "required" => Ok(Some(json!(choice))),
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function" | "custom")
+            ) =>
+        {
+            let item_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut name = required_string(choice, "name", "tool_choice")?.to_string();
+            if item_type == "function" {
+                if let Some(namespace) = object.get("namespace").and_then(Value::as_str) {
+                    name = flatten_namespace_tool_name(namespace, &name);
+                }
+            } else if !tool_map.is_custom(&name) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown custom tool {name}"
+                )));
+            }
+            if !function_names.contains(&name) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown function {name}"
+                )));
+            }
+            Ok(Some(json!({
                 "type": "function",
-                "function": { "name": object.get("name").cloned().unwrap_or(Value::Null) },
-            }))
+                "function": { "name": name },
+            })))
+        }
+        Value::Object(object)
+            if object.get("type").and_then(Value::as_str) == Some("namespace") =>
+        {
+            let namespace = required_string(choice, "name", "namespace tool_choice")?;
+            if !tool_map.has_namespace(namespace) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown namespace {namespace}"
+                )));
+            }
+            Ok(Some(json!("auto")))
         }
         _ => Err(TransformError::invalid_request(
-            "tool_choice must be auto, none, required, or a function",
+            "tool_choice must be auto, none, required, or a named function, custom tool, or namespace",
         )),
     }
 }

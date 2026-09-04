@@ -17,7 +17,7 @@ use super::errors::{
     is_quota_exhausted_error, looks_identifying, map_upstream_status, responses_error_event,
     responses_gateway_code, upstream_message, Surface,
 };
-use super::request_transform::Endpoint;
+use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
 
@@ -1113,6 +1113,7 @@ pub fn responses_echo(params: &Value) -> Value {
 /// usage buckets take their Responses names. `echo` supplies the request
 /// fields the object repeats.
 pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
+    let tool_map = ResponsesToolMap::from_echo(echo);
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
@@ -1156,18 +1157,32 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
         }
         for call in &tool_calls {
             let function = call.get("function");
-            output.push(function_call_item(
-                call.get("id").and_then(Value::as_str).unwrap_or(""),
-                function
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(""),
-                function
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(""),
-                "completed",
-            ));
+            let call_id = call.get("id").and_then(Value::as_str).unwrap_or("");
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let arguments = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if tool_map.is_custom(name) {
+                output.push(custom_tool_call_item(
+                    call_id,
+                    name,
+                    &custom_tool_input(arguments),
+                    "completed",
+                ));
+            } else {
+                let namespace = tool_map.namespace(name);
+                output.push(function_call_item(
+                    call_id,
+                    namespace.map_or(name, |tool| tool.name.as_str()),
+                    namespace.map(|tool| tool.namespace.as_str()),
+                    arguments,
+                    "completed",
+                ));
+            }
         }
     }
 
@@ -1282,17 +1297,49 @@ pub(super) fn refusal_part(refusal: &str) -> Value {
 pub(super) fn function_call_item(
     call_id: &str,
     name: &str,
+    namespace: Option<&str>,
     arguments: &str,
     status: &str,
 ) -> Value {
-    json!({
+    let mut item = json!({
         "id": format!("fc_{call_id}"),
         "type": "function_call",
         "call_id": call_id,
         "name": name,
         "arguments": arguments,
         "status": status,
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = json!(namespace);
+    }
+    item
+}
+
+pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
+    json!({
+        "id": format!("ctc_{call_id}"),
+        "type": "custom_tool_call",
+        "call_id": call_id,
+        "name": name,
+        "input": input,
+        "status": status,
     })
+}
+
+pub(super) fn custom_tool_input(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Object(object)) if object.is_empty() => String::new(),
+        Ok(Value::Object(object)) => object
+            .get("input")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| trimmed.to_string()),
+        _ => trimmed.to_string(),
+    }
 }
 
 /// How a chat `finish_reason` ends a response: the `status`, and the

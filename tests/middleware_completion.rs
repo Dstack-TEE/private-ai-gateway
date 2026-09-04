@@ -709,14 +709,37 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
     )
     .await;
     let upstream = concat!(
-        "data: {\"id\":\"chatcmpl-upstream\",\"created\":1700000000,\"model\":\"internal-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
+        "data: {\"id\":\"chatcmpl-upstream\",\"created\":1700000000,\"model\":\"internal-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_ns\",\"type\":\"function\",\"function\":{\"name\":\"mcp__example___lookup\",\"arguments\":\"{\\\"key\\\":\\\"value\\\"}\"}},{\"index\":1,\"id\":\"call_custom\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
         "data: [DONE]\n\n",
     );
     let (service, requests) =
         build_recording_service(200, upstream.as_bytes().to_vec(), "text/event-stream");
+    let mut input = responses_input(true);
+    input.params["tools"] = json!([
+        {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command",
+            "parameters": {
+                "type": "object",
+                "properties": { "cmd": { "type": "string" } },
+                "required": ["cmd"]
+            }
+        },
+        {
+            "type": "namespace",
+            "name": "mcp__example",
+            "description": "Optional plugin tools",
+            "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
+        },
+        { "type": "custom", "name": "shell", "description": "Run shell input" },
+        { "type": "web_search", "external_web_access": false }
+    ]);
+    input.params["tool_choice"] = json!("auto");
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
     let response = middleware(control_url)
-        .handle_completion(&service, responses_input(true))
+        .handle_completion(&service, input)
         .await;
     assert_eq!(response.status(), 200);
     let (headers, body) = raw_body(response).await;
@@ -736,10 +759,12 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
             "response.created",
             "response.in_progress",
             "response.output_item.added",
-            "response.content_part.added",
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.content_part.done",
+            "response.function_call_arguments.delta",
+            "response.output_item.added",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
             "response.output_item.done",
             "response.completed",
         ]
@@ -752,12 +777,77 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
     assert_eq!(terminal["response"]["usage"]["input_tokens"], json!(1));
     assert_eq!(terminal["response"]["usage"]["output_tokens"], json!(2));
     assert_eq!(terminal["response"]["usage"]["cost"], json!(5));
+    assert_eq!(
+        terminal["response"]["output"][0],
+        json!({
+            "id": "fc_call_ns",
+            "type": "function_call",
+            "call_id": "call_ns",
+            "name": "_lookup",
+            "namespace": "mcp__example",
+            "arguments": "{\"key\":\"value\"}",
+            "status": "completed"
+        })
+    );
+    assert_eq!(
+        terminal["response"]["output"][1],
+        json!({
+            "id": "ctc_call_custom",
+            "type": "custom_tool_call",
+            "call_id": "call_custom",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed"
+        })
+    );
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path.as_deref(), Some("/v1/chat/completions"));
     assert!(requests[0].body.get("messages").is_some());
     assert!(requests[0].body.get("input").is_none());
+    assert_eq!(
+        requests[0].body["tools"],
+        json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "exec_command",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } },
+                        "required": ["cmd"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__example___lookup",
+                    "parameters": { "type": "object" }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run shell input",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "The raw input for this tool, passed through verbatim."
+                            }
+                        },
+                        "required": ["input"]
+                    }
+                }
+            }
+        ])
+    );
+    assert_eq!(requests[0].body["tool_choice"], json!("auto"));
 }
 
 #[tokio::test]

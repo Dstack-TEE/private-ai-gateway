@@ -50,8 +50,13 @@
         "model": "gpt-test",
         "input": [
           { "type": "message", "role": "user", "content": "weather" },
-          { "type": "reasoning", "id": "rs-old", "encrypted_content": "opaque" },
-          { "type": "function_call", "call_id": "call_1", "name": "city", "arguments": "{\"q\":\"SF\"}" },
+          {
+            "type": "reasoning",
+            "id": "rs-old",
+            "encrypted_content": "opaque",
+            "content": [{ "type": "reasoning_text", "text": "choose tools" }]
+          },
+          { "type": "function_call", "call_id": "call_1", "name": "city", "namespace": "weather", "arguments": "{\"q\":\"SF\"}" },
           { "type": "function_call", "call_id": "call_2", "name": "units", "arguments": "{}" },
           { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_text", "text": "foggy" }] },
           { "type": "function_call_output", "call_id": "call_2", "output": "metric" }
@@ -63,8 +68,9 @@
           { "role": "user", "content": "weather" },
           {
             "role": "assistant",
+            "reasoning_content": "choose tools",
             "tool_calls": [
-              { "id": "call_1", "type": "function", "function": { "name": "city", "arguments": "{\"q\":\"SF\"}" } },
+              { "id": "call_1", "type": "function", "function": { "name": "weather__city", "arguments": "{\"q\":\"SF\"}" } },
               { "id": "call_2", "type": "function", "function": { "name": "units", "arguments": "{}" } }
             ]
           },
@@ -123,6 +129,78 @@
       }
     },
     {
+      "name": "codex_default_tools",
+      "input": {
+        "model": "gpt-test",
+        "instructions": "Act as a coding agent.",
+        "input": [
+          { "type": "message", "role": "developer", "content": "Follow repository rules." },
+          { "type": "message", "role": "user", "content": "Inspect the project." }
+        ],
+        "include": ["reasoning.encrypted_content"],
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command",
+            "parameters": {
+              "type": "object",
+              "properties": { "cmd": { "type": "string" } },
+              "required": ["cmd"]
+            },
+            "strict": false
+          },
+          {
+            "type": "namespace",
+            "name": "mcp__example",
+            "description": "Optional plugin tools",
+            "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
+          },
+          { "type": "web_search", "external_web_access": false }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "stream": true,
+        "text": { "verbosity": "medium" },
+        "reasoning": { "effort": "high" }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "system", "content": "Act as a coding agent." },
+          { "role": "developer", "content": "Follow repository rules." },
+          { "role": "user", "content": "Inspect the project." }
+        ],
+        "stream": true,
+        "parallel_tool_calls": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a command",
+              "parameters": {
+                "type": "object",
+                "properties": { "cmd": { "type": "string" } },
+                "required": ["cmd"]
+              },
+              "strict": false
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "mcp__example___lookup",
+              "parameters": { "type": "object" }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "verbosity": "medium",
+        "reasoning_effort": "high"
+      }
+    },
+    {
       "name": "reasoning_effort",
       "input": {
         "model": "gpt-test",
@@ -156,8 +234,84 @@
       "error": true
     },
     {
-      "name": "built_in_tool_rejected",
-      "input": { "model": "gpt-test", "input": "hello", "tools": [{ "type": "web_search" }] },
+      "name": "namespace_non_function_child_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "tools",
+          "tools": [{ "type": "custom", "name": "shell" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "unknown_namespace_tool_choice_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "crm",
+          "tools": [{ "type": "function", "name": "lookup" }]
+        }],
+        "tool_choice": { "type": "namespace", "name": "missing" }
+      },
+      "error": true
+    },
+    {
+      "name": "custom_tool_and_history",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "message", "role": "user", "content": "inspect" },
+          { "type": "custom_tool_call", "call_id": "call_shell", "name": "shell", "input": "pwd" },
+          { "type": "custom_tool_call_output", "call_id": "call_shell", "output": "/workspace" }
+        ],
+        "tools": [{ "type": "custom", "name": "shell", "description": "Run shell input" }],
+        "tool_choice": { "type": "custom", "name": "shell" }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "user", "content": "inspect" },
+          {
+            "role": "assistant",
+            "tool_calls": [{
+              "id": "call_shell",
+              "type": "function",
+              "function": { "name": "shell", "arguments": "{\"input\":\"pwd\"}" }
+            }]
+          },
+          { "role": "tool", "tool_call_id": "call_shell", "content": "/workspace" }
+        ],
+        "tools": [{
+          "type": "function",
+          "function": {
+            "name": "shell",
+            "description": "Run shell input",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "string",
+                  "description": "The raw input for this tool, passed through verbatim."
+                }
+              },
+              "required": ["input"]
+            }
+          }
+        }],
+        "tool_choice": { "type": "function", "function": { "name": "shell" } }
+      }
+    },
+    {
+      "name": "orphan_function_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{ "type": "function_call_output", "call_id": "call_missing", "output": "no call" }]
+      },
       "error": true
     },
     {
@@ -221,7 +375,18 @@
     },
     {
       "name": "tool_calls",
-      "echo": { "tools": [{ "type": "function", "name": "lookup" }], "store": false },
+      "echo": {
+        "tools": [
+          { "type": "function", "name": "lookup" },
+          {
+            "type": "namespace",
+            "name": "crm",
+            "tools": [{ "type": "function", "name": "search" }]
+          },
+          { "type": "custom", "name": "shell" }
+        ],
+        "store": false
+      },
       "input": {
         "id": "chatcmpl_2",
         "model": "gpt-test",
@@ -231,7 +396,8 @@
             "content": null,
             "tool_calls": [
               { "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{\"x\":1}" } },
-              { "id": "call_2", "type": "function", "function": { "name": "lookup", "arguments": "{\"x\":2}" } }
+              { "id": "call_2", "type": "function", "function": { "name": "crm__search", "arguments": "{\"q\":\"open\"}" } },
+              { "id": "call_3", "type": "function", "function": { "name": "shell", "arguments": "{\"input\":\"pwd\"}" } }
             ]
           },
           "finish_reason": "tool_calls"
@@ -244,11 +410,20 @@
         "status": "completed",
         "incomplete_details": null,
         "error": null,
-        "tools": [{ "type": "function", "name": "lookup" }],
+        "tools": [
+          { "type": "function", "name": "lookup" },
+          {
+            "type": "namespace",
+            "name": "crm",
+            "tools": [{ "type": "function", "name": "search" }]
+          },
+          { "type": "custom", "name": "shell" }
+        ],
         "store": false,
         "output": [
           { "id": "fc_call_1", "type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"x\":1}", "status": "completed" },
-          { "id": "fc_call_2", "type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{\"x\":2}", "status": "completed" }
+          { "id": "fc_call_2", "type": "function_call", "call_id": "call_2", "name": "search", "namespace": "crm", "arguments": "{\"q\":\"open\"}", "status": "completed" },
+          { "id": "ctc_call_3", "type": "custom_tool_call", "call_id": "call_3", "name": "shell", "input": "pwd", "status": "completed" }
         ],
         "usage": {
           "input_tokens": 0,
