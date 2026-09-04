@@ -1,0 +1,49 @@
+{
+  "name": "private-ai-gateway-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native and Tauri desktop clients for the ACI local verifying proxy",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "prepare:brand": "node scripts/prepare-brand.mjs",
+    "prepare:native-assets": "node scripts/prepare-native-assets.mjs",
+    "prepare:macos-icon": "node scripts/prepare-macos-icon.mjs",
+    "build": "npm run prepare:brand && npm run prepare:macos-icon && vite build",
+    "build:native": "node scripts/bundle-native.mjs",
+    "build:native:debug": "node scripts/bundle-native.mjs --debug",
+    "dist:native:macos": "node scripts/package-macos-native.mjs",
+    "dist:native:windows": "node scripts/package-windows-native.mjs",
+    "dist:native:linux": "node scripts/package-linux-native.mjs",
+    "check": "npm run prepare:brand && tsc --noEmit",
+    "dev": "npm run prepare:brand && npm run build:native:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
+    "dev:web": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
+    "dist": "npm run prepare:brand && npm run build:native && tauri build --config src-tauri/tauri.brand.conf.json",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "tauri": "tauri",
+    "test:renderer": "playwright test"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@11.16.0",
+  "dependencies": {
+    "@lobehub/icons-static-svg": "^1.94.0",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "lucide-react": "1.38.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@resvg/resvg-js": "2.6.2",
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "26.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
+  }
+}

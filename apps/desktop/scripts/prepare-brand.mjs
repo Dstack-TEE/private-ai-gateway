@@ -1,0 +1,415 @@
+#!/usr/bin/env node
+// Single source of truth for branding: `brand/<id>/brand.json` plus the
+// official assets next to it. This script projects one brand into every
+// place the app reads it, so no name, identifier, colour, or icon is written
+// by hand anywhere else:
+//
+//   src/renderer/generated/          brand.ts, app/tray icons, and wordmark SVGs
+//   gateway/src/brand.rs              Rust constants (tray, menus, data dir)
+//   src-tauri/tauri.brand.conf.json   Tauri config overlay (ignored; passed as --config)
+//   src-tauri/icons/                  legacy desktop icons and Icon Composer asset
+//   assets/tray/trayTemplate*.png     monochrome template tray icon
+//
+// The default brand is `dstack`; `PRIVATE_AI_GATEWAY_BRAND=<id>` selects
+// another. The renderer module, the Rust module, the desktop icons, and the
+// tray icon are committed for the default brand and CI fails on drift; the
+// Tauri overlay is regenerated on every run and merged by the CLI, so the
+// tracked tauri.conf.json stays neutral. Every check here fails fast, before
+// anything is written: a missing asset or field is an error, never a silent
+// fallback.
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { Resvg } from "@resvg/resvg-js";
+
+const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const brandId = process.env.PRIVATE_AI_GATEWAY_BRAND ?? "dstack";
+/** Cross-platform and legacy icon files listed alongside the native `.icon` asset. */
+const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
+if (!/^[a-z][a-z0-9-]*$/.test(brandId)) {
+  throw new Error(`PRIVATE_AI_GATEWAY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
+}
+const brandDir = path.join(appRoot, "brand", brandId);
+const brand = JSON.parse(await readFile(path.join(brandDir, "brand.json"), "utf8"));
+
+const required = {
+  id: "string",
+  productName: "string",
+  shortName: "string",
+  organizationName: "string",
+  tagline: "string",
+  homepageUrl: "string",
+  supportUrl: "string",
+  "service.name": "string",
+  "service.defaultUrl": "string",
+  "service.keyLabel": "string",
+  "bundle.identifier": "string",
+  "bundle.category": "string",
+  "bundle.shortDescription": "string",
+  "bundle.longDescription": "string",
+  "theme.accentLight": "color",
+  "theme.accentDark": "color",
+  "theme.brandColor": "color",
+  "theme.iconBackground": "color",
+  "assets.appIconMark": "file",
+  "assets.trayTemplate": "file",
+  "assets.wordmarkLight": "file",
+  "assets.wordmarkDark": "file",
+};
+const optional = {
+  "assets.appIconLightMark": "file",
+  "assets.appIconDarkMark": "file",
+  "assets.appIconWhiteAsCutout": "boolean",
+};
+const problems = [];
+for (const [key, kind] of Object.entries(required)) {
+  const value = key.split(".").reduce((node, part) => node?.[part], brand);
+  if (typeof value !== "string" || !value.trim()) {
+    problems.push(`${key} is missing`);
+  } else if (kind === "color" && !/^#[0-9a-f]{6}$/i.test(value)) {
+    problems.push(`${key} must be a #rrggbb colour`);
+  } else if (kind === "file" && !(await exists(path.join(brandDir, value)))) {
+    problems.push(`${key} points at ${value}, which is not in ${brandDir}`);
+  }
+}
+for (const [key, kind] of Object.entries(optional)) {
+  const value = key.split(".").reduce((node, part) => node?.[part], brand);
+  if (value === undefined) {
+    continue;
+  }
+  if (kind === "boolean" && typeof value !== "boolean") {
+    problems.push(`${key} must be a boolean when provided`);
+  } else if (kind !== "boolean" && (typeof value !== "string" || !value.trim())) {
+    problems.push(`${key} must be a non-empty string when provided`);
+  } else if (kind === "color" && !/^#[0-9a-f]{6}$/i.test(value)) {
+    problems.push(`${key} must be a #rrggbb colour`);
+  } else if (kind === "file" && !(await exists(path.join(brandDir, value)))) {
+    problems.push(`${key} points at ${value}, which is not in ${brandDir}`);
+  }
+}
+if (brand.id !== brandId) {
+  problems.push(`brand.json id ${JSON.stringify(brand.id)} does not match directory ${brandId}`);
+}
+if (!/^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$/i.test(brand.bundle?.identifier ?? "")) {
+  problems.push("bundle.identifier must be reverse-DNS");
+}
+for (const [file, digest] of Object.entries(brand.source?.sha256 ?? {})) {
+  const actual = createHash("sha256").update(await readFile(path.join(brandDir, file))).digest("hex");
+  if (actual !== digest) {
+    problems.push(`${file} does not match its recorded sha256 (${actual})`);
+  }
+}
+if (problems.length > 0) {
+  throw new Error(`Brand ${brandId} is not buildable:\n  ${problems.join("\n  ")}`);
+}
+
+const asset = (name) => readFile(path.join(brandDir, brand.assets[name]), "utf8");
+const generatedNote = `Generated by scripts/prepare-brand.mjs from brand/${brandId}/brand.json. Do not edit.`;
+const appIconMark = await asset("appIconMark");
+const uiMarkLight = brand.assets.appIconLightMark ? await asset("appIconLightMark") : appIconMark;
+const uiMarkDark = brand.assets.appIconDarkMark ? await asset("appIconDarkMark") : appIconMark;
+const appIconWhiteAsCutout = brand.assets.appIconWhiteAsCutout ?? false;
+const appIconSvg = composeAppIcon(appIconMark, brand.theme.iconBackground, appIconWhiteAsCutout);
+const appIconComposerManifest = composeIconComposerManifest(brand.theme.iconBackground);
+const appIconLayer = render(composeIconLayer(appIconMark, appIconWhiteAsCutout), 1024);
+const traySource = await asset("trayTemplate");
+const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout, false);
+const trayProtectedTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout, true);
+
+// --- renderer -------------------------------------------------------------
+// Renderer images are generated next to the module and imported as Vite assets,
+// so they ship as self-hosted files under the production CSP (`img-src 'self'`,
+// no `data:`).
+const generatedDir = path.join(appRoot, "src/renderer/generated");
+await mkdir(generatedDir, { recursive: true });
+await writeFile(path.join(generatedDir, "app-icon.svg"), appIconSvg);
+await rm(path.join(generatedDir, "app-icon-light.svg"), { force: true });
+await rm(path.join(generatedDir, "app-icon-dark.svg"), { force: true });
+await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout));
+await writeFile(path.join(generatedDir, "brand-mark-dark.svg"), standaloneMark(uiMarkDark, appIconWhiteAsCutout));
+await writeFile(path.join(generatedDir, "tray-mark.svg"), trayTemplateSvg);
+await writeFile(path.join(generatedDir, "tray-mark-protected.svg"), trayProtectedTemplateSvg);
+await copyFile(path.join(brandDir, brand.assets.wordmarkLight), path.join(generatedDir, "wordmark-light.svg"));
+await copyFile(path.join(brandDir, brand.assets.wordmarkDark), path.join(generatedDir, "wordmark-dark.svg"));
+const rendererBrand = {
+  id: brand.id,
+  productName: brand.productName,
+  shortName: brand.shortName,
+  organizationName: brand.organizationName,
+  tagline: brand.tagline,
+  homepageUrl: brand.homepageUrl,
+  supportUrl: brand.supportUrl,
+  service: brand.service,
+  theme: brand.theme,
+};
+await writeFile(
+  path.join(generatedDir, "brand.ts"),
+  `// ${generatedNote}
+import appIcon from "./app-icon.svg";
+import brandMarkDark from "./brand-mark-dark.svg";
+import brandMarkLight from "./brand-mark-light.svg";
+import wordmarkDark from "./wordmark-dark.svg";
+import wordmarkLight from "./wordmark-light.svg";
+
+export const brand = {
+  ...${JSON.stringify(rendererBrand, null, 2).replace(/\n/g, "\n  ")},
+  appIcon,
+  mark: { light: brandMarkLight, dark: brandMarkDark },
+  wordmark: { light: wordmarkLight, dark: wordmarkDark },
+} as const;
+`,
+);
+
+// --- Rust -----------------------------------------------------------------
+const rust = (value) => JSON.stringify(value);
+await writeFile(
+  path.join(appRoot, "gateway/src/brand.rs"),
+  `//! ${generatedNote}
+
+pub const ID: &str = ${rust(brand.id)};
+pub const PRODUCT_NAME: &str = ${rust(brand.productName)};
+pub const SHORT_NAME: &str = ${rust(brand.shortName)};
+pub const ORGANIZATION_NAME: &str = ${rust(brand.organizationName)};
+pub const TAGLINE: &str = ${rust(brand.tagline)};
+pub const HOMEPAGE_URL: &str = ${rust(brand.homepageUrl)};
+pub const SUPPORT_URL: &str = ${rust(brand.supportUrl)};
+pub const SERVICE_NAME: &str = ${rust(brand.service.name)};
+pub const SERVICE_DEFAULT_URL: &str = ${rust(brand.service.defaultUrl)};
+/// Bundle identifier; names the per-user app data directory on every platform.
+pub const APP_IDENTIFIER: &str = ${rust(brand.bundle.identifier)};
+`,
+);
+
+// --- Tauri config overlay ---------------------------------------------------
+// Merged by `tauri dev|build --config` (RFC 7396: objects merge, arrays are
+// replaced), and exported by the CLI as TAURI_CONFIG so the compiled context
+// carries the same values. Only scalar product metadata goes here; the window
+// list stays in the tracked config, and the window title is set at run time
+// from the Rust brand module.
+await writeFile(
+  path.join(appRoot, "src-tauri/tauri.brand.conf.json"),
+  `${JSON.stringify(
+    {
+      productName: brand.productName,
+      identifier: brand.bundle.identifier,
+      bundle: {
+        category: brand.bundle.category,
+        shortDescription: brand.bundle.shortDescription,
+        longDescription: brand.bundle.longDescription,
+        publisher: brand.organizationName,
+        homepage: brand.homepageUrl,
+        ...(process.platform === "darwin"
+          ? {
+              icon: [...LEGACY_DESKTOP_ICONS.map((file) => `icons/${file}`), "icons/Assets.car"],
+            }
+          : {}),
+      },
+    },
+    null,
+    2,
+  )}\n`,
+);
+
+// --- icons ------------------------------------------------------------------
+// The macOS 26 Icon Composer package and every fallback use the same dark
+// green tile with the original brand-green mark. `prepare-macos-icon.mjs`
+// compiles it before bundling; older macOS releases use the matching ICNS and
+// other desktop platforms use the generated PNG/ICO set.
+const composerDir = path.join(appRoot, "src-tauri/icons/AppIcon.icon");
+await rm(composerDir, { recursive: true, force: true });
+await mkdir(path.join(composerDir, "Assets"), { recursive: true });
+await writeFile(path.join(composerDir, "icon.json"), `${JSON.stringify(appIconComposerManifest, null, 2)}\n`);
+await writeFile(path.join(composerDir, "Assets/mark.png"), appIconLayer);
+
+// One stable app icon is used by every platform and system appearance.
+const scratch = path.join(appRoot, "brand/.generated");
+await rm(scratch, { recursive: true, force: true });
+await mkdir(scratch, { recursive: true });
+const appIconPng = path.join(scratch, "app-icon.png");
+await writeFile(appIconPng, render(appIconSvg, 1024));
+// `tauri icon` renders every platform; only the desktop files the bundle
+// lists (tauri.conf.json `bundle.icon`) are copied into the tracked set.
+const iconSet = path.join(scratch, "icons");
+execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "icon", appIconPng, "-o", iconSet], { stdio: "ignore" });
+for (const file of LEGACY_DESKTOP_ICONS) {
+  const source = path.join(iconSet, file);
+  const target = path.join(appRoot, "src-tauri/icons", file);
+  if (file === "icon.icns") {
+    // `tauri icon` writes the icns entries in hash order; sort them so the
+    // tracked file is byte-for-byte reproducible.
+    await writeFile(target, normalizeIcns(await readFile(source)));
+  } else {
+    await copyFile(source, target);
+  }
+}
+
+// Menu bar: a monochrome template of the official mark (alpha only; macOS
+// tints it), never the coloured logo.
+const trayDir = path.join(appRoot, "assets/tray");
+await mkdir(trayDir, { recursive: true });
+await writeFile(path.join(trayDir, "trayTemplate.png"), render(trayTemplateSvg, 18));
+await writeFile(path.join(trayDir, "trayTemplate@2x.png"), render(trayTemplateSvg, 36));
+await writeFile(path.join(trayDir, "trayTemplateProtected.png"), render(trayProtectedTemplateSvg, 18));
+await writeFile(path.join(trayDir, "trayTemplateProtected@2x.png"), render(trayProtectedTemplateSvg, 36));
+await rm(scratch, { recursive: true, force: true });
+
+console.log(`Prepared brand ${brandId}: ${brand.productName} (${brand.bundle.identifier})`);
+
+/** An ICNS file is a header plus (type, length, data) entries; order is free. */
+function normalizeIcns(buffer) {
+  if (buffer.toString("latin1", 0, 4) !== "icns") {
+    throw new Error("tauri icon did not produce an icns file");
+  }
+  const entries = [];
+  for (let offset = 8; offset < buffer.length; ) {
+    const length = buffer.readUInt32BE(offset + 4);
+    entries.push(buffer.subarray(offset, offset + length));
+    offset += length;
+  }
+  entries.sort((a, b) => a.compare(b, 0, 4, 0, 4));
+  return Buffer.concat([buffer.subarray(0, 8), ...entries]);
+}
+
+function render(svg, size) {
+  return new Resvg(svg, { fitTo: { mode: "width", value: size } }).render().asPng();
+}
+
+function composeAppIcon(mark, background, whiteAsCutout) {
+  const { width, height } = svgSize(mark);
+  const inset = 1024 * 0.64;
+  const scale = inset / Math.max(width, height);
+  const offsetX = 512 - (width * scale) / 2;
+  const offsetY = 512 - (height * scale) / 2;
+  const highlight = mixHex(background, "#ffffff", 0.18);
+  const shade = mixHex(background, "#000000", 0.12);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+<linearGradient id="icon-background" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${highlight}"/><stop offset="1" stop-color="${shade}"/></linearGradient>
+<linearGradient id="icon-highlight" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff" stop-opacity=".22"/><stop offset=".45" stop-color="#fff" stop-opacity="0"/></linearGradient>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#icon-background)"/>
+<rect x="101" y="101" width="822" height="822" rx="184" fill="url(#icon-highlight)" stroke="#fff" stroke-opacity=".16" stroke-width="2"/>
+<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>
+</svg>`;
+}
+
+function composeIconLayer(mark, whiteAsCutout) {
+  const { width, height } = svgSize(mark);
+  const inset = 1024 * 0.64;
+  const scale = inset / Math.max(width, height);
+  const offsetX = 512 - (width * scale) / 2;
+  const offsetY = 512 - (height * scale) / 2;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>
+</svg>`;
+}
+
+function standaloneMark(mark, whiteAsCutout) {
+  const { width, height } = svgSize(mark);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg>`;
+}
+
+function composeIconComposerManifest(background) {
+  return {
+    fill: { "automatic-gradient": iconComposerColor(background) },
+    groups: [
+      {
+        "blur-material": 0.08,
+        layers: [
+          {
+            hidden: false,
+            "image-name": "mark.png",
+            name: "Brand mark",
+            position: { scale: 1, "translation-in-points": [0, 0] },
+          },
+        ],
+        lighting: "individual",
+        name: "Dstack mark",
+        shadow: { kind: "layer-color", opacity: 0.28 },
+        specular: true,
+        translucency: { enabled: true, value: 0.12 },
+      },
+    ],
+    "supported-platforms": { circles: ["watchOS"], squares: "shared" },
+  };
+}
+
+function composeTrayTemplate(mark, whiteAsCutout, protectedState) {
+  const { width, height } = svgSize(mark);
+  const inset = 1024 * 0.72;
+  const scale = inset / Math.max(width, height);
+  const offsetX = 512 - (width * scale) / 2;
+  const offsetY = 512 - (height * scale) / 2;
+  const badge = protectedState
+    ? `<defs><mask id="protected-badge"><path d="M512 64 896 208v248c0 240-154 399-384 504C282 855 128 696 128 456V208L512 64Z" fill="white"/><path d="m326 486 116 116 246-258" fill="none" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="78"/></mask></defs><path d="M512 64 896 208v248c0 240-154 399-384 504C282 855 128 696 128 456V208L512 64Z" fill="black" mask="url(#protected-badge)" transform="translate(686 680) scale(.29)"/>`
+    : "";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>${badge}</svg>`;
+}
+
+function iconComposerColor(hex) {
+  const [red, green, blue] = hex.slice(1).match(/../g).map((part) => Number.parseInt(part, 16) / 255);
+  return `extended-srgb:${red.toFixed(5)},${green.toFixed(5)},${blue.toFixed(5)},1.00000`;
+}
+
+function mixHex(source, target, ratio) {
+  const channels = [source, target].map((color) => color.slice(1).match(/../g).map((part) => Number.parseInt(part, 16)));
+  return `#${channels[0].map((value, index) => Math.round(value + (channels[1][index] - value) * ratio).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function svgSize(svg) {
+  const viewBox = svg.match(/viewBox="([^"]+)"/)?.[1]?.trim().split(/[\s,]+/).map(Number);
+  if (viewBox?.length === 4) {
+    return { width: viewBox[2], height: viewBox[3] };
+  }
+  const width = Number(svg.match(/\swidth="([\d.]+)"/)?.[1]);
+  const height = Number(svg.match(/\sheight="([\d.]+)"/)?.[1]);
+  if (!width || !height) {
+    throw new Error("The app icon mark needs a viewBox or width/height");
+  }
+  return { width, height };
+}
+
+function inner(svg) {
+  const open = svg.indexOf(">", svg.indexOf("<svg"));
+  const close = svg.lastIndexOf("</svg>");
+  if (open < 0 || close < 0) {
+    throw new Error("The app icon mark is not an SVG document");
+  }
+  return svg.slice(open + 1, close);
+}
+
+function markContent(svg, whiteAsCutout) {
+  const content = inner(svg);
+  if (!whiteAsCutout) {
+    return content;
+  }
+  const whitePath = /<path\b[^>]*\bfill="(?:white|#fff(?:fff)?)"[^>]*\/>/gi;
+  const cutouts = content.match(whitePath) ?? [];
+  if (cutouts.length === 0) {
+    throw new Error("assets.appIconWhiteAsCutout requires at least one white path in the app icon mark");
+  }
+  const { width, height } = svgSize(svg);
+  const maskPaths = cutouts.map((path) => path.replace(/fill="[^"]+"/i, 'fill="black"')).join("");
+  return `<defs><mask id="app-icon-cutouts" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"><rect width="${width}" height="${height}" fill="white"/>${maskPaths}</mask></defs><g mask="url(#app-icon-cutouts)">${content.replace(whitePath, "")}</g>`;
+}
+
+function withWhiteCutouts(svg, whiteAsCutout) {
+  if (!whiteAsCutout) {
+    return svg;
+  }
+  const open = svg.indexOf(">", svg.indexOf("<svg"));
+  const close = svg.lastIndexOf("</svg>");
+  return `${svg.slice(0, open + 1)}${markContent(svg, true)}${svg.slice(close)}`;
+}
+
+async function exists(file) {
+  try {
+    await readFile(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
