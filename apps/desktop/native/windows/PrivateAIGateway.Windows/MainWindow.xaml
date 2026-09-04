@@ -37,7 +37,8 @@
               <TextBlock Text="Dev mode" Foreground="#B87800" FontWeight="SemiBold" />
             </Border>
             <TextBlock x:Name="StatusText" VerticalAlignment="Center" Opacity="0.7" />
-            <ToggleSwitch x:Name="ProtectionSwitch" Header="Protected" HeaderPlacement="Left" Toggled="ProtectionSwitch_Toggled" />
+            <TextBlock Text="Protected" VerticalAlignment="Center" />
+            <ToggleSwitch x:Name="ProtectionSwitch" Toggled="ProtectionSwitch_Toggled" />
           </StackPanel>
         </Grid>
         <ContentPresenter x:Name="PageHost" Grid.Row="1" />
