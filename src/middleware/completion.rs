@@ -37,7 +37,9 @@ use super::request_features;
 use super::request_transform::{build_candidates, Endpoint};
 use super::sse::{KeepAliveStream, MeterStream, StreamReport};
 use super::stream_transform::{SseTransformStream, StreamTransform};
-use super::types::{ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode};
+use super::types::{
+    ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
+};
 use super::{pricing, response_transform, stream_transform};
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -365,7 +367,7 @@ pub async fn run(
         request_model: model.unwrap_or("").to_string(),
         pricing: consult.pricing.clone(),
         spend_mode: consult.spend_mode,
-        user_id: consult.user_id,
+        tenant: consult.tenant,
         virtual_key_id: consult.virtual_key_id,
         prefix_hash: request_features
             .as_ref()
@@ -398,7 +400,7 @@ pub async fn run(
         // without identity is unattributable and a scanner would otherwise
         // flood the usage pipeline. ErrorSource::Control keeps these out of
         // upstream-health signals.
-        if consult.user_id.is_some() || status == 429 || status >= 500 {
+        if consult.tenant.user_id.is_some() || status == 429 || status >= 500 {
             meter.gateway_failure(status, ErrorSource::Control, message, stream);
         }
         if status == 429 {
@@ -1172,7 +1174,7 @@ struct Meter {
     request_model: String,
     pricing: Option<Value>,
     spend_mode: Option<SpendMode>,
-    user_id: Option<i64>,
+    tenant: TenantIdentity,
     virtual_key_id: Option<i64>,
     /// Echoed on every report so billing can key cache affinity; see
     /// `PostReport::prefix_hash`.
@@ -1341,6 +1343,13 @@ fn build_early_streaming_response(
     // settled at end of stream; the exact route/attempt are filled in once the
     // Stream result is known, so this carries what is knowable now.
     let late_failure_control = control.clone();
+    let late_failure = PostReport {
+        status: 502,
+        is_streaming: Some(true),
+        error_source: Some(ErrorSource::Gateway),
+        error_message: Some("downstream finalizer failed after end of stream".to_string()),
+        ..meter.base()
+    };
 
     let stream_request_id = request_id.clone();
     let stream_abort = downstream_abort.clone();
@@ -1448,52 +1457,17 @@ fn build_early_streaming_response(
                         started,
                         &detail_snippet(err.to_string().as_bytes()),
                     );
-                    spawn_report(
-                        &late_failure_control,
-                        PostReport {
-                            status: 502,
-                            duration_ms: started.elapsed().as_millis() as u64,
-                            is_streaming: Some(true),
-                            attempt_index: Some(attempt_index),
-                            selected_route_id: selected_route,
-                            request_model: scan_model.clone(),
-                            error_source: Some(ErrorSource::Gateway),
-                            error_message: Some(
-                                "downstream finalizer failed after end of stream".to_string(),
-                            ),
-                            ..empty_report(&scan_request_id, endpoint_path)
-                        },
-                    );
+                    let mut report = late_failure.clone();
+                    report.duration_ms = started.elapsed().as_millis() as u64;
+                    report.attempt_index = Some(attempt_index);
+                    report.selected_route_id = selected_route;
+                    spawn_report(&late_failure_control, report);
                 }
                 None
             }
         })
     }));
     (StatusCode::OK, headers, body).into_response()
-}
-
-/// A `PostReport` with every optional field cleared, for callers that fill in
-/// only what they know. Used where no `Meter` is in scope to supply `base()`.
-fn empty_report(request_id: &str, endpoint_path: &str) -> PostReport {
-    PostReport {
-        request_id: request_id.to_string(),
-        endpoint: endpoint_path.to_string(),
-        status: 0,
-        duration_ms: 0,
-        ttft_ms: None,
-        is_streaming: None,
-        attempt_index: None,
-        selected_route_id: None,
-        request_model: String::new(),
-        usage: None,
-        pricing: None,
-        spend_mode: None,
-        user_id: None,
-        virtual_key_id: None,
-        error_source: None,
-        error_message: None,
-        prefix_hash: None,
-    }
 }
 
 /// The per-request context a committed upstream stream needs to become the
@@ -1592,7 +1566,7 @@ impl Meter {
             request_model: self.request_model.clone(),
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
-            user_id: self.user_id,
+            tenant: self.tenant,
             virtual_key_id: self.virtual_key_id,
             selected_route_id: Some(selected_route_id),
             attempt_index,
@@ -1618,7 +1592,7 @@ impl Meter {
             usage: None,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
-            user_id: self.user_id,
+            tenant: self.tenant,
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,

@@ -30,6 +30,7 @@ use private_ai_gateway::middleware::control::ControlClient;
 use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
+use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
 use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -610,6 +611,8 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
             "status": 400,
             "message": "This model does not support image input.",
             "userId": 7,
+            "organizationId": 11,
+            "workspaceId": 13,
             "virtualKeyId": 3
         }),
     )
@@ -623,6 +626,8 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(400)).await;
     assert_eq!(report["errorSource"], json!("control"));
     assert_eq!(report["userId"], json!(7));
+    assert_eq!(report["organizationId"], json!(11));
+    assert_eq!(report["workspaceId"], json!(13));
     assert_eq!(report["virtualKeyId"], json!(3));
     assert!(report["selectedRouteId"].is_null());
     assert!(report["usage"].is_null());
@@ -632,7 +637,12 @@ async fn identity_bearing_denial_is_reported_as_a_control_failure() {
 async fn empty_candidates_is_reported_as_a_control_failure() {
     let (control_url, posts) = spawn_control_capturing(
         200,
-        json!({ "allow": true, "candidates": [], "userId": 7, "virtualKeyId": 3 }),
+        json!({
+            "allow": true,
+            "candidates": [],
+            "userId": 7,
+            "virtualKeyId": 3
+        }),
     )
     .await;
     let mw = middleware(control_url);
@@ -896,7 +906,8 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
             "allow": true,
             "candidates": [{ "routeId": "anthropic:claude", "format": "anthropic" }],
             "pricing": { "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" },
-            "userId": 7
+            "userId": 7,
+            "virtualKeyId": 3
         }),
     )
     .await;
@@ -932,6 +943,8 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "report usage must be pre-cost-injection"
     );
     assert_eq!(report["userId"], json!(7));
+    assert!(report.get("organizationId").is_none());
+    assert!(report.get("workspaceId").is_none());
     assert_eq!(report["isStreaming"], json!(false));
 }
 
@@ -956,7 +969,13 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         request_model: "gpt".to_string(),
         pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
         spend_mode: None,
-        user_id: Some(9),
+        tenant: TenantIdentity {
+            user_id: Some(9),
+            organization: Some(OrganizationScope {
+                organization_id: 11,
+                workspace_id: 13,
+            }),
+        },
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -999,6 +1018,8 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
     );
     assert!(report["ttftMs"].is_number(), "ttft must be recorded");
     assert_eq!(report["userId"], json!(9));
+    assert_eq!(report["organizationId"], json!(11));
+    assert_eq!(report["workspaceId"], json!(13));
 }
 
 #[tokio::test]
@@ -1630,7 +1651,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -1660,6 +1681,9 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
     let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
     assert_eq!(report["status"], json!(502), "internal failure, not 499");
     assert_eq!(report["errorSource"], json!("gateway"));
+    assert!(report.get("userId").is_none());
+    assert!(report.get("organizationId").is_none());
+    assert!(report.get("workspaceId").is_none());
     assert_eq!(
         report["selectedRouteId"],
         json!("openai:gpt"),
@@ -1694,7 +1718,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2440,7 +2464,7 @@ async fn mid_stream_read_timeout_settles_504_with_message() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2637,7 +2661,7 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
@@ -2944,7 +2968,7 @@ async fn in_band_stream_error_message_reaches_the_usage_report() {
         request_model: "gpt".to_string(),
         pricing: None,
         spend_mode: None,
-        user_id: None,
+        tenant: TenantIdentity::default(),
         virtual_key_id: None,
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
