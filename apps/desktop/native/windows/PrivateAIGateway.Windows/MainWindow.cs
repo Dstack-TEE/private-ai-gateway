@@ -36,6 +36,12 @@ public sealed class MainWindow : Window
         store.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(Render);
         store.Error += message => DispatcherQueue.TryEnqueue(async () => await ShowErrorAsync(message));
         Activated += async (_, _) => { if (!initialized) { initialized = true; await InitializeAsync(); } };
+        Navigation.Loaded += SelectInitialPage;
+    }
+
+    private void SelectInitialPage(object sender, RoutedEventArgs args)
+    {
+        Navigation.Loaded -= SelectInitialPage;
         Navigation.SelectedItem = Navigation.MenuItems[0];
     }
 
