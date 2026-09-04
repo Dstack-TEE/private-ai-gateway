@@ -25,24 +25,35 @@ public sealed class MainWindow : Window
 
     public MainWindow()
     {
+        App.Trace("window:constructing");
         Title = "Private AI Gateway";
         BuildShell();
+        App.Trace("window:shell-built");
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.Resize(new global::Windows.Graphics.SizeInt32(1052, 820));
         appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         appWindow.Closing += (_, args) => { args.Cancel = true; appWindow.Hide(); };
+        App.Trace("window:app-window-ready");
         tray = new NativeTray(hwnd, ShowMainWindow, ShowSettings, ToggleFromTray, QuitAsync);
+        App.Trace("window:tray-ready");
         store.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(Render);
         store.Error += message => DispatcherQueue.TryEnqueue(async () => await ShowErrorAsync(message));
         Activated += async (_, _) => { if (!initialized) { initialized = true; await InitializeAsync(); } };
         Navigation.Loaded += SelectInitialPage;
+        App.Trace("window:constructed");
     }
 
     private void SelectInitialPage(object sender, RoutedEventArgs args)
     {
         Navigation.Loaded -= SelectInitialPage;
-        Navigation.SelectedItem = Navigation.MenuItems[0];
+        App.Trace("navigation:loaded");
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            App.Trace("navigation:selecting");
+            Navigation.SelectedItem = Navigation.MenuItems[0];
+            App.Trace("navigation:selected");
+        });
     }
 
     private void BuildShell()
@@ -114,6 +125,13 @@ public sealed class MainWindow : Window
     }
 
     public void HideMainWindow() => appWindow.Hide();
+
+    public void HideAfterLaunch() => DispatcherQueue.TryEnqueue(() =>
+    {
+        App.Trace("window:hiding");
+        appWindow.Hide();
+        App.Trace("window:hidden");
+    });
 
     public void ShowSettings()
     {

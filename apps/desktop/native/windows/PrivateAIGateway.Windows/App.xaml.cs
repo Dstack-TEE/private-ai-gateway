@@ -30,8 +30,10 @@ public partial class App : Application
             return;
         }
         MainWindow = new MainWindow();
+        Trace("app:activating");
         MainWindow.Activate();
-        if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideMainWindow();
+        Trace("app:activated");
+        if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideAfterLaunch();
     }
 
     private static void WriteCrashLog(Exception error)
@@ -42,6 +44,14 @@ public partial class App : Application
             Directory.CreateDirectory(directory);
             File.AppendAllText(Path.Combine(directory, "crash.log"), $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{error}{Environment.NewLine}{Environment.NewLine}");
         }
+        catch { }
+    }
+
+    internal static void Trace(string stage)
+    {
+        var path = Environment.GetEnvironmentVariable("PRIVATE_AI_GATEWAY_LAUNCH_TRACE");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try { File.AppendAllText(path, $"{DateTimeOffset.UtcNow:O} {stage}{Environment.NewLine}"); }
         catch { }
     }
 
