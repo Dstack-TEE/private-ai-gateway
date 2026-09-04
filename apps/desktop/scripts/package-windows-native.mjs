@@ -16,8 +16,8 @@ const run = (command, args, cwd = appRoot) => {
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status ?? "unknown"}`);
 };
 
-run("npm.cmd", ["run", "prepare:brand"]);
-run("npm.cmd", ["run", "prepare:native-assets"]);
+run(process.execPath, ["scripts/prepare-brand.mjs"]);
+run(process.execPath, ["scripts/prepare-native-assets.mjs"]);
 run("node", ["scripts/bundle-native.mjs"]);
 await rm(stage, { recursive: true, force: true });
 await mkdir(stage, { recursive: true });
