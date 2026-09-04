@@ -148,6 +148,21 @@ jobs:
           test -f "$app_bundle/Contents/Resources/icon.icns"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
           codesign --verify --deep --strict "$app_bundle"
+          launch_log="$RUNNER_TEMP/private-ai-gateway-launch.log"
+          "$app_bundle/Contents/MacOS/private-ai-gateway-desktop" >"$launch_log" 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sleep 5
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            cat "$launch_log"
+            exit 1
+          fi
+          cleanup
+          trap - EXIT
           hdiutil verify "$dmg"
           cp "$dmg" release/
           ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "release/Private-AI-Gateway-macos-arm64.zip"

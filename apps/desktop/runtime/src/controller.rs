@@ -283,7 +283,7 @@ impl DesktopRuntime {
         {
             manager.report_error(error);
         }
-        runtime.reload_agent_tokens()?;
+        runtime.initialize_startup_tokens();
 
         let events_runtime = runtime.clone();
         tokio::spawn(async move {
@@ -360,6 +360,35 @@ impl DesktopRuntime {
         self.proxy
             .set_tokens(with_client_token(tokens, &self.credentials)?);
         Ok(())
+    }
+
+    fn initialize_startup_tokens(&self) {
+        let Err(agent_error) = self.reload_agent_tokens() else {
+            return;
+        };
+
+        // A stale or unreadable agent connection record must fail closed, but
+        // it must not prevent the desktop app from opening so the user can
+        // inspect the error and restore the affected configuration.
+        let client_error = match with_client_token(TokenSet::default(), &self.credentials) {
+            Ok(tokens) => {
+                self.proxy.set_tokens(tokens);
+                None
+            }
+            Err(error) => {
+                self.proxy.set_tokens(TokenSet::default());
+                Some(error)
+            }
+        };
+        let message = match client_error {
+            Some(client_error) => format!(
+                "Agent configurations could not be loaded: {agent_error}. The Local API credential is also unavailable: {client_error}"
+            ),
+            None => format!(
+                "Agent configurations could not be loaded and remain disconnected: {agent_error}"
+            ),
+        };
+        self.manager.report_error(message);
     }
 
     pub async fn verify_configuration(

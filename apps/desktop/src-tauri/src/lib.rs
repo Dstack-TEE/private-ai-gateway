@@ -233,8 +233,12 @@ pub fn run() {
                     let _ = window_for_events.hide();
                 }
             });
-            tray::setup(app.handle())?;
-            menu::setup(app.handle())?;
+            if let Err(error) = tray::setup(app.handle()) {
+                runtime.report_error(format!("The system tray is unavailable: {error}"));
+            }
+            if let Err(error) = menu::setup(app.handle()) {
+                runtime.report_error(format!("The application menu is unavailable: {error}"));
+            }
 
             let handle = app.handle().clone();
             let mut states = runtime.subscribe();
