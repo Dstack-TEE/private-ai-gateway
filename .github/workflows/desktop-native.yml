@@ -185,11 +185,16 @@ jobs:
         run: |
           set -euo pipefail
           app='release/native-macos/Private AI Gateway.app'
-          open "$app"
+          log="$RUNNER_TEMP/private-ai-gateway-macos.log"
+          "$app/Contents/MacOS/Private AI Gateway" >"$log" 2>&1 &
+          pid=$!
           sleep 5
-          pid="$(pgrep -x 'Private AI Gateway' | head -1)"
-          test -n "$pid"
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$log"
+            wait "$pid"
+          fi
           kill "$pid"
+          wait "$pid" || true
       - name: Inspect native macOS package
         working-directory: apps/desktop
         run: |
