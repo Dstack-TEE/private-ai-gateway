@@ -11,7 +11,7 @@ use desktop_gateway::{
     secrets::{validate_api_key, KeyringStore, SecretStore, LEGACY_API_KEY_ENTRY},
     tokens::{TokenFiles, TokenSet, LOCAL_TOOLS_AGENT},
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
     contracts::{
@@ -27,6 +27,7 @@ use crate::{
 pub struct RuntimeOptions {
     pub launcher: Arc<dyn SidecarLauncher>,
     pub helper_path: PathBuf,
+    pub task_runtime: Handle,
 }
 
 pub struct DesktopRuntime {
@@ -64,10 +65,19 @@ impl ClientCredentials {
     }
 }
 
-#[derive(Default)]
-struct EndpointRuntime(Mutex<Option<JoinHandle<()>>>);
+struct EndpointRuntime {
+    task_runtime: Handle,
+    task: Mutex<Option<JoinHandle<()>>>,
+}
 
 impl EndpointRuntime {
+    fn new(task_runtime: Handle) -> Self {
+        Self {
+            task_runtime,
+            task: Mutex::new(None),
+        }
+    }
+
     fn start(
         &self,
         manager: Arc<GatewayManager>,
@@ -76,13 +86,13 @@ impl EndpointRuntime {
         config: LocalApiConfig,
     ) -> Result<(), String> {
         let mut runtime = self
-            .0
+            .task
             .lock()
             .map_err(|_| "The Local API runtime is unavailable".to_string())?;
         if runtime.is_some() {
             return Err("The Local API runtime is already active".to_string());
         }
-        *runtime = Some(tokio::spawn(async move {
+        *runtime = Some(self.task_runtime.spawn(async move {
             if let Err(error) = proxy::serve(proxy, listener).await {
                 manager.set_endpoint(config, Err(error));
             }
@@ -92,7 +102,7 @@ impl EndpointRuntime {
 
     async fn stop(&self) -> Result<(), String> {
         let previous = self
-            .0
+            .task
             .lock()
             .map_err(|_| "The Local API runtime is unavailable".to_string())?
             .take();
@@ -238,10 +248,12 @@ impl DesktopRuntime {
                 }
             },
         };
+        let task_runtime = options.task_runtime;
         let manager = Arc::new(GatewayManager::new(
             proxy.clone(),
             usage.clone(),
             options.launcher,
+            task_runtime.clone(),
             local.config.clone(),
             runtime_config,
             settings.profiles.clone(),
@@ -253,7 +265,7 @@ impl DesktopRuntime {
             usage,
             secrets,
             credentials: ClientCredentials::new()?,
-            endpoint: EndpointRuntime::default(),
+            endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
             helper_path: options.helper_path,
             instance,
@@ -286,7 +298,7 @@ impl DesktopRuntime {
         runtime.initialize_startup_tokens();
 
         let events_runtime = runtime.clone();
-        tokio::spawn(async move {
+        task_runtime.spawn(async move {
             while let Some(event) = proxy_events.recv().await {
                 events_runtime.manager.record_proxy_event(event);
             }

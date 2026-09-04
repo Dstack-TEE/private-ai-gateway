@@ -22,7 +22,10 @@ use crate::usage::UsageStore;
 use crate::{local_api, service_config};
 use desktop_gateway::proxy::{ProxyEvent, ProxyState, Session};
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc::Receiver, watch};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc::Receiver, watch},
+};
 
 const EVENT_SCHEMA_VERSION: u64 = 1;
 const MAX_ACTIVITY: usize = 50;
@@ -34,6 +37,7 @@ pub struct GatewayManager {
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
     launcher: Arc<dyn SidecarLauncher>,
+    task_runtime: Handle,
     state_tx: watch::Sender<GatewayState>,
 }
 
@@ -84,6 +88,7 @@ impl GatewayManager {
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
         launcher: Arc<dyn SidecarLauncher>,
+        task_runtime: Handle,
         local_api: LocalApiConfig,
         config: StartGatewayConfig,
         profiles: Vec<ConfidentialProfile>,
@@ -114,6 +119,7 @@ impl GatewayManager {
             proxy,
             usage,
             launcher,
+            task_runtime,
             state_tx,
         }
     }
@@ -663,7 +669,7 @@ impl GatewayManager {
         self.publish(&state);
         if load_catalog {
             let manager = Arc::clone(self);
-            tokio::spawn(async move {
+            self.task_runtime.spawn(async move {
                 let _ = manager.load_catalog(generation, epoch).await;
             });
         }
@@ -765,7 +771,8 @@ fn spawn_event_reader(
     generation: u64,
     mut receiver: Receiver<SidecarEvent>,
 ) {
-    tokio::spawn(async move {
+    let task_runtime = manager.task_runtime.clone();
+    task_runtime.spawn(async move {
         while let Some(event) = receiver.recv().await {
             let result = match event {
                 SidecarEvent::Stdout(bytes) => manager.handle_stdout(generation, &bytes),

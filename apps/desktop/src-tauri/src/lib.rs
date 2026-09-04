@@ -219,6 +219,7 @@ pub fn run() {
             let runtime = DesktopRuntime::launch(RuntimeOptions {
                 launcher: launcher_for_setup.clone(),
                 helper_path,
+                task_runtime: tauri::async_runtime::handle().inner().clone(),
             })?;
             app.manage(runtime.clone());
 
