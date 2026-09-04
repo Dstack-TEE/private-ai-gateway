@@ -21,7 +21,7 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
-        appWindow.Resize(new Windows.Graphics.SizeInt32(1052, 820));
+        appWindow.Resize(new global::Windows.Graphics.SizeInt32(1052, 820));
         appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         appWindow.Closing += (_, args) => { args.Cancel = true; appWindow.Hide(); };
         tray = new NativeTray(hwnd, ShowMainWindow, ShowSettings, ToggleFromTray, QuitAsync);

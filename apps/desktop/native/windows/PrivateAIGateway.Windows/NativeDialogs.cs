@@ -186,5 +186,5 @@ internal static class NativeDialogs
     }
 
     private static string Verdict(RequestActivity item) => item.Verified == true ? "Proof verified" : !item.LeftDevice ? "Blocked locally" : item.Verified == false ? "Proof failed" : "Proof unavailable";
-    private static Border Badge(string text) => new() { Background = new SolidColorBrush(Windows.UI.Color.FromArgb(36, 44, 110, 73)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Child = new TextBlock { Text = text, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 44, 110, 73)), FontSize = 12 } };
+    private static Border Badge(string text) => new() { Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(36, 44, 110, 73)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Child = new TextBlock { Text = text, Foreground = new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 44, 110, 73)), FontSize = 12 } };
 }

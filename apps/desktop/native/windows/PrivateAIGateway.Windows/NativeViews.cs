@@ -2,15 +2,15 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using Windows.Storage.Pickers;
+using global::Windows.Storage.Pickers;
 using WinRT.Interop;
 
 namespace PrivateAIGateway.Windows;
 
 internal static class NativeViews
 {
-    private static readonly SolidColorBrush Success = new(Windows.UI.Color.FromArgb(255, 44, 110, 73));
-    private static readonly SolidColorBrush Warning = new(Windows.UI.Color.FromArgb(255, 184, 120, 0));
+    private static readonly SolidColorBrush Success = new(global::Windows.UI.Color.FromArgb(255, 44, 110, 73));
+    private static readonly SolidColorBrush Warning = new(global::Windows.UI.Color.FromArgb(255, 184, 120, 0));
 
     internal static UIElement Overview(RuntimeStore store, MainWindow window)
     {
@@ -147,9 +147,9 @@ internal static class NativeViews
     {
         var reveal = false;
         var value = new TextBlock { Text = "pag_••••••••••••", FontFamily = new FontFamily("Consolas") };
-        var copy = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
+        var copy = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
         copy.Content = Labeled("Client key", value);
-        copy.Click += (_, _) => Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(ClipboardContent(store.ClientKey));
+        copy.Click += (_, _) => global::Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(ClipboardContent(store.ClientKey));
         var eye = new Button { Content = new FontIcon { Glyph = "\uE890" } };
         eye.Click += (_, _) => { reveal = !reveal; value.Text = reveal ? store.ClientKey : "pag_••••••••••••"; };
         var grid = new Grid { ColumnSpacing = 8 };
@@ -161,11 +161,11 @@ internal static class NativeViews
 
     private static UIElement CopyRow(string title, string value, string? copyValue)
     {
-        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = copyValue is not null };
+        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = copyValue is not null };
         var grid = new Grid(); grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         grid.Children.Add(Labeled(title, new TextBlock { Text = value, FontFamily = new FontFamily("Consolas"), TextTrimming = TextTrimming.CharacterEllipsis }));
         var icon = new FontIcon { Glyph = "\uE8C8" }; Grid.SetColumn(icon, 1); grid.Children.Add(icon); button.Content = grid;
-        button.Click += (_, _) => { if (copyValue is not null) Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(ClipboardContent(copyValue)); };
+        button.Click += (_, _) => { if (copyValue is not null) global::Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(ClipboardContent(copyValue)); };
         return button;
     }
 
@@ -197,10 +197,10 @@ internal static class NativeViews
 
     private static UIElement UsageRow(RequestActivity item, Action action)
     {
-        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(12, 9, 12, 9) };
+        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(12, 9, 12, 9) };
         var grid = new Grid { ColumnSpacing = 12 };
         grid.ColumnDefinitions.Add(new() { Width = new GridLength(24) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(90) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(72) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(18) });
-        grid.Children.Add(new FontIcon { Glyph = item.Verified == true ? "\uE83D" : item.LeftDevice ? "\uE814" : "\uE711", Foreground = item.Verified == true ? Success : item.LeftDevice ? new SolidColorBrush(Windows.UI.Colors.IndianRed) : null });
+        grid.Children.Add(new FontIcon { Glyph = item.Verified == true ? "\uE83D" : item.LeftDevice ? "\uE814" : "\uE711", Foreground = item.Verified == true ? Success : item.LeftDevice ? new SolidColorBrush(global::Windows.UI.Colors.IndianRed) : null });
         var label = Vertical(2); label.Children.Add(new TextBlock { Text = item.Model ?? item.Path, TextTrimming = TextTrimming.CharacterEllipsis }); label.Children.Add(new TextBlock { Text = string.Join(" · ", new[] { item.Agent, item.Path }.Where(value => !string.IsNullOrEmpty(value))), FontSize = 12, Opacity = 0.6, TextTrimming = TextTrimming.CharacterEllipsis }); Grid.SetColumn(label, 1); grid.Children.Add(label);
         var tokens = new TextBlock { Text = $"{(item.InputTokens ?? 0) + (item.OutputTokens ?? 0):N0}", Opacity = 0.65, HorizontalAlignment = HorizontalAlignment.Right }; Grid.SetColumn(tokens, 2); grid.Children.Add(tokens);
         var time = new TextBlock { Text = DateTimeOffset.FromUnixTimeSeconds((long)item.At).ToLocalTime().ToString("t"), Opacity = 0.65, HorizontalAlignment = HorizontalAlignment.Right }; Grid.SetColumn(time, 3); grid.Children.Add(time);
@@ -209,7 +209,7 @@ internal static class NativeViews
     }
 
     private static StackPanel Section(string title) { var stack = Vertical(0); stack.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(12, 10, 12, 7) }); return stack; }
-    private static Border Card(UIElement content) => new() { Child = content, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(20, 128, 128, 128)), BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(35, 128, 128, 128)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(12) };
+    private static Border Card(UIElement content) => new() { Child = content, Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(20, 128, 128, 128)), BorderBrush = new SolidColorBrush(global::Windows.UI.Color.FromArgb(35, 128, 128, 128)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(12) };
     private static UIElement CardInto(Grid grid, UIElement content) { var card = Card(content); grid.Children.Add(card); return card; }
     private static StackPanel Vertical(double spacing) => new() { Orientation = Orientation.Vertical, Spacing = spacing };
     private static StackPanel Horizontal(double spacing) => new() { Orientation = Orientation.Horizontal, Spacing = spacing, VerticalAlignment = VerticalAlignment.Center };
@@ -217,7 +217,7 @@ internal static class NativeViews
     private static TextBlock Empty(string text) => new() { Text = text, HorizontalAlignment = HorizontalAlignment.Center, Opacity = 0.6, Margin = new Thickness(18, 28, 18, 28) };
     private static StackPanel Labeled(string title, UIElement value) { var stack = Vertical(3); stack.Children.Add(new TextBlock { Text = title, FontSize = 12, Opacity = 0.6 }); stack.Children.Add(value); return stack; }
     private static Image AssetImage(string source, double size) => new() { Source = new SvgImageSource(new Uri($"ms-appx:///{source}")), Width = size, Height = size };
-    private static Windows.ApplicationModel.DataTransfer.DataPackage ClipboardContent(string value) { var package = new Windows.ApplicationModel.DataTransfer.DataPackage(); package.SetText(value); return package; }
+    private static global::Windows.ApplicationModel.DataTransfer.DataPackage ClipboardContent(string value) { var package = new global::Windows.ApplicationModel.DataTransfer.DataPackage(); package.SetText(value); return package; }
     private static string Status(GatewayState state) => state.Status switch { "verified" => "Protected", "verifying" => "Verifying…", "blocked" => "Blocked", "error" => "Needs attention", _ => "Not protected" };
 
     private static ComboBox Filter(string header, string all, IEnumerable<string> options, string? selected, Action<string?> changed)
