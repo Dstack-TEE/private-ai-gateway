@@ -354,6 +354,43 @@
     }
   },
   {
+    "name": "openai_chat_to_responses_done_without_finish_reason",
+    "format": "openai",
+    "fn": "createModelResponse",
+    "events": [
+      "data: {\"id\":\"resp_missing_finish\",\"created\":1700000000,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}",
+      "data: [DONE]"
+    ],
+    "types": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.failed"
+    ],
+    "terminal": {
+      "status": "failed",
+      "output": [{
+        "id": "msg_resp_fixture_0",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+      }],
+      "usage": {
+        "input_tokens": 0,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 0,
+        "output_tokens_details": { "reasoning_tokens": 0 },
+        "total_tokens": 0
+      }
+    }
+  },
+  {
     "name": "openai_chat_to_responses_eof_tail",
     "format": "openai",
     "fn": "createModelResponse",

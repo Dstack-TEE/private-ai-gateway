@@ -1571,16 +1571,35 @@ fn validate_responses_chat_compatibility(params: &Value) -> Result<(), Transform
 /// be replayed through Chat Completions and is omitted.
 #[derive(Default)]
 struct ResponsesInputState {
-    calls: HashSet<String>,
+    calls: HashMap<String, ResponsesCallKind>,
     outputs: HashSet<String>,
     pending_reasoning: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponsesCallKind {
+    Function,
+    Custom,
+}
+
+impl ResponsesCallKind {
+    fn output_type(self) -> &'static str {
+        match self {
+            Self::Function => "function_call_output",
+            Self::Custom => "custom_tool_call_output",
+        }
+    }
+}
+
 impl ResponsesInputState {
     fn finish(&self) -> Result<(), TransformError> {
-        if let Some(call_id) = self.calls.difference(&self.outputs).next() {
+        if let Some(call_id) = self
+            .calls
+            .keys()
+            .find(|call_id| !self.outputs.contains(*call_id))
+        {
             return Err(TransformError::invalid_request(format!(
-                "function call {call_id} is missing its output"
+                "tool call {call_id} is missing its output"
             )));
         }
         Ok(())
@@ -1598,6 +1617,11 @@ fn push_input_item(
                 .get("role")
                 .and_then(Value::as_str)
                 .ok_or_else(|| TransformError::invalid_request("input message requires a role"))?;
+            if !matches!(role, "user" | "assistant" | "system" | "developer") {
+                return Err(TransformError::invalid_request(format!(
+                    "input message role {role} is not supported"
+                )));
+            }
             let content = chat_message_content(role, item.get("content"))?;
             let mut message = json!({ "role": role, "content": content });
             if role == "assistant" {
@@ -1621,7 +1645,14 @@ fn push_input_item(
                     "function call {call_id} arguments must be a JSON object"
                 )));
             }
-            push_chat_call(call_id, &name, arguments, messages, state)?;
+            push_chat_call(
+                call_id,
+                &name,
+                arguments,
+                ResponsesCallKind::Function,
+                messages,
+                state,
+            )?;
         }
         Some("custom_tool_call") => {
             let call_id = required_string(item, "call_id", "custom_tool_call")?;
@@ -1629,20 +1660,33 @@ fn push_input_item(
             let input = item.get("input").and_then(Value::as_str).ok_or_else(|| {
                 TransformError::invalid_request("custom_tool_call requires a string input")
             })?;
-            let arguments = serde_json::to_string(&json!({ "input": input })).unwrap_or_default();
-            push_chat_call(call_id, name, &arguments, messages, state)?;
+            let arguments = json!({ "input": input }).to_string();
+            push_chat_call(
+                call_id,
+                name,
+                &arguments,
+                ResponsesCallKind::Custom,
+                messages,
+                state,
+            )?;
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
             let call_id = required_string(item, "call_id", item_type)?;
-            if !state.calls.contains(call_id) {
+            let Some(call_kind) = state.calls.get(call_id).copied() else {
                 return Err(TransformError::invalid_request(format!(
-                    "function output references unknown call {call_id}"
+                    "tool output references unknown call {call_id}"
+                )));
+            };
+            if item_type != call_kind.output_type() {
+                return Err(TransformError::invalid_request(format!(
+                    "tool call {call_id} requires {}",
+                    call_kind.output_type()
                 )));
             }
             if !state.outputs.insert(call_id.to_string()) {
                 return Err(TransformError::invalid_request(format!(
-                    "duplicate function output for call {call_id}"
+                    "duplicate tool output for call {call_id}"
                 )));
             }
             messages.push(json!({
@@ -1678,10 +1722,11 @@ fn push_chat_call(
     call_id: &str,
     name: &str,
     arguments: &str,
+    kind: ResponsesCallKind,
     messages: &mut Vec<Value>,
     state: &mut ResponsesInputState,
 ) -> Result<(), TransformError> {
-    if !state.calls.insert(call_id.to_string()) {
+    if state.calls.insert(call_id.to_string(), kind).is_some() {
         return Err(TransformError::invalid_request(format!(
             "duplicate tool call id {call_id}"
         )));
@@ -1771,11 +1816,32 @@ fn chat_message_content(role: &str, content: Option<&Value>) -> Result<Value, Tr
                 json!({ "type": "image_url", "image_url": image_url })
             }
             Some("input_file") => {
+                if part.get("file_url").is_some_and(|value| !value.is_null()) {
+                    return Err(TransformError::invalid_request(
+                        "input_file file_url is not supported through Chat Completions",
+                    ));
+                }
+                if part.get("detail").is_some_and(|value| !value.is_null()) {
+                    return Err(TransformError::invalid_request(
+                        "input_file detail is not supported through Chat Completions",
+                    ));
+                }
+                let file_id = optional_non_empty_string(part, "file_id", "input_file")?;
+                let file_data = optional_non_empty_string(part, "file_data", "input_file")?;
+                if file_id.is_some() == file_data.is_some() {
+                    return Err(TransformError::invalid_request(
+                        "input_file requires exactly one of file_id or file_data",
+                    ));
+                }
                 let mut file = Map::new();
-                for key in ["file_id", "file_data", "filename"] {
-                    if let Some(value) = part.get(key) {
-                        file.insert(key.into(), value.clone());
-                    }
+                if let Some(file_id) = file_id {
+                    file.insert("file_id".into(), json!(file_id));
+                }
+                if let Some(file_data) = file_data {
+                    file.insert("file_data".into(), json!(file_data));
+                }
+                if let Some(filename) = optional_non_empty_string(part, "filename", "input_file")? {
+                    file.insert("filename".into(), json!(filename));
                 }
                 json!({ "type": "file", "file": file })
             }
@@ -1795,6 +1861,20 @@ fn chat_message_content(role: &str, content: Option<&Value>) -> Result<Value, Tr
     Ok(Value::Array(out))
 }
 
+fn optional_non_empty_string<'a>(
+    object: &'a Value,
+    key: &str,
+    item_type: &str,
+) -> Result<Option<&'a str>, TransformError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(_) => Err(TransformError::invalid_request(format!(
+            "{item_type} {key} must be a non-empty string"
+        ))),
+    }
+}
+
 /// The text of a Responses `output` or content: a string as is, content parts
 /// joined, anything else serialized — a tool result is whatever the tool said.
 fn text_of(value: Option<&Value>) -> String {
@@ -1805,7 +1885,7 @@ fn text_of(value: Option<&Value>) -> String {
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join(""),
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        Some(other) => other.to_string(),
         None => String::new(),
     }
 }

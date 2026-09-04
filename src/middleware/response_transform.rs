@@ -1203,22 +1203,23 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
     let (status, incomplete_details, error) = match upstream_error {
         Some(error) => ("failed", Value::Null, error),
         None => {
-            let (status, details) = responses_terminal(
+            let terminal = responses_terminal(
                 choice
                     .as_ref()
                     .and_then(|choice| choice.get("finish_reason"))
                     .and_then(Value::as_str),
             );
-            if invalid_tool_call_identity && status == "completed" {
-                ("failed", Value::Null, invalid_tool_call_identity_error())
-            } else if invalid_function_arguments && status == "completed" {
-                (
+            match terminal {
+                None => ("failed", Value::Null, invalid_finish_reason_error()),
+                Some(("completed", _)) if invalid_tool_call_identity => {
+                    ("failed", Value::Null, invalid_tool_call_identity_error())
+                }
+                Some(("completed", _)) if invalid_function_arguments => (
                     "failed",
                     Value::Null,
                     invalid_function_call_arguments_error(),
-                )
-            } else {
-                (status, details, Value::Null)
+                ),
+                Some((status, details)) => (status, details, Value::Null),
             }
         }
     };
@@ -1393,13 +1394,21 @@ pub(super) fn invalid_tool_call_identity_error() -> Value {
     })
 }
 
+pub(super) fn invalid_finish_reason_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider ended without a valid finish reason",
+    })
+}
+
 /// How a chat `finish_reason` ends a response: the `status`, and the
 /// `incomplete_details` that say why a cut-off one stopped.
-pub(super) fn responses_terminal(finish_reason: Option<&str>) -> (&'static str, Value) {
+pub(super) fn responses_terminal(finish_reason: Option<&str>) -> Option<(&'static str, Value)> {
     match finish_reason {
-        Some("length") => ("incomplete", json!({ "reason": "max_output_tokens" })),
-        Some("content_filter") => ("incomplete", json!({ "reason": "content_filter" })),
-        _ => ("completed", Value::Null),
+        Some("stop" | "tool_calls") => Some(("completed", Value::Null)),
+        Some("length") => Some(("incomplete", json!({ "reason": "max_output_tokens" }))),
+        Some("content_filter") => Some(("incomplete", json!({ "reason": "content_filter" }))),
+        _ => None,
     }
 }
 

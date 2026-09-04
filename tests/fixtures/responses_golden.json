@@ -315,6 +315,73 @@
       "error": true
     },
     {
+      "name": "mismatched_tool_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "custom_tool_call", "call_id": "call_shell", "name": "shell", "input": "pwd" },
+          { "type": "function_call_output", "call_id": "call_shell", "output": "/workspace" }
+        ]
+      },
+      "error": true
+    },
+    {
+      "name": "invalid_message_role_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{ "type": "message", "role": "tool", "content": "result" }]
+      },
+      "error": true
+    },
+    {
+      "name": "file_inputs",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [
+            { "type": "input_file", "file_id": "file_1" },
+            { "type": "input_file", "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" }
+          ]
+        }]
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [{
+          "role": "user",
+          "content": [
+            { "type": "file", "file": { "file_id": "file_1" } },
+            { "type": "file", "file": { "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" } }
+          ]
+        }]
+      }
+    },
+    {
+      "name": "empty_file_input_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_file" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "file_url_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_file", "file_url": "https://example.com/file.pdf" }]
+        }]
+      },
+      "error": true
+    },
+    {
       "name": "unsupported_input_item_rejected",
       "input": { "model": "gpt-test", "input": [{ "type": "computer_call" }] },
       "error": true
@@ -590,6 +657,43 @@
         "store": false,
         "output": [{
           "id": "msg_chatcmpl_4_0",
+          "type": "message",
+          "role": "assistant",
+          "status": "completed",
+          "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+        }],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "missing_finish_reason",
+      "echo": { "store": false },
+      "input": {
+        "id": "chatcmpl_missing_finish",
+        "model": "gpt-test",
+        "choices": [{
+          "message": { "role": "assistant", "content": "partial" }
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_missing_finish",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider ended without a valid finish reason"
+        },
+        "store": false,
+        "output": [{
+          "id": "msg_chatcmpl_missing_finish_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
