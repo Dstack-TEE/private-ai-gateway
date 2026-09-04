@@ -8,7 +8,7 @@ using WinRT.Interop;
 
 namespace PrivateAIGateway.Windows;
 
-public sealed partial class MainWindow : Window
+public sealed class MainWindow : Window
 {
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
@@ -25,7 +25,7 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
-        InitializeComponent();
+        Title = "Private AI Gateway";
         BuildShell();
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
