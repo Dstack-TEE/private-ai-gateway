@@ -39,7 +39,7 @@ const STRICT_OPENAI_COMPLIANCE: bool = true;
 pub enum StreamTransform {
     AnthropicToOpenaiChat,
     OpenaiToAnthropicMessages,
-    OpenaiChatToResponses(Arc<Value>),
+    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
     /// Applied to every stream, including same-format passthrough, which is the
@@ -52,7 +52,7 @@ impl StreamTransform {
     fn provider(&self) -> &'static str {
         match self {
             StreamTransform::OpenaiToAnthropicMessages => "openai",
-            StreamTransform::OpenaiChatToResponses(_) => "openai",
+            StreamTransform::OpenaiChatToResponses(_, _) => "openai",
             StreamTransform::ExcludeReasoning => "openai",
             StreamTransform::SanitizeResponse(_, _) => "openai",
             _ => "anthropic",
@@ -99,8 +99,8 @@ impl StreamTransform {
             StreamTransform::OpenaiToAnthropicMessages => {
                 openai_to_anthropic_messages_stream(&event, fallback_id, state)
             }
-            StreamTransform::OpenaiChatToResponses(echo) => {
-                openai_chat_to_responses_stream(&event, fallback_id, echo, state)
+            StreamTransform::OpenaiChatToResponses(echo, identity) => {
+                openai_chat_to_responses_stream(&event, echo, identity, state)
             }
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
             StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
@@ -720,20 +720,15 @@ fn responses_event(state: &mut ResponsesStream, kind: &str, mut body: Value) -> 
 
 fn start_responses_stream(
     parsed: &Value,
-    fallback_id: &str,
     echo: &Value,
+    identity: &ResponseIdentity,
     state: &mut ResponsesStream,
 ) -> String {
     if state.started {
         return String::new();
     }
     state.started = true;
-    state.id = parsed
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .unwrap_or(fallback_id)
-        .to_string();
+    state.id = identity.request_id.clone();
     state.model = parsed.get("model").cloned().unwrap_or(Value::Null);
     state.created_at = parsed
         .get("created")
@@ -949,7 +944,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        let (was_started, should_start) = {
+        let should_start = {
             let call = state.calls.entry(index).or_default();
             if !call_id.is_empty() {
                 call.call_id = call_id.to_string();
@@ -958,10 +953,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
                 call.name = name.to_string();
             }
             let was_started = call.output_index.is_some();
-            (
-                was_started,
-                !was_started && !call.call_id.is_empty() && !call.name.is_empty(),
-            )
+            !was_started && !call.call_id.is_empty() && !call.name.is_empty()
         };
 
         if should_start {
@@ -992,8 +984,6 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
                         "delta": arguments,
                     }),
                 ));
-            } else if was_started {
-                unreachable!("a started call has an output index");
             }
         }
     }
@@ -1030,7 +1020,7 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
 }
 
 fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
-    if state.terminated {
+    if state.terminated || !state.started {
         return String::new();
     }
     state.terminated = true;
@@ -1070,8 +1060,8 @@ fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
 
 fn openai_chat_to_responses_stream(
     event: &ParsedEvent,
-    fallback_id: &str,
     echo: &Value,
+    identity: &ResponseIdentity,
     stream_state: &mut StreamState,
 ) -> Result<Option<String>, ()> {
     let payload = event.data.as_deref().unwrap_or("").trim();
@@ -1084,7 +1074,7 @@ fn openai_chat_to_responses_stream(
     }
     let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
     let state = &mut stream_state.responses;
-    let mut output = start_responses_stream(&parsed, fallback_id, echo, state);
+    let mut output = start_responses_stream(&parsed, echo, identity, state);
 
     if let Some(error) = parsed.get("error").filter(|error| !error.is_null()) {
         state.error = Some(error.clone());
@@ -1456,7 +1446,7 @@ impl Stream for SseTransformStream {
                             this.fail("provider ended before sending a finish reason");
                         }
                     }
-                    if let StreamTransform::OpenaiChatToResponses(echo) = &this.transform {
+                    if let StreamTransform::OpenaiChatToResponses(echo, _) = &this.transform {
                         if this.pending_error.is_none()
                             && this.state.responses.started
                             && !this.state.responses.terminated
@@ -1959,9 +1949,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(chunks));
+        let identity = Arc::new(ResponseIdentity {
+            request_id: "resp_fixture".to_string(),
+            user_model: Some("gpt-test".to_string()),
+        });
         let stream = SseTransformStream::new(
             inner,
-            StreamTransform::OpenaiChatToResponses(Arc::new(json!({}))),
+            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity),
         );
         let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
         let mut events = Vec::new();
@@ -1986,6 +1980,12 @@ mod tests {
             events.push(value);
         }
         (events, error, wire)
+    }
+
+    #[test]
+    fn responses_stream_tail_before_start_is_empty() {
+        let mut state = ResponsesStream::default();
+        assert!(responses_stream_tail(&json!({}), &mut state).is_empty());
     }
 
     #[tokio::test]

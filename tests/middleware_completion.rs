@@ -722,6 +722,8 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
     let (headers, body) = raw_body(response).await;
     assert!(headers.get("x-receipt-id").is_some());
     assert!(!body.contains("[DONE]"), "{body}");
+    assert!(!body.contains("chatcmpl-upstream"), "{body}");
+    assert!(!body.contains("internal-model"), "{body}");
 
     let events = sse_events(&body);
     let types: Vec<&str> = events

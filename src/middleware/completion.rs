@@ -1626,7 +1626,7 @@ pub(super) fn build_metered_pipeline(
     let surfaced: ServiceResponseStream = match inputs.echo.as_ref().filter(|_| !native_responses) {
         Some(echo) => Box::pin(SseTransformStream::new(
             visible,
-            StreamTransform::OpenaiChatToResponses(echo.clone()),
+            StreamTransform::OpenaiChatToResponses(echo.clone(), inputs.identity.clone()),
         )),
         None => visible,
     };

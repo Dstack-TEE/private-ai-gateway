@@ -286,8 +286,8 @@
     "terminal": {
       "status": "completed",
       "output": [
-        { "id": "rs_resp_src_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think more" }], "status": "completed" },
-        { "id": "msg_resp_src_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer done", "annotations": [] }] },
+        { "id": "rs_resp_fixture_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think more" }], "status": "completed" },
+        { "id": "msg_resp_fixture_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer done", "annotations": [] }] },
         { "id": "fc_call_1", "type": "function_call", "call_id": "call_1", "name": "weather", "arguments": "{\"city\":\"SF\"}", "status": "completed" },
         { "id": "fc_call_2", "type": "function_call", "call_id": "call_2", "name": "units", "arguments": "{\"system\":\"metric\"}", "status": "completed" }
       ],
@@ -323,7 +323,7 @@
     "terminal": {
       "status": "completed",
       "output": [{
-        "id": "msg_resp_eof_0",
+        "id": "msg_resp_fixture_0",
         "type": "message",
         "role": "assistant",
         "status": "completed",
