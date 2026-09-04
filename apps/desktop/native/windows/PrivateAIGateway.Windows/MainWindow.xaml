@@ -20,7 +20,11 @@
       </NavigationView.MenuItems>
       <NavigationView.PaneHeader>
         <StackPanel Orientation="Horizontal" Spacing="10" Padding="4,8,0,16">
-          <Image Source="Assets/AppIcon.ico" Width="34" Height="34" />
+          <Image Width="34" Height="34">
+            <Image.Source>
+              <SvgImageSource UriSource="ms-appx:///Assets/brand/mark.svg" />
+            </Image.Source>
+          </Image>
           <StackPanel VerticalAlignment="Center">
             <TextBlock Text="Private AI Gateway" FontWeight="SemiBold" />
             <TextBlock Text="Confidential inference" FontSize="12" Opacity="0.65" />
