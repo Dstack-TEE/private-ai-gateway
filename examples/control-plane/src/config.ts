@@ -15,8 +15,8 @@ export interface PricingConfig {
 export interface RouteCandidate {
   routeId: string;
   format: Format;
-  /** Forward Responses API requests natively instead of converting through Chat Completions. */
-  nativeResponses?: boolean;
+  /** API paths implemented directly by this upstream. */
+  supportedEndpoints?: string[];
   /** Self-hosted serving engine (sglang/vllm); absent for managed APIs. */
   engine?: 'sglang' | 'vllm';
   /**

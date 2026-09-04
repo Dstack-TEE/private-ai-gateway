@@ -133,11 +133,18 @@ pub struct RouteCandidate {
     /// Raw reasoning policy from deployment config; the gateway decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_policy: Option<ReasoningPolicy>,
-    /// The upstream implements `/v1/responses` itself, so a Responses request
-    /// is forwarded as-is. Absent means no: served through Chat Completions,
-    /// which every OpenAI-format upstream speaks, and converted back.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub native_responses: bool,
+    /// API paths implemented directly by the upstream. Endpoints omitted here
+    /// may still be served through a gateway conversion when one exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_endpoints: Vec<String>,
+}
+
+impl RouteCandidate {
+    pub fn supports_endpoint(&self, path: &str) -> bool {
+        self.supported_endpoints
+            .iter()
+            .any(|supported| supported == path)
+    }
 }
 
 /// Provider routing block, forwarded verbatim to the control plane.

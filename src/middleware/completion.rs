@@ -27,7 +27,7 @@ use crate::aggregator::service::{
     is_sse_content_type, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
     E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
     MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
-    ServiceResponseStream, UpstreamVerificationError,
+    ServiceResponseStream, UpstreamVerificationError, RESPONSES_PATH,
 };
 
 use super::control::ControlClient;
@@ -694,9 +694,10 @@ pub async fn run(
             let selected_format = selected_candidate
                 .map(|candidate| candidate.format)
                 .unwrap_or(ProviderFormat::Openai);
-            let native_responses = selected_candidate
-                .is_some_and(|candidate| echo.is_some() && candidate.native_responses);
-            let upstream_endpoint = if echo.is_some() && !native_responses {
+            let responses_passthrough = selected_candidate.is_some_and(|candidate| {
+                echo.is_some() && candidate.supports_endpoint(RESPONSES_PATH)
+            });
+            let upstream_endpoint = if echo.is_some() && !responses_passthrough {
                 Endpoint::ChatComplete
             } else {
                 client_endpoint
@@ -797,7 +798,7 @@ pub async fn run(
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
 
-                if let Some(echo) = echo.as_ref().filter(|_| !native_responses) {
+                if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(transformed, echo);
                 }
 
@@ -1603,9 +1604,10 @@ pub(super) fn build_metered_pipeline(
     let selected_format = selected_candidate
         .map(|candidate| candidate.format)
         .unwrap_or(ProviderFormat::Openai);
-    let native_responses = selected_candidate
-        .is_some_and(|candidate| inputs.echo.is_some() && candidate.native_responses);
-    let upstream_endpoint = if inputs.echo.is_some() && !native_responses {
+    let responses_passthrough = selected_candidate.is_some_and(|candidate| {
+        inputs.echo.is_some() && candidate.supports_endpoint(RESPONSES_PATH)
+    });
+    let upstream_endpoint = if inputs.echo.is_some() && !responses_passthrough {
         Endpoint::ChatComplete
     } else {
         inputs.endpoint
@@ -1623,13 +1625,14 @@ pub(super) fn build_metered_pipeline(
     } else {
         transformed
     };
-    let surfaced: ServiceResponseStream = match inputs.echo.as_ref().filter(|_| !native_responses) {
-        Some(echo) => Box::pin(SseTransformStream::new(
-            visible,
-            StreamTransform::OpenaiChatToResponses(echo.clone(), inputs.identity.clone()),
-        )),
-        None => visible,
-    };
+    let surfaced: ServiceResponseStream =
+        match inputs.echo.as_ref().filter(|_| !responses_passthrough) {
+            Some(echo) => Box::pin(SseTransformStream::new(
+                visible,
+                StreamTransform::OpenaiChatToResponses(echo.clone(), inputs.identity.clone()),
+            )),
+            None => visible,
+        };
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the
     // provider's bytes to the client verbatim.
@@ -2101,7 +2104,7 @@ mod tests {
     fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
         RouteCandidate {
             route_id: route_id.into(),
-            native_responses: false,
+            supported_endpoints: Vec::new(),
             format,
             engine: None,
             reasoning_format: None,

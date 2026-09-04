@@ -851,7 +851,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
 }
 
 #[tokio::test]
-async fn native_responses_candidate_keeps_protocol_and_path() {
+async fn supported_responses_endpoint_keeps_protocol_and_path() {
     let control_url = spawn_control(
         200,
         json!({
@@ -859,7 +859,7 @@ async fn native_responses_candidate_keeps_protocol_and_path() {
             "candidates": [{
                 "routeId": "openai:gpt-test",
                 "format": "openai",
-                "nativeResponses": true
+                "supportedEndpoints": ["/v1/responses"]
             }]
         }),
     )

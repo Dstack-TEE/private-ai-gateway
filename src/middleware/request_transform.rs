@@ -212,9 +212,9 @@ pub fn transform_to_provider_request(
 /// shaped for — the upstream path it must be forwarded to.
 ///
 /// `responses` is the client's Responses request when `params` is its chat
-/// conversion: a candidate that serves `/v1/responses` itself gets that
-/// original shaped for the Responses endpoint; every other candidate gets
-/// the chat body, converted back on the way out.
+/// conversion: a candidate listing `/v1/responses` in `supportedEndpoints`
+/// gets that original shaped for the Responses endpoint; every other candidate
+/// gets the chat body, converted back on the way out.
 ///
 /// A candidate that cannot shape THIS request is skipped (logged at debug,
 /// never surfaced to the client), and the remaining candidates keep the
@@ -234,7 +234,7 @@ pub fn build_candidates(
     let mut first_error: Option<TransformError> = None;
     for candidate in candidates {
         let (upstream_endpoint, body) = match responses {
-            Some(original) if candidate.native_responses => (
+            Some(original) if candidate.supports_endpoint(RESPONSES_PATH) => (
                 Endpoint::CreateModelResponse,
                 transform_to_provider_request(
                     candidate.format,
@@ -2179,7 +2179,7 @@ mod tests {
         let params = json!({ "model": "m", "input": "x" });
         let shapeable = |id: &str| RouteCandidate {
             route_id: id.into(),
-            native_responses: false,
+            supported_endpoints: Vec::new(),
             format: ProviderFormat::Openai,
             engine: None,
             reasoning_format: None,
@@ -2189,7 +2189,7 @@ mod tests {
         // the shapeable one still carries the request.
         let unshapeable = RouteCandidate {
             route_id: "anthropic:a".into(),
-            native_responses: false,
+            supported_endpoints: Vec::new(),
             format: ProviderFormat::Anthropic,
             engine: None,
             reasoning_format: None,
@@ -2224,7 +2224,7 @@ mod tests {
         let candidates = vec![
             RouteCandidate {
                 route_id: "openai:a".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: Some(ReasoningFormat::Reasoning),
@@ -2235,7 +2235,7 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "openai:b".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: Some(Engine::Sglang),
                 reasoning_format: None,
@@ -2246,7 +2246,7 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "openai:c".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -2307,7 +2307,7 @@ mod tests {
             });
             let candidate = RouteCandidate {
                 route_id: "self-hosted:m".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: Some(engine),
                 reasoning_format: None,
@@ -2727,7 +2727,7 @@ mod tests {
         let candidates = vec![
             RouteCandidate {
                 route_id: "openai:m".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -2735,7 +2735,7 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "anthropic:m".into(),
-                native_responses: false,
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Anthropic,
                 engine: None,
                 reasoning_format: None,
