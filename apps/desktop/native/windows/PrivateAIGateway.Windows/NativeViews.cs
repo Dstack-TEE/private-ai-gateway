@@ -21,7 +21,12 @@ internal static class NativeViews
         columns.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         var local = Section("Local API");
         local.Children.Add(CopyRow("Endpoint", store.State.ProxyUrl ?? "Unavailable", store.State.ProxyUrl));
-        local.Children.Add(new Separator());
+        local.Children.Add(new Border
+        {
+            Height = 1,
+            Margin = new Thickness(0, 4, 0, 4),
+            Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(32, 128, 128, 128)),
+        });
         local.Children.Add(ClientKeyRow(store));
         var agents = Section("Agents");
         foreach (var agent in store.Agents.Take(5)) agents.Children.Add(AgentRow(store, agent));
@@ -55,7 +60,7 @@ internal static class NativeViews
         range.SelectedIndex = (int)store.UsageRange;
         range.SelectionChanged += (_, _) => { store.UsageRange = (UsageRange)Math.Max(0, range.SelectedIndex); _ = store.ReloadUsageAsync(true); };
         toolbar.Children.Add(range);
-        toolbar.Children.Add(new FrameworkElement { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 10 });
+        toolbar.Children.Add(new Border { Width = 10 });
         var export = new Button { Content = "Export CSV…" };
         export.Click += async (_, _) => await ExportAsync(store, window);
         toolbar.Children.Add(export);
@@ -147,7 +152,7 @@ internal static class NativeViews
     {
         var reveal = false;
         var value = new TextBlock { Text = "pag_••••••••••••", FontFamily = new FontFamily("Consolas") };
-        var copy = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
+        var copy = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
         copy.Content = Labeled("Client key", value);
         copy.Click += (_, _) => global::Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(ClipboardContent(store.ClientKey));
         var eye = new Button { Content = new FontIcon { Glyph = "\uE890" } };
@@ -161,7 +166,7 @@ internal static class NativeViews
 
     private static UIElement CopyRow(string title, string value, string? copyValue)
     {
-        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = copyValue is not null };
+        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = copyValue is not null };
         var grid = new Grid(); grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         grid.Children.Add(Labeled(title, new TextBlock { Text = value, FontFamily = new FontFamily("Consolas"), TextTrimming = TextTrimming.CharacterEllipsis }));
         var icon = new FontIcon { Glyph = "\uE8C8" }; Grid.SetColumn(icon, 1); grid.Children.Add(icon); button.Content = grid;
@@ -197,10 +202,10 @@ internal static class NativeViews
 
     private static UIElement UsageRow(RequestActivity item, Action action)
     {
-        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(global::Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(12, 9, 12, 9) };
+        var button = new Button { HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(12, 9, 12, 9) };
         var grid = new Grid { ColumnSpacing = 12 };
         grid.ColumnDefinitions.Add(new() { Width = new GridLength(24) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(90) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(72) }); grid.ColumnDefinitions.Add(new() { Width = new GridLength(18) });
-        grid.Children.Add(new FontIcon { Glyph = item.Verified == true ? "\uE83D" : item.LeftDevice ? "\uE814" : "\uE711", Foreground = item.Verified == true ? Success : item.LeftDevice ? new SolidColorBrush(global::Windows.UI.Colors.IndianRed) : null });
+        grid.Children.Add(new FontIcon { Glyph = item.Verified == true ? "\uE83D" : item.LeftDevice ? "\uE814" : "\uE711", Foreground = item.Verified == true ? Success : item.LeftDevice ? new SolidColorBrush(Microsoft.UI.Colors.IndianRed) : null });
         var label = Vertical(2); label.Children.Add(new TextBlock { Text = item.Model ?? item.Path, TextTrimming = TextTrimming.CharacterEllipsis }); label.Children.Add(new TextBlock { Text = string.Join(" · ", new[] { item.Agent, item.Path }.Where(value => !string.IsNullOrEmpty(value))), FontSize = 12, Opacity = 0.6, TextTrimming = TextTrimming.CharacterEllipsis }); Grid.SetColumn(label, 1); grid.Children.Add(label);
         var tokens = new TextBlock { Text = $"{(item.InputTokens ?? 0) + (item.OutputTokens ?? 0):N0}", Opacity = 0.65, HorizontalAlignment = HorizontalAlignment.Right }; Grid.SetColumn(tokens, 2); grid.Children.Add(tokens);
         var time = new TextBlock { Text = DateTimeOffset.FromUnixTimeSeconds((long)item.At).ToLocalTime().ToString("t"), Opacity = 0.65, HorizontalAlignment = HorizontalAlignment.Right }; Grid.SetColumn(time, 3); grid.Children.Add(time);
@@ -210,7 +215,7 @@ internal static class NativeViews
 
     private static StackPanel Section(string title) { var stack = Vertical(0); stack.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(12, 10, 12, 7) }); return stack; }
     private static Border Card(UIElement content) => new() { Child = content, Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(20, 128, 128, 128)), BorderBrush = new SolidColorBrush(global::Windows.UI.Color.FromArgb(35, 128, 128, 128)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(12) };
-    private static UIElement CardInto(Grid grid, UIElement content) { var card = Card(content); grid.Children.Add(card); return card; }
+    private static Border CardInto(Grid grid, UIElement content) { var card = Card(content); grid.Children.Add(card); return card; }
     private static StackPanel Vertical(double spacing) => new() { Orientation = Orientation.Vertical, Spacing = spacing };
     private static StackPanel Horizontal(double spacing) => new() { Orientation = Orientation.Horizontal, Spacing = spacing, VerticalAlignment = VerticalAlignment.Center };
     private static ScrollViewer Scroll(UIElement content) => new() { Content = content, Padding = new Thickness(24), HorizontalScrollMode = ScrollMode.Disabled };

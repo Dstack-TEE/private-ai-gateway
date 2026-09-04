@@ -36,7 +36,7 @@ internal static class NativeDialogs
             edit.Click += (_, _) => nextAction = "edit";
             delete.Click += (_, _) => nextAction = "delete";
             use.Click += (_, _) => nextAction = "use";
-            actions.Children.Add(add); actions.Children.Add(edit); actions.Children.Add(delete); actions.Children.Add(new FrameworkElement { Width = 12 }); actions.Children.Add(use);
+            actions.Children.Add(add); actions.Children.Add(edit); actions.Children.Add(delete); actions.Children.Add(new Border { Width = 12 }); actions.Children.Add(use);
             var content = Vertical(12); content.Children.Add(list); content.Children.Add(actions);
             var dialog = Dialog("Profiles", content, root, "Done");
             foreach (var button in new[] { add, edit, delete, use }) button.Click += (_, _) => dialog.Hide();
