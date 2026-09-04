@@ -212,9 +212,13 @@ jobs:
       - name: Inspect native macOS package
         working-directory: apps/desktop
         run: |
-          test -x 'release/native-macos/Private AI Gateway.app/Contents/MacOS/Private AI Gateway'
-          test -x 'release/native-macos/Private AI Gateway.app/Contents/MacOS/private-ai-gateway-desktop-service'
-          codesign --verify --deep --strict 'release/native-macos/Private AI Gateway.app'
+          app='release/native-macos/Private AI Gateway.app'
+          test -x "$app/Contents/MacOS/Private AI Gateway"
+          test -x "$app/Contents/MacOS/private-ai-gateway-desktop-service"
+          test -f "$app/Contents/Resources/Assets.car"
+          test -f "$app/Contents/Resources/icon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app/Contents/Info.plist")" = Icon
+          codesign --verify --deep --strict "$app"
           hdiutil verify release/Private-AI-Gateway-native-macos.dmg
           unzip -tq release/Private-AI-Gateway-native-macos.zip
       - uses: actions/upload-artifact@v6

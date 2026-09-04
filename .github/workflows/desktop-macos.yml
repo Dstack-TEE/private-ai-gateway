@@ -70,7 +70,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run prepare:brand
-          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon assets/tray)"
+          status="$(git status --porcelain=v1 --untracked-files=all -- src/renderer/generated gateway/src/brand.rs src-tauri/icons/32x32.png src-tauri/icons/128x128.png src-tauri/icons/128x128@2x.png src-tauri/icons/icon.png src-tauri/icons/icon.icns src-tauri/icons/icon.ico src-tauri/icons/AppIcon.icon assets/tray)"
           if [[ -n "$status" ]]; then
             printf '%s\n' "$status"
             git diff -- src/renderer/generated gateway/src/brand.rs src-tauri/icons assets/tray

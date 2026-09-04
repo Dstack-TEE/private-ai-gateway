@@ -40,16 +40,21 @@ struct MainWindowView: View {
         } detail: {
             VStack(spacing: 0) {
                 PageHeader(
-                    title: selection?.rawValue ?? "Overview",
+                    section: selection ?? .overview,
                     store: store,
                     configure: openProfiles
                 )
                 Divider()
                 Group {
                     switch selection ?? .overview {
-                    case .overview: OverviewPage(store: store, showProfiles: $showProfiles)
-                    case .agents: AgentsPage(store: store)
-                    case .usage: UsagePageView(store: store)
+                    case .overview:
+                        PrototypeOverviewPage(
+                            store: store,
+                            selection: $selection,
+                            openProfiles: openProfiles
+                        )
+                    case .agents: PrototypeAgentsPage(store: store)
+                    case .usage: PrototypeUsagePage(store: store)
                     case .settings: SettingsPage(store: store)
                     }
                 }
@@ -80,10 +85,7 @@ struct MainWindowView: View {
 private struct AppIdentity: View {
     var body: some View {
         HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath))
-                .resizable()
-                .frame(width: 32, height: 32)
-                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+            NativeBrandMark(size: 32)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Private AI Gateway").font(.headline)
                 Text("Confidential inference").font(.caption).foregroundStyle(.secondary)
@@ -94,36 +96,40 @@ private struct AppIdentity: View {
 }
 
 private struct PageHeader: View {
-    let title: String
+    let section: AppSection
     @ObservedObject var store: RuntimeStore
     let configure: () -> Void
 
     var body: some View {
         HStack {
-            Text(title).font(.title2.weight(.semibold))
+            Text(section.rawValue).font(.headline.weight(.semibold))
             Spacer()
-            if store.isDevMode && store.isRunning {
-                Label("Dev mode", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .font(.callout.weight(.medium))
-            }
-            Text(store.state.status.label)
-                .foregroundStyle(statusColor)
-            Toggle("Protected", isOn: Binding(
-                get: { store.isRunning },
-                set: { enabled in
-                    if enabled && (!store.state.apiKeySaved || store.state.profiles.isEmpty) {
-                        configure()
-                    } else {
-                        store.setProtection(enabled)
-                    }
+            if section != .overview {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(store.isDevMode ? "Dev mode" : "Protected")
+                        .font(.caption.weight(.semibold))
+                    Text(store.isRunning ? "On" : store.isBusy ? "Starting" : "Off")
+                        .font(.caption2)
+                        .foregroundStyle(statusColor)
                 }
-            ))
-            .toggleStyle(.switch)
-            .disabled(store.isBusy)
+                Toggle("Protected", isOn: Binding(
+                    get: { store.isRunning },
+                    set: { enabled in
+                        if enabled && (!store.state.apiKeySaved || store.state.profiles.isEmpty) {
+                            configure()
+                        } else {
+                            store.setProtection(enabled)
+                        }
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(store.isDevMode ? .orange : .green)
+                .disabled(store.isBusy || (store.state.endpointError != nil && !store.isRunning))
+            }
         }
         .padding(.horizontal, 24)
-        .frame(height: 58)
+        .frame(height: 55)
     }
 
     private var statusColor: Color {

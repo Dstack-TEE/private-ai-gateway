@@ -13,10 +13,11 @@ public sealed class MainWindow : Window
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
     private readonly NavigationView Navigation = new();
-    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 17, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
     private readonly Border DevBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
     private readonly TextBlock StatusText = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
     private readonly ToggleSwitch ProtectionSwitch = new();
+    private readonly StackPanel HeaderControls = new() { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
     private readonly ContentPresenter PageHost = new();
     private string page = "overview";
     private bool syncingSwitch;
@@ -89,14 +90,13 @@ public sealed class MainWindow : Window
         header.Children.Add(PageTitle);
 
         DevBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold };
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
-        controls.Children.Add(DevBadge);
-        controls.Children.Add(StatusText);
-        controls.Children.Add(new TextBlock { Text = "Protected", VerticalAlignment = VerticalAlignment.Center });
+        HeaderControls.Children.Add(DevBadge);
+        HeaderControls.Children.Add(StatusText);
+        HeaderControls.Children.Add(new TextBlock { Text = "Protected", VerticalAlignment = VerticalAlignment.Center });
         ProtectionSwitch.Toggled += ProtectionSwitch_Toggled;
-        controls.Children.Add(ProtectionSwitch);
-        Grid.SetColumn(controls, 1);
-        header.Children.Add(controls);
+        HeaderControls.Children.Add(ProtectionSwitch);
+        Grid.SetColumn(HeaderControls, 1);
+        header.Children.Add(HeaderControls);
 
         var headerBorder = new Border
         {
@@ -116,6 +116,7 @@ public sealed class MainWindow : Window
         Content = title,
         Tag = tag,
         Icon = icon,
+        MinHeight = 44,
     };
 
     public void ShowMainWindow()
@@ -139,6 +140,14 @@ public sealed class MainWindow : Window
         Navigation.SelectedItem = Navigation.SettingsItem;
     }
 
+    public void NavigateTo(string target)
+    {
+        var item = Navigation.MenuItems
+            .OfType<NavigationViewItem>()
+            .FirstOrDefault(candidate => string.Equals(candidate.Tag?.ToString(), target, StringComparison.Ordinal));
+        if (item is not null) Navigation.SelectedItem = item;
+    }
+
     private async Task InitializeAsync()
     {
         try { await store.InitializeAsync(); Render(); }
@@ -153,6 +162,7 @@ public sealed class MainWindow : Window
         syncingSwitch = false;
         StatusText.Text = StatusLabel(store.State);
         DevBadge.Visibility = store.IsRunning && store.IsDevMode ? Visibility.Visible : Visibility.Collapsed;
+        HeaderControls.Visibility = page == "overview" ? Visibility.Collapsed : Visibility.Visible;
         tray.Update(store.IsRunning, store.IsProtected, StatusLabel(store.State));
         PageHost.Content = page switch
         {

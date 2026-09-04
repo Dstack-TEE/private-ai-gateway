@@ -28,7 +28,7 @@ import { Resvg } from "@resvg/resvg-js";
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const brandId = process.env.PRIVATE_AI_GATEWAY_BRAND ?? "dstack";
 /** Cross-platform and legacy icon files listed alongside the native `.icon` asset. */
-const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
+const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.png", "icon.icns", "icon.ico"];
 if (!/^[a-z][a-z0-9-]*$/.test(brandId)) {
   throw new Error(`PRIVATE_AI_GATEWAY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
 }

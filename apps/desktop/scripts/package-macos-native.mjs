@@ -57,6 +57,7 @@ await copyExecutable(
 );
 
 await copyFile(path.join(appRoot, "src-tauri/icons/icon.icns"), path.join(resources, "icon.icns"));
+await copyFile(path.join(appRoot, "src-tauri/icons/Assets.car"), path.join(resources, "Assets.car"));
 for (const name of ["trayTemplate.png", "trayTemplate@2x.png", "trayTemplateProtected.png", "trayTemplateProtected@2x.png"]) {
   await copyFile(path.join(appRoot, "assets/tray", name), path.join(resources, name));
 }
@@ -66,6 +67,7 @@ await writeFile(path.join(contents, "Info.plist"), plist({
   CFBundleDisplayName: appName,
   CFBundleExecutable: appName,
   CFBundleIconFile: "icon.icns",
+  CFBundleIconName: "Icon",
   CFBundleIdentifier: bundleId,
   CFBundleName: appName,
   CFBundlePackageType: "APPL",

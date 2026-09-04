@@ -53,7 +53,9 @@ struct Ui {
     title: gtk::Label,
     status: gtk::Label,
     dev: gtk::Label,
+    header_controls: gtk::Box,
     protection: gtk::Switch,
+    sidebar: gtk::ListBox,
     syncing: Cell<bool>,
     page: Cell<usize>,
     client: Rc<RuntimeClient>,
@@ -107,11 +109,11 @@ fn build_app(app: &adw::Application) {
     let protected_label = gtk::Label::new(Some("Protected"));
     let protection = gtk::Switch::new();
     let switch_box = gtk::Box::new(Orientation::Horizontal, 8);
+    switch_box.append(&dev);
+    switch_box.append(&status);
     switch_box.append(&protected_label);
     switch_box.append(&protection);
     header.pack_end(&switch_box);
-    header.pack_end(&status);
-    header.pack_end(&dev);
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
@@ -188,7 +190,9 @@ fn build_app(app: &adw::Application) {
         title,
         status,
         dev,
+        header_controls: switch_box,
         protection: protection.clone(),
+        sidebar: sidebar.clone(),
         syncing: Cell::new(false),
         page: Cell::new(0),
         client: client.clone(),
@@ -296,6 +300,7 @@ impl Ui {
         self.status.set_label(status_label(&state));
         self.dev
             .set_visible(is_running(&state) && !state.config.require_production_os);
+        self.header_controls.set_visible(self.page.get() != 0);
         let title = ["Overview", "Agents", "Usage", "Settings"][self.page.get().min(3)];
         self.title.set_label(title);
         while let Some(child) = self.content.first_child() {
@@ -325,93 +330,280 @@ impl Ui {
     fn overview_page(self: &Rc<Self>) -> gtk::Widget {
         let root = page_box();
         let state = self.state.borrow();
-        let summary = hbox(18);
-        let icon = gtk::Image::from_icon_name(if state.status == "verified" {
-            "security-high-symbolic"
-        } else {
-            "security-medium-symbolic"
+        root.append(&self.status_surface());
+        let columns = gtk::Grid::builder()
+            .column_spacing(20)
+            .row_spacing(42)
+            .column_homogeneous(true)
+            .build();
+        columns.attach(
+            &overview_module("Local API", None, &self.local_api_card(), 136),
+            0,
+            0,
+            1,
+            1,
+        );
+        columns.attach(
+            &overview_module(
+                "Session usage",
+                Some("This session"),
+                &session_metrics(&state.session_usage),
+                136,
+            ),
+            1,
+            0,
+            1,
+            1,
+        );
+        let agents = self.agents_card();
+        let agents_module = overview_module_with_action("Agents", "View all", &agents, 320);
+        let weak = Rc::downgrade(self);
+        agents_module.1.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.navigate(1);
+            }
         });
-        icon.set_pixel_size(36);
-        summary.append(&icon);
-        let labels = vbox(4);
-        labels.append(
+        columns.attach(&agents_module.0, 0, 1, 1, 1);
+        let recent = vbox(0);
+        if state.activity.is_empty() {
+            recent.append(&empty(if is_running(&state) {
+                "No requests in this session yet."
+            } else {
+                "Start protection to begin a new session."
+            }));
+        } else {
+            for item in state.activity.iter().take(5) {
+                recent.append(&self.usage_row(item.clone()));
+            }
+        }
+        let usage_module = overview_module_with_action("Recent usage", "View all", &recent, 320);
+        let weak = Rc::downgrade(self);
+        usage_module.1.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.navigate(2);
+            }
+        });
+        columns.attach(&usage_module.0, 1, 1, 1, 1);
+        root.append(&columns);
+        scrolled(&root).upcast()
+    }
+
+    fn status_surface(self: &Rc<Self>) -> gtk::Widget {
+        let state = self.state.borrow();
+        let ready = state.status == "verified"
+            && !state.configuration_verification
+            && state.api_key_saved;
+        let overlay = gtk::Overlay::new();
+        let tracks = gtk::Grid::builder()
+            .column_homogeneous(true)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        if ready {
+            tracks.attach(&track_layer(&PLAINTEXT_TRACKS, false, "track-plain"), 0, 0, 1, 1);
+            tracks.attach(&track_layer(&TLS_TRACKS, true, "track-cipher"), 2, 0, 1, 1);
+        }
+        overlay.set_child(Some(&tracks));
+
+        let foreground = gtk::Grid::builder()
+            .column_homogeneous(true)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        let local = vbox(7);
+        local.set_margin_start(16);
+        local.set_margin_end(16);
+        local.set_margin_top(16);
+        local.set_margin_bottom(16);
+        let local_title = hbox(8);
+        local_title.append(&gtk::Image::from_icon_name("computer-symbolic"));
+        local_title.append(
             &gtk::Label::builder()
-                .label(
-                    if is_running(&state) && !state.config.require_production_os {
-                        "Protected in dev mode"
-                    } else {
-                        status_label(&state)
-                    },
-                )
-                .css_classes(["title-3"])
+                .label("This PC")
+                .css_classes(["heading"])
+                .build(),
+        );
+        local.append(&local_title);
+        let agents = self.agents.borrow();
+        local.append(
+            &gtk::Label::builder()
+                .label(format!(
+                    "{} enabled · {} active",
+                    agents.iter().filter(|agent| agent.recorded).count(),
+                    agents.iter().filter(|agent| agent.connected).count()
+                ))
+                .css_classes(["dim-label", "caption"])
                 .halign(Align::Start)
                 .build(),
         );
-        labels.append(
+        let icons = hbox(6);
+        for agent in agents.iter().filter(|agent| agent.recorded).take(5) {
+            let icon = gtk::Box::new(Orientation::Horizontal, 0);
+            icon.add_css_class("agent-icon");
+            icon.append(&asset_picture(&format!("agents/{}.svg", agent.id), 15));
+            icons.append(&icon);
+        }
+        local.append(&icons);
+        local.append(
             &gtk::Label::builder()
-                .label(
-                    state
-                        .progress
-                        .as_deref()
-                        .or(state.error.as_deref())
-                        .or_else(|| active_profile(&state).map(|profile| profile.name.as_str()))
-                        .unwrap_or("Choose a Confidential AI profile"),
-                )
-                .css_classes(["dim-label"])
-                .halign(Align::Start)
+                .label("Enabled agents send their requests to the gateway on this PC.")
+                .css_classes(["dim-label", "caption"])
                 .wrap(true)
+                .xalign(0.0)
+                .max_width_chars(28)
+                .halign(Align::Start)
                 .build(),
         );
-        summary.append(&labels);
-        let spacer = gtk::Box::new(Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        summary.append(&spacer);
-        let profiles = gtk::Button::with_label("Profiles…");
+        drop(agents);
+        foreground.attach(&local, 0, 0, 1, 1);
+
+        let gateway = vbox(4);
+        gateway.set_halign(Align::Center);
+        gateway.set_valign(Align::Center);
+        gateway.append(&asset_picture("brand/mark.svg", 44));
+        gateway.append(
+            &gtk::Label::builder()
+                .label("Private AI Gateway")
+                .css_classes(["heading"])
+                .build(),
+        );
+        let verdict = gtk::Label::new(Some(status_label(&state)));
+        verdict.add_css_class(if is_running(&state) && !state.config.require_production_os {
+            "warning"
+        } else if state.status == "verified" {
+            "success"
+        } else {
+            "dim-label"
+        });
+        gateway.append(&verdict);
+        let protection = gtk::Switch::builder()
+            .active(is_running(&state))
+            .sensitive(state.endpoint_error.is_none() || is_running(&state))
+            .halign(Align::Center)
+            .build();
+        let original = is_running(&state);
+        let weak = Rc::downgrade(self);
+        protection.connect_active_notify(move |toggle| {
+            if toggle.is_active() != original {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_protection(toggle.is_active());
+                }
+            }
+        });
+        gateway.append(&protection);
+        foreground.attach(&gateway, 1, 0, 1, 1);
+
+        let remote = vbox(6);
+        remote.set_margin_start(16);
+        remote.set_margin_end(16);
+        remote.set_margin_top(16);
+        remote.set_margin_bottom(16);
+        remote.set_halign(Align::Fill);
+        let profile = active_profile(&state);
+        let service = hbox(8);
+        service.set_halign(Align::End);
+        service.append(
+            &gtk::Label::builder()
+                .label(profile.map_or("Custom service", |entry| entry.name.as_str()))
+                .css_classes(["heading"])
+                .build(),
+        );
+        let provider_asset = match profile.map(|entry| &entry.provider) {
+            Some(ServiceProvider::Phala) => "providers/phala.svg",
+            Some(ServiceProvider::Redpill) => "providers/redpill.png",
+            _ => "brand/mark.svg",
+        };
+        service.append(&asset_picture(provider_asset, 24));
+        remote.append(&service);
+        remote.append(
+            &gtk::Label::builder()
+                .label(service_host(
+                    state.remote_url.as_deref().unwrap_or(&state.config.remote_url),
+                ))
+                .css_classes(["dim-label", "caption", "monospace"])
+                .halign(Align::End)
+                .build(),
+        );
+        for text in if state.status == "verified" {
+            vec![
+                "Verified hardware ✓".to_string(),
+                format!("{} answers this session ✓", state.session_usage.protected),
+            ]
+        } else {
+            vec!["Not verified •".into(), "No answers this session •".into()]
+        } {
+            remote.append(
+                &gtk::Label::builder()
+                    .label(text)
+                    .css_classes([if state.status == "verified" { "success" } else { "dim-label" }, "caption"])
+                    .halign(Align::End)
+                    .build(),
+            );
+        }
+        let actions = hbox(6);
+        actions.set_halign(Align::End);
+        let profiles = gtk::Button::builder()
+            .icon_name("preferences-system-symbolic")
+            .tooltip_text("Profiles")
+            .build();
         let weak = Rc::downgrade(self);
         profiles.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
                 ui.show_profiles();
             }
         });
-        summary.append(&profiles);
-        let privacy = gtk::Button::with_label("Privacy Verification…");
-        privacy.set_sensitive(state.identity.is_some());
+        actions.append(&profiles);
+        let privacy = gtk::Button::builder()
+            .icon_name("security-high-symbolic")
+            .tooltip_text("Privacy verification")
+            .sensitive(state.identity.is_some())
+            .build();
         let weak = Rc::downgrade(self);
         privacy.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
                 ui.show_privacy();
             }
         });
-        summary.append(&privacy);
-        root.append(&card(&summary));
-        let columns = hbox(20);
-        columns.set_homogeneous(true);
-        columns.append(&self.local_api_card());
-        columns.append(&self.agents_card());
-        root.append(&columns);
-        root.append(&metrics(&state.session_usage, Some("This session")));
-        let recent = vbox(0);
-        recent.append(&section_title("Recent usage"));
-        if state.activity.is_empty() {
-            recent.append(&empty("No usage this session"));
-        } else {
-            for item in state.activity.iter().take(5) {
-                recent.append(&self.usage_row(item.clone()));
-            }
+        actions.append(&privacy);
+        remote.append(&actions);
+        foreground.attach(&remote, 2, 0, 1, 1);
+        overlay.add_overlay(&foreground);
+        let surface = card(&overlay);
+        surface.add_css_class("status-surface");
+        surface.set_height_request(184);
+        surface.upcast()
+    }
+
+    fn navigate(self: &Rc<Self>, index: i32) {
+        if let Some(row) = self.sidebar.row_at_index(index) {
+            self.sidebar.select_row(Some(&row));
         }
-        root.append(&card(&recent));
-        scrolled(&root).upcast()
     }
 
     fn local_api_card(self: &Rc<Self>) -> gtk::Widget {
         let state = self.state.borrow();
         let root = vbox(0);
-        root.append(&section_title("Local API"));
-        root.append(&copy_row(
+        let endpoint = gtk::Overlay::new();
+        endpoint.set_child(Some(&copy_row(
             "Endpoint",
             state.proxy_url.as_deref().unwrap_or("Unavailable"),
             state.proxy_url.clone(),
-        ));
+        )));
+        let settings = gtk::Button::builder()
+            .icon_name("preferences-system-symbolic")
+            .tooltip_text("Local API settings")
+            .halign(Align::End)
+            .valign(Align::Center)
+            .margin_end(12)
+            .build();
+        let weak = Rc::downgrade(self);
+        settings.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.show_local_api();
+            }
+        });
+        endpoint.add_overlay(&settings);
+        root.append(&endpoint);
         let key = self.client_key.borrow().clone();
         let row = hbox(8);
         let copy = gtk::Button::new();
@@ -445,16 +637,16 @@ impl Ui {
         });
         row.append(&eye);
         root.append(&row);
-        card(&root).upcast()
+        root.set_height_request(136);
+        root.upcast()
     }
 
     fn agents_card(self: &Rc<Self>) -> gtk::Widget {
         let root = vbox(0);
-        root.append(&section_title("Agents"));
         for agent in self.agents.borrow().iter().take(5) {
             root.append(&self.agent_row(agent.clone()));
         }
-        card(&root).upcast()
+        root.upcast()
     }
     fn agents_page(self: &Rc<Self>) -> gtk::Widget {
         let root = page_box();
@@ -1438,7 +1630,20 @@ impl Ui {
 
 fn install_css() {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(".navigation-sidebar { background: alpha(@window_fg_color, .035); } .card { background: alpha(@window_fg_color, .035); border: 1px solid alpha(@window_fg_color, .10); border-radius: 8px; padding: 14px; } .dev-badge { color: #9a6700; background: alpha(#e9a400, .16); border-radius: 5px; padding: 4px 8px; font-weight: 600; } .success { color: #2c6e49; } .monospace { font-family: monospace; } .caption { font-size: 0.88em; }");
+    provider.load_from_data(
+        ".navigation-sidebar { background: alpha(@window_fg_color, .035); } \
+         .card { background: alpha(@window_fg_color, .035); border: 1px solid alpha(@window_fg_color, .10); border-radius: 8px; padding: 14px; } \
+         .status-surface, .overview-surface { padding: 0; } \
+         .status-surface { background: alpha(@window_fg_color, .025); } \
+         .track-plain, .track-cipher { font-family: monospace; font-size: 11px; opacity: .11; } \
+         .track-cipher { color: #2c6e49; opacity: .16; } \
+         .agent-icon { background: white; border: 1px solid alpha(black, .12); border-radius: 6px; padding: 4px; } \
+         .session-metric { padding: 9px 12px; border: 1px solid alpha(@window_fg_color, .07); } \
+         .overview-action { color: #2c6e49; padding: 2px 5px; } \
+         .dev-badge { color: #9a6700; background: alpha(#e9a400, .16); border-radius: 5px; padding: 4px 8px; font-weight: 600; } \
+         .success { color: #2c6e49; } .warning { color: #9a6700; } \
+         .monospace { font-family: monospace; } .caption { font-size: 0.88em; }",
+    );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -1509,6 +1714,126 @@ fn card(child: &impl IsA<gtk::Widget>) -> gtk::Box {
     card.add_css_class("card");
     card.append(child);
     card
+}
+fn overview_module(
+    title: &str,
+    meta: Option<&str>,
+    child: &impl IsA<gtk::Widget>,
+    height: i32,
+) -> gtk::Box {
+    let root = vbox(8);
+    let heading = hbox(8);
+    heading.append(&section_title(title));
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    heading.append(&spacer);
+    if let Some(meta) = meta {
+        heading.append(
+            &gtk::Label::builder()
+                .label(meta)
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+    }
+    root.append(&heading);
+    let surface = card(child);
+    surface.add_css_class("overview-surface");
+    surface.set_height_request(height);
+    root.append(&surface);
+    root
+}
+fn overview_module_with_action(
+    title: &str,
+    action: &str,
+    child: &impl IsA<gtk::Widget>,
+    height: i32,
+) -> (gtk::Box, gtk::Button) {
+    let root = vbox(8);
+    let heading = hbox(8);
+    heading.append(&section_title(title));
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    heading.append(&spacer);
+    let button = gtk::Button::with_label(action);
+    button.set_has_frame(false);
+    button.add_css_class("overview-action");
+    heading.append(&button);
+    root.append(&heading);
+    let surface = card(child);
+    surface.add_css_class("overview-surface");
+    surface.set_height_request(height);
+    root.append(&surface);
+    (root, button)
+}
+fn session_metrics(summary: &UsageSummary) -> gtk::Grid {
+    let forwarded = summary.requests.saturating_sub(summary.blocked_locally);
+    let protected = if forwarded == 0 {
+        "—".to_string()
+    } else {
+        format!("{}%", summary.protected.saturating_mul(100) / forwarded)
+    };
+    let grid = gtk::Grid::builder()
+        .column_homogeneous(true)
+        .row_homogeneous(true)
+        .build();
+    for (index, (label, value)) in [
+        ("Requests", format_number(summary.requests)),
+        (
+            "Tokens",
+            compact_number(summary.input_tokens + summary.output_tokens),
+        ),
+        ("Cost", format!("${:.4}", summary.cost_usd)),
+        ("Protected", protected),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let metric = vbox(1);
+        metric.add_css_class("session-metric");
+        metric.append(
+            &gtk::Label::builder()
+                .label(label)
+                .css_classes(["dim-label", "caption"])
+                .halign(Align::Start)
+                .build(),
+        );
+        metric.append(
+            &gtk::Label::builder()
+                .label(value)
+                .css_classes(["title-3", "monospace"])
+                .halign(Align::Start)
+                .build(),
+        );
+        grid.attach(&metric, (index % 2) as i32, (index / 2) as i32, 1, 1);
+    }
+    grid
+}
+fn track_layer(lines: &[&str], align_right: bool, class: &str) -> gtk::Box {
+    let root = vbox(0);
+    root.set_valign(Align::Center);
+    root.set_overflow(gtk::Overflow::Hidden);
+    for line in lines {
+        root.append(
+            &gtk::Label::builder()
+                .label(*line)
+                .css_classes([class])
+                .halign(if align_right { Align::End } else { Align::Start })
+                .xalign(if align_right { 1.0 } else { 0.0 })
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .single_line_mode(true)
+                .build(),
+        );
+    }
+    root
+}
+fn service_host(value: &str) -> &str {
+    value
+        .split_once("://")
+        .map_or(value, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|host| !host.is_empty())
+        .unwrap_or("Not configured")
 }
 fn section_title(title: &str) -> gtk::Label {
     gtk::Label::builder()
@@ -1750,3 +2075,40 @@ fn format_number(value: u64) -> String {
     }
     result.chars().rev().collect()
 }
+fn compact_number(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        format_number(value)
+    }
+}
+
+const PLAINTEXT_TRACKS: [&str; 11] = [
+    "POST /v1/messages  model demo/verified-chat-01  stream true",
+    "event content_block_delta  compose hash matches expected value",
+    "messages user  inspect public dstack attestation report",
+    "event message_delta  stop_reason end_turn  output_tokens 96",
+    "POST /v1/responses  model demo/verified-reasoning-01",
+    "event response.output_text.delta  release notes summarized",
+    "input user  summarize public release notes  tool read_public_file",
+    "event response.completed  input_tokens 384  output_tokens 96",
+    "POST /v1/chat/completions  compare tdx_quote and compose_hash",
+    "data chat.completion.chunk  both digests match",
+    "tools function compare_hash  tool_choice auto",
+];
+
+const TLS_TRACKS: [&str; 11] = [
+    "17 03 03 00 f4  9f3a c1e0 7b42 d5a8 0e6f 2c91",
+    "17 03 03 03 1a  4d17 e8b3 5a0c f9d2 61b7 a3e4",
+    "application_data record_len 244  17 03 03 00 f4  6d03 c1e8",
+    "17 03 03 01 6c  e1a7 5c09 f38d 2b64 d0e7 4a1f",
+    "17 03 03 00 5e  b2a0 7e95 0d1b 9c6e 18e4 a0f7",
+    "application_data record_len 794  17 03 03 03 1a  b5c8 02a6",
+    "17 03 03 02 48  9e21 4fb7 a6d5 0c83 e2f9 71b4",
+    "17 03 03 00 91  81c7 e6a2 5b9d 1f74 c0e3 a8d6",
+    "17 03 03 01 d0  a3e8 5c02 e9b1 4d7f 8a36 1e0c",
+    "application_data record_len 152  17 03 03 00 98  c7d2 3e5a",
+    "17 03 03 00 3c  7a0d 2c95 f6e3 41b8 d9c0 3f5e",
+];
