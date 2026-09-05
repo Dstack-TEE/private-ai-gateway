@@ -301,6 +301,7 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
   // Each start gets its own verification run; stop or a newer start makes a
@@ -351,7 +352,9 @@ export function mockApi(name: string | null): DesktopApi {
     onClientKeyChange: () => () => undefined,
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
+    nativeDialogReady: async () => undefined,
     openSupport: async () => undefined,
+    openAgentWebsite: async () => undefined,
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {
       const run = ++verifyRun;
@@ -371,6 +374,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     verifyConfiguration: async (profile, requireProductionOs, key) => {
+      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
       const existing = state.profiles.find((entry) => entry.id === profile.id);
       const profileChanged = !existing
         || existing.provider !== profile.provider
@@ -400,7 +404,8 @@ export function mockApi(name: string | null): DesktopApi {
       credentialProfiles.add(profile.id);
       state = {
         ...state,
-        status: "stopped",
+        status: reconnect ? "verified" : "stopped",
+        protectedSince: reconnect ? Math.floor(Date.now() / 1_000) : undefined,
         configurationVerification: false,
         progress: undefined,
         config: { remoteUrl: profile.remoteUrl, requireProductionOs },
@@ -416,6 +421,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     activateProfile: async (profileId) => {
+      const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
       const profile = state.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new Error("Confidential AI profile not found");
       state = {
@@ -424,6 +430,8 @@ export function mockApi(name: string | null): DesktopApi {
         activeProfileId: profile.id,
         apiKeySaved: profile.credentialSaved ?? Boolean(profile.verifiedAt),
         catalog: undefined,
+        status: reconnect ? "verified" : "stopped",
+        protectedSince: reconnect ? Math.floor(Date.now() / 1_000) : undefined,
       };
       publish();
       return state;

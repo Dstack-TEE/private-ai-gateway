@@ -16,9 +16,16 @@ so behavior and accessibility do not drift across three platform-specific UI
 implementations. Destructive confirmations and file destinations use the
 operating system's native dialogs directly.
 
+New/Edit Profile opens a separate child dialog over the Profiles chooser.
+Dialog webviews receive a non-secret state snapshot at initialization and are
+presented after their first content commit, not as empty windows while IPC loads.
+
 macOS tray image updates preserve the template flag atomically; replacing only
 the image resets that flag in the underlying tray implementation and can make
 the icon disappear against a dark menu bar.
+The tray uses a 36px template raster for Tauri's 18pt macOS image, with a 16pt
+mark and a transparent clearance around the protected badge. The Dock app icon
+is independent and unchanged.
 
 Agent connections are saved preferences, not permanent config rewrites. Only
 connected agents under active protection receive gateway settings. Stopping,
@@ -120,8 +127,10 @@ protocol is the service's own response, shown as such.
   new key, so a credential is never silently reused. Profile metadata is
   written atomically and the current API-key authentication model is shaped so
   an OAuth account can be added as another auth kind later. A successful
-  `Verify and Save` selects the profile, closes the profile flow, and leaves
-  protection off until the user explicitly starts it. Selecting an existing
+  `Verify and Save` selects the profile and returns to the chooser. If protection
+  was off it stays off; if it was on, saving or switching profiles stops protection,
+  restores agent configs, and starts a freshly verified connection. A failed
+  verification keeps protection off and does not save the candidate. Selecting an existing
   profile also closes the chooser. The window and native tray both route a
   missing or unavailable current profile back into this same flow. Legacy
   single-service settings are recognized at

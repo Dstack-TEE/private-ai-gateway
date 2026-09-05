@@ -538,10 +538,11 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
-        if self.manager.is_running()? {
-            return Err("Stop protection before verifying a different service".to_string());
-        }
         let initial = self.manager.snapshot()?;
+        if initial.status == "verifying" {
+            return Err("Wait for the current verification to finish".to_string());
+        }
+        let reconnect = self.manager.is_running()? && !initial.configuration_verification;
         let initial_settings = service_config::settings_from_state(
             initial.profiles.clone(),
             initial.active_profile_id.clone(),
@@ -575,6 +576,9 @@ impl DesktopRuntime {
                 .ok_or_else(|| "Enter an API key".to_string())?,
             None => return Err("Enter an API key for this profile".to_string()),
         };
+        if reconnect {
+            self.stop()?;
+        }
         let previous = self.manager.snapshot()?;
         let mut settings = service_config::settings_from_state(
             previous.profiles.clone(),
@@ -658,20 +662,28 @@ impl DesktopRuntime {
             }
         };
         self.manager.set_service_configuration(
-            config,
+            config.clone(),
             settings.profiles,
             settings.active_profile_id,
             true,
             true,
         );
-        self.manager.snapshot()
+        if reconnect {
+            self.start(config)
+        } else {
+            self.manager.snapshot()
+        }
     }
 
-    pub fn activate_profile(&self, profile_id: String) -> Result<GatewayState, String> {
-        if self.manager.is_running()? {
-            return Err("Stop protection before changing profiles".to_string());
-        }
+    pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
         let previous = self.manager.snapshot()?;
+        if previous.status == "verifying" {
+            return Err("Wait for the current verification to finish".to_string());
+        }
+        if previous.active_profile_id == profile_id {
+            return Ok(previous);
+        }
+        let reconnect = self.manager.is_running()? && !previous.configuration_verification;
         let mut settings = service_config::settings_from_state(
             previous.profiles,
             previous.active_profile_id,
@@ -683,6 +695,9 @@ impl DesktopRuntime {
             .find(|profile| profile.id == profile_id)
             .cloned()
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
+        if reconnect {
+            self.stop()?;
+        }
         settings.active_profile_id = profile.id;
         let settings = service_config::save(settings)?;
         let config = settings.runtime_config()?;
@@ -691,13 +706,17 @@ impl DesktopRuntime {
             .is_ok_and(service_config::profile_has_credential);
         self.proxy.set_api_key(None);
         self.manager.set_service_configuration(
-            config,
+            config.clone(),
             settings.profiles,
             settings.active_profile_id,
             credential_saved,
             false,
         );
-        self.manager.snapshot()
+        if reconnect {
+            self.start(config)
+        } else {
+            self.manager.snapshot()
+        }
     }
 
     pub fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {

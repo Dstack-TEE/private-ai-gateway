@@ -134,9 +134,9 @@ pub fn sync(app: &AppHandle, state: &GatewayState) {
 
 fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
     let bytes = if protected {
-        include_bytes!("../../assets/tray/trayTemplateProtected.png").as_slice()
+        include_bytes!("../../assets/tray/trayTemplateProtected@2x.png").as_slice()
     } else {
-        include_bytes!("../../assets/tray/trayTemplate.png").as_slice()
+        include_bytes!("../../assets/tray/trayTemplate@2x.png").as_slice()
     };
     tauri::image::Image::from_bytes(bytes)
 }
@@ -198,7 +198,7 @@ fn activate_app() {}
 
 #[cfg(test)]
 mod tests {
-    use super::menu_state;
+    use super::{menu_state, tray_icon};
     use desktop_runtime::contracts::{
         ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
     };
@@ -209,6 +209,31 @@ mod tests {
             api_key_saved,
             ..GatewayState::default()
         }
+    }
+
+    #[test]
+    fn tray_assets_are_retina_sized_without_excessive_padding() {
+        for protected in [false, true] {
+            let icon = tray_icon(protected).unwrap();
+            assert_eq!((icon.width(), icon.height()), (36, 36));
+            let mut bounds = (36, 36, 0, 0);
+            for (index, pixel) in icon.rgba().chunks_exact(4).enumerate() {
+                if pixel[3] > 128 {
+                    let (x, y) = (index % 36, index / 36);
+                    bounds = (
+                        bounds.0.min(x),
+                        bounds.1.min(y),
+                        bounds.2.max(x),
+                        bounds.3.max(y),
+                    );
+                }
+            }
+            assert!(bounds.2 - bounds.0 >= 29 && bounds.3 - bounds.1 >= 29);
+        }
+        assert_ne!(
+            tray_icon(false).unwrap().rgba(),
+            tray_icon(true).unwrap().rgba()
+        );
     }
 
     #[test]

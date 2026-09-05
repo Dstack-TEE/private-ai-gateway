@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createRoot } from "react-dom/client";
 import {
   BatteryMedium,
+  Bot,
+  ExternalLink,
   Ban,
   ChartNoAxesColumn,
   Check,
@@ -221,10 +223,13 @@ const TLS_TRACKS = [
 function useModalDialog(
   onClose: () => void,
   initialFocus?: React.RefObject<HTMLElement | null>,
+  dismissible = true,
 ): React.RefObject<HTMLDialogElement | null> {
   const ref = useRef<HTMLDialogElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  const dismissibleRef = useRef(dismissible);
+  dismissibleRef.current = dismissible;
   // Captured during the first render, before the commit that opens the dialog
   // disables the trigger (which would drop browser focus to <body>).
   const [opener] = useState<HTMLElement | null>(() =>
@@ -238,9 +243,14 @@ function useModalDialog(
       (initialFocus?.current ?? node).focus();
     }
     const onCloseEvent = () => closeRef.current();
+    const onCancelEvent = (event: Event) => {
+      if (!dismissibleRef.current) event.preventDefault();
+    };
     node?.addEventListener("close", onCloseEvent);
+    node?.addEventListener("cancel", onCancelEvent);
     return () => {
       node?.removeEventListener("close", onCloseEvent);
+      node?.removeEventListener("cancel", onCancelEvent);
       // Deferred: the opener may only be re-enabled by the same commit that
       // unmounts the dialog.
       window.setTimeout(() => opener?.focus(), 0);
@@ -250,7 +260,7 @@ function useModalDialog(
   return ref;
 }
 
-function useNativeGatewayWindow(title: string): {
+function useNativeGatewayWindow(title: string, contentReady = true): {
   state: GatewayState;
   setState: React.Dispatch<React.SetStateAction<GatewayState>>;
   loaded: boolean;
@@ -262,6 +272,12 @@ function useNativeGatewayWindow(title: string): {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string>();
   const [closed, setClosed] = useState(false);
+
+  useEffect(() => {
+    if (!loaded || (!contentReady && !loadError) || previewMode) return;
+    // Present after the initial React commit, so the native sheet never opens empty.
+    void desktopApi.nativeDialogReady().catch((error: unknown) => setLoadError(errorMessage(error)));
+  }, [loaded, contentReady, loadError]);
 
   useEffect(() => {
     document.title = `${title} - ${brand.productName}`;
@@ -317,8 +333,8 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
   );
 }
 
-function NativeProfilesWindow({ repair }: { repair: boolean }): React.JSX.Element {
-  const native = useNativeGatewayWindow("Profiles");
+function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; editor?: boolean }): React.JSX.Element {
+  const native = useNativeGatewayWindow(editor ? query.get("profile") ? "Edit Profile" : "New Profile" : "Profiles");
   const [actionError, setActionError] = useState<string>();
   const [repairRequest, setRepairRequest] = useState(repair ? 1 : 0);
   useEffect(() => desktopApi.onProfileRepairRequest(() => setRepairRequest((current) => current + 1)), []);
@@ -338,6 +354,14 @@ function NativeProfilesWindow({ repair }: { repair: boolean }): React.JSX.Elemen
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
+  if (editor) return <main className="native-dialog-host"><ProfileEditorSheet
+    state={native.state} busy={busy} running={running}
+    profile={native.state.profiles.find((profile) => profile.id === query.get("profile"))}
+    onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
+    onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
+    onClearKey={() => run(() => desktopApi.clearApiKey())}
+    onComplete={native.close} onDeleted={native.close} onClose={native.close}
+  /></main>;
   return (
     <main className="native-dialog-host">
       {actionError && <div className="sr-only" role="alert">{actionError}</div>}
@@ -370,13 +394,13 @@ function NativePrivacyWindow(): React.JSX.Element {
 }
 
 function NativeLocalApiWindow(): React.JSX.Element {
-  const native = useNativeGatewayWindow("Local API Settings");
   const [clientKey, setClientKey] = useState("");
   const [keyLoaded, setKeyLoaded] = useState(false);
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   const [copied, setCopied] = useState<string>();
   const [keyError, setKeyError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  const native = useNativeGatewayWindow("Local API Settings", keyLoaded);
   const copyTimer = useRef<number | undefined>(undefined);
 
   const loadClientKey = useCallback(() => {
@@ -459,20 +483,8 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
   const [recordId, setRecordId] = useState(initialRecordId);
   const [activity, setActivity] = useState<RequestActivity>();
   const [error, setError] = useState<string>();
-  const [closed, setClosed] = useState(false);
-
-  useEffect(() => {
-    document.title = `Usage Proof - ${brand.productName}`;
-    const root = document.documentElement;
-    root.classList.add("is-native-dialog");
-    root.style.setProperty("--accent-light", brand.theme.accentLight);
-    root.style.setProperty("--accent-dark", brand.theme.accentDark);
-    const unsubscribe = desktopApi.onUsageProofRequest(setRecordId);
-    return () => {
-      unsubscribe();
-      root.classList.remove("is-native-dialog");
-    };
-  }, []);
+  const native = useNativeGatewayWindow("Usage Proof", Boolean(activity || error));
+  useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
   useEffect(() => {
     let active = true;
     setActivity(undefined);
@@ -483,17 +495,9 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
     );
     return () => { active = false; };
   }, [recordId]);
-  const close = () => {
-    if (previewMode) {
-      setClosed(true);
-    } else {
-      void desktopApi.closeNativeDialog().catch((closeError: unknown) => setError(errorMessage(closeError)));
-    }
-  };
-
-  if (closed) return <main className="native-dialog-host" aria-label="Usage proof closed" />;
-  if (!activity || error) return <NativeDialogStatus label="usage proof" error={error} onClose={close} />;
-  return <main className="native-dialog-host"><UsageEvidenceSheet activity={activity} onClose={close} /></main>;
+  if (native.closed) return <main className="native-dialog-host" aria-label="Usage proof closed" />;
+  if (!activity || error || native.loadError) return <NativeDialogStatus label="usage proof" error={error ?? native.loadError} onClose={native.close} />;
+  return <main className="native-dialog-host"><UsageEvidenceSheet activity={activity} onClose={native.close} /></main>;
 }
 
 function App(): React.JSX.Element {
@@ -1171,16 +1175,15 @@ function PageHeader({
   onToggle(): void;
 }): React.JSX.Element {
   const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
-  const verdict = presentation(state);
   const protectionStarting = busy && !state.configurationVerification;
   return (
     <header className="page-header" data-tauri-drag-region>
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
         <div className="page-protection">
+          {developmentMode && <span className="state state-warning">Dev mode</span>}
           <span className="page-switch-copy">
-            <strong><ProtectionStatus state={state} label={developmentMode ? "Dev mode" : "Protected"} /></strong>
-            <small className={developmentMode ? "is-development" : verdict.tone === "success" ? "is-on" : verdict.tone === "danger" ? "is-error" : undefined}>{running ? "On" : protectionStarting ? "Starting" : "Off"}</small>
+            <strong><ProtectionStatus state={state} label={isProtected(state) ? "Protected" : protectionStarting ? "Starting…" : "Not protected"} /></strong>
           </span>
           <ProtectedControl
             state={state}
@@ -1244,7 +1247,7 @@ function Overview({
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
-  const localAvailable = Boolean(state.proxyUrl) && !state.endpointError;
+  const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
   const recent = protectedNow ? state.activity.slice(0, 5) : [];
   return (
     <div className="overview-page">
@@ -1265,7 +1268,7 @@ function Overview({
         </p>
       )}
       <div className="overview-grid">
-        <OverviewModule title="Local API" status={<StateLabel tone={localAvailable ? "success" : "danger"} icon={localAvailable ? Check : TriangleAlert} text={localAvailable ? "Available" : "Unavailable"} />}>
+        <OverviewModule title="Local API" status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             endpointError={state.endpointError}
@@ -1282,8 +1285,8 @@ function Overview({
         </OverviewModule>
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
           <div className="preview-list">
-            {agents.length === 0 && <EmptyState text="Agent configs unavailable" />}
-            {sortAgents(agents).slice(0, 5).map((agent) => (
+            {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
+            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 5).map((agent) => (
               <AgentRow
                 key={agent.id}
                 agent={agent}
@@ -1336,10 +1339,10 @@ function StatusSurface({
 }): React.JSX.Element {
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
-  const connected = agents.filter((agent) => agent.connected).length;
+  const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
-  const localApiAvailable = Boolean(state.proxyUrl) && !endpointDown;
+  const localApiAvailable = protectedNow && Boolean(state.proxyUrl) && !endpointDown;
   const profileStatus = !activeProfile
     ? "Not configured"
     : activeProfileAvailable
@@ -1357,14 +1360,14 @@ function StatusSurface({
 
       <div className="status-segment status-local">
         <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This Mac</span></div>
-        <div className={`status-fact ${localApiAvailable ? "state-success" : "state-danger"}`}>
-          {localApiAvailable ? <Check size={13} aria-hidden="true" /> : <TriangleAlert size={13} aria-hidden="true" />}
+        <div className={`status-fact ${localApiAvailable ? "state-success" : ""}`}>
+          <span className="dot" aria-hidden="true" />
           <span>Local API {localApiAvailable ? "available" : "unavailable"}</span>
         </div>
-        <div className="status-fact"><SquareTerminal size={13} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} linked</span></div>
-        <div className="status-agent-icons" role="group" aria-label="Linked agents">
-          {agents.filter((agent) => agent.connected).slice(0, 5).map((agent) => (
-            <span className="status-agent-icon" key={agent.id} title={agent.name}>
+        <div className="status-fact"><Bot size={13} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} linked</span></div>
+        <div className="status-agent-icons" role="group" aria-label="Installed agents">
+          {sortAgents(agents.filter((agent) => agent.installed)).sort((a, b) => Number(b.connected) - Number(a.connected)).map((agent) => (
+            <span className={`status-agent-icon${agent.connected ? "" : " is-disconnected"}`} key={agent.id} title={`${agent.name} · ${agent.connected ? "Connected" : "Not connected"}`}>
               {AGENT_ICONS[agent.id] ? <img src={AGENT_ICONS[agent.id]} alt={agent.name} /> : agent.name.slice(0, 1)}
             </span>
           ))}
@@ -1389,11 +1392,11 @@ function StatusSurface({
       </div>
 
       <div className="status-segment status-remote">
-        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
-        <button className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>AI Provider</span></div>
+        <button className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus size={18} aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
-          <ChevronDown size={14} aria-hidden="true" />
+          {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
         </button>
         <div className="status-endpoint" title={activeProfile?.remoteUrl}>{activeProfile?.remoteUrl ?? "No endpoint configured"}</div>
         <button className={`status-fact status-profile-state ${activeProfileAvailable ? "state-success" : "state-warning"}`} aria-haspopup="dialog" onClick={activeProfileAvailable ? onPrivacy : onSettings}>
@@ -1655,10 +1658,10 @@ function AgentsView({
       {problem && <p className="banner" role="alert">{problem}</p>}
       <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
       <section className="group" aria-labelledby="agents-title">
-        <h2 className="group-title" id="agents-title">Configured agents <span>{connected} connected · {active} active</span></h2>
+        <h2 className="group-title" id="agents-title">Installed <span>{connected} connected · {active} active</span></h2>
         <div className="inset">
-          {agents.length === 0 && <EmptyState text="Agent configs unavailable" />}
-          {sortAgents(agents).map((agent) => (
+          {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
+          {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
             <AgentRow
               key={agent.id}
               agent={agent}
@@ -1668,6 +1671,12 @@ function AgentsView({
           ))}
         </div>
       </section>
+      {agents.some((agent) => !agent.installed) && <section className="group" aria-labelledby="not-installed-title">
+        <h2 className="group-title" id="not-installed-title">Not installed</h2>
+        <div className="inset">{sortAgents(agents.filter((agent) => !agent.installed)).map((agent) => (
+          <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
+        ))}</div>
+      </section>}
       <p className="page-footnote">Available models sync automatically from the verified service.</p>
     </div>
   );
@@ -1685,15 +1694,15 @@ function AgentRow({
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
   const name = displayAgentName(agent);
-  const presence = agent.attention
-    ? { label: "Needs attention", tone: "warning" as Tone, icon: TriangleAlert }
-    : agent.error
-      ? { label: "Error", tone: "danger" as Tone, icon: TriangleAlert }
-      : agent.connected
-        ? { label: "Connected", tone: "success" as Tone, icon: ShieldCheck }
-        : agent.installed
-          ? { label: "Not connected", tone: "neutral" as Tone, icon: undefined }
-          : { label: "CLI not found", tone: "neutral" as Tone, icon: undefined };
+  const presence = !agent.installed
+    ? { label: "Not installed", tone: "neutral" as Tone, icon: undefined }
+    : agent.attention
+      ? { label: "Needs attention", tone: "warning" as Tone, icon: TriangleAlert }
+      : agent.error
+        ? { label: "Error", tone: "danger" as Tone, icon: TriangleAlert }
+        : agent.connected
+          ? { label: "Connected", tone: "success" as Tone, icon: ShieldCheck }
+          : { label: "Not connected", tone: "neutral" as Tone, icon: undefined };
   const disconnecting = agent.recorded;
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
@@ -1705,18 +1714,26 @@ function AgentRow({
           <span className="row-title">{name}</span>
           <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />
         </span>
-        <code className="row-note agent-config" title={agent.configPath}>{homePath(agent.configPath)}</code>
+        {agent.installed && <code className="row-note agent-config" title={agent.configPath}>{homePath(agent.configPath)}</code>}
         {note && <p className="row-note">{note}</p>}
       </div>
-      <SwitchControl
+      {agent.installed ? <SwitchControl
         checked={disconnecting}
         compact
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
         onToggle={() => onSelect(!disconnecting)}
-      />
+      /> : <AgentWebsite agent={agent} />}
     </div>
   );
+}
+
+function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
+  const [error, setError] = useState<string>();
+  return <span><button className="button" onClick={() => {
+    setError(undefined);
+    void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => setError(errorMessage(error)));
+  }}>Website<ExternalLink size={14} aria-hidden="true" /></button>{error && <span className="row-note" role="alert">{error}</span>}</span>;
 }
 
 /** Text plus a tone icon, so no state relies on colour alone. */
@@ -2145,7 +2162,7 @@ function SettingsView({
           <div className="row">
             <span className="row-main">
               <span className="row-title">Profiles</span>
-              <span className="row-note">{activeProfile?.name ?? "Profile"} · {serviceHost(state.remoteUrl ?? state.config.remoteUrl)} · {state.status === "verified" && !state.configurationVerification ? "Protected" : state.catalog?.models.length ? "Verified configuration" : activeProfile?.verifiedAt ? "Saved profile" : "Verification required"}</span>
+              <span className="row-note">{activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Verified configuration" : "Verification required"}` : "No provider configured"}</span>
             </span>
             <button type="button" className="button" onClick={() => onOpen("confidential")}><Settings size={15} />Manage…</button>
           </div>
@@ -2206,29 +2223,39 @@ function ProfilesSheet({
     return initialEditorProfileId ? { kind: "edit", profileId: initialEditorProfileId } : undefined;
   });
   const completeEditor = () => setEditor(undefined);
+  const [openError, setOpenError] = useState<string>();
+  const openEditor = (profileId?: string) => {
+    if (previewMode) {
+      setEditor(profileId ? { kind: "edit", profileId } : { kind: "new" });
+      return;
+    }
+    setOpenError(undefined);
+    void desktopApi.openNativeDialog("profile-editor", { profileId }).catch((error: unknown) => setOpenError(errorMessage(error)));
+  };
   return (
     <>
-      {state.profiles.length > 0 && !editor && (
+      {state.profiles.length > 0 && (
         <ProfileListSheet
           state={state}
           busy={busy}
           running={running}
           onActivate={onActivate}
-          onNew={() => setEditor({ kind: "new" })}
-          onEdit={(profileId) => setEditor({ kind: "edit", profileId })}
+          onNew={() => openEditor()}
+          onEdit={openEditor}
+          error={openError}
           onClose={onClose}
         />
       )}
-      {editor && (
+      {(editor || state.profiles.length === 0) && (
         <ProfileEditorSheet
           state={state}
           busy={busy}
           running={running}
-          profile={editor.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
+          profile={editor?.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
           onVerify={onVerify}
           onDelete={onDelete}
           onClearKey={onClearKey}
-          onComplete={onClose}
+          onComplete={state.profiles.length === 0 ? onClose : completeEditor}
           onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
           onClose={state.profiles.length === 0 ? onClose : completeEditor}
         />
@@ -2245,6 +2272,7 @@ function ProfileListSheet({
   onNew,
   onEdit,
   onClose,
+  error: openError,
 }: {
   state: GatewayState;
   busy: boolean;
@@ -2253,9 +2281,10 @@ function ProfileListSheet({
   onNew(): void;
   onEdit(profileId: string): void;
   onClose(): void;
+  error?: string;
 }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
-  const frozen = busy || running;
+  const frozen = busy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
   const [error, setError] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
@@ -2276,10 +2305,6 @@ function ProfileListSheet({
   const select = async (profileId: string) => {
     if (!await activate(profileId)) return;
     onClose();
-  };
-  const edit = async (profileId: string) => {
-    if (!await activate(profileId)) return;
-    onEdit(profileId);
   };
   return (
     <dialog ref={dialog} className="sheet profiles-sheet" aria-label="Profiles">
@@ -2313,13 +2338,13 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </button>
-              <IconButton label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => void edit(profile.id)}><Pencil size={15} /></IconButton>
+              <IconButton label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
             </div>
           );
         })}
       </div>
-      {frozen && <p className="field-note profile-lock-note">Stop protection before switching or editing profiles.</p>}
-      {error && <p className="banner sheet-banner" role="alert">{error}</p>}
+      {running && <p className="field-note profile-lock-note">Switching profiles briefly stops protection and reconnects to the selected provider.</p>}
+      {(error || openError) && <p className="banner sheet-banner" role="alert">{error || openError}</p>}
       <div className="sheet-actions profile-list-actions">
         <button type="button" className="button" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</button>
         <button type="button" className="button" onClick={onClose}>Done</button>
@@ -2351,8 +2376,7 @@ function ProfileEditorSheet({
   onDeleted(): void;
   onClose(): void;
 }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
-  const frozen = busy || running;
+  const frozen = busy;
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
     id: profile?.id ?? `profile-${crypto.randomUUID()}`,
@@ -2362,6 +2386,7 @@ function ProfileEditorSheet({
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const dialog = useModalDialog(onClose, undefined, !saving);
   const [error, setError] = useState<string>();
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
@@ -2442,6 +2467,7 @@ function ProfileEditorSheet({
   return (
     <dialog ref={dialog} className="sheet profile-editor-sheet" aria-label={isNew ? "New profile" : "Edit profile"}>
       <div className="sheet-heading"><h2>{isNew ? "New Profile" : "Edit Profile"}</h2></div>
+      {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form onSubmit={(event) => void submit(event)}>
         <div className="service-presets" role="group" aria-label="Confidential AI provider">
           {SERVICE_PRESETS.map((service) => (
@@ -2465,16 +2491,16 @@ function ProfileEditorSheet({
               <span>{keyLabel}</span>
               <span className="key-field-actions">
                 {verifiedConfiguration && <span className="verified-configuration"><Check size={12} aria-hidden="true" />Verified configuration</span>}
-                {savedCredentialApplies && <button type="button" className="link" onClick={() => void clearKey()} disabled={saving || frozen}>Delete credential</button>}
+                {savedCredentialApplies && profile?.id === state.activeProfileId && <button type="button" className="link" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</button>}
               </span>
             </span>
             <input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
-            <small>{frozen ? "Stop protection before changing or verifying this profile." : verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
+            <small>{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
           </div>
         </div>
         {error && <p className="banner sheet-banner" role="alert">{error}</p>}
         <div className="sheet-actions profile-editor-actions">
-          {!isNew && <button type="button" className="button destructive" disabled={saving || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
+          {!isNew && <button type="button" className="button destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
           <button type="button" className="button" onClick={onClose} disabled={saving}>Cancel</button>
           <button type="submit" className="button primary" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</button>
         </div>
@@ -2513,15 +2539,31 @@ function LocalApiSheet({
   onSave(config: LocalApiConfig): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
   const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
   const [saving, setSaving] = useState(false);
+  const dialog = useModalDialog(onClose, undefined, !saving);
   const [error, setError] = useState<string>();
   const endpoint = localEndpoint(draft) ?? "";
   const openAi = openAiEndpoint(endpoint) ?? "";
   const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }));
     setError(undefined);
+  };
+  const regenerate = async () => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      const confirmed = await desktopApi.confirm({
+        title: "Regenerate client key?",
+        message: "The old client key will stop working immediately. Update your tools with the new key. Connected agents use separate keys and are not affected.",
+        confirmLabel: "Regenerate",
+      });
+      if (confirmed) await onRotate();
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setSaving(false);
+    }
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -2568,7 +2610,7 @@ function LocalApiSheet({
               <input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
               <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
               <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
-              <button type="button" className="button" disabled={frozen || saving} onClick={() => void onRotate()}><RefreshCw size={15} />Generate</button>
+              <button type="button" className="button" disabled={frozen || saving} onClick={() => void regenerate()}><RefreshCw size={15} />Regenerate…</button>
             </div>
             <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</span>
           </div>
@@ -2897,6 +2939,7 @@ if (!root) {
 const nativeDialog = query.get("native-dialog");
 createRoot(root).render(
   nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
+    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
         : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={query.get("record") ?? ""} />

@@ -5,6 +5,7 @@
   "windows": [
     "main",
     "profiles",
+    "profile-editor",
     "privacy",
     "local-api",
     "usage-proof"

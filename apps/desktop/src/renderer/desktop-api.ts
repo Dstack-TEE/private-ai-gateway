@@ -16,6 +16,12 @@ import type {
   UsageQuery,
 } from "../shared/contracts";
 
+declare global {
+  interface Window {
+    __GATEWAY_INITIAL_STATE__?: GatewayState;
+  }
+}
+
 export const desktopApi: DesktopApi = {
   getLaunchPreferences: () => invoke("get_launch_preferences"),
   setLaunchPreference: (name, enabled) => invoke("set_launch_preference", { name, enabled }),
@@ -33,6 +39,11 @@ export const desktopApi: DesktopApi = {
     return invoke("save_local_api_config", { config });
   },
   getState(): Promise<GatewayState> {
+    const initial = window.__GATEWAY_INITIAL_STATE__;
+    if (initial) {
+      delete window.__GATEWAY_INITIAL_STATE__;
+      return Promise.resolve(initial);
+    }
     return invoke("get_gateway_state");
   },
   onStateChange(listener: (state: GatewayState) => void): () => void {
@@ -55,14 +66,17 @@ export const desktopApi: DesktopApi = {
       kind,
       repair: options?.repair ?? false,
       recordId: options?.recordId,
+      profileId: options?.profileId,
     });
   },
   closeNativeDialog(): Promise<void> {
     return invoke("close_native_dialog");
   },
+  nativeDialogReady: () => invoke("native_dialog_ready"),
   openSupport(): Promise<void> {
     return invoke("open_support");
   },
+  openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),
   confirm(options): Promise<boolean> {
     return confirm(options.message, {
       title: options.title,

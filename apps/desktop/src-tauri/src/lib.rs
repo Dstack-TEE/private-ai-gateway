@@ -206,6 +206,22 @@ fn disconnect_all_agents(
 }
 
 #[tauri::command]
+fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = match agent_id.as_str() {
+        "claude-code" => "https://code.claude.com",
+        "codex" => "https://developers.openai.com/codex/cli/",
+        "opencode" => "https://opencode.ai",
+        "pi" => "https://pi.dev",
+        "hermes" => "https://hermes-agent.nousresearch.com",
+        _ => return Err("Unknown agent".to_string()),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| format!("Cannot open the agent website: {error}"))
+}
+
+#[tauri::command]
 fn open_support(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -229,8 +245,20 @@ fn open_native_dialog(
     kind: String,
     repair: bool,
     record_id: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<(), String> {
-    native_dialog::open(&app, &kind, repair, record_id.as_deref())
+    native_dialog::open(
+        &app,
+        &kind,
+        repair,
+        record_id.as_deref(),
+        profile_id.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    native_dialog::ready(&window)
 }
 
 #[tauri::command]
@@ -268,6 +296,8 @@ pub fn run() {
             stop_gateway,
             copy_text,
             open_native_dialog,
+            native_dialog_ready,
+            open_agent_website,
             close_native_dialog,
             query_usage,
             get_usage_record,

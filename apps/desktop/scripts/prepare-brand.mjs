@@ -339,14 +339,15 @@ function composeIconComposerManifest(background) {
 
 function composeTrayTemplate(mark, whiteAsCutout, protectedState) {
   const { width, height } = svgSize(mark);
-  const inset = 1024 * 0.72;
-  const scale = inset / Math.max(width, height);
-  const offsetX = 512 - (width * scale) / 2;
-  const offsetY = 512 - (height * scale) / 2;
+  // An 18pt menu-bar canvas with a 16pt mark, rendered at 1x and 2x.
+  const scale = 16 / Math.max(width, height);
+  const offsetX = 9 - (width * scale) / 2;
+  const offsetY = 9 - (height * scale) / 2;
+  const shield = "M13.5 10 16.8 11.2v2.1c0 1.8-1.2 3.1-3.3 4.1-2.1-1-3.3-2.3-3.3-4.1v-2.1Z";
   const badge = protectedState
-    ? `<defs><mask id="protected-badge"><path d="M512 64 896 208v248c0 240-154 399-384 504C282 855 128 696 128 456V208L512 64Z" fill="white"/><path d="m326 486 116 116 246-258" fill="none" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="78"/></mask></defs><path d="M512 64 896 208v248c0 240-154 399-384 504C282 855 128 696 128 456V208L512 64Z" fill="black" mask="url(#protected-badge)" transform="translate(686 680) scale(.29)"/>`
+    ? `<defs><mask id="tray-mark-clearance"><rect width="18" height="18" fill="white"/><path d="${shield}" fill="black" stroke="black" stroke-width="1.5"/></mask><mask id="protected-badge"><rect width="18" height="18" fill="white"/><path d="m11.8 13.4 1.2 1.2 2.3-2.4" fill="none" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width=".9"/></mask></defs><path d="${shield}" fill="black" mask="url(#protected-badge)"/>`
     : "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})">${markContent(mark, whiteAsCutout)}</g>${badge}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><g${protectedState ? ' mask="url(#tray-mark-clearance)"' : ""}><svg x="${offsetX.toFixed(4)}" y="${offsetY.toFixed(4)}" width="${(width * scale).toFixed(4)}" height="${(height * scale).toFixed(4)}" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg></g>${badge}</svg>`;
 }
 
 function iconComposerColor(hex) {

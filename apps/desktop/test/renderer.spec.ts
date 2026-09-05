@@ -65,7 +65,7 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
 
 });
 
-test("Profiles renders as one native child-window surface", async ({ page }) => {
+test("Profiles keeps its list underneath the profile editor", async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 560 });
   await page.goto("/?mock=no-key&native-dialog=profiles");
 
@@ -76,16 +76,22 @@ test("Profiles renders as one native child-window surface", async ({ page }) => 
   expect(box).toEqual({ x: 0, y: 0, width: 620, height: 560 });
 
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
-  await expect(profiles).toHaveCount(0);
+  await expect(page.locator(".profiles-sheet")).toHaveCount(1);
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
-  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(page.locator("dialog[open]")).toHaveCount(2);
   await editor.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("dialog", { name: "Profiles" })).toBeVisible();
 });
 
 test("complex dialogs render as native child-window surfaces", async ({ page }) => {
   const cases = [
+    {
+      size: { width: 580, height: 510 },
+      path: "/?mock=ready&native-dialog=profile-editor",
+      name: "New profile",
+      text: "Verify and Save",
+    },
     {
       size: { width: 700, height: 680 },
       path: "/?mock=ready&native-dialog=privacy",
@@ -114,6 +120,19 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(dialog).toContainText(entry.text);
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
   }
+});
+
+test("regenerating the client key requires an explicit native confirmation", async ({ page }) => {
+  await page.goto("/?mock=interactive&native-dialog=local-api");
+  const key = page.getByLabel("Client key", { exact: true });
+  await expect(key).not.toHaveValue("");
+  const original = await key.inputValue();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Regenerate…" }).click();
+  await expect(key).toHaveValue(original);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Regenerate…" }).click();
+  await expect(key).not.toHaveValue(original);
 });
 
 test("protection flow, page headers, and focus follow the native desktop contract", async ({ page }) => {
@@ -358,7 +377,7 @@ test("overview presents local availability and the active profile without sessio
   const status = page.getByLabel("Protection status");
   await expect(status.getByText("Local API available", { exact: true })).toBeVisible();
   await expect(status.getByText("1 agent linked", { exact: true })).toBeVisible();
-  await expect(status.getByText("Confidential AI", { exact: true })).toBeVisible();
+  await expect(status.getByText("AI Provider", { exact: true })).toBeVisible();
   await expect(status.getByRole("button", { name: "Profiles: RedPill" })).toBeVisible();
   await expect(status.locator(".status-endpoint")).toHaveText("https://tee.redpill.ai");
   await expect(status.locator(".protection-duration")).toHaveText(/00:10:\d{2}/);
@@ -384,6 +403,56 @@ test("overview presents local availability and the active profile without sessio
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
   await expect(editor.getByLabel("RedPill API key")).toBeVisible();
+});
+
+test("installed agents stay ordered and protection state is consistent across pages", async ({ page }) => {
+  await page.goto("/?mock=mixed-agents");
+  await expect(page.locator(".status-agent-icon")).toHaveCount(4);
+  await expect(page.locator(".status-agent-icon.is-disconnected")).toHaveCount(3);
+  const preview = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
+  await expect(preview.locator(".agent-block")).toHaveCount(4);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const installed = page.getByRole("region", { name: /^Installed/ });
+  const order = await installed.locator(".row-title").allTextContents();
+  await installed.getByRole("switch", { name: "Connect Codex" }).click();
+  await expect(installed.locator(".row-title")).toHaveText(order);
+  const absent = page.getByRole("region", { name: "Not installed" });
+  await expect(absent.getByRole("switch")).toHaveCount(0);
+  await expect(absent.getByRole("button", { name: "Website" })).toBeVisible();
+  const header = page.locator(".page-header");
+  await expect(header.getByText("Protected", { exact: true })).toBeVisible();
+  const label = await header.locator(".protection-status > span").boundingBox();
+  const timer = await header.locator(".protection-duration").boundingBox();
+  expect(label && timer && timer.y >= label.y + label.height).toBeTruthy();
+  await header.getByRole("switch", { name: "Stop protection" }).click();
+  await expect(header.getByText("Not protected", { exact: true })).toBeVisible();
+  await expect(header.locator(".protection-duration")).toHaveCount(0);
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await expect(page.getByText("Local API unavailable", { exact: true })).toBeVisible();
+});
+
+test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor.getByLabel("RedPill API key")).toBeEnabled();
+  await expect(editor.getByText(/Saving briefly stops protection/)).toBeVisible();
+  await editor.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(profiles).toBeVisible();
+  await profiles.getByRole("button", { name: "New Profile" }).click();
+  const candidate = page.getByRole("dialog", { name: "New profile" });
+  await expect(candidate.getByText(/Saving briefly stops protection/)).toBeVisible();
+  await candidate.getByRole("button", { name: "Custom", exact: true }).click();
+  await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
+  await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
+  await candidate.getByRole("button", { name: "Verify and Save" }).click();
+  await expect(candidate.getByRole("alert")).toContainText("did not answer");
+  await candidate.getByRole("button", { name: "Cancel" }).click();
+  await expect(profiles.locator(".profile-select")).toHaveCount(1);
+  await profiles.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
 });
 
 test("a native proof error remains dismissible without a window close button", async ({ page }) => {
@@ -469,11 +538,9 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByLabel("API key").fill("sk-profile-test");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
-  await expect(profiles).toHaveCount(0);
-  await page.getByRole("button", { name: "Manage…" }).click();
+  await expect(profiles).toBeVisible();
   const reopenedProfiles = page.getByRole("dialog", { name: "Profiles" });
   await expect(reopenedProfiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
   await reopenedProfiles.locator(".profile-select", { hasText: "RedPill" }).click();
   await expect(reopenedProfiles).toHaveCount(0);
   await page.getByRole("button", { name: "Manage…" }).click();

@@ -1,13 +1,15 @@
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const PROFILES_LABEL: &str = "profiles";
+const PROFILE_EDITOR_LABEL: &str = "profile-editor";
 const PRIVACY_LABEL: &str = "privacy";
 const LOCAL_API_LABEL: &str = "local-api";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
-const DIALOG_LABELS: [&str; 4] = [
+const DIALOG_LABELS: [&str; 5] = [
     PROFILES_LABEL,
+    PROFILE_EDITOR_LABEL,
     PRIVACY_LABEL,
     LOCAL_API_LABEL,
     USAGE_PROOF_LABEL,
@@ -28,8 +30,28 @@ pub fn open(
     kind: &str,
     repair: bool,
     record_id: Option<&str>,
+    profile_id: Option<&str>,
 ) -> Result<(), String> {
+    if profile_id.is_some_and(|id| id.len() > 128 || id.chars().any(char::is_control)) {
+        return Err("Invalid profile identifier".to_string());
+    }
     let spec = match kind {
+        "profile-editor" => DialogSpec {
+            label: PROFILE_EDITOR_LABEL,
+            title: if profile_id.is_some() {
+                "Edit Profile"
+            } else {
+                "New Profile"
+            },
+            width: 580.0,
+            height: 510.0,
+            min_width: 520.0,
+            min_height: 460.0,
+            query: format!(
+                "index.html?native-dialog=profile-editor&profile={}",
+                encode_query_component(profile_id.unwrap_or_default())
+            ),
+        },
         "profiles" => DialogSpec {
             label: PROFILES_LABEL,
             title: "Profiles",
@@ -86,13 +108,11 @@ pub fn open(
 
     // A document can present one modal sheet at a time. Keep a second tray or
     // menu action from creating an invisible queued dialog.
-    #[cfg(target_os = "macos")]
-    for label in DIALOG_LABELS
-        .into_iter()
-        .filter(|label| *label != spec.label)
-    {
+    for label in DIALOG_LABELS.into_iter().filter(|label| {
+        *label != spec.label && !(spec.label == PROFILE_EDITOR_LABEL && *label == PROFILES_LABEL)
+    }) {
         if let Some(window) = app.get_webview_window(label) {
-            return window.set_focus().map_err(window_error);
+            return focus_if_visible(&window);
         }
     }
 
@@ -106,17 +126,29 @@ pub fn open(
                 .emit(USAGE_PROOF_EVENT, record_id)
                 .map_err(window_error)?;
         }
-        #[cfg(not(target_os = "macos"))]
-        window.show().map_err(window_error)?;
-        window.set_focus().map_err(window_error)?;
-        return Ok(());
+        return focus_if_visible(&window);
     }
 
     let main = app
-        .get_webview_window("main")
+        .get_webview_window(
+            if spec.label == PROFILE_EDITOR_LABEL
+                && app.get_webview_window(PROFILES_LABEL).is_some()
+            {
+                PROFILES_LABEL
+            } else {
+                "main"
+            },
+        )
         .ok_or_else(|| "The main window is unavailable".to_string())?;
+    let state = app
+        .state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+        .state()?;
+    let initial_state = serde_json::to_string(&state).map_err(window_error)?;
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
+            .initialization_script(format!(
+                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};"
+            ))
             .title(spec.title)
             .inner_size(spec.width, spec.height)
             .min_inner_size(spec.min_width, spec.min_height)
@@ -124,24 +156,20 @@ pub fn open(
             .resizable(true)
             .maximizable(false)
             .minimizable(false)
-            .skip_taskbar(true);
+            .skip_taskbar(true)
+            .visible(false);
     builder = match centered_position(&main, spec.width, spec.height) {
         Some((x, y)) => builder.position(x, y),
         None => builder.center(),
     };
     #[cfg(target_os = "macos")]
     {
-        let window = builder
-            .visible(false)
+        builder
             .closable(false)
             .hidden_title(true)
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .build()
             .map_err(window_error)?;
-        if let Err(error) = macos::present(main, window.clone()) {
-            let _ = window.destroy();
-            return Err(error);
-        }
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
@@ -151,12 +179,50 @@ pub fn open(
             .map_err(window_error)?
             .build()
             .map_err(window_error)?;
-        window.set_focus().map_err(window_error)
+        window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Err(error) = main.set_enabled(true).and_then(|_| main.set_focus()) {
+                    eprintln!("Cannot restore the dialog parent: {error}");
+                }
+            }
+        });
+        Ok(())
     }
 }
 
 pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
-    open(app, "profiles", repair, None)
+    open(app, "profiles", repair, None, None)
+}
+
+fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.is_visible().map_err(window_error)? {
+        window.set_focus().map_err(window_error)?;
+    }
+    Ok(())
+}
+
+pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if !DIALOG_LABELS.contains(&window.label()) {
+        return Err("Only native dialogs can present themselves".to_string());
+    }
+    let app = window.app_handle();
+    let parent = if window.label() == PROFILE_EDITOR_LABEL {
+        app.get_webview_window(PROFILES_LABEL)
+            .or_else(|| app.get_webview_window("main"))
+    } else {
+        app.get_webview_window("main")
+    }
+    .ok_or("The parent window is unavailable")?;
+    #[cfg(target_os = "macos")]
+    {
+        macos::present(parent, window.clone())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.show().map_err(window_error)?;
+        window.set_focus().map_err(window_error)?;
+        parent.set_enabled(false).map_err(window_error)
+    }
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -185,6 +251,9 @@ mod macos {
         on_main(&dispatcher, move || {
             let parent = native(&parent)?;
             let sheet = native(&window)?;
+            if sheet.sheetParent().is_some() {
+                return Ok(());
+            }
             for kind in [
                 NSWindowButton::CloseButton,
                 NSWindowButton::MiniaturizeButton,
