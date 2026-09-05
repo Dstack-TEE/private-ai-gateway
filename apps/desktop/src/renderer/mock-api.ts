@@ -17,6 +17,7 @@ import type {
  * browser test without a backend.
  */
 export type MockScenario =
+  | "configuration-verifying"
   | "ready"
   | "no-profiles"
   | "no-key"
@@ -241,6 +242,8 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
         state: { ...BASE, status: "verifying", progress: "Reading the verified model list", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS },
         agents: STOPPED_AGENTS,
       };
+    case "configuration-verifying":
+      return { state: { ...BASE, status: "verifying", configurationVerification: true }, agents: STOPPED_AGENTS };
     case "error":
       return {
         state: { ...BASE, status: "error", remoteUrl: BASE.config.remoteUrl, error: "Cannot read the verified model list: The verified gateway did not answer the model list request" },
@@ -301,7 +304,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 }
 
 export function mockApi(name: string | null): DesktopApi {
-  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
+  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
@@ -484,6 +487,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     queryUsage: async (query: UsageQuery) => {
+      if (name === "usage-query-error" && query.model) throw new Error("Usage database temporarily unavailable");
       const filtered = history.filter((item) =>
         (!query.agent || item.agent === query.agent)
         && (!query.model || item.model === query.model)
@@ -523,7 +527,7 @@ export function mockApi(name: string | null): DesktopApi {
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([day, point]) => ({ day, ...point })),
         agents: ["claude-code", "codex", "opencode", "pi", "hermes"],
-        models: CATALOG.models.map((model) => model.id),
+        models: Array.from(new Set(history.flatMap((record) => record.model ? [record.model] : []))),
       };
     },
     getUsageRecord: async (recordId) => {

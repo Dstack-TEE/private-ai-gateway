@@ -884,6 +884,10 @@ impl DesktopRuntime {
     }
 
     pub fn rotate_client_key(&self) -> Result<String, String> {
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
         let token = self.credentials.rotate()?;
@@ -1009,6 +1013,12 @@ impl DesktopRuntime {
                 self.report_error(error);
             }
         }
+        // Publish the scan under the same lock as connect/disconnect and key
+        // rotation, so an older scan cannot restore revoked credentials.
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
@@ -1223,6 +1233,71 @@ mod tests {
         }
     }
 
+    fn test_runtime(
+        executor: &tokio::runtime::Runtime,
+        directory: &std::path::Path,
+    ) -> Arc<DesktopRuntime> {
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        let proxy = ProxyState::new(events);
+        let usage = Arc::new(UsageStore::memory().unwrap());
+        let manager = Arc::new(GatewayManager::new(
+            proxy.clone(),
+            usage.clone(),
+            Arc::new(NoSidecar),
+            executor.handle().clone(),
+            GatewayState::default(),
+        ));
+        Arc::new(DesktopRuntime {
+            manager,
+            proxy,
+            usage,
+            secrets: Arc::new(KeyringStore),
+            credentials: ClientCredentials(Mutex::new(TokenFiles::new(directory))),
+            legacy_credential_pending: Mutex::new(false),
+            endpoint: EndpointRuntime::new(executor.handle().clone()),
+            codex_sync: CodexCatalogSync::default(),
+            agent_policy: Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::new(()),
+            helper_path: directory.join("helper"),
+            instance: None,
+        })
+    }
+
+    #[test]
+    fn client_key_rotation_preserves_agent_tokens_and_fails_closed() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        let original = runtime.client_key().unwrap();
+        let mut tokens = TokenSet::default();
+        tokens.insert(original.clone(), LOCAL_TOOLS_AGENT.to_string());
+        tokens.insert("agent-token".to_string(), "codex".to_string());
+        runtime.proxy.set_tokens(tokens);
+
+        let rotated = runtime.rotate_client_key().unwrap();
+        assert_ne!(rotated, original);
+        assert_eq!(runtime.client_key().unwrap(), rotated);
+        assert_eq!(runtime.proxy.tokens().agent_for(&original), None);
+        assert_eq!(
+            runtime.proxy.tokens().agent_for(&rotated),
+            Some(LOCAL_TOOLS_AGENT)
+        );
+        assert_eq!(
+            runtime.proxy.tokens().agent_for("agent-token"),
+            Some("codex")
+        );
+
+        let token_path = TokenFiles::new(directory.path()).path(LOCAL_TOOLS_AGENT);
+        std::fs::remove_file(&token_path).unwrap();
+        std::fs::create_dir(&token_path).unwrap();
+        assert!(runtime.rotate_client_key().is_err());
+        assert_eq!(runtime.proxy.tokens().agent_for(&rotated), None);
+        assert_eq!(
+            runtime.proxy.tokens().agent_for("agent-token"),
+            Some("codex")
+        );
+    }
+
     #[test]
     fn occupied_listener_restores_previous_endpoint_and_serializes_mutations() {
         let executor = tokio::runtime::Runtime::new().unwrap();
@@ -1235,34 +1310,10 @@ mod tests {
                 ..LocalApiConfig::default()
             };
             let original = local_api::resolve(config.clone()).unwrap();
-            let (events, _) = tokio::sync::mpsc::channel(8);
-            let proxy = ProxyState::new(events);
-            let usage = Arc::new(UsageStore::memory().unwrap());
-            let manager = Arc::new(GatewayManager::new(
-                proxy.clone(),
-                usage.clone(),
-                Arc::new(NoSidecar),
-                executor.handle().clone(),
-                GatewayState {
-                    local_api: config.clone(),
-                    ..GatewayState::default()
-                },
-            ));
-            manager.set_endpoint(config.clone(), Ok(original.endpoint.clone()));
-            let runtime = Arc::new(DesktopRuntime {
-                manager,
-                proxy,
-                usage,
-                secrets: Arc::new(KeyringStore),
-                credentials: ClientCredentials(Mutex::new(TokenFiles::new(temp.path()))),
-                legacy_credential_pending: Mutex::new(false),
-                endpoint: EndpointRuntime::new(executor.handle().clone()),
-                codex_sync: CodexCatalogSync::default(),
-                agent_policy: Mutex::new(()),
-                lifecycle: tokio::sync::Mutex::new(()),
-                helper_path: temp.path().join("helper"),
-                instance: None,
-            });
+            let runtime = test_runtime(&executor, temp.path());
+            runtime
+                .manager
+                .set_endpoint(config.clone(), Ok(original.endpoint.clone()));
             runtime
                 .endpoint
                 .start(

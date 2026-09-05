@@ -182,7 +182,15 @@ impl ProxyState {
     }
 
     pub fn set_tokens(&self, tokens: TokenSet) {
-        write(&self.credentials).tokens = tokens;
+        {
+            let mut credentials = write(&self.credentials);
+            // Periodic reconciliation republishes the same set. It must not
+            // revoke valid requests unless a credential actually changed.
+            if credentials.tokens == tokens {
+                return;
+            }
+            credentials.tokens = tokens;
+        }
         self.credential_epoch.fetch_add(1, Ordering::SeqCst);
         self.revoke_deliveries();
     }
@@ -1730,6 +1738,38 @@ mod tests {
                 .as_u16(),
             200
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_agent_scan_does_not_cancel_an_admitted_request() {
+        let (state, _events) = state();
+        state.set_tokens(tokens());
+        let sidecar = mock_sidecar().await;
+        verified(&state, &sidecar, 1, 1).await;
+        state.set_api_key(Some("sk-real".to_string()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *state.pause.lock().unwrap() = Some((reached.clone(), resume.clone()));
+        let proxy = spawn(router(state.clone())).await;
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{proxy}/v1/chat/completions"))
+                .bearer_auth("opencode-token")
+                .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached.notified())
+            .await
+            .unwrap();
+        state.set_tokens(tokens());
+        resume.notify_one();
+        let response = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// A revocation that lands after the final checks but before the send

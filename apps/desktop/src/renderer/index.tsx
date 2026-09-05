@@ -338,9 +338,12 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
+  const editingProfileId = query.get("profile");
+  const editingProfile = native.state.profiles.find((profile) => profile.id === editingProfileId);
+  if (editor && editingProfileId && !editingProfile) return <NativeDialogStatus label="profile" error="This profile is no longer available." onClose={native.close} />;
   if (editor) return <main className="native-dialog-host"><ProfileEditorSheet
     state={native.state} busy={busy} running={running}
-    profile={native.state.profiles.find((profile) => profile.id === query.get("profile"))}
+    profile={editingProfile}
     onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
     onClearKey={() => run(() => desktopApi.clearApiKey())}
@@ -1467,7 +1470,7 @@ function ProtectedControl({
   const protectionStarting = busy && !state.configurationVerification;
   const checked = running || protectionStarting;
   const label = busy
-    ? state.configurationVerification ? "Cancel configuration verification" : "Cancel protection start"
+    ? state.configurationVerification ? "Verifying configuration" : "Cancel protection start"
     : running ? "Stop protection" : "Start protection";
   return (
     <div className={`protected-control ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only" : ""}`}>
@@ -1477,7 +1480,7 @@ function ProtectedControl({
         size="default"
         checked={checked}
         label={label}
-        disabled={endpointDown && !checked}
+        disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
         title={endpointDown && !checked ? state.endpointError : label}
         developmentMode={developmentMode}
         onToggle={onToggle}
@@ -1768,6 +1771,7 @@ function UsageView({
       }
     } catch (loadError) {
       if (generation === requestGeneration.current) {
+        setPage(undefined);
         setError(errorMessage(loadError));
       }
     } finally {
@@ -1786,9 +1790,11 @@ function UsageView({
     setCursors([undefined]);
   };
   const agentOptions = Array.from(new Set([
+    ...(agent ? [agent] : []),
     ...agents.map((entry) => entry.id),
     ...(page?.agents ?? []),
   ]));
+  const modelOptions = Array.from(new Set([...(model ? [model] : []), ...(page?.models ?? [])]));
   const exportCsv = async () => {
     try {
       const path = query.has("mock")
@@ -1823,7 +1829,7 @@ function UsageView({
       {(problem || error) && <Alert variant="destructive"><AlertDescription>{problem ?? error}</AlertDescription></Alert>}
       <div className="usage-toolbar" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><NativeSelect id="usage-agent" value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></Field>
-        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{page?.models.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
+        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{modelOptions.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
         <fieldset className="filter-field time-filter">
           <legend>Time</legend>
           <ToggleGroup className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
@@ -1841,12 +1847,12 @@ function UsageView({
       <UsageStats page={page} />
       <section className="group usage-over-time" aria-labelledby="usage-chart-title">
         <h2 className="group-title" id="usage-chart-title">Usage over time <span>{rangeLabel(range)}</span></h2>
-        <UsageChart page={page} range={range} metric={metric} onMetric={setMetric} />
+        <UsageChart page={page} loading={loading} range={range} metric={metric} onMetric={setMetric} />
       </section>
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
           Usage history
-          <span aria-live="polite">{loading ? "Loading" : `${page?.summary.requests ?? 0} records · kept on this Mac`}</span>
+          <span aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</span>
           <span className="group-actions">
             <IconButton label="Export usage as CSV" onClick={() => void exportCsv()}><Download size={16} /></IconButton>
             <IconButton label="Clear usage history" onClick={() => void clear()}><Trash2 size={16} /></IconButton>
@@ -1897,20 +1903,23 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const forwarded = Math.max(0, (summary?.requests ?? 0) - (summary?.blockedLocally ?? 0));
   const protectedRate = forwarded ? (summary?.protected ?? 0) / forwarded : 0;
   const failedOrRejected = (summary?.blockedLocally ?? 0) + (summary?.failedProof ?? 0);
-  return <div className="usage-stats"><div><span>Requests</span><strong>{(summary?.requests ?? 0).toLocaleString()}</strong><small>{failedOrRejected.toLocaleString()} failed or rejected</small></div><div><span>Tokens</span><strong>{formatTokens(totalTokens)}</strong><small>{formatTokens(summary?.inputTokens ?? 0)} in · {formatTokens(summary?.outputTokens ?? 0)} out</small></div><div><span>Cost</span><strong>{currency(summary?.costUsd ?? 0)}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary?.protected ?? 0} of {forwarded} answers</small></div></div>;
+  return <div className="usage-stats"><div><span>Requests</span><strong>{summary ? summary.requests.toLocaleString() : "—"}</strong><small>{summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"}</small></div><div><span>Tokens</span><strong>{summary ? formatTokens(totalTokens) : "—"}</strong><small>{summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"}</small></div><div><span>Cost</span><strong>{summary ? currency(summary.costUsd) : "—"}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary ? `${summary.protected} of ${forwarded} answers` : "—"}</small></div></div>;
 }
 
 function UsageChart({
   page,
+  loading,
   range,
   metric,
   onMetric,
 }: {
   page?: UsagePage;
+  loading: boolean;
   range: string;
   metric: UsageMetric;
   onMetric(metric: UsageMetric): void;
 }): React.JSX.Element {
+  if (!page) return <figure className="usage-chart" aria-busy={loading}><EmptyState text={loading ? "Loading usage…" : "Usage data unavailable."} /></figure>;
   const series = completeDailySeries(page?.series ?? [], range).slice(-30);
   const value = (point: UsagePage["series"][number]) => metric === "tokens" ? point.tokens : metric === "cost" ? point.costUsd : point.requests;
   const peak = Math.max(1, ...series.map(value));
@@ -2489,7 +2498,7 @@ function LocalApiSheet({
     try {
       const confirmed = await desktopApi.confirm({
         title: "Rotate local API key?",
-        message: "The old client key will stop working immediately. Update your tools with the new key. Connected agents use separate keys and are not affected.",
+        message: "The old client key will stop working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate key",
       });
       if (confirmed) await onRotate();
@@ -2529,7 +2538,7 @@ function LocalApiSheet({
               <Input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
             <div className="flex flex-wrap items-center gap-2">
               <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
-              <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
+              <IconButton label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
               <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw size={15} />Rotate key</Button>
             </div>
             <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>

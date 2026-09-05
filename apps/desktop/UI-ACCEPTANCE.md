@@ -1,84 +1,65 @@
-# Desktop UI Acceptance Audit
+# Desktop Acceptance Audit
 
-Audited September 5, 2026 against `62a1bf5` plus the local corrections below.
-Renderer tests use mock runtime data in Chromium; they do not validate AppKit,
-WKWebView, native menu actions, or the installed release. A passing build is not
-visual acceptance. The previous statement that all 18 requests were complete
-was not supported by the verification performed.
+Baseline: `9e528c6`, plus the fixes documented below. This is an evidence ledger,
+not a claim of complete product, platform or accessibility certification.
+Renderer tests exercise the real components against a mock bridge; gateway and
+runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 
-| Request | Current evidence | Remaining acceptance |
+## Confirmed Corrections
+
+1. Periodic Agent reconciliation previously republished unchanged token sets and
+   cancelled admitted requests. Identical sets now leave the credential epoch
+   and cancellation gate untouched. Actual revocations still cancel delivery.
+2. Agent list scans and client-key rotation now use the same policy lock as
+   connect/disconnect, preventing stale token snapshots from restoring access.
+3. Client-key rotation retains revoke-first behavior on storage failure. Other
+   agent credentials remain unchanged, but the confirmation now correctly warns
+   that in-flight requests can be interrupted by a credential mutation.
+4. Configuration-only verification disables the protection switch instead of
+   offering cancellation that the backend lifecycle transaction cannot perform.
+5. A native editor for a deleted/nonexistent profile displays a dismissible error
+   instead of silently becoming a New Profile form.
+6. Failed usage queries clear stale results and show unknown totals, not results
+   from previous filters. Selected agent/model labels survive empty facets after
+   clearing history. Charts do not invent zero usage when a query failed.
+
+## Workflow Coverage
+
+| Workflow | Automated evidence | Remaining acceptance |
 | --- | --- | --- |
-| 1. Connected count only | Renderer counts installed connected agents; no active count | None identified in renderer |
-| 2. Same header status | Fixed: PageHeader now uses the same presentation function as Overview, including blocked/error states | Native rendering |
-| 3. Last-row spacing | Both status columns add 6px before their last row | Original screenshot intent was not confirmed |
-| 4. Wider profile selector | Width is 152px, bounded by its parent | User visual acceptance |
-| 5. Verified text plus info | Info appears only for live hardware verification | None identified in renderer |
-| 6. Agent name/status alignment | Shared row uses centered flex alignment; regression checks centers | Long names and native font rendering |
-| 7. Inactive tray gray, no badge | Single template asset; inactive alpha is 45%; no badge asset | Actual macOS menu-bar appearance in light/dark modes |
-| 8. Expanded tray menu | Native code includes endpoint/key copy, profiles, agents, elapsed time | Clipboard, profile reconnect, agent toggles and error handling need native interaction testing; browser menu is stale |
-| 9. Proof layouts | Shared proof layout; fixed clipped identity hashes to wrap fully | Native viewport and realistic long evidence |
-| 10. Muted inactive/verifying | Follow-up found the neutral CSS rule was missing; now explicitly uses the neutral color token with computed-color assertions | Native rendering |
-| 11. Overview mark/spacing | Mark 38px; switch top margin 9px | User visual acceptance |
-| 12. Four preview rows/window fit | Both lists capped at four; default window 1052x784; mock content fits | Native fonts, longer agent attention messages |
-| 13. About links | Documentation points to the gateway quickstart; GitHub opens its source repository | Desktop-specific onboarding documentation remains limited |
-| 14. Unified Settings group | General includes startup, Profiles and Local API; configuration rows clickable | None identified in renderer |
-| 15. Equal module spacing | Overview top/inter-row spacing both 28px | Native visual acceptance |
-| 16. Nonselectable chrome | Body disables selection; inputs and evidence opt back in | Native selection behavior |
-| 17. Agents bot icon | Sidebar and Overview use Bot | None identified in renderer |
-| 18. Agents description width | Dedicated page-intro width cap removed | None identified in renderer |
+| First launch | No-profile opens New Profile; first provider preset, validation and failed-save behavior | Real credential permission prompts |
+| Profiles | Presets, scoped keys, verify/save without starting protection, switching, deletion, child dialogs, stale editors | Native sheets and OS credential failures |
+| Protection | Verified identity, fail-closed states, startup cancellation, configuration lockout, session clock | Real provider verification and disconnects |
+| Agent configuration | Five integrations, verified model discovery, drift detection, uninstall, restore/retry, persistent links | Actual CLI sessions with installed versions |
+| Admission/revocation | Local HTTP tests: credentials revoked during body/read/send boundaries; unchanged token reconciliation does not cancel delivery | Long sessions on each target OS |
+| Local API | Endpoint validation, occupied-port rollback, rebind serialization, network opt-in, client-key rotation and failure revocation | Real macOS/Windows network permissions |
+| Usage | SQLite reopen/persistence, filters, cursor pagination, legacy IDs, full session totals, empty days, CSV safety, explicit clearing | Sustained real traffic and disk exhaustion |
+| Proof | Event merging preserves receipt results and usage; forwarded failures distinguished from local rejections | Real signed receipts from each supported provider |
+| Updates | Standard Tauri updater and SemVer libraries; channel isolation, persistence, automatic checks, offline retry, missing-feed state, confirmation | Installed-version upgrade/restart and rollback acceptance |
+| Settings | Grouped shadcn Item/Field composition, Advanced channel selector, independent local version display | WKWebView font/rendering acceptance |
+| Navigation/dialogs | Keyboard navigation, nested dialogs, focus return, no transient loading frame, Profile opens dialog | VoiceOver and native window focus |
+| Layout | Four Overview rows, bounded widths down to 320px, 200% zoom, dark/high-contrast/reduced-motion checks | Human visual approval on macOS |
+| Tray/startup/quit | Native code uses shared runtime operations; runtime enforces projection only while connected and protected | Native tray interactions, login launch and quit recovery |
 
-## Corrections In This Audit
+## Verification
 
-- Removed independent PageHeader status wording/tone; blocked state is checked
-  across Agents, Usage and Settings in the existing fail-closed regression.
-- Removed single-line truncation of privacy identity values; the existing dialog
-  regression checks wrapping and horizontal bounds.
-- App/Dock icons, branding and native packaging configuration are unchanged.
+- Renderer: 22 tests passed.
+- Gateway: 45 tests passed; one OS keyring integration test intentionally ignored.
+- Runtime: 18 tests passed.
+- Release tooling: 4 tests passed.
+- No provider secrets or production traffic were used for these checks.
+- The paused-delivery regression uses notifications, not timing guesses, to
+  exercise a reconciliation between admission and upstream send.
 
-## Follow-up Corrections
+## Release Boundaries
 
-- Added the missing neutral color rule; changing only the state class had not
-  changed the rendered headline color.
-- Removed the Overview provider endpoint line as requested.
-- Preserved the row separator on clickable list rows instead of resetting all
-  borders. Browser checks cover both the General and About groups.
-- Moved update checks/install actions into the version control in About's first
-  row; progress, errors and install confirmation remain available.
-- Added manual agent detection to the Agents page header using the existing scan
-  path, loading state and error handling.
-- Added `core:window:allow-internal-toggle-maximize`. The installed Tauri 2.11.5
-  drag script invokes this separately from `start_dragging` on macOS mouseup;
-  no custom drag or double-click handler was added. Native behavior still needs
-  testing in a newly packaged app.
-
-Verification: TypeScript check and all 18 renderer tests pass. An agent-browser
-check at 1100x900 found no Overview content overflow, equal status heading top
-coordinates, and no Settings row horizontal overflow. Screenshot capture worked,
-but image inspection was unavailable; this is not pixel-level visual acceptance.
-
-## Release Gate
-
-Additional follow-up corrections:
-
-- Brand marks now use direct vector path paint and an even-odd clip for the eye,
-  with no tint filter or mask. The macOS mark layer has no material blur,
-  translucency, specular effect or shadow. Source logo geometry is preserved.
-- The native tray separates status (including elapsed time) from explicit Start,
-  Stop and Cancel actions. It no longer presents a checkmark labelled Protected.
-- Configuration-only verification does not make the tray choose Stop. Its next
-  action starts protection. While the profile save transaction is verifying,
-  the action is disabled; only protection startup verification can be cancelled.
-  Native operations use the existing runtime controller
-  on a worker thread rather than performing lifecycle work on the menu thread.
-- The browser tray no longer draws a switch that the native menu does not have;
-  it remains a limited preview, not an acceptance test for native submenus.
-
-Still not release-complete: these version-0.1.0 test packages do not configure the
-updater endpoint (the workflow requires an explicit release version). Publishing
-an update channel and validating Windows distribution signing are separate from
-Apple notarization. No full HIG or VoiceOver compliance claim is justified.
-
-Do not label this audit as full product acceptance or present the previous
-download as containing these local corrections. Native tray interactions and
-WKWebView dialog appearance still need macOS verification. The browser tray mock
-must not be used as evidence for the native menu contract.
+- The official shadcn Luma components and approved dstack primary colors remain
+  unchanged. Product-specific layouts compose those primitives.
+- Profile selection is a dialog workflow, not an inline menu/Select replacement.
+- Beta and stable have separate feeds. Draft artifacts do not imply a published
+  feed; an unpublished channel is explicitly shown as such in the client.
+- No stable release or update-channel advancement is authorized by this audit.
+- Windows update signatures are not Authenticode distribution signing.
+- macOS signing/notarization of an earlier build is not acceptance of subsequent
+  UI or runtime edits. New native builds and human inspection remain necessary.
+- The browser tray is a limited preview, not evidence for native menu behavior.

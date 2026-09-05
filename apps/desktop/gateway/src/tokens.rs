@@ -141,7 +141,7 @@ impl TokenFiles {
 }
 
 /// Issued tokens mapped to the agent they authenticate.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TokenSet(HashMap<String, String>);
 
 impl TokenSet {

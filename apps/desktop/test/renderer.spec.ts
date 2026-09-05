@@ -177,6 +177,47 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
   }
 });
 
+test("stale profile editors are dismissible and configuration verification cannot be cancelled", async ({ page }) => {
+  await page.goto("/?mock=ready&native-dialog=profile-editor&profile=deleted-profile");
+  await expect(page.getByRole("alert")).toHaveText("This profile is no longer available.");
+  await expect(page.getByRole("dialog", { name: "New profile" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("main", { name: "Profiles closed" })).toBeVisible();
+
+  await page.goto("/?mock=configuration-verifying");
+  const control = page.getByRole("switch", { name: "Verifying configuration" });
+  await expect(control).toBeDisabled();
+  await expect(control).not.toBeChecked();
+  await nav(page, "Settings").click();
+  await expect(control).toBeDisabled();
+});
+
+test("usage query failures do not display stale totals and clearing preserves the selected filter", async ({ page }) => {
+  await page.goto("/?mock=usage-query-error");
+  await nav(page, "Usage").click();
+  const history = page.getByRole("list", { name: "Usage history" });
+  await expect(history.getByRole("button").first()).toBeVisible();
+  const model = page.getByRole("combobox", { name: "Model", exact: true });
+  const selected = await model.locator("option").nth(1).getAttribute("value");
+  expect(selected).toBeTruthy();
+  await model.selectOption(selected ?? "");
+  await expect(page.getByRole("alert")).toHaveText("Usage database temporarily unavailable");
+  await expect(history.getByRole("button")).toHaveCount(0);
+  await expect(page.locator(".usage-stats strong")).toHaveText(["—", "—", "—", "—"]);
+  await expect(model).toHaveValue(selected ?? "");
+  await expect(page.getByText("Usage data unavailable.")).toBeVisible();
+
+  await page.goto("/?mock=ready");
+  await nav(page, "Usage").click();
+  await model.selectOption(selected ?? "");
+  await expect(history.getByRole("button").first()).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Clear usage history" }).click();
+  await expect(history.getByRole("button")).toHaveCount(0);
+  await expect(model).toHaveValue(selected ?? "");
+  await expect(page.locator(".usage-stats strong").first()).toHaveText("0");
+});
+
 test("rotating the client key requires an explicit native confirmation", async ({ page }) => {
   await page.goto("/?mock=interactive&native-dialog=local-api");
   const key = page.getByLabel("Client key", { exact: true });
