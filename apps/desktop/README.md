@@ -289,7 +289,6 @@ these repository secrets are present:
 - `APPLE_CERTIFICATE`: base64-encoded PKCS#12 containing a Developer ID
   Application certificate and its private key
 - `APPLE_CERTIFICATE_PASSWORD`: password used when exporting the PKCS#12
-- `KEYCHAIN_PASSWORD`: temporary CI keychain password
 - `APPLE_API_ISSUER`: App Store Connect API issuer ID
 - `APPLE_API_KEY`: App Store Connect API key ID
 - `APPLE_API_PRIVATE_KEY`: complete contents of the matching `AuthKey_*.p8`
