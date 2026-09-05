@@ -1209,7 +1209,16 @@ mod tests {
 
     struct NoSidecar;
     impl SidecarLauncher for NoSidecar {
-        fn spawn(&self, _: Vec<String>) -> Result<(tokio::sync::mpsc::Receiver<crate::gateway::SidecarEvent>, Box<dyn crate::gateway::SidecarChild>), String> {
+        fn spawn(
+            &self,
+            _: Vec<String>,
+        ) -> Result<
+            (
+                tokio::sync::mpsc::Receiver<crate::gateway::SidecarEvent>,
+                Box<dyn crate::gateway::SidecarChild>,
+            ),
+            String,
+        > {
             Err("No sidecar in this listener test".to_string())
         }
     }
@@ -1221,28 +1230,60 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let old_listener = proxy::bind_std("127.0.0.1:0".parse().unwrap()).unwrap();
             let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let config = LocalApiConfig { port: old_listener.local_addr().unwrap().port(), ..LocalApiConfig::default() };
+            let config = LocalApiConfig {
+                port: old_listener.local_addr().unwrap().port(),
+                ..LocalApiConfig::default()
+            };
             let original = local_api::resolve(config.clone()).unwrap();
             let (events, _) = tokio::sync::mpsc::channel(8);
             let proxy = ProxyState::new(events);
             let usage = Arc::new(UsageStore::memory().unwrap());
-            let manager = Arc::new(GatewayManager::new(proxy.clone(), usage.clone(), Arc::new(NoSidecar), executor.handle().clone(), GatewayState { local_api: config.clone(), ..GatewayState::default() }));
+            let manager = Arc::new(GatewayManager::new(
+                proxy.clone(),
+                usage.clone(),
+                Arc::new(NoSidecar),
+                executor.handle().clone(),
+                GatewayState {
+                    local_api: config.clone(),
+                    ..GatewayState::default()
+                },
+            ));
             manager.set_endpoint(config.clone(), Ok(original.endpoint.clone()));
             let runtime = Arc::new(DesktopRuntime {
-                manager, proxy, usage,
+                manager,
+                proxy,
+                usage,
                 secrets: Arc::new(KeyringStore),
                 credentials: ClientCredentials(Mutex::new(TokenFiles::new(temp.path()))),
                 legacy_credential_pending: Mutex::new(false),
                 endpoint: EndpointRuntime::new(executor.handle().clone()),
-                codex_sync: CodexCatalogSync::default(), agent_policy: Mutex::new(()),
-                lifecycle: tokio::sync::Mutex::new(()), helper_path: temp.path().join("helper"), instance: None,
+                codex_sync: CodexCatalogSync::default(),
+                agent_policy: Mutex::new(()),
+                lifecycle: tokio::sync::Mutex::new(()),
+                helper_path: temp.path().join("helper"),
+                instance: None,
             });
-            runtime.endpoint.start(runtime.manager.clone(), runtime.proxy.clone(), old_listener, config.clone()).unwrap();
+            runtime
+                .endpoint
+                .start(
+                    runtime.manager.clone(),
+                    runtime.proxy.clone(),
+                    old_listener,
+                    config.clone(),
+                )
+                .unwrap();
             let gate = runtime.lifecycle.lock().await;
             assert!(runtime.stop().unwrap_err().contains("in progress"));
-            assert!(runtime.save_local_api_config(config.clone()).await.unwrap_err().contains("in progress"));
+            assert!(runtime
+                .save_local_api_config(config.clone())
+                .await
+                .unwrap_err()
+                .contains("in progress"));
             drop(gate);
-            let candidate = LocalApiConfig { port: occupied.local_addr().unwrap().port(), ..config.clone() };
+            let candidate = LocalApiConfig {
+                port: occupied.local_addr().unwrap().port(),
+                ..config.clone()
+            };
             assert!(runtime.save_local_api_config(candidate).await.is_err());
             let state = runtime.state().unwrap();
             assert_eq!(state.local_api, config);
