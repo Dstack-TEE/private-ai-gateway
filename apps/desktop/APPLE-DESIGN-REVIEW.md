@@ -9,9 +9,10 @@ macOS.
 
 ## Review Status
 
-The renderer uses React, shared local components and CSS, not a full UI component
-library. Lucide supplies interface icons; LobeHub supplies locally bundled agent
-marks. HTML controls inside WKWebView are not AppKit controls. This document is
+The renderer uses React with official shadcn/ui Base Luma components backed by Base UI.
+Buttons, inputs, switches, native selects and segmented controls share the same
+component source and desktop theme. Lucide supplies interface icons; LobeHub
+supplies locally bundled agent marks. HTML controls inside WKWebView are not AppKit controls. This document is
 an implementation review, not a claim of complete HIG compliance.
 
 The current renderer regressions run in Chromium with mock runtime state.

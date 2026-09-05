@@ -16,6 +16,39 @@ so behavior and accessibility do not drift across three platform-specific UI
 implementations. Destructive confirmations and file destinations use the
 operating system's native dialogs directly.
 
+### Renderer Components
+
+The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
+Tailwind CSS 4, Lucide, and the official Neutral light/dark palette.
+`src/renderer/theme.css` defines the palette and aliases for existing page layouts.
+`styles.css` owns product layout, not a second button/switch implementation.
+Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
+their browser/platform picker. Do not override component dimensions, radii,
+shadows or typography; choose from the official component variants instead.
+
+Component sources in `src/renderer/components/ui` were obtained from the official
+`https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
+Local changes are import paths and Lucide icon substitution only.
+`components.json` configures subsequent
+shadcn additions. Use these components for new standard controls; retain semantic
+HTML for navigation/list rows and the operating-system APIs for native surfaces.
+Product statuses use the standard palette: primary for verified, muted for
+unknown/inactive, destructive for warnings/errors, and chart tokens for usage.
+No separate green/yellow status palette is maintained. The default Luma
+appearance is not an AppKit emulation: WebView content is still web content.
+
+Shared product compositions live one layer above `components/ui`:
+
+- `controls.tsx`: named icon actions and protection/preference switches.
+- `sheet.tsx`: the single modal lifecycle, heading and action layout. It uses
+  HTML `showModal()` for focus containment inside native child-window webviews,
+  rather than adding a second library focus trap over the platform sheet.
+- `settings.tsx`: grouped settings, navigation rows, toggles and labeled fields.
+
+Keep policy, persistence and verification in their existing runtime/page owners;
+shared presentation components receive values and callbacks only. `main.tsx`
+creates the React root once, independently of the hot-reloadable renderer.
+
 New/Edit Profile opens a separate child dialog over the Profiles chooser.
 Dialog webviews receive a non-secret state snapshot at initialization and are
 presented after their first content commit, not as empty windows while IPC loads.

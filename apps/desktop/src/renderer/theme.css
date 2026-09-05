@@ -1,0 +1,119 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Official shadcn Neutral palette. Luma component styles live in components/ui. */
+:root {
+  color-scheme: light;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+
+  /* Existing page names alias standard theme tokens, not a second palette. */
+  --font-title: 17px;
+  --font-body: 14px;
+  --font-caption: 13px;
+  --sidebar-width: 196px;
+  --text: var(--foreground);
+  --text-secondary: var(--muted-foreground);
+  --text-tertiary: var(--muted-foreground);
+  --window: var(--background);
+  --panel: var(--card);
+  --panel-subtle: var(--muted);
+  --separator: var(--border);
+  --separator-strong: var(--border);
+  --control: var(--background);
+  --control-hover: var(--muted);
+  --control-pressed: var(--secondary);
+  --control-border: var(--border);
+  --control-radius: var(--radius);
+  --selected: var(--accent);
+  --on-accent: var(--primary-foreground);
+  --success: var(--primary);
+  --success-bg: var(--secondary);
+  --warning: var(--destructive);
+  --warning-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
+  --danger: var(--destructive);
+  --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
+  --neutral: var(--muted-foreground);
+  --neutral-bg: var(--muted);
+  --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
+  --veil-color: color-mix(in srgb, var(--success) 16%, var(--panel));
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --sidebar: oklch(0.205 0 0);
+  }
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  body { @apply bg-background text-foreground; }
+}
+
+/* Development mode uses the theme's destructive token without changing geometry. */
+[data-slot="switch"].is-development { --primary: var(--warning); }
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="button"], [data-slot="switch"], [data-slot="switch-thumb"] { transition: none; }
+}

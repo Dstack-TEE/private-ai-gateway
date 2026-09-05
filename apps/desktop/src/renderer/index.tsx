@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 import {
   BatteryMedium,
   Bot,
@@ -43,6 +42,14 @@ import { desktopApi as liveApi, initialGatewayState } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
 import { UpdateControl, useUpdates } from "./updates";
+import { Button } from "./components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
+import { Input } from "./components/ui/input";
+import { IconButton, SwitchControl } from "./components/controls";
+import { Sheet, SheetActions, DismissSheetAction } from "./components/sheet";
+import { SettingsSection, SettingsLink, SettingsToggle, FormField } from "./components/settings";
+import { NativeSelect } from "./components/ui/native-select";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
   AgentStatus,
   ConfidentialProfile,
@@ -57,7 +64,6 @@ import type {
   UsageSummary,
   VerificationCheck,
 } from "../shared/contracts";
-import "./styles.css";
 
 // `?mock=<scenario>` renders the window against canned state for screenshots.
 const query = new URLSearchParams(window.location.search);
@@ -224,49 +230,6 @@ const TLS_TRACKS = [
   "17 03 03 00 3c   7a0d 2c95 f6e3 41b8 d9c0 3f5e 8a2b 6e17 c4d8 0b93 5a6f e1d2 7c04 93ab 5e8f 21c6 d0a3 7b19",
 ];
 
-/** HTML modal dialog: `showModal()` gives browser-native focus
- * containment, Escape handling, and an inert background. Focus returns to
- * the opener on close. */
-function useModalDialog(
-  onClose: () => void,
-  initialFocus?: React.RefObject<HTMLElement | null>,
-  dismissible = true,
-): React.RefObject<HTMLDialogElement | null> {
-  const ref = useRef<HTMLDialogElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  const dismissibleRef = useRef(dismissible);
-  dismissibleRef.current = dismissible;
-  // Captured during the first render, before the commit that opens the dialog
-  // disables the trigger (which would drop browser focus to <body>).
-  const [opener] = useState<HTMLElement | null>(() =>
-    document.activeElement instanceof HTMLElement ? document.activeElement : null,
-  );
-  useLayoutEffect(() => {
-    const node = ref.current;
-    node?.showModal();
-    if (node) {
-      node.tabIndex = -1;
-      (initialFocus?.current ?? node).focus();
-    }
-    const onCloseEvent = () => closeRef.current();
-    const onCancelEvent = (event: Event) => {
-      if (!dismissibleRef.current) event.preventDefault();
-    };
-    node?.addEventListener("close", onCloseEvent);
-    node?.addEventListener("cancel", onCancelEvent);
-    return () => {
-      node?.removeEventListener("close", onCloseEvent);
-      node?.removeEventListener("cancel", onCancelEvent);
-      // Deferred: the opener may only be re-enabled by the same commit that
-      // unmounts the dialog.
-      window.setTimeout(() => opener?.focus(), 0);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  return ref;
-}
-
 function useNativeGatewayWindow(title: string, contentReady = true): {
   state: GatewayState;
   setState: React.Dispatch<React.SetStateAction<GatewayState>>;
@@ -344,7 +307,7 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
     <main className="native-dialog-host native-dialog-loading" aria-label={label}>
       <TriangleAlert aria-hidden="true" />
       <span role="alert">{error}</span>
-      <button className="button" onClick={onClose}>Done</button>
+      <Button variant="outline" onClick={onClose}>Done</Button>
     </main>
   );
 }
@@ -1085,7 +1048,7 @@ function Sidebar({
         {VIEWS.map((entry) => {
           const Icon = entry.icon;
           return (
-            <button
+            <Button variant="ghost"
               key={entry.id}
               id={`nav-${entry.id}`}
               className="nav-item"
@@ -1096,11 +1059,11 @@ function Sidebar({
             >
               <Icon size={18} aria-hidden="true" />
               <span>{entry.label}</span>
-            </button>
+            </Button>
           );
         })}
       </nav>
-      {updateAvailable && <button className="nav-item" onClick={() => onChange("settings", true)}><Download size={18} aria-hidden="true" /><span>Update available</span></button>}
+      {updateAvailable && <Button variant="ghost" className="nav-item" onClick={() => onChange("settings", true)}><Download size={18} aria-hidden="true" /><span>Update available</span></Button>}
     </aside>
   );
 }
@@ -1121,9 +1084,9 @@ function MacMenuBar({ protected: isProtected, trayOpen, onTray }: { protected: b
         <span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span>
       </div>
       <div className="mac-menu-right">
-        <button className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Gateway menu" aria-expanded={trayOpen} onClick={onTray}>
+        <Button variant="ghost" className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Gateway menu" aria-expanded={trayOpen} onClick={onTray}>
           <span className={`tray-template-icon${isProtected ? " is-protected" : ""}`} aria-hidden="true" />
-        </button>
+        </Button>
         <Wifi size={15} strokeWidth={1.8} aria-hidden="true" />
         <BatteryMedium size={17} strokeWidth={1.8} aria-hidden="true" />
         <time aria-hidden="true">{date}</time>
@@ -1169,16 +1132,16 @@ function PreviewTrayMenu({
         <span><strong>{brand.productName}</strong><small>{serviceHost(state.remoteUrl ?? state.config.remoteUrl)}</small></span>
       </div>
       <div className="preview-tray-status" role="status">{verdict.title}{developmentMode ? " (Dev mode)" : ""}</div>
-      <button className="preview-tray-item" role="menuitem" disabled={(busy && !verifying) || (endpointDown && !running && !verifying)} onClick={onProtection}>{action}</button>
+      <Button variant="ghost" className="preview-tray-item" role="menuitem" disabled={(busy && !verifying) || (endpointDown && !running && !verifying)} onClick={onProtection}>{action}</Button>
       <div className="preview-tray-separator" />
-      <button className="preview-tray-item" role="menuitem" onClick={onOpen}>Open {brand.productName}</button>
-      <button className="preview-tray-item" role="menuitem" onClick={onSettings}>Settings…</button>
+      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onOpen}>Open {brand.productName}</Button>
+      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onSettings}>Settings…</Button>
       <div className="preview-tray-separator" />
-      <button className="preview-tray-item" role="menuitemcheckbox" aria-checked={openAtLogin} onClick={onOpenAtLogin}>
+      <Button variant="ghost" className="preview-tray-item" role="menuitemcheckbox" aria-checked={openAtLogin} onClick={onOpenAtLogin}>
         <span className="preview-tray-check" aria-hidden="true">{openAtLogin ? "✓" : ""}</span>
         Open at Login
-      </button>
-      <button className="preview-tray-item" role="menuitem" onClick={onQuit}>Quit {brand.productName}</button>
+      </Button>
+      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onQuit}>Quit {brand.productName}</Button>
     </div>
   );
 }
@@ -1211,7 +1174,7 @@ function PageHeader({
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
         <div className="page-protection">
-          {view === "agents" && <button className="icon-button" aria-label="Detect installed agents" title="Detect installed agents" disabled={refreshingAgents} onClick={onRefreshAgents}><RefreshCw size={15} className={refreshingAgents ? "is-spinning" : undefined} aria-hidden="true" /></button>}
+          {view === "agents" && <IconButton label="Detect installed agents" disabled={refreshingAgents} onClick={onRefreshAgents}><RefreshCw size={15} className={refreshingAgents ? "is-spinning" : undefined} aria-hidden="true" /></IconButton>}
           {developmentMode && <span className="state state-warning">Dev mode</span>}
           <span className={`page-switch-copy state-${verdict.tone}`}>
             <strong><ProtectionStatus state={state} label={verdict.title} /></strong>
@@ -1431,15 +1394,15 @@ function StatusSurface({
 
       <div className="status-segment status-remote">
         <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
-        <button className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+        <Button variant="ghost" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus size={18} aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
           {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
-        </button>
+        </Button>
         <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
           {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
-          {liveVerified && <button className="icon-button" aria-label="Privacy verification" title="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info size={14} aria-hidden="true" /></button>}
+          {liveVerified && <IconButton label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info size={14} aria-hidden="true" /></IconButton>}
         </div>
       </div>
     </section>
@@ -1507,6 +1470,7 @@ function ProtectedControl({
       {!iconOnly && <span>Protected</span>}
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
+        size="default"
         checked={checked}
         label={label}
         disabled={endpointDown && !checked}
@@ -1515,39 +1479,6 @@ function ProtectedControl({
         onToggle={onToggle}
       />
     </div>
-  );
-}
-
-function SwitchControl({
-  checked,
-  label,
-  disabled = false,
-  developmentMode = false,
-  compact = false,
-  title,
-  onToggle,
-}: {
-  checked: boolean;
-  label: string;
-  disabled?: boolean;
-  developmentMode?: boolean;
-  compact?: boolean;
-  title?: string;
-  onToggle(): void;
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      className={`switch${compact ? " switch-compact" : ""}${developmentMode ? " is-development" : ""}`}
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      title={title ?? label}
-      onClick={onToggle}
-    >
-      <span aria-hidden="true" />
-    </button>
   );
 }
 
@@ -1568,7 +1499,7 @@ function OverviewModule({
       <header className="overview-module-title">
         <h2>{title}</h2>
         {status}
-        {action && onAction && <button className="module-action" onClick={onAction}>{action}</button>}
+        {action && onAction && <Button variant="ghost" size="xs" className="module-action" onClick={onAction}>{action}</Button>}
       </header>
       <div className="module inset">{children}</div>
     </section>
@@ -1599,7 +1530,7 @@ function LocalApiPanel({
   return (
     <div className="copy-rows">
       <div className="copy-row">
-        <button
+        <Button variant="ghost"
           className="copy-surface"
           disabled={!proxyUrl}
           aria-label={`${endpointLabel}: ${proxyUrl ?? "Unavailable"}. Copy`}
@@ -1610,17 +1541,17 @@ function LocalApiPanel({
           </span>
           <code className="row-note">{proxyUrl ?? "Unavailable"}</code>
           <span className={`copy-feedback ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
-        </button>
+        </Button>
         <IconButton className="row-action" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
       </div>
       <div className="copy-row">
-        <button className="copy-surface" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
+        <Button variant="ghost" className="copy-surface" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line">
             <span className="row-title">Client key</span>
           </span>
           <code className="row-note">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
           <span className={`copy-feedback ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
-        </button>
+        </Button>
         <IconButton className="row-action" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </div>
       {endpointError && <p className="inline-error">{endpointError}</p>}
@@ -1647,7 +1578,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
   const tokens = (activity.inputTokens ?? 0) + (activity.outputTokens ?? 0);
   const timestamp = new Date(activity.at * 1_000);
   return (
-    <button className="row list-row usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
+    <Button variant="ghost" className="row list-row usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
       <span className="row-main">
         <span className="row-title">{agentName(activity.agent)}</span>
         <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
@@ -1656,7 +1587,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
       <span className="usage-amount"><strong>{tokens ? formatTokens(tokens) : "—"}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
       <time className="row-side" dateTime={timestamp.toISOString()} title={formatTimestamp(timestamp.getTime(), true)}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
-    </button>
+    </Button>
   );
 }
 
@@ -1667,16 +1598,6 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
       {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
-}
-
-function IconButton({
-  label,
-  className = "",
-  disabled = false,
-  onClick,
-  children,
-}: React.PropsWithChildren<{ label: string; className?: string; disabled?: boolean; onClick(): void }>): React.JSX.Element {
-  return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
 function AgentsView({
@@ -1757,7 +1678,7 @@ function AgentRow({
       </div>
       {agent.installed ? <SwitchControl
         checked={disconnecting}
-        compact
+        size="sm"
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
         onToggle={() => onSelect(!disconnecting)}
@@ -1768,10 +1689,10 @@ function AgentRow({
 
 function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   const [error, setError] = useState<string>();
-  return <span><button className="button" onClick={() => {
+  return <span><Button variant="outline" onClick={() => {
     setError(undefined);
     void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => setError(errorMessage(error)));
-  }}>Website<ExternalLink size={14} aria-hidden="true" /></button>{error && <span className="row-note" role="alert">{error}</span>}</span>;
+  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note" role="alert">{error}</span>}</span>;
 }
 
 /** Text plus a tone icon, so no state relies on colour alone. */
@@ -1889,22 +1810,20 @@ function UsageView({
     <div className="usage-page">
       {(problem || error) && <p className="banner" role="alert">{problem ?? error}</p>}
       <div className="usage-toolbar" role="group" aria-label="Usage filters">
-        <label>Agent<select value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</select></label>
-        <label>Model<select value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{page?.models.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</select></label>
+        <label>Agent<NativeSelect value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></label>
+        <label>Model<NativeSelect value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{page?.models.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></label>
         <fieldset className="filter-field time-filter">
           <legend>Time</legend>
-          <div className="segmented-control" role="group" aria-label="Usage time range">
+          <ToggleGroup className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
             {(["24h", "7d", "30d", "all"] as const).map((value) => (
-              <button
-                type="button"
+              <ToggleGroupItem
                 key={value}
-                aria-pressed={range === value}
-                onClick={() => { setRange(value); resetPagination(); }}
+                value={value}
               >
                 {{ "24h": "Today", "7d": "7 days", "30d": "30 days", all: "All" }[value]}
-              </button>
+              </ToggleGroupItem>
             ))}
-          </div>
+          </ToggleGroup>
         </fieldset>
       </div>
       <UsageStats page={page} />
@@ -1987,13 +1906,13 @@ function UsageChart({
   return (
     <figure className="usage-chart" aria-label={`${metric} usage by day`}>
       <div className="chart-toolbar">
-        <div className="segmented-control chart-metric" role="group" aria-label="Chart metric">
+        <ToggleGroup className="segmented-control chart-metric" spacing={0} value={[metric]} aria-label="Chart metric" onValueChange={([value]) => { if (value === "tokens" || value === "cost" || value === "requests") onMetric(value); }}>
           {(["tokens", "cost", "requests"] as const).map((entry) => (
-            <button type="button" key={entry} aria-pressed={metric === entry} onClick={() => onMetric(entry)}>
+            <ToggleGroupItem key={entry} value={entry}>
               {{ tokens: "Tokens", cost: "Cost", requests: "Requests" }[entry]}
-            </button>
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>
         {metric === "tokens" && <span className="chart-legend"><i className="input" />Input <i className="output" />Output</span>}
       </div>
       <div className="chart-bars" aria-hidden="true">
@@ -2134,15 +2053,11 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
 }
 
 function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
   return (
-    <dialog ref={dialog} className="sheet usage-evidence-sheet" aria-label="Usage proof">
-      <div className="sheet-heading usage-proof-heading">
-        <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, true)}</small></span>
-      </div>
+    <Sheet title="Usage proof" className="usage-evidence-sheet" headingClassName="usage-proof-heading" description={formatTimestamp(activity.at * 1_000, true)} onClose={onClose}>
       <div className="proof-card"><Evidence activity={activity} /></div>
-      <div className="sheet-actions"><button className="button" onClick={onClose}>Done</button></div>
-    </dialog>
+      <DismissSheetAction onClose={onClose} />
+    </Sheet>
   );
 }
 
@@ -2185,51 +2100,27 @@ function SettingsView({
     <div className="page-body settings-page">
       {problem && <p className="banner" role="alert">{problem}</p>}
 
-      <section className="group" aria-labelledby="general-title">
-        <h2 className="group-title" id="general-title">General</h2>
-        <div className="inset">
-          <div className="row toggle-row">
-            <span className="row-main"><span className="row-title">Open at Login</span></span>
-            <SwitchControl compact label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
-          </div>
-          <div className="row toggle-row">
-            <span className="row-main"><span className="row-title">Connect on launch</span><span className="row-note">Start protection using the selected profile.</span></span>
-            <SwitchControl compact label="Connect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
-          </div>
-          <button className="row list-row" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")}>
-            <span className="row-main">
-              <span className="row-title">Profiles</span>
-              <span className="row-note">{activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Verified configuration" : "Verification required"}` : "No provider configured"}</span>
-            </span>
-            <ChevronRight size={16} className="row-chevron" aria-hidden="true" />
-          </button>
+      <SettingsSection title="General">
+          <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
+          <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Verified configuration" : "Verification required"}` : "No provider configured"} />
           {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
-          <button className="row list-row" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")}>
-            <span className="row-main"><span className="row-title">Local API</span><span className="row-note">Listener and client access</span></span>
-            <ChevronRight size={16} className="row-chevron" aria-hidden="true" />
-          </button>
-        </div>
-      </section>
+          <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
+      </SettingsSection>
 
-      <details className="group settings-advanced">
-        <summary className="group-title"><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></summary>
-        <div className="inset">
-          <div className="row toggle-row">
-            <span className="row-main"><span className="row-title">Allow development OS</span><span className="row-note">Accept development OS images that are not intended for production workloads.{frozen ? " Stop protection to change this setting." : ""}</span></span>
-            <SwitchControl checked={allowDevelopmentOs} compact developmentMode={allowDevelopmentOs} label="Allow development OS" disabled={frozen} onToggle={() => onPolicy(!allowDevelopmentOs)} />
-          </div>
-        </div>
-      </details>
+      <Collapsible className="group settings-advanced">
+        <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
+        <CollapsibleContent className="inset">
+          <SettingsToggle label="Allow development OS" description={`Accept development OS images that are not intended for production workloads.${frozen ? " Stop protection to change this setting." : ""}`} checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={frozen} onToggle={() => onPolicy(!allowDevelopmentOs)} />
+        </CollapsibleContent>
+      </Collapsible>
 
-      {anyRecorded && <section className="group" aria-labelledby="agents-settings-title"><h2 className="group-title" id="agents-settings-title">Agents</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><button className="button" disabled={locked} onClick={onRestoreAll}>Restore all</button></div></div></section>}
+      {anyRecorded && <SettingsSection title="Agents"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></div></SettingsSection>}
 
-      <section className="group" aria-labelledby="about-title">
-        <h2 className="group-title" id="about-title">About</h2>
-        <div className="inset">
+      <SettingsSection title="About">
           <div className="row"><span className="row-main">{brand.productName}</span><UpdateControl updates={updates} /></div>
-          {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <button key={target} className="row list-row" onClick={() => onAboutLink(target)}><span className="row-main">{label}</span><ExternalLink size={15} className="row-chevron" aria-hidden="true" /></button>)}
-        </div>
-      </section>
+          {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
+      </SettingsSection>
     </div>
   );
 }
@@ -2320,7 +2211,6 @@ function ProfileListSheet({
   onClose(): void;
   error?: string;
 }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
   const frozen = busy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
   const [error, setError] = useState<string>();
@@ -2344,8 +2234,7 @@ function ProfileListSheet({
     onClose();
   };
   return (
-    <dialog ref={dialog} className="sheet profiles-sheet" aria-label="Profiles">
-      <div className="sheet-heading"><h2>Profiles</h2></div>
+    <Sheet title="Profiles" className="profiles-sheet" onClose={onClose}>
       <p className="sheet-text">Choose the verified service and credential used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner sheet-banner profile-availability">
@@ -2364,7 +2253,7 @@ function ProfileListSheet({
               : "Verification required";
           return (
             <div className={`profile-list-row${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
-              <button
+              <Button variant="ghost"
                 type="button"
                 className="profile-select"
                 aria-pressed={active}
@@ -2374,7 +2263,7 @@ function ProfileListSheet({
                 <ServiceLogo url={profile.remoteUrl} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
-              </button>
+              </Button>
               <IconButton label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
             </div>
           );
@@ -2382,11 +2271,12 @@ function ProfileListSheet({
       </div>
       {running && <p className="field-note profile-lock-note">Switching profiles briefly stops protection and reconnects to the selected provider.</p>}
       {(error || openError) && <p className="banner sheet-banner" role="alert">{error || openError}</p>}
-      <div className="sheet-actions profile-list-actions">
-        <button type="button" className="button" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</button>
-        <button type="button" className="button" onClick={onClose}>Done</button>
-      </div>
-    </dialog>
+      <SheetActions leading={
+        <Button type="button" variant="outline" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
+      }>
+        <Button type="button" variant="outline" onClick={onClose}>Done</Button>
+      </SheetActions>
+    </Sheet>
   );
 }
 
@@ -2424,7 +2314,6 @@ function ProfileEditorSheet({
   }));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
-  const dialog = useModalDialog(onClose, undefined, !saving);
   const [error, setError] = useState<string>();
   const selectedPreset = SERVICE_PRESETS.find((service) => service.id === draft.provider);
   const keyLabel = selectedPreset?.keyLabel ?? "API key";
@@ -2503,53 +2392,50 @@ function ProfileEditorSheet({
     onComplete();
   };
   return (
-    <dialog ref={dialog} className="sheet profile-editor-sheet" aria-label={isNew ? "New profile" : "Edit profile"}>
-      <div className="sheet-heading"><h2>{isNew ? "New Profile" : "Edit Profile"}</h2></div>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" dismissible={!saving} onClose={onClose}>
       {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form onSubmit={(event) => void submit(event)}>
-        <div className="service-presets" role="group" aria-label="Confidential AI provider">
+        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Confidential AI provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
-            <button key={service.id} type="button" className="service-preset" aria-label={service.name} title={service.url} aria-pressed={draft.provider === service.id} disabled={frozen || saving} onClick={() => chooseService(service.id)}>
+            <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
               <ServiceLogo url={service.url} size="large" />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
-            </button>
+            </ToggleGroupItem>
           ))}
-          <button type="button" className="service-preset" aria-label="Custom" title="Use another ACI endpoint" aria-pressed={draft.provider === "custom"} disabled={frozen || saving} onClick={() => chooseService("custom")}>
+          <ToggleGroupItem value="custom" className="service-preset" aria-label="Custom" title="Use another ACI endpoint">
             <ServiceLogo url="custom://service" size="large" />
             <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
-          </button>
-        </div>
+          </ToggleGroupItem>
+        </ToggleGroup>
         <div className="sheet-card">
-          <label className="sheet-field"><span>Profile name</span><input value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></label>
-          <label className="sheet-field"><span>Service endpoint</span><input value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></label>
+          <label className="sheet-field"><span>Profile name</span><Input value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></label>
+          <label className="sheet-field"><span>Service endpoint</span><Input value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></label>
           <div className="sheet-field key-field">
             <span>
               <span>{keyLabel}</span>
               <span className="key-field-actions">
                 {verifiedConfiguration && <span className="verified-configuration"><Check size={12} aria-hidden="true" />Verified configuration</span>}
-                {savedCredentialApplies && profile?.id === state.activeProfileId && <button type="button" className="link" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</button>}
+                {savedCredentialApplies && profile?.id === state.activeProfileId && <Button type="button" variant="link" size="sm" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</Button>}
               </span>
             </span>
-            <input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
+            <Input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
             <small>{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
           </div>
         </div>
         {error && <p className="banner sheet-banner" role="alert">{error}</p>}
-        <div className="sheet-actions profile-editor-actions">
-          {!isNew && <button type="button" className="button destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</button>}
-          <button type="button" className="button" onClick={onClose} disabled={saving}>Cancel</button>
-          <button type="submit" className="button primary" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</button>
-        </div>
+        <SheetActions leading={!isNew && <Button type="button" variant="destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
+          <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
+        </SheetActions>
       </form>
-    </dialog>
+    </Sheet>
   );
 }
 
 function PrivacyVerificationSheet({ state, onClose }: { state: GatewayState; onClose(): void }): React.JSX.Element {
-  const dialog = useModalDialog(onClose);
-  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2>Privacy verification</h2></div><PrivacyVerification state={state} /><div className="sheet-actions"><button className="button" onClick={onClose}>Done</button></div></dialog>;
+  return <Sheet title="Privacy verification" className="privacy-sheet" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
 }
 
 function LocalApiSheet({
@@ -2579,7 +2465,6 @@ function LocalApiSheet({
 }): React.JSX.Element {
   const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
   const [saving, setSaving] = useState(false);
-  const dialog = useModalDialog(onClose, undefined, !saving);
   const [error, setError] = useState<string>();
   const endpoint = localEndpoint(draft) ?? "";
   const openAi = openAiEndpoint(endpoint) ?? "";
@@ -2587,14 +2472,14 @@ function LocalApiSheet({
     setDraft((current) => ({ ...current, [key]: value }));
     setError(undefined);
   };
-  const regenerate = async () => {
+  const rotateKey = async () => {
     setSaving(true);
     setError(undefined);
     try {
       const confirmed = await desktopApi.confirm({
-        title: "Regenerate client key?",
+        title: "Rotate local API key?",
         message: "The old client key will stop working immediately. Update your tools with the new key. Connected agents use separate keys and are not affected.",
-        confirmLabel: "Regenerate",
+        confirmLabel: "Rotate key",
       });
       if (confirmed) await onRotate();
     } catch (error) {
@@ -2612,43 +2497,31 @@ function LocalApiSheet({
     if (!message) onClose();
   };
   return (
-    <dialog ref={dialog} className="sheet local-api-sheet" aria-label="Local API settings">
-      <div className="sheet-heading"><h2>Local API settings</h2></div>
+    <Sheet title="Local API settings" className="local-api-sheet" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll">
           <div className="sheet-card config-fields">
-          <div className="row field settings-field-row">
-            <label className="field-label" htmlFor="local-listen-address">Listen address</label>
-            <div className="field-controls">
-              <input id="local-listen-address" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
-            </div>
-            <span className="field-note">Address used by the local gateway.</span>
+          <FormField id="local-listen-address" label="Listen address" description="Address used by the local gateway.">
+              <Input id="local-listen-address" aria-describedby="local-listen-address-note" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
             <datalist id="listen-addresses"><option value="127.0.0.1" /><option value="::1" /><option value="0.0.0.0" /></datalist>
-          </div>
-          <div className="row toggle-row">
-            <span className="row-main"><span className="row-title">Allow network access</span><span className="row-note">Permit a non-loopback listen address. Keep this off for local agents.</span></span>
-            <SwitchControl checked={draft.allowNetworkAccess} compact label="Allow network access" disabled={frozen || saving} onToggle={() => update("allowNetworkAccess", !draft.allowNetworkAccess)} />
-          </div>
+          </FormField>
+          <SettingsToggle label="Allow network access" description="Permit a non-loopback listen address. Keep this off for local agents." checked={draft.allowNetworkAccess} disabled={frozen || saving} onToggle={() => update("allowNetworkAccess", !draft.allowNetworkAccess)} />
           {draft.allowNetworkAccess && <p className="row-warning">Other devices on the network may reach this gateway. Only use this on a trusted network.</p>}
-          <div className="row field settings-field-row">
-            <label className="field-label" htmlFor="local-port">Port</label>
-            <div className="field-controls"><input id="local-port" type="number" min="1024" max="65535" value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} /></div>
-            <span className="field-note">1024–65535</span>
-          </div>
-          <div className="row field settings-field-row">
-            <label className="field-label" htmlFor="local-client-host">Client host</label>
-            <div className="field-controls"><input id="local-client-host" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} /></div>
-            <span className="field-note">Optional hostname shown to clients.</span>
-          </div>
+          <FormField id="local-port" label="Port" description="1024–65535">
+            <Input id="local-port" aria-describedby="local-port-note" type="number" min="1024" max="65535" value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
+          </FormField>
+          <FormField id="local-client-host" label="Client host" description="Optional hostname shown to clients.">
+            <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
+          </FormField>
           </div>
           <div className="sheet-card client-key-card">
           <div className="row field settings-field-row">
             <label className="field-label" htmlFor="local-client-key">Client key</label>
             <div className="field-controls credential-controls">
-              <input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
+              <Input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
               <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
               <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
-              <button type="button" className="button" disabled={frozen || saving} onClick={() => void regenerate()}><RefreshCw size={15} />Regenerate…</button>
+              <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw size={15} />Rotate key</Button>
             </div>
             <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</span>
           </div>
@@ -2666,14 +2539,14 @@ function LocalApiSheet({
           {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
           {(error || externalError) && <p className="sheet-text error" role="alert">{error ?? externalError}</p>}
         </div>
-        <div className="sheet-actions split-actions">
-          <button type="button" className="button" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</button>
-          <span />
-          <button type="button" className="button" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</button>
-          <button type="submit" className="button primary" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</button>
-        </div>
+        <SheetActions leading={
+          <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
+        }>
+          <Button type="button" variant="outline" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</Button>
+          <Button type="submit" variant="default" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</Button>
+        </SheetActions>
       </form>
-    </dialog>
+    </Sheet>
   );
 }
 
@@ -2972,16 +2845,13 @@ function errorMessage(error: unknown): string {
   return message;
 }
 
-const root = document.getElementById("root");
-if (!root) {
-  throw new Error("Missing renderer root");
-}
-const nativeDialog = query.get("native-dialog");
-createRoot(root).render(
-  nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
+export function Renderer(): React.JSX.Element {
+  // Native child windows and the main window share one component entry point.
+  const nativeDialog = query.get("native-dialog");
+  return nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
     : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
         : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={query.get("record") ?? ""} />
-          : <App />,
-);
+          : <App />;
+}

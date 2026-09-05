@@ -5,6 +5,16 @@ type Page = import("@playwright/test").Page;
 const nav = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name });
 
+const themeColor = (page: Page, token: string) => page.evaluate((name) => {
+  const probe = document.createElement("span");
+  probe.hidden = true;
+  probe.style.color = `var(${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}, token);
+
 const overflow = (page: Page) =>
   page.evaluate(() => {
     const content = document.querySelector<HTMLElement>(".content");
@@ -167,16 +177,16 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
   }
 });
 
-test("regenerating the client key requires an explicit native confirmation", async ({ page }) => {
+test("rotating the client key requires an explicit native confirmation", async ({ page }) => {
   await page.goto("/?mock=interactive&native-dialog=local-api");
   const key = page.getByLabel("Client key", { exact: true });
   await expect(key).not.toHaveValue("");
   const original = await key.inputValue();
   page.once("dialog", (dialog) => dialog.dismiss());
-  await page.getByRole("button", { name: "Regenerate…" }).click();
+  await page.getByRole("button", { name: "Rotate key" }).click();
   await expect(key).toHaveValue(original);
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Regenerate…" }).click();
+  await page.getByRole("button", { name: "Rotate key" }).click();
   await expect(key).not.toHaveValue(original);
 });
 
@@ -186,7 +196,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".gateway-verdict")).toHaveCSS("color", "rgba(29, 29, 31, 0.64)");
+  await expect(page.locator(".gateway-verdict")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   let editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
@@ -371,6 +381,15 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   );
   expect(new Set(chartDays).size).toBe(7);
 
+  const metric = page.getByRole("group", { name: "Chart metric" });
+  await metric.getByRole("button", { name: "Tokens", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Space");
+  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toHaveAttribute("aria-pressed", "true");
+
   const history = page.locator('ul[aria-label="Usage history"]');
   await expect(history.getByRole("button")).toHaveCount(20);
   await page.getByRole("button", { name: "Next usage page" }).click();
@@ -490,7 +509,7 @@ test("overview presents local availability and the active profile without sessio
   await expect(page.locator(".tray-template-icon")).toHaveCSS("opacity", "0.45");
   for (const name of ["Agents", "Usage", "Settings"]) {
     await nav(page, name).click();
-    await expect(page.locator(".page-switch-copy")).toHaveCSS("color", "rgba(29, 29, 31, 0.64)");
+    await expect(page.locator(".page-switch-copy")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   }
   await expect(page.getByRole("button", { name: "Profiles", exact: true })).toHaveCSS("border-bottom-width", "1px");
   await nav(page, "Agents").click();
@@ -604,9 +623,9 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await page.getByRole("switch", { name: "Stop protection" }).click();
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
 
-  const advanced = page.locator("details.settings-advanced");
-  await expect(advanced).not.toHaveAttribute("open", "");
-  await advanced.locator("summary").click();
+  const advanced = page.locator(".settings-advanced");
+  await expect(advanced.getByRole("button", { name: "Advanced" })).toHaveAttribute("aria-expanded", "false");
+  await advanced.getByRole("button", { name: "Advanced" }).click();
   await expect(advanced.getByText("Allow development OS", { exact: true })).toBeVisible();
   const devMode = advanced.getByRole("switch", { name: "Allow development OS" });
   await expect(devMode).toHaveAttribute("aria-checked", "false");

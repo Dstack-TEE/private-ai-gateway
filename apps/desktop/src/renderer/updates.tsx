@@ -1,3 +1,4 @@
+import { Button } from "./components/ui/button";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateProgress } from "../shared/contracts";
@@ -56,10 +57,10 @@ export function UpdateControl({ updates }: { updates: ReturnType<typeof useUpdat
     : info ? "You're up to date" : "Update status unavailable";
   const action = info?.version ? "Install and Restart…" : "Check for Updates";
   return <span className="update-control">
-    <button className="button" aria-label={action} title={action} disabled={Boolean(busy) || info?.enabled === false} onClick={() => void (info?.version ? updates.install() : updates.check())}>
+    <Button variant="outline" aria-label={action} title={action} disabled={Boolean(busy) || info?.enabled === false} onClick={() => void (info?.version ? updates.install() : updates.check())}>
       {info?.currentVersion ? `v${info.currentVersion}` : "Updates"}
       {info?.version ? <Download size={14} aria-hidden="true" /> : <RefreshCw size={14} className={busy ? "is-spinning" : undefined} aria-hidden="true" />}
-    </button>
+    </Button>
     <small role="status">{label}</small>
     {error && <small role="alert">{error}</small>}
   </span>;

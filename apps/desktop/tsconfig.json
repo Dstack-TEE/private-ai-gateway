@@ -9,6 +9,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
+    "paths": { "@/*": ["./src/renderer/*"] },
     "types": ["node", "vite/client"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
