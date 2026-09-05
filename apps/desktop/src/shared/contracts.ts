@@ -156,6 +156,8 @@ export interface LocalApiConfig {
 }
 
 export interface GatewayState {
+  /** Unix seconds when the current protection session became verified. */
+  protectedSince?: number;
   status: GatewayStatus;
   /** Settings is verifying a candidate without enabling forwarding. */
   configurationVerification: boolean;
@@ -229,7 +231,15 @@ export interface ConfirmationOptions {
   cancelLabel?: string;
 }
 
+export interface LaunchPreferences {
+  openAtLogin: boolean;
+  connectOnLaunch: boolean;
+}
+
 export interface DesktopApi {
+  getLaunchPreferences(): Promise<LaunchPreferences>;
+  setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
+  onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;

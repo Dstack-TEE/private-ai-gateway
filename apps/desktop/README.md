@@ -8,12 +8,30 @@ Tauri delegates windows, menus, tray integration, file dialogs, confirmation
 dialogs, clipboard, autostart, and application lifecycle to each operating
 system.
 
-Profiles, Local API settings, Privacy verification, and Usage proof open in
-parented native windows: child windows on macOS, owned windows on Windows, and
-transient windows on Linux. Their complex content stays in the shared renderer
+Profiles, Local API settings, Privacy verification, and Usage proof open as
+document-modal AppKit sheets on macOS, without traffic lights or an independent
+title bar. Done, Cancel, and Escape dismiss the sheet, including loading/error
+states. Windows uses owned windows and Linux uses transient windows. Complex content stays in the shared renderer
 so behavior and accessibility do not drift across three platform-specific UI
 implementations. Destructive confirmations and file destinations use the
 operating system's native dialogs directly.
+
+macOS tray image updates preserve the template flag atomically; replacing only
+the image resets that flag in the underlying tray implementation and can make
+the icon disappear against a dark menu bar.
+
+Agent connections are saved preferences, not permanent config rewrites. Only
+connected agents under active protection receive gateway settings. Stopping,
+verification failure, or quitting restores the owned settings while retaining
+the connection choices. Startup recovers unfinished restoration before any
+automatic connection. Uninstalled agents stay linked but inactive; deleted
+configs are not recreated, and external edits are preserved. Failed restoration
+keeps its journal for retry and prevents a normal quit from silently discarding it.
+Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
+
+Settings exposes **Open at Login** (the operating system's login item, also
+available in the tray) and **Connect on launch** (off by default). Automatic
+connection verifies the selected profile before applying any agent config.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -43,12 +61,11 @@ protocol is the service's own response, shown as such.
 - **Primary instance, then endpoint.** At launch the app takes a per-user OS
   file lock (`fd-lock`) to become the primary instance and synchronously binds
   the saved Local API address and port; a failure is shown in the window and
-  blocks starting and connecting for that launch. Disconnecting agents never
-  depends on it. A second instance hands off to the first (the Tauri
+  blocks protection for that launch. Saving connection choices and restoring
+  agents do not require a listener. A second instance hands off to the first (the Tauri
   single-instance plugin only focuses the window; the lock decides).
 - **Local endpoint** defaults to loopback-only `http://127.0.0.1:4180`. The
-  app claims the configured address and port before agent connections are
-  available.
+  app claims the configured address and port before agent settings are applied.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity

@@ -702,6 +702,13 @@ fn is_sensitive(path: &[String]) -> bool {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Connection {
     fields: Vec<OwnedField>,
+    /// User intent survives protection sessions; suspended links own no config.
+    #[serde(default)]
+    suspended: bool,
+    #[serde(default)]
+    options: ConnectOptions,
+    #[serde(default)]
+    attention: Option<String>,
     /// The agent is not authorized (disconnect in progress).
     #[serde(default)]
     disabled: bool,
@@ -910,9 +917,15 @@ impl Projector {
             }
         }
         let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
+            Ok(_) if connect && catalog.is_none() => Edit {
+                changes: Vec::new(),
+                record: None,
+                pending_secrets: Vec::new(),
+                consumed_secrets: Vec::new(),
+            },
             Ok(mut doc) => self.edit(agent, connect, &mut doc, &store, catalog, options)?,
-            // Disconnect previews survive a broken config: nothing can be
-            // restored, but token, parked secrets, and record still go.
+            // A broken config does not prevent revocation. Applying the
+            // disconnect keeps its restoration journal until repair succeeds.
             Err(_) if !connect => {
                 store
                     .get(agent.id())
@@ -958,8 +971,23 @@ impl Projector {
                 if let Some(error) = read_error {
                     return Err(error);
                 }
-                self.require_helper()?;
-                self.connect(agent, &mut store, text, catalog, options)?;
+                if catalog.is_some() {
+                    self.require_helper()?;
+                    self.connect(agent, &mut store, text, catalog, options)?;
+                } else {
+                    if store.contains_key(agent.id()) {
+                        self.suspend(agent, &mut store)?;
+                    }
+                    store.insert(
+                        agent.id().to_string(),
+                        Connection {
+                            suspended: true,
+                            options: options.clone(),
+                            ..Connection::default()
+                        },
+                    );
+                    self.save_store(&store)?;
+                }
             } else {
                 self.disconnect(agent, &mut store)?;
             }
@@ -1007,6 +1035,113 @@ impl Projector {
         })
     }
 
+    /// Reconcile saved links with protection. All edits use the same lock and
+    /// restoration journal as explicit connect/disconnect operations.
+    pub fn reconcile(&self, catalog: Option<&Catalog>) -> Result<Vec<(String, String)>, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            let mut store = self.load_store()?;
+            let mut failures = Vec::new();
+            for agent in Agent::ALL {
+                let Some(record) = store.get(agent.id()).cloned() else {
+                    continue;
+                };
+                let status = self.status(agent, &store, catalog);
+                let result = if record.cleanup_pending {
+                    self.cleanup(agent, &mut store)
+                } else if catalog.is_none()
+                    || !status.installed
+                    || status.error.is_some()
+                    || (!record.suspended && !status.authorized)
+                {
+                    if catalog.is_some()
+                        && status.installed
+                        && !record.suspended
+                        && !status.authorized
+                    {
+                        if let Some(record) = store.get_mut(agent.id()) {
+                            record.attention = Some("Configuration changed outside the app; reconnect to apply it again".to_string());
+                        }
+                    }
+                    self.suspend(agent, &mut store)
+                } else if record.suspended && record.attention.is_none() {
+                    self.suspend(agent, &mut store).and_then(|()| {
+                        self.require_helper()?;
+                        let text = self.read_config(agent)?;
+                        self.connect(agent, &mut store, text, catalog, &record.options)
+                    })
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = result {
+                    if let Some(record) = store.get_mut(agent.id()) {
+                        record.attention = Some(error.clone());
+                    }
+                    self.save_store(&store)?;
+                    failures.push((agent.id().to_string(), error));
+                }
+            }
+            Ok(failures)
+        })
+    }
+
+    fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
+        let Some(record) = store.get_mut(agent.id()) else {
+            return Ok(());
+        };
+        if record.suspended && record.fields.is_empty() {
+            return Ok(());
+        }
+        self.tokens.revoke(agent.id())?;
+        record.suspended = true;
+        self.save_store(store)?;
+        let record = store
+            .get(agent.id())
+            .cloned()
+            .ok_or("Missing agent restore record")?;
+        let text = self.read_config(agent)?;
+        let mut doc = self.parse_config(agent, text.as_deref())?;
+        let default_model = record
+            .options
+            .default_model
+            .clone()
+            .or_else(|| selected_model(agent, Some(&doc)));
+        let edit = if text.is_some() {
+            restore(&mut doc, &record, self.secrets.as_ref())?
+        } else {
+            // A removed config is an uninstall/user action, not a request to
+            // recreate fields the gateway previously removed.
+            Edit {
+                changes: Vec::new(),
+                record: None,
+                pending_secrets: Vec::new(),
+                consumed_secrets: record
+                    .fields
+                    .iter()
+                    .filter_map(|field| match &field.previous {
+                        Some(Previous::Secret { secret_ref }) => Some(secret_ref.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+        };
+        if !edit.changes.is_empty() {
+            write_atomic(
+                &agent.config_path(&self.home, self.tool_env),
+                &doc.render()?,
+                Some(text.as_deref()),
+            )
+            .map_err(|error| format!("Cannot restore {}: {error}", agent.name()))?;
+        }
+        for entry in &edit.consumed_secrets {
+            self.secrets.delete(entry)?;
+        }
+        if let Some(record) = store.get_mut(agent.id()) {
+            record.fields.clear();
+            record.options.default_model = default_model;
+        }
+        self.save_store(store)
+    }
+
     /// Token, parked secrets, config, and record land together or are rolled
     /// back together.
     fn connect(
@@ -1017,6 +1152,15 @@ impl Projector {
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
     ) -> Result<(), String> {
+        let options = if agent == Agent::Codex && options.default_model.is_none() {
+            ConnectOptions {
+                default_model: catalog
+                    .and_then(|catalog| catalog.models.first())
+                    .map(|model| model.id().to_string()),
+            }
+        } else {
+            options.clone()
+        };
         if store
             .get(agent.id())
             .is_some_and(|record| record.disabled || record.cleanup_pending)
@@ -1032,12 +1176,15 @@ impl Projector {
                 catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
             )?;
         }
-        let edit = self.edit(agent, true, &mut doc, store, catalog, options)?;
+        let edit = self.edit(agent, true, &mut doc, store, catalog, &options)?;
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), String> {
             // A fresh token on every new connection; a leftover file from an
             // incomplete disconnect is never reused.
-            if store.contains_key(agent.id()) {
+            if store
+                .get(agent.id())
+                .is_some_and(|record| !record.suspended)
+            {
                 self.tokens.ensure(agent.id())?;
             } else {
                 self.tokens.rotate(agent.id())?;
@@ -1054,7 +1201,8 @@ impl Projector {
                 })?;
                 guard.config = Some((path, text.clone()));
             }
-            if let Some(record) = edit.record {
+            if let Some(mut record) = edit.record {
+                record.options = options.clone();
                 store.insert(agent.id().to_string(), record);
             }
             self.save_store(store)
@@ -1085,31 +1233,10 @@ impl Projector {
         self.cleanup(agent, store)
     }
 
-    /// Restore what can be restored and remove token, consumed parked
-    /// secrets, and the record. An unreadable or unparseable config is left
-    /// untouched (and its parked secrets stay in the credential store) rather
-    /// than blocking the disconnect.
+    /// Keep the journal on failure so cleanup can be retried without losing
+    /// the original settings or parked credentials.
     fn cleanup(&self, agent: Agent, store: &mut Store) -> Result<(), String> {
-        let Some(record) = store.get(agent.id()).cloned() else {
-            return Ok(());
-        };
-        let (text, read_error) = self.config_text(agent);
-        if read_error.is_none() {
-            if let Ok(mut doc) =
-                ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
-            {
-                let edit = restore(&mut doc, &record, self.secrets.as_ref())?;
-                if !edit.changes.is_empty() {
-                    let path = agent.config_path(&self.home, self.tool_env);
-                    write_atomic(&path, &doc.render()?, Some(text.as_deref())).map_err(
-                        |error| format!("Cannot write the {} config: {error}", agent.name()),
-                    )?;
-                }
-                for entry in &edit.consumed_secrets {
-                    self.secrets.delete(entry)?;
-                }
-            }
-        }
+        self.suspend(agent, store)?;
         self.tokens.revoke(agent.id())?;
         store.remove(agent.id());
         self.save_store(store)
@@ -1220,6 +1347,22 @@ impl Projector {
         let Some(record) = record else {
             return status;
         };
+        if record.suspended && !record.cleanup_pending {
+            status.connected = true;
+            status.attention = record.attention.clone().or_else(|| {
+                (!installed).then(|| {
+                    "CLI not found; configuration stays restored until the agent is available"
+                        .to_string()
+                })
+            });
+            if !record.fields.is_empty() {
+                status.attention = Some(
+                    "Configuration restoration is incomplete; retry stopping protection"
+                        .to_string(),
+                );
+            }
+            return status;
+        }
         let managed = doc.as_ref().is_some_and(|doc| {
             record
                 .fields
@@ -1915,6 +2058,143 @@ mod tests {
     }
 
     #[test]
+    fn links_survive_stop_restart_and_uninstall_without_owning_inactive_configs() {
+        let sandbox = sandbox("link-lifecycle");
+        let agent = Agent::ClaudeCode;
+        let config = agent.config_path(&sandbox.home, false);
+        let cli = sandbox.home.join(".local/bin").join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
+        write(&cli, "test cli");
+        write(
+            &config,
+            r#"{"model":"original","env":{"ANTHROPIC_AUTH_TOKEN":"original-secret"}}"#,
+        );
+        let options = claude_options();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, None, &options)
+            .unwrap();
+        let status = sandbox
+            .projector
+            .apply(agent, true, &preview.revision, None, &options)
+            .unwrap();
+        assert!(status.connected && !status.authorized);
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["model"]),
+            Some(ConfigValue::Str("original".into()))
+        );
+
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog()))
+            .unwrap()
+            .is_empty());
+        assert!(
+            sandbox
+                .projector
+                .scan(None)
+                .unwrap()
+                .0
+                .iter()
+                .find(|s| s.id == agent.id())
+                .unwrap()
+                .authorized
+        );
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["model"]),
+            Some(ConfigValue::Str("original".into()))
+        );
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["env", "ANTHROPIC_AUTH_TOKEN"]),
+            Some(ConfigValue::Str("original-secret".into()))
+        );
+        assert!(sandbox.projector.load_store().unwrap()[agent.id()].suspended);
+
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog()))
+            .unwrap()
+            .is_empty());
+        fs::remove_file(&cli).unwrap();
+        fs::remove_file(&config).unwrap();
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog()))
+            .unwrap()
+            .is_empty());
+        assert!(
+            !config.exists(),
+            "uninstall must not recreate deleted config"
+        );
+        let status = sandbox
+            .projector
+            .scan(None)
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|s| s.id == agent.id())
+            .unwrap();
+        assert!(status.connected && !status.authorized && status.attention.is_some());
+        write(&cli, "test cli");
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog()))
+            .unwrap()
+            .is_empty());
+        assert!(
+            sandbox
+                .projector
+                .scan(None)
+                .unwrap()
+                .0
+                .iter()
+                .find(|s| s.id == agent.id())
+                .unwrap()
+                .authorized
+        );
+        disconnect(&sandbox, agent);
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+    }
+
+    #[test]
+    fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
+        let sandbox = sandbox("link-restore-retry");
+        let agent = Agent::ClaudeCode;
+        let config = agent.config_path(&sandbox.home, false);
+        write(&config, r#"{"model":"original"}"#);
+        connect(&sandbox);
+        let managed = fs::read_to_string(&config).unwrap();
+        write(&config, "invalid json");
+        assert_eq!(sandbox.projector.reconcile(None).unwrap().len(), 1);
+        assert!(!sandbox.projector.load_store().unwrap()[agent.id()]
+            .fields
+            .is_empty());
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+        write(&config, &managed);
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["model"]),
+            Some(ConfigValue::Str("original".into()))
+        );
+        connect(&sandbox);
+        let mut edited = doc(&sandbox, agent);
+        edited
+            .set_value(&["model"], &ConfigValue::Str("user-choice".into()))
+            .unwrap();
+        write(&config, &edited.render().unwrap());
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["model"]),
+            Some(ConfigValue::Str("user-choice".into()))
+        );
+    }
+
+    #[test]
     fn codex_and_opencode_use_official_custom_provider_configs() {
         let sandbox = sandbox("providers");
         let catalog = catalog();
@@ -2460,6 +2740,7 @@ mod tests {
                 }],
                 disabled: true,
                 cleanup_pending: false,
+                ..Connection::default()
             },
         );
         sandbox.projector.save_store(&store).unwrap();
@@ -2541,15 +2822,28 @@ mod tests {
             .contains("no longer matches"));
 
         // Corrupt the file entirely: still recorded, error reported, token
-        // still unauthorized, and Disconnect cleans up without touching it.
+        // still unauthorized, and Disconnect retains its recovery journal.
         write(&path, "{ not json");
         assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
         let status = &sandbox.projector.scan(None).unwrap().0[1];
         assert!(status.recorded && !status.authorized);
         assert!(status.error.is_some());
-        disconnect(&sandbox, Agent::ClaudeCode);
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, false, None, &ConnectOptions::default())
+            .unwrap();
+        assert!(sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                false,
+                &preview.revision,
+                None,
+                &ConnectOptions::default()
+            )
+            .is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
-        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(sandbox.projector.load_store().unwrap()["claude-code"].cleanup_pending);
         assert!(sandbox
             .projector
             .tokens
@@ -2576,11 +2870,8 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         let failures = sandbox.projector.disconnect_all().unwrap();
-        assert!(
-            failures.is_empty(),
-            "unreadable config is skipped, not fatal: {failures:?}"
-        );
-        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(sandbox.projector.load_store().unwrap()["claude-code"].cleanup_pending);
         assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
     }
 

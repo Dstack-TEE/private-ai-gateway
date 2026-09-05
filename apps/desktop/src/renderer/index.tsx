@@ -5,6 +5,7 @@ import {
   Ban,
   ChartNoAxesColumn,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -46,6 +47,7 @@ import type {
   DesktopApi,
   GatewayState,
   LocalApiConfig,
+  LaunchPreferences,
   RequestActivity,
   UsagePage,
   UsageQuery,
@@ -129,6 +131,31 @@ function profileHasCredential(profile: ConfidentialProfile): boolean {
 
 function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
   return Boolean(profile?.verifiedAt && profileHasCredential(profile) && state.apiKeySaved);
+}
+
+function isProtected(state: GatewayState): boolean {
+  return state.status === "verified" && !state.configurationVerification && state.apiKeySaved && !state.endpointError;
+}
+
+function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
+  const active = isProtected(state);
+  const since = active ? state.protectedSince : undefined;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since === undefined) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  const seconds = since === undefined ? undefined : Math.max(0, Math.floor(now / 1_000) - since);
+  const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
+  return (
+    <span className="protection-status">
+      {active ? <ShieldCheck size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
+      <span aria-live="polite">{label}</span>
+      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Protected for ${elapsed}`} title={`Protected since ${formatTimestamp((since ?? 0) * 1_000, true)}`}>{elapsed}</time>}
+    </span>
+  );
 }
 
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
@@ -275,11 +302,17 @@ function useNativeGatewayWindow(title: string): {
   return { state, setState, loaded, loadError, closed, close };
 }
 
-function NativeDialogStatus({ label, error }: { label: string; error?: string }): React.JSX.Element {
+function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element {
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [onClose]);
   return (
     <main className="native-dialog-host native-dialog-loading">
       {error ? <TriangleAlert aria-hidden="true" /> : <LoaderCircle className="is-spinning" aria-hidden="true" />}
-      <span>{error ?? `Loading ${label}…`}</span>
+      <span role={error ? "alert" : "status"}>{error ?? `Loading ${label}…`}</span>
+      <button className="button" onClick={onClose}>{error ? "Done" : "Cancel"}</button>
     </main>
   );
 }
@@ -302,7 +335,7 @@ function NativeProfilesWindow({ repair }: { repair: boolean }): React.JSX.Elemen
   };
 
   if (native.closed) return <main className="native-dialog-host" aria-label="Profiles closed" />;
-  if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} />;
+  if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
   return (
@@ -327,7 +360,7 @@ function NativeProfilesWindow({ repair }: { repair: boolean }): React.JSX.Elemen
 function NativePrivacyWindow(): React.JSX.Element {
   const native = useNativeGatewayWindow("Privacy Verification");
   if (native.closed) return <main className="native-dialog-host" aria-label="Privacy verification closed" />;
-  if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} />;
+  if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} onClose={native.close} />;
   const verified = !native.state.configurationVerification && native.state.status === "verified";
   return (
     <main className="native-dialog-host">
@@ -370,7 +403,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
 
   if (native.closed) return <main className="native-dialog-host" aria-label="Local API settings closed" />;
   if (!native.loaded || !keyLoaded || native.loadError || keyError) {
-    return <NativeDialogStatus label="Local API settings" error={native.loadError ?? keyError} />;
+    return <NativeDialogStatus label="Local API settings" error={native.loadError ?? keyError} onClose={native.close} />;
   }
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
@@ -459,7 +492,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
   };
 
   if (closed) return <main className="native-dialog-host" aria-label="Usage proof closed" />;
-  if (!activity || error) return <NativeDialogStatus label="usage proof" error={error} />;
+  if (!activity || error) return <NativeDialogStatus label="usage proof" error={error} onClose={close} />;
   return <main className="native-dialog-host"><UsageEvidenceSheet activity={activity} onClose={close} /></main>;
 }
 
@@ -470,6 +503,8 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
+  const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
+  const [savingPreference, setSavingPreference] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
@@ -480,15 +515,32 @@ function App(): React.JSX.Element {
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string }>();
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
-  const [previewOpenAtLogin, setPreviewOpenAtLogin] = useState(true);
   const copyTimer = useRef<number | undefined>(undefined);
   const firstUsePresented = useRef(false);
+  const agentScan = useRef(0);
   const busy = state.status === "verifying";
   const running = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
   const verified = !state.configurationVerification && state.status === "verified";
   const endpointDown = Boolean(state.endpointError);
   const models = state.catalog?.models ?? [];
-  const catalogReady = verified && models.length > 0;
+
+  useEffect(() => {
+    let active = true;
+    void desktopApi.getLaunchPreferences().then(
+      (value) => { if (active) setLaunchPreferences(value); },
+      (error: unknown) => { if (active) setActionError(errorMessage(error)); },
+    );
+    const unsubscribe = desktopApi.onLaunchPreferencesChange(setLaunchPreferences);
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  const saveLaunchPreference = async (name: keyof LaunchPreferences, enabled: boolean) => {
+    setSavingPreference(true);
+    setActionError(undefined);
+    try { setLaunchPreferences(await desktopApi.setLaunchPreference(name, enabled)); }
+    catch (error) { setActionError(errorMessage(error)); }
+    finally { setSavingPreference(false); }
+  };
 
   useEffect(() => {
     document.title = brand.productName;
@@ -584,17 +636,26 @@ function App(): React.JSX.Element {
   }, [configuredPolicy]);
 
   const loadAgents = useCallback(async () => {
+    const scan = ++agentScan.current;
     try {
-      setAgents(await desktopApi.listAgents());
+      const next = await desktopApi.listAgents();
+      if (scan === agentScan.current) setAgents(next);
     } catch (error) {
-      setActionError(errorMessage(error));
+      if (scan === agentScan.current) setActionError(errorMessage(error));
     }
   }, []);
 
   // Agent status depends on the verified catalog, so reload with the session.
   const catalogRevision = state.catalog?.revision;
   useEffect(() => {
-    void loadAgents();
+    let active = true;
+    let timer: number | undefined;
+    const refresh = async () => {
+      await loadAgents();
+      if (active) timer = window.setTimeout(() => void refresh(), 5_000);
+    };
+    void refresh();
+    return () => { active = false; window.clearTimeout(timer); };
   }, [loadAgents, catalogRevision, verified]);
 
   const run = async (action: () => Promise<GatewayState | void>) => {
@@ -756,7 +817,8 @@ function App(): React.JSX.Element {
     if (!confirmed) return;
     setApplying(true);
     try {
-      setAgents(await desktopApi.disconnectAllAgents());
+      await desktopApi.disconnectAllAgents();
+      await loadAgents();
       setNotice({ id: Date.now(), text: "All agent configurations restored" });
       window.setTimeout(() => document.getElementById("page-title-settings")?.focus(), 0);
     } catch (error) {
@@ -818,7 +880,6 @@ function App(): React.JSX.Element {
             running={running}
             endpointDown={endpointDown}
             developmentMode={allowDevelopmentOs}
-            catalogReady={catalogReady}
             problem={problem}
             locked={locked}
             clientKey={clientKey}
@@ -826,7 +887,6 @@ function App(): React.JSX.Element {
             copied={copied}
             onToggle={toggleGateway}
             onSettings={() => openSettings("confidential")}
-            onActivateProfile={activateProfile}
             onPrivacy={() => openSettings("privacy")}
             onLocalSettings={() => openSettings("local-api")}
             onAgents={() => changeView("agents")}
@@ -840,8 +900,6 @@ function App(): React.JSX.Element {
         {view === "agents" && (
           <AgentsView
             agents={agents}
-            endpointDown={endpointDown}
-            catalogReady={catalogReady}
             locked={locked}
             problem={problem}
             onSelect={(agent, connect) => void applyAgent(agent, connect)}
@@ -869,6 +927,9 @@ function App(): React.JSX.Element {
             onRestoreAll={() => void restoreAll()}
             onSupport={() => void run(() => desktopApi.openSupport())}
             onOpen={openSettings}
+            launchPreferences={launchPreferences}
+            savingPreference={savingPreference}
+            onLaunchPreference={(name, enabled) => void saveLaunchPreference(name, enabled)}
           />
         )}
         </div>
@@ -922,7 +983,7 @@ function App(): React.JSX.Element {
 
   return (
     <div className="desktop-preview">
-      <MacMenuBar protected={verified && state.apiKeySaved} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
+      <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
       <div className="desktop-window">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
@@ -931,14 +992,14 @@ function App(): React.JSX.Element {
           running={running}
           endpointDown={endpointDown}
           developmentMode={allowDevelopmentOs}
-          openAtLogin={previewOpenAtLogin}
+          openAtLogin={launchPreferences?.openAtLogin ?? false}
           onProtection={toggleGateway}
           onOpen={() => setPreviewTrayOpen(false)}
           onSettings={() => {
             setPreviewTrayOpen(false);
             changeView("settings");
           }}
-          onOpenAtLogin={() => setPreviewOpenAtLogin((enabled) => !enabled)}
+          onOpenAtLogin={() => void saveLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)}
           onQuit={() => {
             setPreviewTrayOpen(false);
             setNotice({ id: Date.now(), text: "Quit is available in the installed macOS app" });
@@ -1118,7 +1179,7 @@ function PageHeader({
       {view !== "overview" && (
         <div className="page-protection">
           <span className="page-switch-copy">
-            <strong>{developmentMode ? "Dev mode" : "Protected"}</strong>
+            <strong><ProtectionStatus state={state} label={developmentMode ? "Dev mode" : "Protected"} /></strong>
             <small className={developmentMode ? "is-development" : verdict.tone === "success" ? "is-on" : verdict.tone === "danger" ? "is-error" : undefined}>{running ? "On" : protectionStarting ? "Starting" : "Off"}</small>
           </span>
           <ProtectedControl
@@ -1144,7 +1205,6 @@ function Overview({
   running,
   endpointDown,
   developmentMode,
-  catalogReady,
   problem,
   locked,
   clientKey,
@@ -1152,7 +1212,6 @@ function Overview({
   copied,
   onToggle,
   onSettings,
-  onActivateProfile,
   onPrivacy,
   onLocalSettings,
   onAgents,
@@ -1168,7 +1227,6 @@ function Overview({
   running: boolean;
   endpointDown: boolean;
   developmentMode: boolean;
-  catalogReady: boolean;
   problem?: string;
   locked: boolean;
   clientKey: string;
@@ -1176,7 +1234,6 @@ function Overview({
   copied?: string;
   onToggle(): void;
   onSettings(): void;
-  onActivateProfile(profileId: string): Promise<string | undefined>;
   onPrivacy(): void;
   onLocalSettings(): void;
   onAgents(): void;
@@ -1186,7 +1243,9 @@ function Overview({
   onSelect(agent: AgentStatus, connect: boolean): void;
   onInspect(activity: RequestActivity): void;
 }): React.JSX.Element {
-  const recent = state.activity.slice(0, 5);
+  const protectedNow = isProtected(state);
+  const localAvailable = Boolean(state.proxyUrl) && !state.endpointError;
+  const recent = protectedNow ? state.activity.slice(0, 5) : [];
   return (
     <div className="overview-page">
       <StatusSurface
@@ -1198,7 +1257,6 @@ function Overview({
         developmentMode={developmentMode}
         onToggle={onToggle}
         onSettings={onSettings}
-        onActivateProfile={onActivateProfile}
         onPrivacy={onPrivacy}
       />
       {problem && (
@@ -1207,7 +1265,7 @@ function Overview({
         </p>
       )}
       <div className="overview-grid">
-        <OverviewModule title="Local API">
+        <OverviewModule title="Local API" status={<StateLabel tone={localAvailable ? "success" : "danger"} icon={localAvailable ? Check : TriangleAlert} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             endpointError={state.endpointError}
@@ -1219,8 +1277,8 @@ function Overview({
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule title="Session usage" meta="This session">
-          <SessionSummary summary={state.sessionUsage} />
+        <OverviewModule title="Usage in this session">
+          <SessionSummary summary={state.sessionUsage} active={protectedNow} />
         </OverviewModule>
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
           <div className="preview-list">
@@ -1231,7 +1289,6 @@ function Overview({
                 agent={agent}
                 compact
                 disabled={locked}
-                connectBlocked={endpointDown || !catalogReady}
                 onSelect={(connect) => onSelect(agent, connect)}
               />
             ))}
@@ -1265,7 +1322,6 @@ function StatusSurface({
   developmentMode,
   onToggle,
   onSettings,
-  onActivateProfile,
   onPrivacy,
 }: {
   state: GatewayState;
@@ -1276,39 +1332,36 @@ function StatusSurface({
   developmentMode: boolean;
   onToggle(): void;
   onSettings(): void;
-  onActivateProfile(profileId: string): Promise<string | undefined>;
   onPrivacy(): void;
 }): React.JSX.Element {
   const verdict = presentation(state);
+  const protectedNow = isProtected(state);
   const connected = agents.filter((agent) => agent.connected).length;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const localApiAvailable = Boolean(state.proxyUrl) && !endpointDown;
   const profileStatus = !activeProfile
-    ? "Create a profile to continue"
+    ? "Not configured"
     : activeProfileAvailable
-      ? "Verified configuration"
+      ? "Verified"
       : profileHasCredential(activeProfile)
         ? "Verification required"
         : "Credential unavailable";
-  const selectProfile = async (profileId: string) => {
-    if (!profileId || profileId === state.activeProfileId) return;
-    await onActivateProfile(profileId);
-  };
   return (
-    <section className={`status-surface status-${state.status} ${state.status === "verified" && !state.configurationVerification && state.apiKeySaved ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
-      <TrackLayer side="left" lines={PLAINTEXT_TRACKS} active={state.status === "verified" && !state.configurationVerification && state.apiKeySaved} />
-      <TrackLayer side="right" lines={TLS_TRACKS} active={state.status === "verified" && !state.configurationVerification && state.apiKeySaved} />
+    <section className={`status-surface status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
+      <TrackLayer side="left" lines={PLAINTEXT_TRACKS} active={protectedNow} />
+      <TrackLayer side="right" lines={TLS_TRACKS} active={protectedNow} />
       <div className="status-glow" aria-hidden="true" />
       <div className="status-edge status-edge-left" aria-hidden="true" />
       <div className="status-edge status-edge-right" aria-hidden="true" />
 
       <div className="status-segment status-local">
         <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This Mac</span></div>
-        <div className="status-local-facts">
-          <div><span>Local API</span><strong className={localApiAvailable ? "state-success" : "state-danger"}>{localApiAvailable ? "Available" : "Unavailable"}</strong></div>
-          <div><span>Agents</span><strong>{connected === 0 ? "None linked" : `${connected} linked`}</strong></div>
+        <div className={`status-fact ${localApiAvailable ? "state-success" : "state-danger"}`}>
+          {localApiAvailable ? <Check size={13} aria-hidden="true" /> : <TriangleAlert size={13} aria-hidden="true" />}
+          <span>Local API {localApiAvailable ? "available" : "unavailable"}</span>
         </div>
+        <div className="status-fact"><SquareTerminal size={13} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} linked</span></div>
         <div className="status-agent-icons" role="group" aria-label="Linked agents">
           {agents.filter((agent) => agent.connected).slice(0, 5).map((agent) => (
             <span className="status-agent-icon" key={agent.id} title={agent.name}>
@@ -1322,7 +1375,7 @@ function StatusSurface({
         <div className="gateway-core">
           <BrandMark className="gateway-mark" busy={busy} />
           <strong>{brand.productName}</strong>
-          <span className={`gateway-verdict state-${verdict.tone}`} aria-live="polite">{verdict.title}</span>
+          <span className={`gateway-verdict state-${verdict.tone}`}><ProtectionStatus state={state} label={verdict.title} /></span>
           <ProtectedControl
             state={state}
             busy={busy}
@@ -1336,30 +1389,17 @@ function StatusSurface({
       </div>
 
       <div className="status-segment status-remote">
-        <div className="status-profile">
-          <ServiceLogo url={activeProfile?.remoteUrl ?? "custom://service"} size="large" />
-          <div className="status-profile-copy">
-            <label htmlFor="overview-profile">Profile</label>
-            <select
-              id="overview-profile"
-              aria-label="Confidential AI profile"
-              value={activeProfile?.id ?? ""}
-              disabled={busy || running || state.profiles.length === 0}
-              onChange={(event) => void selectProfile(event.target.value)}
-            >
-              {state.profiles.length === 0 && <option value="">No profiles</option>}
-              {state.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}
-            </select>
-          </div>
-        </div>
-        <div className={`status-profile-state ${activeProfileAvailable ? "state-success" : "state-warning"}`}>
+        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
+        <button className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+          {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus size={18} aria-hidden="true" />}
+          <span>{activeProfile?.name ?? "Setup provider"}</span>
+          <ChevronDown size={14} aria-hidden="true" />
+        </button>
+        <div className="status-endpoint" title={activeProfile?.remoteUrl}>{activeProfile?.remoteUrl ?? "No endpoint configured"}</div>
+        <button className={`status-fact status-profile-state ${activeProfileAvailable ? "state-success" : "state-warning"}`} aria-haspopup="dialog" onClick={activeProfileAvailable ? onPrivacy : onSettings}>
           {activeProfileAvailable ? <Check size={13} aria-hidden="true" /> : <TriangleAlert size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
-        </div>
-        <div className="status-actions">
-          <IconButton label="Profiles" onClick={onSettings}><Settings size={16} /></IconButton>
-          <IconButton label="Privacy verification" onClick={onPrivacy}><ShieldCheck size={16} /></IconButton>
-        </div>
+        </button>
       </div>
     </section>
   );
@@ -1472,13 +1512,13 @@ function SwitchControl({
 
 function OverviewModule({
   title,
-  meta,
+  status,
   action,
   onAction,
   children,
 }: React.PropsWithChildren<{
   title: string;
-  meta?: string;
+  status?: React.ReactNode;
   action?: string;
   onAction?(): void;
 }>): React.JSX.Element {
@@ -1486,7 +1526,7 @@ function OverviewModule({
     <section className="overview-module">
       <header className="overview-module-title">
         <h2>{title}</h2>
-        {meta && <span>{meta}</span>}
+        {status}
         {action && onAction && <button className="module-action" onClick={onAction}>{action}</button>}
       </header>
       <div className="module inset">{children}</div>
@@ -1526,7 +1566,6 @@ function LocalApiPanel({
         >
           <span className="row-title-line">
             <span className="row-title">Endpoint</span>
-            <span className="row-side">{proxyUrl ? "Available" : "Stopped"}</span>
           </span>
           <code className="row-note">{proxyUrl ?? "Unavailable"}</code>
           <span className={`copy-feedback ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
@@ -1537,7 +1576,6 @@ function LocalApiPanel({
         <button className="copy-surface" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line">
             <span className="row-title">Client key</span>
-            <span className="row-side">for your own tools</span>
           </span>
           <code className="row-note">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
           <span className={`copy-feedback ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
@@ -1549,16 +1587,16 @@ function LocalApiPanel({
   );
 }
 
-function SessionSummary({ summary }: { summary: UsageSummary }): React.JSX.Element {
+function SessionSummary({ summary, active }: { summary: UsageSummary; active: boolean }): React.JSX.Element {
   const forwarded = Math.max(0, summary.requests - summary.blockedLocally);
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
     <div className="session-summary">
-      <div><span>Requests</span><strong>{summary.requests.toLocaleString()}</strong></div>
-      <div><span>Tokens</span><strong>{formatTokens(totalTokens)}</strong></div>
-      <div><span>Cost</span><strong>{currency(summary.costUsd)}</strong></div>
-      <div><span>Protected</span><strong>{forwarded ? `${protectedRate}%` : "—"}</strong></div>
+      <div><span>Requests</span><strong>{active ? summary.requests.toLocaleString() : "—"}</strong></div>
+      <div><span>Tokens</span><strong>{active ? formatTokens(totalTokens) : "—"}</strong></div>
+      <div><span>Cost</span><strong>{active ? currency(summary.costUsd) : "—"}</strong></div>
+      <div><span>Protected</span><strong>{active && forwarded ? `${protectedRate}%` : "—"}</strong></div>
     </div>
   );
 }
@@ -1601,27 +1639,23 @@ function IconButton({
 
 function AgentsView({
   agents,
-  endpointDown,
-  catalogReady,
   locked,
   problem,
   onSelect,
 }: {
   agents: AgentStatus[];
-  endpointDown: boolean;
-  catalogReady: boolean;
   locked: boolean;
   problem?: string;
   onSelect(agent: AgentStatus, connect: boolean): void;
 }): React.JSX.Element {
   const connected = agents.filter((agent) => agent.connected).length;
-  const enabled = agents.filter((agent) => agent.recorded).length;
+  const active = agents.filter((agent) => agent.authorized).length;
   return (
     <div className="page-body">
       {problem && <p className="banner" role="alert">{problem}</p>}
-      <p className="page-intro">Enabled agents use {brand.productName} whenever protection is on. Their previous settings return when you disconnect them.</p>
+      <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
       <section className="group" aria-labelledby="agents-title">
-        <h2 className="group-title" id="agents-title">Configured agents <span>{enabled} enabled · {connected} active</span></h2>
+        <h2 className="group-title" id="agents-title">Configured agents <span>{connected} connected · {active} active</span></h2>
         <div className="inset">
           {agents.length === 0 && <EmptyState text="Agent configs unavailable" />}
           {sortAgents(agents).map((agent) => (
@@ -1629,7 +1663,6 @@ function AgentsView({
               key={agent.id}
               agent={agent}
               disabled={locked}
-              connectBlocked={endpointDown || !catalogReady}
               onSelect={(connect) => onSelect(agent, connect)}
             />
           ))}
@@ -1643,14 +1676,11 @@ function AgentsView({
 function AgentRow({
   agent,
   disabled,
-  connectBlocked,
   compact = false,
   onSelect,
 }: {
   agent: AgentStatus;
   disabled: boolean;
-  /** Connecting needs the verified catalog and a bound endpoint; disconnecting never does. */
-  connectBlocked: boolean;
   compact?: boolean;
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
@@ -1665,7 +1695,7 @@ function AgentRow({
           ? { label: "Not connected", tone: "neutral" as Tone, icon: undefined }
           : { label: "CLI not found", tone: "neutral" as Tone, icon: undefined };
   const disconnecting = agent.recorded;
-  const actionable = disconnecting || (!connectBlocked && !agent.error);
+  const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
     <div className={`agent-block row ${compact ? "agent-compact" : ""}`} title={agent.configPath}>
@@ -1683,7 +1713,6 @@ function AgentRow({
         compact
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
-        title={!disconnecting && connectBlocked ? "Start protection first; models come from the verified service" : undefined}
         onToggle={() => onSelect(!disconnecting)}
       />
     </div>
@@ -2071,6 +2100,9 @@ function SettingsView({
   onRestoreAll,
   onSupport,
   onOpen,
+  launchPreferences,
+  savingPreference,
+  onLaunchPreference,
 }: {
   state: GatewayState;
   busy: boolean;
@@ -2083,12 +2115,29 @@ function SettingsView({
   onRestoreAll(): void;
   onSupport(): void;
   onOpen(target: SettingsTarget): void;
+  launchPreferences?: LaunchPreferences;
+  savingPreference: boolean;
+  onLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): void;
 }): React.JSX.Element {
   const frozen = busy || running;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body settings-page">
       {problem && <p className="banner" role="alert">{problem}</p>}
+
+      <section className="group" aria-labelledby="startup-title">
+        <h2 className="group-title" id="startup-title">Startup</h2>
+        <div className="inset">
+          <div className="row toggle-row">
+            <span className="row-main"><span className="row-title">Open at Login</span></span>
+            <SwitchControl compact label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
+          </div>
+          <div className="row toggle-row">
+            <span className="row-main"><span className="row-title">Connect on launch</span><span className="row-note">Start protection using the selected profile.</span></span>
+            <SwitchControl compact label="Connect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
+          </div>
+        </div>
+      </section>
 
       <section className="group" aria-labelledby="service-settings-title">
         <h2 className="group-title" id="service-settings-title">Service</h2>

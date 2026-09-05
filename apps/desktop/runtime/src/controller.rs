@@ -39,6 +39,7 @@ pub struct DesktopRuntime {
     legacy_credential_pending: Mutex<bool>,
     endpoint: EndpointRuntime,
     codex_sync: CodexCatalogSync,
+    agent_policy: Mutex<()>,
     helper_path: PathBuf,
     #[allow(dead_code)]
     instance: Option<lock::InstanceLock>,
@@ -261,6 +262,7 @@ impl DesktopRuntime {
             legacy_credential_pending: Mutex::new(migrated_legacy),
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
+            agent_policy: Mutex::new(()),
             helper_path: options.helper_path,
             instance,
         });
@@ -291,7 +293,45 @@ impl DesktopRuntime {
         {
             manager.report_error(error);
         }
-        runtime.initialize_startup_tokens();
+        if runtime.instance.is_some() {
+            runtime.initialize_startup_tokens();
+        }
+
+        let weak = Arc::downgrade(&runtime);
+        let mut states = runtime.subscribe();
+        task_runtime.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            let mut previous = None;
+            loop {
+                tokio::select! {
+                    result = states.changed() => {
+                        if result.is_err() { break; }
+                        let state = states.borrow();
+                        let policy = (protection_active(&state), state.catalog.as_ref().map(|catalog| catalog.revision.clone()));
+                        if previous.as_ref() == Some(&policy) { continue; }
+                        previous = Some(policy);
+                    },
+                    _ = interval.tick() => {},
+                }
+                let Some(runtime) = weak.upgrade() else { break };
+                let result = tokio::task::spawn_blocking(move || {
+                    if let Err(error) = runtime.reconcile_agents() {
+                        if runtime
+                            .state()
+                            .is_ok_and(|state| state.error.as_deref() != Some(&error))
+                        {
+                            runtime.report_error(error);
+                        }
+                    }
+                })
+                .await;
+                if result.is_err() {
+                    if let Some(runtime) = weak.upgrade() {
+                        runtime.report_error("Agent reconciliation could not complete; stop protection and retry".to_string());
+                    }
+                }
+            }
+        });
 
         let events_runtime = runtime.clone();
         task_runtime.spawn(async move {
@@ -368,6 +408,10 @@ impl DesktopRuntime {
     }
 
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
         let config = service_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
@@ -394,8 +438,21 @@ impl DesktopRuntime {
     }
 
     pub fn stop(&self) -> Result<GatewayState, String> {
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
         let result = self.manager.stop();
         self.proxy.set_api_key(None);
+        if self.instance.is_none() {
+            return result;
+        }
+        self.proxy
+            .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
+        let failures = self.current_projector()?.reconcile(None)?;
+        if !failures.is_empty() {
+            return Err(agent_failures(failures));
+        }
         result
     }
 
@@ -436,6 +493,10 @@ impl DesktopRuntime {
     fn reload_agent_tokens(&self) -> Result<(), String> {
         let projector = self.current_projector()?;
         projector.migrate_legacy()?;
+        let failures = projector.reconcile(None)?;
+        if !failures.is_empty() {
+            return Err(agent_failures(failures));
+        }
         let (_, tokens) = projector.scan(None)?;
         self.proxy
             .set_tokens(with_client_token(tokens, &self.credentials)?);
@@ -844,14 +905,22 @@ impl DesktopRuntime {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        if let Err(error) = self.reconcile_agents() {
+            if self.state()?.error.as_deref() != Some(&error) {
+                self.report_error(error);
+            }
+        }
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
         let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
+        if self.instance.is_none() {
+            return Ok(statuses);
+        }
         if let Some(catalog) = catalog.as_ref() {
             if let Some(codex) = statuses
                 .iter_mut()
-                .find(|status| status.id == Agent::Codex.id() && status.connected)
+                .find(|status| status.id == Agent::Codex.id() && status.authorized)
             {
                 if let Some(error) = self.codex_sync.refresh_error(&projector, catalog) {
                     let refresh = format!(
@@ -888,6 +957,13 @@ impl DesktopRuntime {
         revision: String,
         options: ConnectOptions,
     ) -> Result<AgentStatus, String> {
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
+        if self.instance.is_none() {
+            return Err("Another app instance owns the agent configurations".to_string());
+        }
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;
         let projector = self.current_projector()?;
@@ -909,6 +985,13 @@ impl DesktopRuntime {
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
+        if self.instance.is_none() {
+            return Err("Another app instance owns the agent configurations".to_string());
+        }
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
         let projector = self.current_projector()?;
@@ -933,22 +1016,72 @@ impl DesktopRuntime {
         }
     }
 
+    fn reconcile_agents(&self) -> Result<(), String> {
+        if self.instance.is_none() {
+            return Ok(());
+        }
+        let _guard = self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?;
+        let state = self.manager.snapshot()?;
+        let session = self.proxy.session();
+        let protected = protection_active(&state) && session.verified;
+        let catalog = if protected { session.catalog } else { None };
+        let projector = self.current_projector()?;
+        let failures = projector.reconcile(catalog.as_ref())?;
+        let tokens = projector.scan(catalog.as_ref())?.1;
+        self.proxy
+            .set_tokens(with_client_token(tokens, &self.credentials)?);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(agent_failures(failures))
+        }
+    }
+
     fn connection_catalog(&self, agent: Agent, connect: bool) -> Result<Option<Catalog>, String> {
         if !connect {
             return Ok(None);
         }
-        if let Some(error) = self.manager.snapshot()?.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}"));
+        if !self
+            .current_projector()?
+            .scan(None)?
+            .0
+            .iter()
+            .any(|status| status.id == agent.id() && status.installed)
+        {
+            return Ok(None);
+        }
+        let state = self.manager.snapshot()?;
+        if state.status != "verified"
+            || state.configuration_verification
+            || state.endpoint_error.is_some()
+            || !state.api_key_saved
+        {
+            return Ok(None);
         }
         let session = self.proxy.session();
         match (session.verified, session.catalog) {
             (true, Some(catalog)) => Ok(Some(catalog)),
-            _ => Err(format!(
-                "Start the gateway and wait until it is verified; the model list for {} comes from it",
-                agent.name()
-            )),
+            _ => Ok(None),
         }
     }
+}
+
+fn agent_failures(failures: Vec<(String, String)>) -> String {
+    failures
+        .into_iter()
+        .map(|(agent, error)| format!("{agent}: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn protection_active(state: &GatewayState) -> bool {
+    state.status == "verified"
+        && !state.configuration_verification
+        && state.api_key_saved
+        && state.endpoint_error.is_none()
 }
 
 fn with_client_token(
@@ -967,5 +1100,33 @@ fn restore_secret_entry(
     match value {
         Some(value) => secrets.set(entry, value),
         None => secrets.delete(entry),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protection_active;
+    use crate::contracts::GatewayState;
+
+    #[test]
+    fn only_live_protection_allows_agent_projection() {
+        let mut state = GatewayState {
+            api_key_saved: true,
+            ..GatewayState::default()
+        };
+        for status in ["stopped", "verifying", "blocked", "error"] {
+            state.status = status.to_string();
+            assert!(!protection_active(&state));
+        }
+        state.status = "verified".to_string();
+        assert!(protection_active(&state));
+        state.configuration_verification = true;
+        assert!(!protection_active(&state));
+        state.configuration_verification = false;
+        state.api_key_saved = false;
+        assert!(!protection_active(&state));
+        state.api_key_saved = true;
+        state.endpoint_error = Some("Listener unavailable".to_string());
+        assert!(!protection_active(&state));
     }
 }

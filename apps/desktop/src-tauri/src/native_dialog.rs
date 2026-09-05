@@ -6,6 +6,12 @@ const LOCAL_API_LABEL: &str = "local-api";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
+const DIALOG_LABELS: [&str; 4] = [
+    PROFILES_LABEL,
+    PRIVACY_LABEL,
+    LOCAL_API_LABEL,
+    USAGE_PROOF_LABEL,
+];
 
 struct DialogSpec {
     label: &'static str,
@@ -78,6 +84,18 @@ pub fn open(
         _ => return Err("Unknown native dialog".to_string()),
     };
 
+    // A document can present one modal sheet at a time. Keep a second tray or
+    // menu action from creating an invisible queued dialog.
+    #[cfg(target_os = "macos")]
+    for label in DIALOG_LABELS
+        .into_iter()
+        .filter(|label| *label != spec.label)
+    {
+        if let Some(window) = app.get_webview_window(label) {
+            return window.set_focus().map_err(window_error);
+        }
+    }
+
     if let Some(window) = app.get_webview_window(spec.label) {
         if spec.label == PROFILES_LABEL && repair {
             window
@@ -88,6 +106,7 @@ pub fn open(
                 .emit(USAGE_PROOF_EVENT, record_id)
                 .map_err(window_error)?;
         }
+        #[cfg(not(target_os = "macos"))]
         window.show().map_err(window_error)?;
         window.set_focus().map_err(window_error)?;
         return Ok(());
@@ -110,12 +129,30 @@ pub fn open(
         Some((x, y)) => builder.position(x, y),
         None => builder.center(),
     };
-    let window = builder
-        .parent(&main)
-        .map_err(window_error)?
-        .build()
-        .map_err(window_error)?;
-    window.set_focus().map_err(window_error)
+    #[cfg(target_os = "macos")]
+    {
+        let window = builder
+            .visible(false)
+            .closable(false)
+            .hidden_title(true)
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .build()
+            .map_err(window_error)?;
+        if let Err(error) = macos::present(main, window.clone()) {
+            let _ = window.destroy();
+            return Err(error);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = builder
+            .parent(&main)
+            .map_err(window_error)?
+            .build()
+            .map_err(window_error)?;
+        window.set_focus().map_err(window_error)
+    }
 }
 
 pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
@@ -123,17 +160,81 @@ pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if ![
-        PROFILES_LABEL,
-        PRIVACY_LABEL,
-        LOCAL_API_LABEL,
-        USAGE_PROOF_LABEL,
-    ]
-    .contains(&window.label())
-    {
+    if !DIALOG_LABELS.contains(&window.label()) {
         return Err("Only native dialog windows can close themselves".to_string());
     }
-    window.close().map_err(window_error)
+    #[cfg(target_os = "macos")]
+    {
+        macos::dismiss(window.clone())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.close().map_err(window_error)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::window_error;
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_app_kit::{NSWindow, NSWindowButton};
+    use tauri::WebviewWindow;
+
+    pub fn present(parent: WebviewWindow, window: WebviewWindow) -> Result<(), String> {
+        let dispatcher = window.clone();
+        on_main(&dispatcher, move || {
+            let parent = native(&parent)?;
+            let sheet = native(&window)?;
+            for kind in [
+                NSWindowButton::CloseButton,
+                NSWindowButton::MiniaturizeButton,
+                NSWindowButton::ZoomButton,
+            ] {
+                if let Some(button) = sheet.standardWindowButton(kind) {
+                    button.setHidden(true);
+                }
+            }
+            sheet.setMovable(false);
+            parent.beginSheet_completionHandler(&sheet, None);
+            Ok(())
+        })
+    }
+
+    pub fn dismiss(window: WebviewWindow) -> Result<(), String> {
+        let dispatcher = window.clone();
+        on_main(&dispatcher, move || {
+            let sheet = native(&window)?;
+            if let Some(parent) = sheet.sheetParent() {
+                parent.endSheet(&sheet);
+            }
+            window.close().map_err(window_error)
+        })
+    }
+
+    fn native(window: &WebviewWindow) -> Result<Retained<NSWindow>, String> {
+        MainThreadMarker::new().ok_or("Native sheets require the main thread")?;
+        let ptr = window.ns_window().map_err(window_error)?.cast::<NSWindow>();
+        // SAFETY: Tauri owns this live NSWindow. Retaining it on the main thread
+        // keeps it alive for the entire AppKit operation, including dismissal.
+        unsafe { Retained::retain(ptr) }
+            .ok_or_else(|| "The native window is unavailable".to_string())
+    }
+
+    fn on_main(
+        window: &WebviewWindow,
+        action: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
+        if MainThreadMarker::new().is_some() {
+            return action();
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(action());
+            })
+            .map_err(window_error)?;
+        receiver.recv().map_err(window_error)?
+    }
 }
 
 fn centered_position(parent: &tauri::WebviewWindow, width: f64, height: f64) -> Option<(f64, f64)> {

@@ -494,6 +494,7 @@ impl GatewayManager {
                 runtime.state.progress = None;
                 runtime.state.error = None;
                 if !runtime.verification_only {
+                    runtime.state.protected_since.get_or_insert_with(now_secs);
                     self.proxy.publish(Session {
                         generation,
                         epoch,
@@ -999,6 +1000,18 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_preserves_usage_but_not_the_protection_clock() {
+        let mut state = GatewayState {
+            protected_since: Some(123),
+            ..GatewayState::default()
+        };
+        state.session_usage.requests = 7;
+        let stopped = GatewayManager::carried(&state);
+        assert_eq!(stopped.protected_since, None);
+        assert_eq!(stopped.session_usage.requests, 7);
+    }
     use serde_json::json;
 
     #[test]

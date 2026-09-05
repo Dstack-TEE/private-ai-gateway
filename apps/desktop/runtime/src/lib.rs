@@ -7,5 +7,6 @@ pub mod contracts;
 pub mod controller;
 pub mod gateway;
 pub mod local_api;
+pub mod preferences;
 pub mod service_config;
 pub mod usage;

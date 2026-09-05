@@ -17,6 +17,9 @@ import type {
 } from "../shared/contracts";
 
 export const desktopApi: DesktopApi = {
+  getLaunchPreferences: () => invoke("get_launch_preferences"),
+  setLaunchPreference: (name, enabled) => invoke("set_launch_preference", { name, enabled }),
+  onLaunchPreferencesChange: (listener) => subscribe("gateway://launch-preferences", listener),
   copyText(text: string): Promise<void> {
     return invoke("copy_text", { text });
   },

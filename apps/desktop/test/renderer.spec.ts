@@ -33,9 +33,9 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
     await expect(tray.getByRole("menuitem", { name })).toBeVisible();
   }
   const openAtLogin = tray.getByRole("menuitemcheckbox", { name: "Open at Login" });
-  await expect(openAtLogin).toHaveAttribute("aria-checked", "true");
-  await openAtLogin.click();
   await expect(openAtLogin).toHaveAttribute("aria-checked", "false");
+  await openAtLogin.click();
+  await expect(openAtLogin).toHaveAttribute("aria-checked", "true");
 
   const brandImageElements = page.locator(".brand-logo img");
   await expect(brandImageElements).toHaveCount(3);
@@ -220,12 +220,16 @@ test("overview shows five agents, five current-session records, truthful copy su
   await expect(overviewProof).toContainText("Signed receipt verified");
   await overviewProof.getByRole("button", { name: "Done" }).click();
 
-  const session = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Session usage" }) });
+  const session = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Usage in this session" }) });
   const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
   for (const label of ["Requests", "Tokens", "Cost", "Protected"]) {
     await expect(session.getByText(label, { exact: true })).toBeVisible();
   }
   await expect(session.locator("small")).toHaveCount(0);
+  await expect(session.getByText("This session", { exact: true })).toHaveCount(0);
+  await expect(localApi.locator(".overview-module-title").getByText("Available", { exact: true })).toBeVisible();
+  await expect(localApi.locator(".copy-rows").getByText("Available", { exact: true })).toHaveCount(0);
+  await expect(localApi.getByText("for your own tools", { exact: true })).toHaveCount(0);
   for (const module of [localApi, session]) {
     const height = await module.locator(".module").evaluate((node) => node.getBoundingClientRect().height);
     expect(height).toBe(136);
@@ -254,6 +258,11 @@ test("overview shows five agents, five current-session records, truthful copy su
   await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.getByRole("switch", { name: "Stop protection" }).click();
+  await expect(session.locator("strong")).toHaveText(["—", "—", "—", "—"]);
+  await expect(usageModule.locator(".usage-row")).toHaveCount(0);
+  await expect(page.locator(".protection-duration")).toHaveCount(0);
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -334,7 +343,7 @@ test("service settings stay focused while privacy verification exposes the compl
   await page.getByRole("switch", { name: "Start protection" }).click();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
   await nav(page, "Overview").click();
-  await page.getByRole("button", { name: "Privacy verification" }).click();
+  await page.getByRole("button", { name: "Verified", exact: true }).click();
   const privacy = page.getByRole("dialog", { name: "Privacy verification" });
   await expect(privacy.getByText("Attested encrypted channel")).toBeVisible();
   await expect(privacy).toContainText("SPKI-pinned TLS");
@@ -347,11 +356,26 @@ test("overview presents local availability and the active profile without sessio
   await page.goto("/?mock=ready");
 
   const status = page.getByLabel("Protection status");
-  await expect(status.getByText("Local API", { exact: true })).toBeVisible();
-  await expect(status.getByText("Available", { exact: true })).toBeVisible();
-  await expect(status.getByText("1 linked", { exact: true })).toBeVisible();
-  await expect(status.getByLabel("Confidential AI profile")).toHaveValue("default");
-  await expect(status.getByText("Verified configuration", { exact: true })).toBeVisible();
+  await expect(status.getByText("Local API available", { exact: true })).toBeVisible();
+  await expect(status.getByText("1 agent linked", { exact: true })).toBeVisible();
+  await expect(status.getByText("Confidential AI", { exact: true })).toBeVisible();
+  await expect(status.getByRole("button", { name: "Profiles: RedPill" })).toBeVisible();
+  await expect(status.locator(".status-endpoint")).toHaveText("https://tee.redpill.ai");
+  await expect(status.locator(".protection-duration")).toHaveText(/00:10:\d{2}/);
+  const rowOffsets = await status.evaluate((node) => {
+    const centers = (selector: string) => Array.from(node.querySelector(selector)?.children ?? []).map((child) => {
+      const box = child.getBoundingClientRect();
+      return box.y + box.height / 2;
+    });
+    const left = centers(".status-local");
+    const right = centers(".status-remote");
+    return left.map((center, index) => Math.abs(center - right[index]));
+  });
+  expect(rowOffsets).toHaveLength(4);
+  expect(rowOffsets.every((offset) => offset <= 1)).toBe(true);
+  await status.getByRole("button", { name: "Verified", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
+  await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();
   await expect(status.getByText(/answers this session/i)).toHaveCount(0);
 
   await page.goto("/?mock=no-key");
@@ -360,6 +384,35 @@ test("overview presents local availability and the active profile without sessio
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
   await expect(editor.getByLabel("RedPill API key")).toBeVisible();
+});
+
+test("a native proof error remains dismissible without a window close button", async ({ page }) => {
+  await page.goto("/?mock=ready&native-dialog=usage-proof&record=missing");
+  await expect(page.getByRole("alert")).toHaveText("Usage record not found");
+  await expect(page.getByRole("button", { name: "Done", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByLabel("Usage proof closed")).toBeVisible();
+});
+
+test("startup preferences and saved agent links are independent of protection", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await page.getByRole("switch", { name: "Stop protection" }).click();
+  await nav(page, "Agents").click();
+  const codex = page.locator(".agent-block", { hasText: "Codex" });
+  await codex.getByRole("switch", { name: "Connect Codex" }).click();
+  await expect(codex.getByRole("switch", { name: "Disconnect Codex" })).toBeChecked();
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  await page.getByRole("switch", { name: "Stop protection" }).click();
+  await expect(codex.getByRole("switch", { name: "Disconnect Codex" })).toBeChecked();
+  await nav(page, "Settings").click();
+  const startup = page.getByRole("region", { name: "Startup" });
+  await expect(startup.getByRole("switch", { name: "Open at Login" })).not.toBeChecked();
+  await expect(startup.getByRole("switch", { name: "Connect on launch" })).not.toBeChecked();
+  await startup.getByRole("switch", { name: "Open at Login" }).click();
+  await startup.getByRole("switch", { name: "Connect on launch" }).click();
+  await expect(startup.getByRole("switch", { name: "Open at Login" })).toBeChecked();
+  await expect(startup.getByRole("switch", { name: "Connect on launch" })).toBeChecked();
+  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
 });
 
 test("Confidential AI presets keep provider credentials scoped and settings stay compact", async ({ page }) => {

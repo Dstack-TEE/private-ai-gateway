@@ -301,6 +301,7 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
   // Each start gets its own verification run; stop or a newer start makes a
   // pending timer a no-op instead of completing the wrong run.
@@ -308,9 +309,20 @@ export function mockApi(name: string | null): DesktopApi {
   let history = [...USAGE_HISTORY];
   let clientKey = "sk-pag-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
   const credentialProfiles = new Set(state.apiKeySaved ? [state.activeProfileId] : []);
-  const publish = () => listeners.forEach((listener) => listener(state));
+  const publish = () => {
+    const protectedNow = state.status === "verified" && !state.configurationVerification && state.apiKeySaved;
+    agents = agents.map((agent) => ({ ...agent, authorized: agent.connected && protectedNow }));
+    listeners.forEach((listener) => listener(state));
+  };
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
+  let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   return {
+    getLaunchPreferences: async () => launchPreferences,
+    setLaunchPreference: async (name, enabled) => {
+      launchPreferences = { ...launchPreferences, [name]: enabled };
+      return launchPreferences;
+    },
+    onLaunchPreferencesChange: () => () => undefined,
     copyText: async () => undefined,
     getClientKey: async () => clientKey,
     rotateClientKey: async () => {
@@ -343,7 +355,7 @@ export function mockApi(name: string | null): DesktopApi {
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {
       const run = ++verifyRun;
-      state = { ...state, status: "verifying", configurationVerification: false, progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };
+      state = { ...state, status: "verifying", protectedSince: undefined, configurationVerification: false, progress: "Starting the verifier", config, remoteUrl: config.remoteUrl, error: undefined, activity: [], sessionId: `session-mock-${run}`, sessionUsage: usageSummary([]) };
       publish();
       window.setTimeout(() => {
         if (run !== verifyRun || state.status !== "verifying") {
@@ -353,7 +365,7 @@ export function mockApi(name: string | null): DesktopApi {
         // fails verification like the real backend would.
         state = config.remoteUrl.endsWith(".invalid")
           ? { ...state, status: "error", progress: undefined, error: "The verified gateway did not answer the model list request" }
-          : { ...state, status: "verified", progress: undefined, identity: IDENTITY, checks: CHECKS, catalog: CATALOG };
+          : { ...state, status: "verified", protectedSince: Math.floor(Date.now() / 1_000), progress: undefined, identity: IDENTITY, checks: CHECKS, catalog: CATALOG };
         publish();
       }, 350);
       return state;
@@ -433,7 +445,7 @@ export function mockApi(name: string | null): DesktopApi {
     },
     stop: async () => {
       verifyRun += 1;
-      state = { ...state, status: "stopped", configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
+      state = { ...state, status: "stopped", protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
       publish();
       return state;
     },
@@ -511,7 +523,7 @@ export function mockApi(name: string | null): DesktopApi {
     },
     previewAgent: async (agentId, connect, options): Promise<AgentPreview> => {
       const agent = agents.find((candidate) => candidate.id === agentId) ?? CLAUDE_OFF;
-      if (connect && agent.id === "codex" && !options.defaultModel) {
+      if (connect && state.status === "verified" && agent.id === "codex" && !options.defaultModel) {
         throw new Error("Choose a verified default model for Codex");
       }
       return {
@@ -538,7 +550,7 @@ export function mockApi(name: string | null): DesktopApi {
     applyAgent: async (agentId, connect) => {
       agents = agents.map((agent) =>
         agent.id === agentId
-          ? { ...agent, connected: connect, recorded: connect, authorized: connect, attention: undefined }
+          ? { ...agent, connected: connect, recorded: connect, authorized: connect && state.status === "verified" && !state.configurationVerification && state.apiKeySaved, attention: undefined }
           : agent,
       );
       return agents.find((agent) => agent.id === agentId) ?? claude();

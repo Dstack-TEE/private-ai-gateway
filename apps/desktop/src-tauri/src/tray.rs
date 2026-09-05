@@ -59,7 +59,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             "autostart" => sync_autostart(app),
             "quit" => {
-                let _ = app.state::<std::sync::Arc<DesktopRuntime>>().stop();
                 app.exit(0);
             }
             _ => {}
@@ -88,16 +87,28 @@ fn toggle_or_open_settings(app: &AppHandle) {
 fn sync_autostart(app: &AppHandle) {
     let menu = app.state::<TrayMenu>();
     let checked = menu.autostart.is_checked().unwrap_or(false);
-    let result = if checked {
-        app.autolaunch().enable()
-    } else {
-        app.autolaunch().disable()
-    };
+    let result = set_open_at_login(app, checked);
     if let Err(error) = result {
         let _ = menu.autostart.set_checked(!checked);
         app.state::<std::sync::Arc<DesktopRuntime>>()
             .report_error(format!("Open at Login could not be changed: {error}"));
     }
+    if let Ok(preferences) = crate::get_launch_preferences(app.clone()) {
+        let _ = app.emit("gateway://launch-preferences", preferences);
+    }
+}
+
+pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    }
+    .map_err(|error| format!("Open at Login could not be changed: {error}"))?;
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let _ = menu.autostart.set_checked(enabled);
+    }
+    Ok(())
 }
 
 /// Reflect the gateway state in the checkmark, the status row, and the tooltip.
@@ -110,9 +121,13 @@ pub fn sync(app: &AppHandle, state: &GatewayState) {
     if let Some(tray) = app.tray_by_id("gateway") {
         let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
         if let Ok(icon) = tray_icon(
-            state.status == "verified" && !state.configuration_verification && state.api_key_saved,
+            state.status == "verified"
+                && !state.configuration_verification
+                && state.api_key_saved
+                && state.endpoint_error.is_none(),
         ) {
-            let _ = tray.set_icon(Some(icon));
+            // Replacing NSImage otherwise clears its template flag on macOS.
+            let _ = tray.set_icon_with_as_template(Some(icon), true);
         }
     }
 }

@@ -16,7 +16,46 @@ use desktop_runtime::{
 };
 use runtime_adapter::TauriSidecarLauncher;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchPreferences {
+    open_at_login: bool,
+    connect_on_launch: bool,
+}
+
+#[tauri::command]
+fn get_launch_preferences(app: AppHandle) -> Result<LaunchPreferences, String> {
+    Ok(LaunchPreferences {
+        open_at_login: app
+            .autolaunch()
+            .is_enabled()
+            .map_err(|error| error.to_string())?,
+        connect_on_launch: desktop_runtime::preferences::load()?.connect_on_launch,
+    })
+}
+
+#[tauri::command]
+fn set_launch_preference(
+    app: AppHandle,
+    name: String,
+    enabled: bool,
+) -> Result<LaunchPreferences, String> {
+    match name.as_str() {
+        "openAtLogin" => tray::set_open_at_login(&app, enabled)?,
+        "connectOnLaunch" => {
+            desktop_runtime::preferences::save(desktop_runtime::preferences::Preferences {
+                connect_on_launch: enabled,
+            })?
+        }
+        _ => return Err("Unknown startup preference".to_string()),
+    }
+    let preferences = get_launch_preferences(app.clone())?;
+    let _ = app.emit("gateway://launch-preferences", &preferences);
+    Ok(preferences)
+}
 
 const AUTOSTART_ARG: &str = "--autostart";
 
@@ -220,6 +259,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
+            get_launch_preferences,
+            set_launch_preference,
             start_gateway,
             verify_configuration,
             activate_profile,
@@ -289,15 +330,35 @@ pub fn run() {
             if show_on_launch {
                 tray::show_window(app.handle());
             }
+            match desktop_runtime::preferences::load() {
+                Ok(preferences) if preferences.connect_on_launch => {
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = runtime
+                            .state()
+                            .and_then(|state| runtime.clone().start(state.config));
+                        if let Err(error) = result {
+                            runtime.report_error(format!("Automatic connection failed: {error}"));
+                        }
+                    });
+                }
+                Err(error) => runtime.report_error(error),
+                _ => {}
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
 
     app.run(|app, event| match event {
-        tauri::RunEvent::ExitRequested { .. } => {
+        tauri::RunEvent::ExitRequested { api, .. } => {
             if let Some(runtime) = app.try_state::<Arc<DesktopRuntime>>() {
-                let _ = runtime.stop();
+                if let Err(error) = runtime.stop() {
+                    api.prevent_exit();
+                    runtime.report_error(format!(
+                        "Cannot quit until agent configurations are restored: {error}"
+                    ));
+                    tray::show_window(app);
+                }
             }
         }
         #[cfg(target_os = "macos")]
