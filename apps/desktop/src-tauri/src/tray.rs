@@ -74,10 +74,12 @@ fn toggle_or_open_settings(app: &AppHandle) {
         return;
     };
     let running = matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
-    if !running && !state.api_key_saved {
+    if !running && !active_profile_ready(&state) {
         sync(app, &state);
         show_window(app);
-        let _ = app.emit(crate::menu::NAVIGATE_EVENT, "settings");
+        if let Err(error) = crate::native_dialog::open_profiles(app, true) {
+            runtime.report_error(error);
+        }
         return;
     }
     runtime.inner().clone().toggle();
@@ -135,6 +137,12 @@ pub fn show_window(app: &AppHandle) {
 
 /// Checkmark state and the plain-language status row for the gateway state.
 fn menu_state(state: &GatewayState) -> (bool, &'static str) {
+    if state.endpoint_error.is_some() {
+        return (false, "Local API unavailable");
+    }
+    if state.status == "stopped" && !active_profile_ready(state) {
+        return (false, "Profile required");
+    }
     match state.status.as_str() {
         "verifying" if state.configuration_verification => (false, "Verifying configuration"),
         "verifying" => (true, "Starting - verifying service"),
@@ -148,6 +156,15 @@ fn menu_state(state: &GatewayState) -> (bool, &'static str) {
         "error" => (false, "Failed - open for details"),
         _ => (false, "Stopped"),
     }
+}
+
+fn active_profile_ready(state: &GatewayState) -> bool {
+    state.api_key_saved
+        && state.profiles.iter().any(|profile| {
+            profile.id == state.active_profile_id
+                && profile.verified_at.is_some()
+                && profile.credential_saved.unwrap_or(true)
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -167,7 +184,9 @@ fn activate_app() {}
 #[cfg(test)]
 mod tests {
     use super::menu_state;
-    use desktop_runtime::contracts::GatewayState;
+    use desktop_runtime::contracts::{
+        ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
+    };
 
     fn state(status: &str, api_key_saved: bool) -> GatewayState {
         GatewayState {
@@ -179,7 +198,10 @@ mod tests {
 
     #[test]
     fn checkmark_tracks_running_states() {
-        assert_eq!(menu_state(&state("stopped", false)), (false, "Stopped"));
+        assert_eq!(
+            menu_state(&GatewayState::default()),
+            (false, "Profile required")
+        );
         assert_eq!(
             menu_state(&state("verified", true)),
             (true, "Ready - requests protected")
@@ -191,5 +213,24 @@ mod tests {
         assert!(menu_state(&state("verifying", false)).0);
         assert!(menu_state(&state("blocked", true)).0);
         assert!(!menu_state(&state("error", true)).0);
+    }
+
+    #[test]
+    fn stopped_state_requires_a_verified_active_profile() {
+        let mut ready = state("stopped", true);
+        ready.active_profile_id = "profile-1".to_string();
+        ready.profiles.push(ConfidentialProfile {
+            id: "profile-1".to_string(),
+            name: "Private AI".to_string(),
+            provider: ServiceProvider::Custom,
+            remote_url: "https://private.example.com".to_string(),
+            auth: ProfileAuth::ApiKey,
+            credential_saved: Some(true),
+            verified_at: Some(1),
+        });
+        assert_eq!(menu_state(&ready), (false, "Stopped"));
+
+        ready.profiles[0].credential_saved = Some(false);
+        assert_eq!(menu_state(&ready), (false, "Profile required"));
     }
 }

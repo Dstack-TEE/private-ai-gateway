@@ -10,6 +10,7 @@ import type {
   DesktopApi,
   GatewayState,
   LocalApiConfig,
+  RequestActivity,
   StartGatewayConfig,
   UsagePage,
   UsageQuery,
@@ -36,6 +37,25 @@ export const desktopApi: DesktopApi = {
   },
   onNavigate(listener: (section: "settings") => void): () => void {
     return subscribe("gateway://navigate", listener);
+  },
+  onProfileRepairRequest(listener: () => void): () => void {
+    return subscribe("gateway://profile-repair", listener);
+  },
+  onUsageProofRequest(listener: (recordId: string) => void): () => void {
+    return subscribe("gateway://usage-proof", listener);
+  },
+  onClientKeyChange(listener: () => void): () => void {
+    return subscribe("gateway://client-key-changed", listener);
+  },
+  openNativeDialog(kind, options): Promise<void> {
+    return invoke("open_native_dialog", {
+      kind,
+      repair: options?.repair ?? false,
+      recordId: options?.recordId,
+    });
+  },
+  closeNativeDialog(): Promise<void> {
+    return invoke("close_native_dialog");
   },
   openSupport(): Promise<void> {
     return invoke("open_support");
@@ -69,6 +89,9 @@ export const desktopApi: DesktopApi = {
   },
   queryUsage(query: UsageQuery): Promise<UsagePage> {
     return invoke("query_usage", { query });
+  },
+  getUsageRecord(recordId: string): Promise<RequestActivity> {
+    return invoke("get_usage_record", { recordId });
   },
   exportUsageCsv(query: UsageQuery, path: string): Promise<number> {
     return invoke("export_usage_csv", { query, path });

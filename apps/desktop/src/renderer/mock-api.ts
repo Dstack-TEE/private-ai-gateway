@@ -230,7 +230,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "no-key":
       return {
-        state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, profiles: [{ ...REDPILL_PROFILE, credentialSaved: false, verifiedAt: undefined }], apiKeySaved: false },
+        state: { ...BASE, profiles: [{ ...REDPILL_PROFILE, credentialSaved: false, verifiedAt: undefined }], apiKeySaved: false },
         agents: STOPPED_AGENTS,
       };
     case "verifying":
@@ -334,6 +334,11 @@ export function mockApi(name: string | null): DesktopApi {
       return () => listeners.delete(listener);
     },
     onNavigate: () => () => undefined,
+    onProfileRepairRequest: () => () => undefined,
+    onUsageProofRequest: () => () => undefined,
+    onClientKeyChange: () => () => undefined,
+    openNativeDialog: async () => undefined,
+    closeNativeDialog: async () => undefined,
     openSupport: async () => undefined,
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {
@@ -484,6 +489,11 @@ export function mockApi(name: string | null): DesktopApi {
         agents: ["claude-code", "codex", "opencode", "pi", "hermes"],
         models: CATALOG.models.map((model) => model.id),
       };
+    },
+    getUsageRecord: async (recordId) => {
+      const record = history.find((item) => item.id === recordId);
+      if (!record) throw new Error("Usage record not found");
+      return record;
     },
     exportUsageCsv: async () => history.length,
     clearUsage: async () => {

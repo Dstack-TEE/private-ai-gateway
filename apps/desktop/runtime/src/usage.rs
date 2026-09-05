@@ -4,7 +4,9 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, Row};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{RequestActivity, UsageSummary};
@@ -200,6 +202,22 @@ impl UsageStore {
         let (where_sql, bindings) = filters(&query, false)?;
         let connection = self.lock()?;
         summary(&connection, &where_sql, &bindings)
+    }
+
+    pub fn get(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {
+        let record_id = clean_filter(Some(record_id), "record")?
+            .ok_or_else(|| "Invalid usage record".to_string())?;
+        self.lock()?
+            .query_row(
+                &format!(
+                    "SELECT {} FROM usage_records WHERE id = ? AND path != '/v1/models'",
+                    columns()
+                ),
+                [record_id],
+                row_to_activity,
+            )
+            .optional()
+            .map_err(db_error)
     }
 
     pub fn export_csv(&self, query: &UsageQuery, path: &Path) -> Result<usize, String> {
@@ -567,6 +585,11 @@ mod tests {
         let store = UsageStore::open(path.clone()).unwrap();
         store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
         store.upsert(&item("b2", 20, "pi", "model-b")).unwrap();
+        assert_eq!(
+            store.get("a1").unwrap().unwrap().model.as_deref(),
+            Some("model-a")
+        );
+        assert!(store.get("missing").unwrap().is_none());
         let mut discovery = item("catalog", 30, "codex", "catalog-only");
         discovery.path = "/v1/models".to_string();
         store.upsert(&discovery).unwrap();

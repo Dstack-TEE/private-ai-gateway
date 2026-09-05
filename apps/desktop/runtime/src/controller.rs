@@ -16,7 +16,7 @@ use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 use crate::{
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, StartGatewayConfig,
+        LocalApiConfig, RequestActivity, StartGatewayConfig,
     },
     gateway::{GatewayManager, SidecarLauncher},
     local_api::{self, ResolvedLocalApi},
@@ -732,6 +732,10 @@ impl DesktopRuntime {
 
     pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
         self.usage.page(&query)
+    }
+
+    pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {
+        self.usage.get(record_id)
     }
 
     pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, String> {

@@ -8,6 +8,13 @@ Tauri delegates windows, menus, tray integration, file dialogs, confirmation
 dialogs, clipboard, autostart, and application lifecycle to each operating
 system.
 
+Profiles, Local API settings, Privacy verification, and Usage proof open in
+parented native windows: child windows on macOS, owned windows on Windows, and
+transient windows on Linux. Their complex content stays in the shared renderer
+so behavior and accessibility do not drift across three platform-specific UI
+implementations. Destructive confirmations and file destinations use the
+operating system's native dialogs directly.
+
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
 
@@ -89,15 +96,18 @@ protocol is the service's own response, shown as such.
   check to the final rename.
 - **Confidential AI profiles** are verified before they are saved. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
-  A fresh install starts without a profile and opens New Profile when settings
-  are first needed; every profile can be deleted, including the last one.
+  A fresh install starts without a profile and opens New Profile as soon as the
+  initial state loads; every profile can be deleted, including the last one.
   Settings offers local, self-hosted branding for the Phala and RedPill
   presets plus a custom HTTPS endpoint. New providers or endpoints require a
   new key, so a credential is never silently reused. Profile metadata is
   written atomically and the current API-key authentication model is shaped so
   an OAuth account can be added as another auth kind later. A successful
-  `Verify and Save` selects the profile but leaves protection off until the
-  user explicitly starts it. Legacy single-service settings are recognized at
+  `Verify and Save` selects the profile, closes the profile flow, and leaves
+  protection off until the user explicitly starts it. Selecting an existing
+  profile also closes the chooser. The window and native tray both route a
+  missing or unavailable current profile back into this same flow. Legacy
+  single-service settings are recognized at
   launch, while their credential migrates to the profile entry on first use so
   opening the app does not request credential-store access.
 - **Model catalog** is the verified service's `GET /v1/models`, read through

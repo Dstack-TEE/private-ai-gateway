@@ -1,4 +1,5 @@
 mod menu;
+mod native_dialog;
 mod runtime_adapter;
 mod tray;
 
@@ -8,7 +9,7 @@ use desktop_gateway::agents::helper_binary_name;
 use desktop_runtime::{
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
-        LocalApiConfig, StartGatewayConfig,
+        LocalApiConfig, RequestActivity, StartGatewayConfig,
     },
     controller::{DesktopRuntime, RuntimeOptions},
     usage::{UsagePage, UsageQuery},
@@ -81,6 +82,16 @@ fn query_usage(
 }
 
 #[tauri::command]
+fn get_usage_record(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    record_id: String,
+) -> Result<RequestActivity, String> {
+    runtime
+        .usage_record(&record_id)?
+        .ok_or_else(|| "Usage record not found".to_string())
+}
+
+#[tauri::command]
 fn export_usage_csv(
     runtime: State<'_, Arc<DesktopRuntime>>,
     query: UsageQuery,
@@ -100,8 +111,13 @@ fn get_client_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<String, Str
 }
 
 #[tauri::command]
-fn rotate_client_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<String, String> {
-    runtime.rotate_client_key()
+fn rotate_client_key(
+    app: AppHandle,
+    runtime: State<'_, Arc<DesktopRuntime>>,
+) -> Result<String, String> {
+    let key = runtime.rotate_client_key()?;
+    let _ = app.emit("gateway://client-key-changed", ());
+    Ok(key)
 }
 
 #[tauri::command]
@@ -168,6 +184,21 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
         .map_err(|error| format!("Cannot copy text: {error}"))
 }
 
+#[tauri::command]
+fn open_native_dialog(
+    app: AppHandle,
+    kind: String,
+    repair: bool,
+    record_id: Option<String>,
+) -> Result<(), String> {
+    native_dialog::open(&app, &kind, repair, record_id.as_deref())
+}
+
+#[tauri::command]
+fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
+    native_dialog::close(&window)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let show_on_launch =
@@ -195,7 +226,10 @@ pub fn run() {
             delete_profile,
             stop_gateway,
             copy_text,
+            open_native_dialog,
+            close_native_dialog,
             query_usage,
+            get_usage_record,
             export_usage_csv,
             clear_usage,
             open_support,

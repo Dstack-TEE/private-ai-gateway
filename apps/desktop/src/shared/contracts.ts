@@ -236,8 +236,13 @@ export interface DesktopApi {
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
-  /** A native menu asked the window to show a section (macOS Settings…). */
+  /** A native menu asked the main window to show a section. */
   onNavigate(listener: (section: "settings") => void): () => void;
+  onProfileRepairRequest(listener: () => void): () => void;
+  onUsageProofRequest(listener: (recordId: string) => void): () => void;
+  onClientKeyChange(listener: () => void): () => void;
+  openNativeDialog(kind: "profiles" | "privacy" | "local-api" | "usage-proof", options?: { repair?: boolean; recordId?: string }): Promise<void>;
+  closeNativeDialog(): Promise<void>;
   /** Open the brand's support page in the system browser. */
   openSupport(): Promise<void>;
   /** Use the platform confirmation dialog for destructive actions. */
@@ -249,6 +254,7 @@ export interface DesktopApi {
   stop(): Promise<GatewayState>;
   clearApiKey(): Promise<GatewayState>;
   queryUsage(query: UsageQuery): Promise<UsagePage>;
+  getUsageRecord(recordId: string): Promise<RequestActivity>;
   exportUsageCsv(query: UsageQuery, path: string): Promise<number>;
   clearUsage(): Promise<number>;
   refreshCatalog(): Promise<GatewayState>;

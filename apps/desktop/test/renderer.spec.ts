@@ -65,29 +65,75 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
 
 });
 
+test("Profiles renders as one native child-window surface", async ({ page }) => {
+  await page.setViewportSize({ width: 620, height: 560 });
+  await page.goto("/?mock=no-key&native-dialog=profiles");
+
+  await expect(page.locator(".desktop-window, .sidebar")).toHaveCount(0);
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  await expect(profiles).toBeVisible();
+  const box = await profiles.boundingBox();
+  expect(box).toEqual({ x: 0, y: 0, width: 620, height: 560 });
+
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  await expect(profiles).toHaveCount(0);
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await editor.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("dialog", { name: "Profiles" })).toBeVisible();
+});
+
+test("complex dialogs render as native child-window surfaces", async ({ page }) => {
+  const cases = [
+    {
+      size: { width: 700, height: 680 },
+      path: "/?mock=ready&native-dialog=privacy",
+      name: "Privacy verification",
+      text: "Attested encrypted channel",
+    },
+    {
+      size: { width: 600, height: 680 },
+      path: "/?mock=no-key&native-dialog=local-api",
+      name: "Local API settings",
+      text: "Listen address",
+    },
+    {
+      size: { width: 560, height: 500 },
+      path: "/?mock=ready&native-dialog=usage-proof&record=51be02",
+      name: "Usage proof",
+      text: "Signed receipt verified",
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    await page.setViewportSize(entry.size);
+    await page.goto(entry.path);
+    await expect(page.locator(".desktop-window, .sidebar")).toHaveCount(0);
+    const dialog = page.getByRole("dialog", { name: entry.name });
+    await expect(dialog).toContainText(entry.text);
+    expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
+  }
+});
+
 test("protection flow, page headers, and focus follow the native desktop contract", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=no-profiles");
 
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-
-  await page.getByRole("switch", { name: "Start protection" }).click();
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
-  const editor = page.getByRole("dialog", { name: "New profile" });
+  let editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
   await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  editor = page.getByRole("dialog", { name: "New profile" });
+  await expect(editor).toBeVisible();
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
-  const profiles = page.getByRole("dialog", { name: "Profiles" });
-  const initialProfilesHeight = await profiles.evaluate((node) => node.getBoundingClientRect().height);
-  await expect(profiles.getByText(/Verified configuration/)).toBeVisible();
-  await expect(profiles.getByText(/models discovered from the verified endpoint/i)).toHaveCount(0);
-  expect(await profiles.evaluate((node) => node.getBoundingClientRect().height)).toBe(initialProfilesHeight);
-  const done = profiles.getByRole("button", { name: "Done" });
-  await expect(done).not.toHaveClass(/primary/);
-  await done.click();
+  await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
 
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
@@ -296,6 +342,26 @@ test("service settings stay focused while privacy verification exposes the compl
   await expect(privacy.getByRole("heading", { name: "Verification checks" })).toBeVisible();
 });
 
+test("overview presents local availability and the active profile without session filler", async ({ page }) => {
+  await page.setViewportSize({ width: 940, height: 720 });
+  await page.goto("/?mock=ready");
+
+  const status = page.getByLabel("Protection status");
+  await expect(status.getByText("Local API", { exact: true })).toBeVisible();
+  await expect(status.getByText("Available", { exact: true })).toBeVisible();
+  await expect(status.getByText("1 linked", { exact: true })).toBeVisible();
+  await expect(status.getByLabel("Confidential AI profile")).toHaveValue("default");
+  await expect(status.getByText("Verified configuration", { exact: true })).toBeVisible();
+  await expect(status.getByText(/answers this session/i)).toHaveCount(0);
+
+  await page.goto("/?mock=no-key");
+  await expect(page.getByLabel("Protection status").getByText("Credential unavailable", { exact: true })).toBeVisible();
+  await page.getByRole("switch", { name: "Start protection" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  await expect(editor).toBeVisible();
+  await expect(editor.getByLabel("RedPill API key")).toBeVisible();
+});
+
 test("Confidential AI presets keep provider credentials scoped and settings stay compact", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=ready");
@@ -350,18 +416,24 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByLabel("API key").fill("sk-profile-test");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
-  await expect(profiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveAttribute("aria-pressed", "true");
+  await expect(profiles).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage…" }).click();
+  const reopenedProfiles = page.getByRole("dialog", { name: "Profiles" });
+  await expect(reopenedProfiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
-  await profiles.locator(".profile-select", { hasText: "RedPill" }).click();
-  await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
-  await profiles.getByRole("button", { name: "Edit Private Lab" }).click();
+  await reopenedProfiles.locator(".profile-select", { hasText: "RedPill" }).click();
+  await expect(reopenedProfiles).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage…" }).click();
+  const profilesAfterSelection = page.getByRole("dialog", { name: "Profiles" });
+  await expect(profilesAfterSelection.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
+  await profilesAfterSelection.getByRole("button", { name: "Edit Private Lab" }).click();
   editor = page.getByRole("dialog", { name: "Edit profile" });
   page.once("dialog", (dialog) => dialog.accept());
   await editor.getByRole("button", { name: "Delete Profile" }).click();
   await expect(editor).toHaveCount(0);
-  await expect(profiles.locator(".profile-select", { hasText: "Private Lab" })).toHaveCount(0);
+  await expect(profilesAfterSelection.locator(".profile-select", { hasText: "Private Lab" })).toHaveCount(0);
 
-  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  await profilesAfterSelection.getByRole("button", { name: "Edit RedPill" }).click();
   editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor.getByRole("button", { name: "Delete Profile" })).toBeEnabled();
   page.once("dialog", (dialog) => dialog.accept());
