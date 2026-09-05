@@ -412,7 +412,7 @@ test("settings keep the installed version visible without manual update controls
   await expect(status).toHaveText("You're up to date");
 });
 
-test("local copy hover follows the grouped row shape and profiles use a menu", async ({ page }) => {
+test("local copy hover follows the grouped row shape and profiles open their dialog", async ({ page }) => {
   await page.goto("/?mock=ready");
   const copy = page.getByRole("button", { name: /^Local endpoint:/ });
   await copy.hover();
@@ -427,16 +427,12 @@ test("local copy hover follows the grouped row shape and profiles use a menu", a
   expect(shape.clipped).toBe("hidden");
   expect(Number.parseFloat(shape.radius)).toBeGreaterThan(0);
   const profile = page.getByRole("button", { name: "Profiles: RedPill" });
-  await expect(profile).toHaveAttribute("aria-haspopup", "menu");
+  await expect(profile).toHaveAttribute("aria-haspopup", "dialog");
   await profile.click();
-  await expect(page.getByRole("menuitemradio", { name: "RedPill" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("dialog", { name: "Profiles", exact: true })).toBeVisible();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(profile).toBeFocused();
-  await page.goto("/?mock=profile-switch");
-  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
-  await page.getByRole("menuitemradio", { name: "Phala" }).click();
-  await expect(page.getByRole("button", { name: "Profiles: Phala" })).toBeVisible();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -632,7 +628,6 @@ test("installed agents stay ordered and protection state is consistent across pa
 test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
-  await page.getByRole("menuitem", { name: "Manage profiles" }).click();
   const profiles = page.getByRole("dialog", { name: "Profiles" });
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   const editor = page.getByRole("dialog", { name: "Edit profile" });

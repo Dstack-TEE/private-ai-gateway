@@ -17,7 +17,6 @@ import type {
  * browser test without a backend.
  */
 export type MockScenario =
-  | "profile-switch"
   | "ready"
   | "no-profiles"
   | "no-key"
@@ -222,8 +221,6 @@ const STOPPED_AGENTS = [CODEX, CLAUDE_OFF, OPENCODE, PI, HERMES];
 
 function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatus[] } {
   switch (name) {
-    case "profile-switch":
-      return { state: { ...BASE, profiles: [REDPILL_PROFILE, { ...REDPILL_PROFILE, id: "phala-profile", name: "Phala", provider: "phala", remoteUrl: "https://inference.phala.com" }] }, agents: STOPPED_AGENTS };
     case "ready":
       return {
         state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, activity: ACTIVITY, sessionId: "session-demo", sessionUsage: usageSummary(ACTIVITY) },
@@ -304,7 +301,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 }
 
 export function mockApi(name: string | null): DesktopApi {
-  const known: MockScenario[] = ["ready", "profile-switch", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
+  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));

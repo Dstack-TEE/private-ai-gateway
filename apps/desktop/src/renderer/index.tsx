@@ -45,7 +45,6 @@ import { UpdateControl, UpdateChannelControl, useUpdates } from "./updates";
 import { Button } from "./components/ui/button";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
 import { Badge } from "./components/ui/badge";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuItem } from "./components/ui/dropdown-menu";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription, ItemGroup } from "./components/ui/item";
@@ -874,7 +873,6 @@ function App(): React.JSX.Element {
         <div className="content" id={`page-${view}`} key={view}>
         {view === "overview" && (
           <Overview
-            onActivateProfile={activateProfile}
             state={state}
             agents={agents}
             busy={busy}
@@ -1202,7 +1200,6 @@ function PageHeader({
 }
 
 function Overview({
-  onActivateProfile,
   state,
   agents,
   busy,
@@ -1225,7 +1222,6 @@ function Overview({
   onSelect,
   onInspect,
 }: {
-  onActivateProfile(profileId: string): Promise<string | undefined>;
   state: GatewayState;
   agents: AgentStatus[];
   busy: boolean;
@@ -1254,7 +1250,6 @@ function Overview({
   return (
     <div className="overview-page">
       <StatusSurface
-        onActivateProfile={onActivateProfile}
         state={state}
         agents={agents}
         busy={busy}
@@ -1320,7 +1315,6 @@ function Overview({
 }
 
 function StatusSurface({
-  onActivateProfile,
   state,
   agents,
   busy,
@@ -1331,7 +1325,6 @@ function StatusSurface({
   onSettings,
   onPrivacy,
 }: {
-  onActivateProfile(profileId: string): Promise<string | undefined>;
   state: GatewayState;
   agents: AgentStatus[];
   busy: boolean;
@@ -1342,7 +1335,6 @@ function StatusSurface({
   onSettings(): void;
   onPrivacy(): void;
 }): React.JSX.Element {
-  const [switchingProfile, setSwitchingProfile] = useState(false);
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
@@ -1406,22 +1398,11 @@ function StatusSurface({
 
       <div className="status-segment status-remote">
         <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
-        {activeProfile ? <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="outline" className="status-profile" />} disabled={busy || switchingProfile} aria-label={`Profiles: ${activeProfile.name}`}>
-            <ServiceLogo url={activeProfile.remoteUrl} /><span>{activeProfile.name}</span><ChevronDown aria-hidden="true" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuRadioGroup value={state.activeProfileId} onValueChange={(profileId) => {
-              if (switchingProfile || profileId === state.activeProfileId) return;
-              setSwitchingProfile(true);
-              void onActivateProfile(profileId).finally(() => setSwitchingProfile(false));
-            }}>
-              {state.profiles.map((profile) => <DropdownMenuRadioItem key={profile.id} value={profile.id} disabled={busy || switchingProfile || !profileIsAvailable(profile, state)}><ServiceLogo url={profile.remoteUrl} /><span>{profile.name}</span></DropdownMenuRadioItem>)}
-            </DropdownMenuRadioGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onSettings}><Settings aria-hidden="true" />Manage profiles</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu> : <Button variant="outline" className="status-profile" aria-label="Setup provider" aria-haspopup="dialog" onClick={onSettings}><Plus aria-hidden="true" /><span>Setup provider</span></Button>}
+        <Button variant="outline" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+          {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
+          <span>{activeProfile?.name ?? "Setup provider"}</span>
+          {activeProfile && <ChevronDown aria-hidden="true" />}
+        </Button>
         <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
           {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
