@@ -940,7 +940,9 @@ fn merge_activity(state: &mut GatewayState, mut incoming: RequestActivity) {
     } else {
         state.activity.insert(0, incoming);
     }
-    state.activity.sort_by_key(|item| std::cmp::Reverse(item.at));
+    state
+        .activity
+        .sort_by_key(|item| std::cmp::Reverse(item.at));
     state.activity.truncate(MAX_ACTIVITY);
 }
 
