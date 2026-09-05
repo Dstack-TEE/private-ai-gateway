@@ -166,22 +166,26 @@ export const brand = {
 );
 
 // --- Rust -----------------------------------------------------------------
-const rust = (value) => JSON.stringify(value);
+const rust = (name, value) => {
+  const prefix = `pub const ${name}: &str =`;
+  const literal = `${JSON.stringify(value)};`;
+  return `${prefix}${prefix.length + literal.length + 1 > 100 ? "\n    " : " "}${literal}`;
+};
 await writeFile(
   path.join(appRoot, "gateway/src/brand.rs"),
   `//! ${generatedNote}
 
-pub const ID: &str = ${rust(brand.id)};
-pub const PRODUCT_NAME: &str = ${rust(brand.productName)};
-pub const SHORT_NAME: &str = ${rust(brand.shortName)};
-pub const ORGANIZATION_NAME: &str = ${rust(brand.organizationName)};
-pub const TAGLINE: &str = ${rust(brand.tagline)};
-pub const HOMEPAGE_URL: &str = ${rust(brand.homepageUrl)};
-pub const SUPPORT_URL: &str = ${rust(brand.supportUrl)};
-pub const SERVICE_NAME: &str = ${rust(brand.service.name)};
-pub const SERVICE_DEFAULT_URL: &str = ${rust(brand.service.defaultUrl)};
+${rust("ID", brand.id)}
+${rust("PRODUCT_NAME", brand.productName)}
+${rust("SHORT_NAME", brand.shortName)}
+${rust("ORGANIZATION_NAME", brand.organizationName)}
+${rust("TAGLINE", brand.tagline)}
+${rust("HOMEPAGE_URL", brand.homepageUrl)}
+${rust("SUPPORT_URL", brand.supportUrl)}
+${rust("SERVICE_NAME", brand.service.name)}
+${rust("SERVICE_DEFAULT_URL", brand.service.defaultUrl)}
 /// Bundle identifier; names the per-user app data directory on every platform.
-pub const APP_IDENTIFIER: &str = ${rust(brand.bundle.identifier)};
+${rust("APP_IDENTIFIER", brand.bundle.identifier)}
 `,
 );
 

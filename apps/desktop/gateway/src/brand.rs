@@ -6,7 +6,8 @@ pub const SHORT_NAME: &str = "Gateway";
 pub const ORGANIZATION_NAME: &str = "Dstack TEE";
 pub const TAGLINE: &str = "The open framework for confidential AI";
 pub const HOMEPAGE_URL: &str = "https://dstack.org";
-pub const SUPPORT_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md";
+pub const SUPPORT_URL: &str =
+    "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md";
 pub const SERVICE_NAME: &str = "RedPill";
 pub const SERVICE_DEFAULT_URL: &str = "https://tee.redpill.ai";
 /// Bundle identifier; names the per-user app data directory on every platform.
