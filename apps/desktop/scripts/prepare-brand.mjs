@@ -116,8 +116,7 @@ const appIconSvg = composeAppIcon(appIconMark, brand.theme.iconBackground, appIc
 const appIconComposerManifest = composeIconComposerManifest(brand.theme.iconBackground);
 const appIconLayer = render(composeIconLayer(appIconMark, appIconWhiteAsCutout), 1024);
 const traySource = await asset("trayTemplate");
-const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout, false);
-const trayProtectedTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout, true);
+const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout);
 
 // --- renderer -------------------------------------------------------------
 // Renderer images are generated next to the module and imported as Vite assets,
@@ -131,7 +130,6 @@ await rm(path.join(generatedDir, "app-icon-dark.svg"), { force: true });
 await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout));
 await writeFile(path.join(generatedDir, "brand-mark-dark.svg"), standaloneMark(uiMarkDark, appIconWhiteAsCutout));
 await writeFile(path.join(generatedDir, "tray-mark.svg"), trayTemplateSvg);
-await writeFile(path.join(generatedDir, "tray-mark-protected.svg"), trayProtectedTemplateSvg);
 await copyFile(path.join(brandDir, brand.assets.wordmarkLight), path.join(generatedDir, "wordmark-light.svg"));
 await copyFile(path.join(brandDir, brand.assets.wordmarkDark), path.join(generatedDir, "wordmark-dark.svg"));
 const rendererBrand = {
@@ -270,8 +268,6 @@ const trayDir = path.join(appRoot, "assets/tray");
 await mkdir(trayDir, { recursive: true });
 await writeFile(path.join(trayDir, "trayTemplate.png"), render(trayTemplateSvg, 18));
 await writeFile(path.join(trayDir, "trayTemplate@2x.png"), render(trayTemplateSvg, 36));
-await writeFile(path.join(trayDir, "trayTemplateProtected.png"), render(trayProtectedTemplateSvg, 18));
-await writeFile(path.join(trayDir, "trayTemplateProtected@2x.png"), render(trayProtectedTemplateSvg, 36));
 await rm(scratch, { recursive: true, force: true });
 
 console.log(`Prepared brand ${brandId}: ${brand.productName} (${brand.bundle.identifier})`);
@@ -355,17 +351,13 @@ function composeIconComposerManifest(background) {
   };
 }
 
-function composeTrayTemplate(mark, whiteAsCutout, protectedState) {
+function composeTrayTemplate(mark, whiteAsCutout) {
   const { width, height } = svgSize(mark);
   // An 18pt menu-bar canvas with a 16pt mark, rendered at 1x and 2x.
   const scale = 16 / Math.max(width, height);
   const offsetX = 9 - (width * scale) / 2;
   const offsetY = 9 - (height * scale) / 2;
-  const shield = "M13.5 10 16.8 11.2v2.1c0 1.8-1.2 3.1-3.3 4.1-2.1-1-3.3-2.3-3.3-4.1v-2.1Z";
-  const badge = protectedState
-    ? `<defs><mask id="tray-mark-clearance"><rect width="18" height="18" fill="white"/><path d="${shield}" fill="black" stroke="black" stroke-width="1.5"/></mask><mask id="protected-badge"><rect width="18" height="18" fill="white"/><path d="m11.8 13.4 1.2 1.2 2.3-2.4" fill="none" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width=".9"/></mask></defs><path d="${shield}" fill="black" mask="url(#protected-badge)"/>`
-    : "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><g${protectedState ? ' mask="url(#tray-mark-clearance)"' : ""}><svg x="${offsetX.toFixed(4)}" y="${offsetY.toFixed(4)}" width="${(width * scale).toFixed(4)}" height="${(height * scale).toFixed(4)}" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg></g>${badge}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><svg x="${offsetX.toFixed(4)}" y="${offsetY.toFixed(4)}" width="${(width * scale).toFixed(4)}" height="${(height * scale).toFixed(4)}" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg></svg>`;
 }
 
 function iconComposerColor(hex) {

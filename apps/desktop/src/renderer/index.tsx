@@ -14,6 +14,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Info,
   Laptop,
   LayoutGrid,
   LoaderCircle,
@@ -25,7 +26,6 @@ import {
   Settings,
   ShieldCheck,
   ShieldX,
-  SquareTerminal,
   TriangleAlert,
   Trash2,
   Wifi,
@@ -191,7 +191,7 @@ type UsageMetric = "tokens" | "cost" | "requests";
 type Tone = "success" | "warning" | "danger" | "neutral";
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
-  { id: "agents", label: "Agents", icon: SquareTerminal },
+  { id: "agents", label: "Agents", icon: Bot },
   { id: "usage", label: "Usage", icon: ChartNoAxesColumn },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -677,6 +677,7 @@ function App(): React.JSX.Element {
     void refresh();
     return () => { active = false; window.clearTimeout(timer); };
   }, [loadAgents, catalogRevision, verified]);
+  useEffect(() => desktopApi.onAgentsChange(() => void loadAgents()), [loadAgents]);
 
   const run = async (action: () => Promise<GatewayState | void>) => {
     setActionError(undefined);
@@ -946,7 +947,7 @@ function App(): React.JSX.Element {
             problem={problem}
             onPolicy={setAllowDevelopmentOs}
             onRestoreAll={() => void restoreAll()}
-            onSupport={() => void run(() => desktopApi.openSupport())}
+            onAboutLink={(target) => void run(() => desktopApi.openAboutLink(target))}
             onOpen={openSettings}
             launchPreferences={launchPreferences}
             savingPreference={savingPreference}
@@ -1202,8 +1203,8 @@ function PageHeader({
       {view !== "overview" && (
         <div className="page-protection">
           {developmentMode && <span className="state state-warning">Dev mode</span>}
-          <span className="page-switch-copy">
-            <strong><ProtectionStatus state={state} label={isProtected(state) ? "Protected" : protectionStarting ? "Starting…" : "Not protected"} /></strong>
+          <span className={`page-switch-copy state-${isProtected(state) ? "success" : "neutral"}`}>
+            <strong><ProtectionStatus state={state} label={isProtected(state) ? "Protected" : protectionStarting ? "Verifying…" : "Not protected"} /></strong>
           </span>
           <ProtectedControl
             state={state}
@@ -1268,7 +1269,7 @@ function Overview({
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
-  const recent = protectedNow ? state.activity.slice(0, 5) : [];
+  const recent = protectedNow ? state.activity.slice(0, 4) : [];
   return (
     <div className="overview-page">
       <StatusSurface
@@ -1306,7 +1307,7 @@ function Overview({
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
           <div className="preview-list">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
-            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 5).map((agent) => (
+            {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
               <AgentRow
                 key={agent.id}
                 agent={agent}
@@ -1426,10 +1427,11 @@ function StatusSurface({
           {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
         </button>
         <div className="status-endpoint" title={activeProfile?.remoteUrl}>{activeProfile?.remoteUrl ?? "No endpoint configured"}</div>
-        <button className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`} aria-haspopup="dialog" onClick={activeProfile ? onPrivacy : onSettings}>
+        <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
           {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
-        </button>
+          {liveVerified && <button className="icon-button" aria-label="Privacy verification" title="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info size={14} aria-hidden="true" /></button>}
+        </div>
       </div>
     </section>
   );
@@ -1634,6 +1636,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
 function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): void }): React.JSX.Element {
   const outcome = outcomeOf(activity);
   const tokens = (activity.inputTokens ?? 0) + (activity.outputTokens ?? 0);
+  const timestamp = new Date(activity.at * 1_000);
   return (
     <button className="row list-row usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
       <span className="row-main">
@@ -1643,7 +1646,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
       </span>
       <span className="usage-amount"><strong>{tokens ? formatTokens(tokens) : "—"}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
-      <time className="row-side">{formatTimestamp(activity.at * 1_000, true)}</time>
+      <time className="row-side" dateTime={timestamp.toISOString()} title={formatTimestamp(timestamp.getTime(), true)}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
     </button>
   );
 }
@@ -1678,14 +1681,13 @@ function AgentsView({
   problem?: string;
   onSelect(agent: AgentStatus, connect: boolean): void;
 }): React.JSX.Element {
-  const connected = agents.filter((agent) => agent.connected).length;
-  const active = agents.filter((agent) => agent.authorized).length;
+  const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   return (
     <div className="page-body">
       {problem && <p className="banner" role="alert">{problem}</p>}
       <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
       <section className="group" aria-labelledby="agents-title">
-        <h2 className="group-title" id="agents-title">Installed <span>{connected} connected · {active} active</span></h2>
+        <h2 className="group-title" id="agents-title">Installed <span>{connected} connected</span></h2>
         <div className="inset">
           {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
           {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
@@ -2138,7 +2140,7 @@ function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; 
     <dialog ref={dialog} className="sheet usage-evidence-sheet" aria-label="Usage proof">
       <div className="sheet-heading usage-proof-heading">
         <span className={`proof-mark state-${outcome.tone}`} aria-hidden="true"><ProofIcon size={18} /></span>
-        <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, false)}</small></span>
+        <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, true)}</small></span>
       </div>
       <div className="proof-card"><Evidence activity={activity} /></div>
       <div className="sheet-actions"><button className="button" onClick={onClose}>Done</button></div>
@@ -2157,7 +2159,7 @@ function SettingsView({
   problem,
   onPolicy,
   onRestoreAll,
-  onSupport,
+  onAboutLink,
   onOpen,
   launchPreferences,
   savingPreference,
@@ -2173,7 +2175,7 @@ function SettingsView({
   problem?: string;
   onPolicy(value: boolean): void;
   onRestoreAll(): void;
-  onSupport(): void;
+  onAboutLink(target: "documentation" | "github"): void;
   onOpen(target: SettingsTarget): void;
   launchPreferences?: LaunchPreferences;
   savingPreference: boolean;
@@ -2185,8 +2187,8 @@ function SettingsView({
     <div className="page-body settings-page">
       {problem && <p className="banner" role="alert">{problem}</p>}
 
-      <section className="group" aria-labelledby="startup-title">
-        <h2 className="group-title" id="startup-title">Startup</h2>
+      <section className="group" aria-labelledby="general-title">
+        <h2 className="group-title" id="general-title">General</h2>
         <div className="inset">
           <div className="row toggle-row">
             <span className="row-main"><span className="row-title">Open at Login</span></span>
@@ -2196,30 +2198,18 @@ function SettingsView({
             <span className="row-main"><span className="row-title">Connect on launch</span><span className="row-note">Start protection using the selected profile.</span></span>
             <SwitchControl compact label="Connect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           </div>
-        </div>
-      </section>
-
-      <section className="group" aria-labelledby="service-settings-title">
-        <h2 className="group-title" id="service-settings-title">Service</h2>
-        <div className="inset">
-          <div className="row">
+          <button className="row list-row" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")}>
             <span className="row-main">
               <span className="row-title">Profiles</span>
               <span className="row-note">{activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Verified configuration" : "Verification required"}` : "No provider configured"}</span>
             </span>
-            <button type="button" className="button" onClick={() => onOpen("confidential")}><Settings size={15} />Manage…</button>
-          </div>
-        </div>
-      </section>
-
-      <section className="group" aria-labelledby="local-api-title">
-        <h2 className="group-title" id="local-api-title">Local API</h2>
-        <div className="inset">
+            <ChevronRight size={16} className="row-chevron" aria-hidden="true" />
+          </button>
           {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
-          <div className="row">
-            <span className="row-main"><span className="row-title">Listener and client access</span><span className="row-note">Configure the address, port, client key, and managed access.</span></span>
-            <button type="button" className="button" onClick={() => onOpen("local-api")}><Settings size={15} />Local API settings…</button>
-          </div>
+          <button className="row list-row" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")}>
+            <span className="row-main"><span className="row-title">Local API</span><span className="row-note">Listener and client access</span></span>
+            <ChevronRight size={16} className="row-chevron" aria-hidden="true" />
+          </button>
         </div>
       </section>
 
@@ -2236,7 +2226,13 @@ function SettingsView({
       {anyRecorded && <section className="group" aria-labelledby="agents-settings-title"><h2 className="group-title" id="agents-settings-title">Agents</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><button className="button" disabled={locked} onClick={onRestoreAll}>Restore all</button></div></div></section>}
 
       <UpdateSettings updates={updates} />
-      <section className="group" aria-labelledby="support-title"><h2 className="group-title" id="support-title">Support</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">{brand.productName}</span></span><button className="button" onClick={onSupport}>Get Help…</button></div></div></section>
+      <section className="group" aria-labelledby="about-title">
+        <h2 className="group-title" id="about-title">About</h2>
+        <div className="inset">
+          <div className="row"><span className="row-main">{brand.productName}</span><span className="row-side">{updates.info?.currentVersion ?? ""}</span></div>
+          {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <button key={target} className="row list-row" onClick={() => onAboutLink(target)}><span className="row-main">{label}</span><ExternalLink size={15} className="row-chevron" aria-hidden="true" /></button>)}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2741,7 +2737,7 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
           <div className="sheet-card identity-grid">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
-            <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono />
+            <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono wide />
             <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
             <Detail label="Serving mode" value={identity.serving} />
             <Detail label="Channel" value={verified && passed("id-6") ? "SPKI-pinned attested TLS" : "Not established"} />

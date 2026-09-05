@@ -15,7 +15,7 @@
         "label": "main",
         "title": "Private AI Gateway",
         "width": 1052,
-        "height": 820,
+        "height": 784,
         "minWidth": 720,
         "minHeight": 600,
         "resizable": true,

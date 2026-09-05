@@ -359,7 +359,8 @@ export function mockApi(name: string | null): DesktopApi {
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => undefined,
-    openSupport: async () => undefined,
+    openAboutLink: async () => undefined,
+    onAgentsChange: () => () => undefined,
     openAgentWebsite: async () => undefined,
     confirm: async (options) => window.confirm(`${options.title}\n\n${options.message}`),
     start: async (config) => {

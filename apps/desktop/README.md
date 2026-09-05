@@ -27,8 +27,11 @@ macOS tray image updates preserve the template flag atomically; replacing only
 the image resets that flag in the underlying tray implementation and can make
 the icon disappear against a dark menu bar.
 The tray uses a 36px template raster for Tauri's 18pt macOS image, with a 16pt
-mark and a transparent clearance around the protected badge. The Dock app icon
-is independent and unchanged.
+mark. Protected uses the full template alpha; stopped or verifying uses 45%
+alpha, tinted by macOS. There is no status badge. The Dock app icon is independent
+and unchanged. The native tray menu offers endpoint/key copying, profile selection,
+agent connection checkmarks, and elapsed protection time. Actions use the same
+runtime operations as the main window, including profile reconnection and config restoration.
 
 Agent connections are saved preferences, not permanent config rewrites. Only
 connected agents under active protection receive gateway settings. Stopping,
@@ -184,7 +187,7 @@ protocol is the service's own response, shown as such.
   it leaves the machine. Models that disappear on a refresh are reported,
   never replaced.
 - **Usage history** is written to an owner-only SQLite database in the app
-  data directory and has no automatic retention cutoff. Overview shows five
+  data directory and has no automatic retention cutoff. Overview shows four
   recent rows plus a complete current-session summary aggregated from SQLite,
   rather than from the 50-row in-memory activity preview. Usage keeps history
   across app restarts, supports agent/model/time filters and cursor pagination,
@@ -270,8 +273,8 @@ drift. With Xcode 26, `prepare-macos-icon.mjs` compiles the `.icon` source into
 the native `Assets.car`; it and the PNG, ICO, and ICNS fallbacks all use one
 dark-green app icon with the original green Dstack mark. The scripts validate
 their inputs and fail fast on a missing field, asset, digest, or named app
-icon. Normal and protected tray templates are generated from the same local
-mark; the protected variant adds a small status badge at the lower right.
+icon. The tray uses a single local template mark; inactive states reduce its
+alpha without changing its silhouette or adding a badge.
 
 The default brand uses the official Dstack logo kit from
 [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) at commit

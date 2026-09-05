@@ -51,9 +51,10 @@ export const desktopApi: DesktopApi = {
   onStateChange(listener: (state: GatewayState) => void): () => void {
     return subscribe("gateway://state", listener);
   },
-  onNavigate(listener: (section: "settings") => void): () => void {
+  onNavigate(listener: (section: "settings" | "agents") => void): () => void {
     return subscribe("gateway://navigate", listener);
   },
+  onAgentsChange: (listener) => subscribe("gateway://agents-changed", listener),
   onProfileRepairRequest(listener: () => void): () => void {
     return subscribe("gateway://profile-repair", listener);
   },
@@ -75,8 +76,8 @@ export const desktopApi: DesktopApi = {
     return invoke("close_native_dialog");
   },
   nativeDialogReady: () => invoke("native_dialog_ready"),
-  openSupport(): Promise<void> {
-    return invoke("open_support");
+  openAboutLink(target: "documentation" | "github"): Promise<void> {
+    return invoke("open_about_link", { target });
   },
   openAgentWebsite: (agentId) => invoke("open_agent_website", { agentId }),
   confirm(options): Promise<boolean> {

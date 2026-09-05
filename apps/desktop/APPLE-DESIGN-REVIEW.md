@@ -17,7 +17,7 @@ macOS.
 | Buttons | One or two prominent buttons per view; a hit region people can hit easily; title-case verb labels; a press state | One prominent button per view (Start/Connect); regular controls 32 px, primary 40 px; hover, pressed, disabled, focus states; ellipsis on labels that open a sheet (Restore All…). |
 | Sidebar | Use a source-list style sidebar for stable top-level destinations | Overview, Agents, Usage, and Settings use one persistent sidebar with native system typography, restrained selection styling, and arrow-key navigation. |
 | Page headers | Keep titles and primary state controls predictable | Every destination has a separate title row; non-Overview pages place the labeled Protected switch at the trailing edge. |
-| Settings | Minimize settings; Command-Comma opens them; respect system settings | Four groups (General, Privacy, Agents, Advanced) plus About; ⌘, in the app menu; appearance, contrast, and motion follow the system. |
+| Settings | Minimize settings; Command-Comma opens them; respect system settings | General groups startup, Profiles, and Local API; Advanced stays collapsed; About links to documentation and source. Appearance, contrast, and motion follow the system. |
 | Windows | Preserve standard window behavior and controls | A decorated Tauri `NSWindow` uses the supported overlay title-bar style. The real AppKit traffic lights are positioned over the sidebar; production HTML never draws replacement controls. |
 | Sheets | Cancel left of the default action; default button is prominent | Native `<dialog>` styled as a sheet, Cancel then the default action, one prominent button. |
 | Accessibility | Don't rely on colour alone; keyboard access; legible at larger sizes | Every state pairs colour with an icon or dot; the segmented control is a tab list with arrow keys, the activity list is a native `<ul>` of plain buttons whose selection is `aria-pressed`, and sheets, disclosures, and fields are native elements, so Tab order and VoiceOver names come from the platform; `prefers-contrast: more` strengthens separators; `prefers-reduced-motion` stops the spinner and toggle animation; every view is checked at 360 px and 200 % zoom with no horizontal overflow. |
@@ -41,7 +41,7 @@ predefined items so each keeps its system role and shortcut: the application
 menu (About with version and organization, Settings… ⌘,, Services, Hide, Hide
 Others, Show All, Quit), Edit (Undo, Redo, Cut, Copy, Paste, Select All, which
 the text fields in the window rely on), View (Full Screen), Window (Minimize,
-Zoom, Close Window), and Help with the brand's support link; the OS credential
+Zoom, Close Window), and Help with documentation and source links; the OS credential
 store. Menu labels come from the generated brand module.
 
 Web (HTML in the WebView): the sidebar contents, page headers, grouped lists,
@@ -69,8 +69,8 @@ The default brand is `dstack`, using the official Dstack logo kit from
 (`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
 `brand.json`). The app icon is the original green mark on one dark-green
 rounded square in every appearance; the tray uses a smaller monochrome
-template mark and adds a lower-right protected badge only while forwarding is
-enabled. The brand accent is
+template mark at full alpha while protected and reduced alpha otherwise, without
+a badge. The brand accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
 templates; the script refuses to build them until their official assets are

@@ -3,7 +3,7 @@
 //! Settings…, Services, Hide, Hide Others, Show All, Quit), Edit (Undo, Redo,
 //! Cut, Copy, Paste, Select All, so text fields in the window get the system
 //! editing commands), View (Full Screen), Window (Minimize, Zoom, Close
-//! Window), and Help with the brand's support link. Every label comes from
+//! Window), and Help with documentation and source links. Every label comes from
 //! the brand module. Other platforms are tray-only and get no menu bar.
 
 use tauri::AppHandle;
@@ -13,7 +13,7 @@ pub const NAVIGATE_EVENT: &str = "gateway://navigate";
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    use desktop_gateway::brand::{ORGANIZATION_NAME, PRODUCT_NAME, SUPPORT_URL};
+    use desktop_gateway::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
     use tauri::{
         menu::{
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
@@ -21,7 +21,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         },
         Emitter,
     };
-    use tauri_plugin_opener::OpenerExt;
 
     let about = AboutMetadata {
         name: Some(PRODUCT_NAME.to_string()),
@@ -80,14 +79,16 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
-    let support = MenuItem::with_id(
+    let documentation =
+        MenuItem::with_id(app, "documentation", "Documentation", true, None::<&str>)?;
+    let github = MenuItem::with_id(app, "github", "GitHub", true, None::<&str>)?;
+    let help = Submenu::with_id_and_items(
         app,
-        "support",
-        format!("{ORGANIZATION_NAME} Support"),
+        HELP_SUBMENU_ID,
+        "Help",
         true,
-        None::<&str>,
+        &[&documentation, &github],
     )?;
-    let help = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[&support])?;
     app.set_menu(Menu::with_items(
         app,
         &[&application, &edit, &view, &window, &help],
@@ -97,8 +98,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             crate::tray::show_window(app);
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
-        "support" => {
-            let _ = app.opener().open_url(SUPPORT_URL, None::<&str>);
+        "documentation" | "github" => {
+            if let Err(error) = crate::open_about_link(app.clone(), event.id().as_ref().to_string())
+            {
+                use tauri::Manager;
+                app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                    .report_error(error);
+            }
         }
         _ => {}
     });

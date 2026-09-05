@@ -174,8 +174,13 @@ async fn refresh_catalog(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<Gate
 }
 
 #[tauri::command]
-fn list_agents(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<Vec<AgentStatus>, String> {
-    runtime.list_agents()
+fn list_agents(
+    app: AppHandle,
+    runtime: State<'_, Arc<DesktopRuntime>>,
+) -> Result<Vec<AgentStatus>, String> {
+    let agents = runtime.list_agents()?;
+    tray::sync_agents(&app, &agents);
+    Ok(agents)
 }
 
 #[tauri::command]
@@ -223,11 +228,16 @@ fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_support(app: AppHandle) -> Result<(), String> {
+fn open_about_link(app: AppHandle, target: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let url = match target.as_str() {
+        "documentation" => desktop_gateway::brand::SUPPORT_URL,
+        "github" => "https://github.com/Dstack-TEE/private-ai-gateway",
+        _ => return Err("Unknown resource".to_string()),
+    };
     app.opener()
-        .open_url(desktop_gateway::brand::SUPPORT_URL, None::<&str>)
-        .map_err(|error| format!("Cannot open the support page: {error}"))
+        .open_url(url, None::<&str>)
+        .map_err(|_| "Cannot open the resource in your browser".to_string())
 }
 
 #[tauri::command]
@@ -307,7 +317,7 @@ pub fn run() {
             get_usage_record,
             export_usage_csv,
             clear_usage,
-            open_support,
+            open_about_link,
             clear_api_key,
             get_client_key,
             rotate_client_key,

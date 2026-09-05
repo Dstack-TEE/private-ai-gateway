@@ -261,15 +261,16 @@ export interface DesktopApi {
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the main window to show a section. */
-  onNavigate(listener: (section: "settings") => void): () => void;
+  onNavigate(listener: (section: "settings" | "agents") => void): () => void;
+  onAgentsChange(listener: () => void): () => void;
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: () => void): () => void;
   openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   closeNativeDialog(): Promise<void>;
-  /** Open the brand's support page in the system browser. */
-  openSupport(): Promise<void>;
+  /** Open a documented, allowlisted project resource in the system browser. */
+  openAboutLink(target: "documentation" | "github"): Promise<void>;
   openAgentWebsite(agentId: string): Promise<void>;
   /** Use the platform confirmation dialog for destructive actions. */
   confirm(options: ConfirmationOptions): Promise<boolean>;
