@@ -10,6 +10,7 @@ export function IconButton({ label, className, variant = "outline", ...props }: 
 }
 
 type SwitchControlProps = {
+  id?: string;
   label: string;
   checked: boolean;
   disabled?: boolean;

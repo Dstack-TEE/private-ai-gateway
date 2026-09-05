@@ -181,6 +181,9 @@ test("rotating the client key requires an explicit native confirmation", async (
   await page.goto("/?mock=interactive&native-dialog=local-api");
   const key = page.getByLabel("Client key", { exact: true });
   await expect(key).not.toHaveValue("");
+  await expect(page.locator(".sheet-card")).toHaveCount(0);
+  await expect(key).toHaveCSS("height", "36px");
+  await expect(key).toHaveCSS("border-radius", "24px");
   const original = await key.inputValue();
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "Rotate key" }).click();
@@ -367,7 +370,7 @@ test("updates are discovered on launch and installation requires confirmation", 
   const about = page.getByRole("region", { name: "About", exact: true });
   await expect(about.getByRole("button", { name: "Install and Restart…", exact: true })).toContainText("v0.1.0");
   await expect(about.getByRole("button", { name: "Documentation", exact: true })).toHaveCSS("border-bottom-width", "1px");
-  await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveCSS("border-bottom-width", "0px");
+  await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveAttribute("data-slot", "item");
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -478,7 +481,7 @@ test("overview presents local availability and the active profile without sessio
   const localHeader = page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) });
   const badgeOffset = await localHeader.evaluate((header) => {
     const title = header.querySelector("h2")?.getBoundingClientRect();
-    const badge = header.querySelector(".state")?.getBoundingClientRect();
+    const badge = header.querySelector('[data-slot="badge"]')?.getBoundingClientRect();
     if (!title || !badge) throw new Error("Missing Local API heading or status");
     return Math.abs(title.y + title.height / 2 - badge.y - badge.height / 2);
   });
@@ -514,6 +517,8 @@ test("overview presents local availability and the active profile without sessio
   await expect(page.getByRole("button", { name: "Profiles", exact: true })).toHaveCSS("border-bottom-width", "1px");
   await nav(page, "Agents").click();
   const detect = page.getByRole("button", { name: "Detect installed agents" });
+  await expect(page.locator(".page-header").getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
+  await expect(page.locator(".content").getByRole("button", { name: "Detect installed agents" })).toBeVisible();
   await detect.click();
   await expect(detect).toBeEnabled();
 

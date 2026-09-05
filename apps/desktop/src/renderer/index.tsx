@@ -43,6 +43,11 @@ import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
 import { UpdateControl, useUpdates } from "./updates";
 import { Button } from "./components/ui/button";
+import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
+import { Badge } from "./components/ui/badge";
+import { Alert, AlertDescription } from "./components/ui/alert";
+import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
+import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
 import { IconButton, SwitchControl } from "./components/controls";
@@ -864,8 +869,6 @@ function App(): React.JSX.Element {
           endpointDown={endpointDown}
           developmentMode={allowDevelopmentOs}
           onToggle={toggleGateway}
-          refreshingAgents={refreshingAgents}
-          onRefreshAgents={() => void refreshAgents()}
         />
         <div className="content" id={`page-${view}`} key={view}>
         {view === "overview" && (
@@ -895,6 +898,8 @@ function App(): React.JSX.Element {
         )}
         {view === "agents" && (
           <AgentsView
+            refreshing={refreshingAgents}
+            onRefresh={() => void refreshAgents()}
             agents={agents}
             locked={locked}
             problem={problem}
@@ -1044,14 +1049,16 @@ function Sidebar({
         <BrandMark className="brand-mark" />
         <span>{brand.productName}</span>
       </div>
-      <nav aria-label="Main navigation" onKeyDown={onKeyDown}>
+      <SidebarProvider className="min-h-0 flex-col">
+      <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>
+        <SidebarMenu>
         {VIEWS.map((entry) => {
           const Icon = entry.icon;
           return (
-            <Button variant="ghost"
-              key={entry.id}
+            <SidebarMenuItem key={entry.id}><SidebarMenuButton
+              size="lg"
+              isActive={view === entry.id}
               id={`nav-${entry.id}`}
-              className="nav-item"
               aria-label={entry.label}
               aria-current={view === entry.id ? "page" : undefined}
               tabIndex={view === entry.id ? 0 : -1}
@@ -1059,11 +1066,13 @@ function Sidebar({
             >
               <Icon size={18} aria-hidden="true" />
               <span>{entry.label}</span>
-            </Button>
+            </SidebarMenuButton></SidebarMenuItem>
           );
         })}
+        </SidebarMenu>
       </nav>
-      {updateAvailable && <Button variant="ghost" className="nav-item" onClick={() => onChange("settings", true)}><Download size={18} aria-hidden="true" /><span>Update available</span></Button>}
+      {updateAvailable && <SidebarMenu><SidebarMenuItem><SidebarMenuButton size="lg" onClick={() => onChange("settings", true)}><Download aria-hidden="true" /><span>Update available</span></SidebarMenuButton></SidebarMenuItem></SidebarMenu>}
+      </SidebarProvider>
     </aside>
   );
 }
@@ -1154,8 +1163,6 @@ function PageHeader({
   endpointDown,
   developmentMode,
   onToggle,
-  refreshingAgents,
-  onRefreshAgents,
 }: {
   view: View;
   state: GatewayState;
@@ -1164,8 +1171,6 @@ function PageHeader({
   endpointDown: boolean;
   developmentMode: boolean;
   onToggle(): void;
-  refreshingAgents: boolean;
-  onRefreshAgents(): void;
 }): React.JSX.Element {
   const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
   const verdict = presentation(state);
@@ -1174,7 +1179,6 @@ function PageHeader({
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
         <div className="page-protection">
-          {view === "agents" && <IconButton label="Detect installed agents" disabled={refreshingAgents} onClick={onRefreshAgents}><RefreshCw size={15} className={refreshingAgents ? "is-spinning" : undefined} aria-hidden="true" /></IconButton>}
           {developmentMode && <span className="state state-warning">Dev mode</span>}
           <span className={`page-switch-copy state-${verdict.tone}`}>
             <strong><ProtectionStatus state={state} label={verdict.title} /></strong>
@@ -1531,7 +1535,7 @@ function LocalApiPanel({
     <div className="copy-rows">
       <div className="copy-row">
         <Button variant="ghost"
-          className="copy-surface"
+          className="copy-surface h-full w-full"
           disabled={!proxyUrl}
           aria-label={`${endpointLabel}: ${proxyUrl ?? "Unavailable"}. Copy`}
           onClick={() => proxyUrl && void onCopy(endpointLabel, proxyUrl)}
@@ -1545,7 +1549,7 @@ function LocalApiPanel({
         <IconButton className="row-action" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
       </div>
       <div className="copy-row">
-        <Button variant="ghost" className="copy-surface" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
+        <Button variant="ghost" className="copy-surface h-full w-full" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line">
             <span className="row-title">Client key</span>
           </span>
@@ -1601,11 +1605,15 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
 }
 
 function AgentsView({
+  refreshing,
+  onRefresh,
   agents,
   locked,
   problem,
   onSelect,
 }: {
+  refreshing: boolean;
+  onRefresh(): void;
   agents: AgentStatus[];
   locked: boolean;
   problem?: string;
@@ -1614,8 +1622,11 @@ function AgentsView({
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   return (
     <div className="page-body">
-      {problem && <p className="banner" role="alert">{problem}</p>}
-      <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
+      {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
+      <div className="page-toolbar">
+        <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
+        <IconButton label="Detect installed agents" disabled={refreshing} onClick={onRefresh}><RefreshCw className={refreshing ? "is-spinning" : undefined} aria-hidden="true" /></IconButton>
+      </div>
       <section className="group" aria-labelledby="agents-title">
         <h2 className="group-title" id="agents-title">Installed <span>{connected} connected</span></h2>
         <div className="inset">
@@ -1666,24 +1677,25 @@ function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <div className={`agent-block row ${compact ? "agent-compact" : ""}`} title={agent.configPath}>
+    <Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
       <span className={agent.connected ? "agent-mark-on" : undefined}><AgentMark agent={agent} /></span>
-      <div className="row-main">
-        <span className="row-title-line">
+      <ItemContent className="min-w-0">
+        <ItemTitle className="row-title-line flex-wrap">
           <span className="row-title">{name}</span>
           <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />
-        </span>
-        {agent.installed && <code className="row-note agent-config" title={agent.configPath}>{homePath(agent.configPath)}</code>}
-        {note && <p className="row-note">{note}</p>}
-      </div>
+        </ItemTitle>
+        {agent.installed && !compact && <ItemDescription title={agent.configPath}>{homePath(agent.configPath)}</ItemDescription>}
+        {note && <ItemDescription>{note}</ItemDescription>}
+      </ItemContent>
+      <ItemActions>
       {agent.installed ? <SwitchControl
         checked={disconnecting}
-        size="sm"
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
         onToggle={() => onSelect(!disconnecting)}
       /> : <AgentWebsite agent={agent} />}
-    </div>
+      </ItemActions>
+    </Item>
   );
 }
 
@@ -1706,10 +1718,10 @@ function StateLabel({
   text: string;
 }): React.JSX.Element {
   return (
-    <span className={`state state-${tone}`}>
+    <Badge variant={tone === "danger" || tone === "warning" ? "destructive" : tone === "success" ? "secondary" : "outline"}>
       {Icon ? <Icon size={13} aria-hidden="true" /> : <span className="dot" aria-hidden="true" />}
       {text}
-    </span>
+    </Badge>
   );
 }
 
@@ -1808,10 +1820,10 @@ function UsageView({
 
   return (
     <div className="usage-page">
-      {(problem || error) && <p className="banner" role="alert">{problem ?? error}</p>}
+      {(problem || error) && <Alert variant="destructive"><AlertDescription>{problem ?? error}</AlertDescription></Alert>}
       <div className="usage-toolbar" role="group" aria-label="Usage filters">
-        <label>Agent<NativeSelect value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></label>
-        <label>Model<NativeSelect value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{page?.models.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></label>
+        <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><NativeSelect id="usage-agent" value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></Field>
+        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{page?.models.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
         <fieldset className="filter-field time-filter">
           <legend>Time</legend>
           <ToggleGroup className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
@@ -2098,7 +2110,7 @@ function SettingsView({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body settings-page">
-      {problem && <p className="banner" role="alert">{problem}</p>}
+      {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
@@ -2270,7 +2282,7 @@ function ProfileListSheet({
         })}
       </div>
       {running && <p className="field-note profile-lock-note">Switching profiles briefly stops protection and reconnects to the selected provider.</p>}
-      {(error || openError) && <p className="banner sheet-banner" role="alert">{error || openError}</p>}
+      {(error || openError) && <Alert variant="destructive"><AlertDescription>{error || openError}</AlertDescription></Alert>}
       <SheetActions leading={
         <Button type="button" variant="outline" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
       }>
@@ -2409,22 +2421,18 @@ function ProfileEditorSheet({
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
           </ToggleGroupItem>
         </ToggleGroup>
-        <div className="sheet-card">
-          <label className="sheet-field"><span>Profile name</span><Input value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></label>
-          <label className="sheet-field"><span>Service endpoint</span><Input value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></label>
-          <div className="sheet-field key-field">
-            <span>
-              <span>{keyLabel}</span>
-              <span className="key-field-actions">
-                {verifiedConfiguration && <span className="verified-configuration"><Check size={12} aria-hidden="true" />Verified configuration</span>}
-                {savedCredentialApplies && profile?.id === state.activeProfileId && <Button type="button" variant="link" size="sm" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</Button>}
-              </span>
-            </span>
-            <Input type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-label={keyLabel} />
-            <small>{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</small>
-          </div>
-        </div>
-        {error && <p className="banner sheet-banner" role="alert">{error}</p>}
+        <FieldGroup className="mt-6">
+          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></FormField>
+          <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></FormField>
+          <Field>
+            <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
+            <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
+            <FieldDescription id="profile-key-note">{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
+            {verifiedConfiguration && <Badge variant="secondary"><Check aria-hidden="true" />Verified configuration</Badge>}
+            {savedCredentialApplies && profile?.id === state.activeProfileId && <Button className="self-start" type="button" variant="link" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</Button>}
+          </Field>
+          <FieldError>{error}</FieldError>
+        </FieldGroup>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
@@ -2499,8 +2507,8 @@ function LocalApiSheet({
   return (
     <Sheet title="Local API settings" className="local-api-sheet" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
-        <div className="sheet-scroll">
-          <div className="sheet-card config-fields">
+        <div className="sheet-scroll py-6">
+          <FieldGroup>
           <FormField id="local-listen-address" label="Listen address" description="Address used by the local gateway.">
               <Input id="local-listen-address" aria-describedby="local-listen-address-note" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
             <datalist id="listen-addresses"><option value="127.0.0.1" /><option value="::1" /><option value="0.0.0.0" /></datalist>
@@ -2513,29 +2521,25 @@ function LocalApiSheet({
           <FormField id="local-client-host" label="Client host" description="Optional hostname shown to clients.">
             <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
           </FormField>
-          </div>
-          <div className="sheet-card client-key-card">
-          <div className="row field settings-field-row">
-            <label className="field-label" htmlFor="local-client-key">Client key</label>
-            <div className="field-controls credential-controls">
+          <Field>
+            <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
               <Input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
+            <div className="flex flex-wrap items-center gap-2">
               <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
               <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
               <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw size={15} />Rotate key</Button>
             </div>
-            <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</span>
-          </div>
-          </div>
-          <div className="sheet-card endpoints-card">
-          <div className="row">
-            <span className="row-main"><span className="row-title">OpenAI-style endpoint</span><code className="row-note">{openAi || "Invalid settings"}</code></span>
-            <IconButton label="Copy OpenAI-style endpoint" disabled={!openAi} onClick={() => void onCopy("OpenAI-style endpoint", openAi)}>{copied === "OpenAI-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
-          </div>
-          <div className="row">
-            <span className="row-main"><span className="row-title">Anthropic-style endpoint</span><code className="row-note">{endpoint || "Invalid settings"}</code></span>
-            <IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
-          </div>
-          </div>
+            <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>
+          </Field>
+          <Item>
+            <ItemContent><ItemTitle>OpenAI-style endpoint</ItemTitle><ItemDescription>{openAi || "Invalid settings"}</ItemDescription></ItemContent>
+            <ItemActions><IconButton label="Copy OpenAI-style endpoint" disabled={!openAi} onClick={() => void onCopy("OpenAI-style endpoint", openAi)}>{copied === "OpenAI-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
+          </Item>
+          <Item>
+            <ItemContent><ItemTitle>Anthropic-style endpoint</ItemTitle><ItemDescription>{endpoint || "Invalid settings"}</ItemDescription></ItemContent>
+            <ItemActions><IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
+          </Item>
+          </FieldGroup>
           {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
           {(error || externalError) && <p className="sheet-text error" role="alert">{error ?? externalError}</p>}
         </div>

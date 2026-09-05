@@ -12,6 +12,11 @@ on:
         description: 'Optional stable version for an updater-enabled draft release (for example 0.1.1)'
         required: false
         type: string
+      publish_release:
+        description: Publish the signed version and advance the desktop update channel
+        required: true
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
@@ -322,3 +327,15 @@ jobs:
           node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY"
           mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.sig' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name 'latest.json' \) -print0)
           gh release create "desktop-v$VERSION" "${assets[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Gateway $VERSION" --generate-notes
+      - name: Publish desktop version
+        if: inputs.publish_release
+        run: gh release edit "desktop-v$VERSION" --draft=false --latest=false
+
+  update-feed:
+    if: inputs.publish_release && inputs.release_version != '' && inputs.production_macos
+    needs: draft-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/desktop-update-feed.yml
+    with:
+      tag: desktop-v${{ inputs.release_version }}

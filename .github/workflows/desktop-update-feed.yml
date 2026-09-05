@@ -1,6 +1,11 @@
 name: Publish desktop update feed
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -13,12 +18,12 @@ concurrency:
 
 jobs:
   publish:
-    if: startsWith(github.event.release.tag_name, 'desktop-v') && !github.event.release.prerelease
+    if: inputs.tag != '' || (startsWith(github.event.release.tag_name, 'desktop-v') && !github.event.release.prerelease)
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.event.release.tag_name }}
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
       - uses: actions/setup-node@v6
         with:
