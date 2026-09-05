@@ -17,6 +17,7 @@ import type {
  * browser test without a backend.
  */
 export type MockScenario =
+  | "profile-switch"
   | "ready"
   | "no-profiles"
   | "no-key"
@@ -221,6 +222,8 @@ const STOPPED_AGENTS = [CODEX, CLAUDE_OFF, OPENCODE, PI, HERMES];
 
 function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatus[] } {
   switch (name) {
+    case "profile-switch":
+      return { state: { ...BASE, profiles: [REDPILL_PROFILE, { ...REDPILL_PROFILE, id: "phala-profile", name: "Phala", provider: "phala", remoteUrl: "https://inference.phala.com" }] }, agents: STOPPED_AGENTS };
     case "ready":
       return {
         state: { ...BASE, status: "verified", remoteUrl: BASE.config.remoteUrl, identity: IDENTITY, checks: CHECKS, catalog: CATALOG, activity: ACTIVITY, sessionId: "session-demo", sessionUsage: usageSummary(ACTIVITY) },
@@ -301,7 +304,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 }
 
 export function mockApi(name: string | null): DesktopApi {
-  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
+  const known: MockScenario[] = ["ready", "profile-switch", "no-profiles", "no-key", "verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
@@ -312,7 +315,7 @@ export function mockApi(name: string | null): DesktopApi {
   let verifyRun = 0;
   let history = [...USAGE_HISTORY];
   let clientKey = "sk-pag-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
-  const credentialProfiles = new Set(state.apiKeySaved ? [state.activeProfileId] : []);
+  const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved ?? Boolean(profile.verifiedAt)).map((profile) => profile.id));
   const publish = () => {
     const protectedNow = state.status === "verified" && !state.configurationVerification && state.apiKeySaved;
     agents = agents.map((agent) => ({ ...agent, authorized: agent.connected && protectedNow }));
@@ -321,10 +324,16 @@ export function mockApi(name: string | null): DesktopApi {
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   let updateChannel: "beta" | "stable" = "stable";
+  let updateAttempts = 0;
   return {
+    getAppVersion: async () => "0.1.0",
     getUpdateChannel: async () => updateChannel,
     setUpdateChannel: async (channel) => { updateChannel = channel; return channel; },
-    checkUpdate: async () => ({ enabled: true, currentVersion: "0.1.0", version: name === "update-available" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null }),
+    checkUpdate: async () => {
+      updateAttempts += 1;
+      if (name === "update-offline" || (name === "update-recover" && updateAttempts === 1)) throw new Error("offline");
+      return { enabled: true, currentVersion: "0.1.0", channelPublished: name !== "update-unpublished", version: name === "update-available" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null };
+    },
     installUpdate: async () => undefined,
     onUpdateProgress: () => () => undefined,
     getLaunchPreferences: async () => launchPreferences,

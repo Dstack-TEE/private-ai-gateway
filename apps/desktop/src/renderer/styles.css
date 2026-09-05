@@ -222,7 +222,6 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .row-title-line { max-width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .row-chevron { flex: 0 0 auto; color: var(--text-tertiary); }
 .row-title { font-weight: 620; }
-.settings-page .row-title { font-weight: 400; }
 .row-note { flex: 1 0 100%; display: block; color: var(--text-secondary); font-size: var(--font-caption); line-height: 1.35; overflow-wrap: anywhere; }
 .row-note code, code.row-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-side { flex: 0 0 auto; color: var(--text-secondary); font-size: var(--font-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -256,8 +255,6 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .list-items > li { border-bottom: 1px solid var(--separator); }
 .list-items > li:last-child { border-bottom: 0; }
 .list-row { width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--separator); border-radius: 0; font-size: inherit; }
-.update-control { min-width: 0; display: grid; justify-items: end; gap: 4px; text-align: right; }
-.update-control small { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .list-row:hover { background: var(--panel-subtle); }
 .list-row:focus-visible { box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--primary) 42%, transparent); }
 .evidence { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 14px 16px; font-size: 13px; line-height: 1.5; }

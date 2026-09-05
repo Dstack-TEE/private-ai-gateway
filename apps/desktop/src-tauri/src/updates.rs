@@ -52,6 +52,7 @@ pub struct UpdateInfo {
     enabled: bool,
     current_version: String,
     version: Option<String>,
+    channel_published: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -75,6 +76,7 @@ pub async fn check_update(
         enabled,
         current_version: app.package_info().version.to_string(),
         version: None,
+        channel_published: true,
     };
     if !enabled {
         return Ok(info);
@@ -85,19 +87,37 @@ pub async fn check_update(
         UpdateChannel::Beta => "beta",
         UpdateChannel::Stable => "stable",
     };
-    let endpoint = format!("https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{channel_name}/latest.json")
-        .parse().map_err(|_| "Invalid update endpoint")?;
+    let endpoint = format!("https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{channel_name}/latest.json");
     let updater = app
         .updater_builder()
-        .endpoints(vec![endpoint])
+        .endpoints(vec![endpoint
+            .parse()
+            .map_err(|_| "Invalid update endpoint")?])
         .map_err(|_| "Invalid update endpoint")?
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Updates are not configured correctly for this build")?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|_| "Could not check for updates. Try again later.")?;
+    let update = match updater.check().await {
+        Ok(update) => update,
+        // The plugin groups HTTP failures as ReleaseNotFound. Only a confirmed
+        // 404 means the selected channel has not published a feed yet.
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            let response = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|_| "Could not check the update channel")?
+                .head(&endpoint)
+                .send()
+                .await
+                .map_err(|_| "Could not reach the update channel")?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                info.channel_published = false;
+                return Ok(info);
+            }
+            return Err("The update channel is temporarily unavailable".to_string());
+        }
+        Err(_) => return Err("Could not check for updates. Try again later.".to_string()),
+    };
     if update.as_ref().is_some_and(|update| {
         update
             .raw_json

@@ -45,9 +45,10 @@ import { UpdateControl, UpdateChannelControl, useUpdates } from "./updates";
 import { Button } from "./components/ui/button";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
 import { Badge } from "./components/ui/badge";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuItem } from "./components/ui/dropdown-menu";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
-import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./components/ui/item";
+import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription, ItemGroup } from "./components/ui/item";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
 import { IconButton, SwitchControl } from "./components/controls";
@@ -144,7 +145,7 @@ function profileHasCredential(profile: ConfidentialProfile): boolean {
 }
 
 function profileIsAvailable(profile: ConfidentialProfile | undefined, state: GatewayState): boolean {
-  return Boolean(profile?.verifiedAt && profileHasCredential(profile) && state.apiKeySaved);
+  return Boolean(profile?.verifiedAt && profileHasCredential(profile) && (profile.id !== state.activeProfileId || state.apiKeySaved));
 }
 
 function isProtected(state: GatewayState): boolean {
@@ -873,6 +874,7 @@ function App(): React.JSX.Element {
         <div className="content" id={`page-${view}`} key={view}>
         {view === "overview" && (
           <Overview
+            onActivateProfile={activateProfile}
             state={state}
             agents={agents}
             busy={busy}
@@ -1200,6 +1202,7 @@ function PageHeader({
 }
 
 function Overview({
+  onActivateProfile,
   state,
   agents,
   busy,
@@ -1222,6 +1225,7 @@ function Overview({
   onSelect,
   onInspect,
 }: {
+  onActivateProfile(profileId: string): Promise<string | undefined>;
   state: GatewayState;
   agents: AgentStatus[];
   busy: boolean;
@@ -1250,6 +1254,7 @@ function Overview({
   return (
     <div className="overview-page">
       <StatusSurface
+        onActivateProfile={onActivateProfile}
         state={state}
         agents={agents}
         busy={busy}
@@ -1315,6 +1320,7 @@ function Overview({
 }
 
 function StatusSurface({
+  onActivateProfile,
   state,
   agents,
   busy,
@@ -1325,6 +1331,7 @@ function StatusSurface({
   onSettings,
   onPrivacy,
 }: {
+  onActivateProfile(profileId: string): Promise<string | undefined>;
   state: GatewayState;
   agents: AgentStatus[];
   busy: boolean;
@@ -1335,6 +1342,7 @@ function StatusSurface({
   onSettings(): void;
   onPrivacy(): void;
 }): React.JSX.Element {
+  const [switchingProfile, setSwitchingProfile] = useState(false);
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
@@ -1398,11 +1406,22 @@ function StatusSurface({
 
       <div className="status-segment status-remote">
         <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
-        <Button variant="ghost" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
-          {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus size={18} aria-hidden="true" />}
-          <span>{activeProfile?.name ?? "Setup provider"}</span>
-          {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
-        </Button>
+        {activeProfile ? <DropdownMenu>
+          <DropdownMenuTrigger render={<Button variant="outline" className="status-profile" />} disabled={busy || switchingProfile} aria-label={`Profiles: ${activeProfile.name}`}>
+            <ServiceLogo url={activeProfile.remoteUrl} /><span>{activeProfile.name}</span><ChevronDown aria-hidden="true" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuRadioGroup value={state.activeProfileId} onValueChange={(profileId) => {
+              if (switchingProfile || profileId === state.activeProfileId) return;
+              setSwitchingProfile(true);
+              void onActivateProfile(profileId).finally(() => setSwitchingProfile(false));
+            }}>
+              {state.profiles.map((profile) => <DropdownMenuRadioItem key={profile.id} value={profile.id} disabled={busy || switchingProfile || !profileIsAvailable(profile, state)}><ServiceLogo url={profile.remoteUrl} /><span>{profile.name}</span></DropdownMenuRadioItem>)}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={onSettings}><Settings aria-hidden="true" />Manage profiles</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu> : <Button variant="outline" className="status-profile" aria-label="Setup provider" aria-haspopup="dialog" onClick={onSettings}><Plus aria-hidden="true" /><span>Setup provider</span></Button>}
         <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
           {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
@@ -1535,7 +1554,7 @@ function LocalApiPanel({
     <div className="copy-rows">
       <div className="copy-row">
         <Button variant="ghost"
-          className="copy-surface h-full w-full"
+          className="copy-surface h-full w-full rounded-none"
           disabled={!proxyUrl}
           aria-label={`${endpointLabel}: ${proxyUrl ?? "Unavailable"}. Copy`}
           onClick={() => proxyUrl && void onCopy(endpointLabel, proxyUrl)}
@@ -1549,7 +1568,7 @@ function LocalApiPanel({
         <IconButton className="row-action" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
       </div>
       <div className="copy-row">
-        <Button variant="ghost" className="copy-surface h-full w-full" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
+        <Button variant="ghost" className="copy-surface h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line">
             <span className="row-title">Client key</span>
           </span>
@@ -2122,16 +2141,18 @@ function SettingsView({
 
       <Collapsible className="group settings-advanced">
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
-        <CollapsibleContent className="inset">
+        <CollapsibleContent>
+          <ItemGroup className="gap-0 overflow-hidden rounded-2xl border divide-y">
           <SettingsToggle label="Allow development OS" description={`Accept development OS images that are not intended for production workloads.${frozen ? " Stop protection to change this setting." : ""}`} checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={frozen} onToggle={() => onPolicy(!allowDevelopmentOs)} />
+          <UpdateChannelControl updates={updates} />
+          </ItemGroup>
         </CollapsibleContent>
       </Collapsible>
 
-      {anyRecorded && <SettingsSection title="Agents"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></div></SettingsSection>}
+      {anyRecorded && <SettingsSection title="Agents"><Item><ItemContent><ItemTitle>Restore all agent configs</ItemTitle><ItemDescription>Restore the original configuration for every connected agent.</ItemDescription></ItemContent><ItemActions><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></ItemActions></Item></SettingsSection>}
 
       <SettingsSection title="About">
-          <UpdateChannelControl updates={updates} />
-          <div className="row"><span className="row-main">{brand.productName}</span><UpdateControl updates={updates} /></div>
+          <UpdateControl updates={updates} productName={brand.productName} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
       </SettingsSection>
     </div>

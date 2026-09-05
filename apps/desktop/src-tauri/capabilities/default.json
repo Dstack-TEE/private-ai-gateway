@@ -11,6 +11,7 @@
     "usage-proof"
   ],
   "permissions": [
+    "core:app:allow-version",
     "core:event:default",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",

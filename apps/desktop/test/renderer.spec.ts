@@ -364,22 +364,79 @@ test("updates are discovered on launch and installation requires confirmation", 
     expect(dialog.message()).toContain("connected agent configurations will be restored");
     await dialog.dismiss();
   });
-  await page.getByRole("button", { name: "Install and Restart…", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Install and Restart…", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Install and Restart", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Install and Restart", exact: true })).toBeEnabled();
   await expect(page.getByRole("heading", { name: "Updates", exact: true })).toHaveCount(0);
   const about = page.getByRole("region", { name: "About", exact: true });
-  await expect(about.getByRole("button", { name: "Install and Restart…", exact: true })).toContainText("v0.1.0");
+  await expect(about.locator('[data-slot="app-version"]')).toHaveText("v0.1.0");
+  await expect(page.getByRole("button", { name: "Check for Updates" })).toHaveCount(0);
   await expect(about.getByRole("button", { name: "Documentation", exact: true })).toHaveCSS("border-bottom-width", "1px");
   await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveAttribute("data-slot", "item");
-  const channel = about.getByRole("combobox", { name: "Update channel" });
+  await expect(about.getByRole("combobox", { name: "Update channel" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  const channel = page.locator(".settings-advanced").getByRole("combobox", { name: "Update channel" });
   await expect(channel).toHaveValue("stable");
   await channel.selectOption("beta");
   await expect(page.getByRole("status").filter({ hasText: "Version 0.3.0-beta.1 is available" })).toBeVisible();
   await nav(page, "Overview").click();
   await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
   await expect(channel).toHaveValue("beta");
   await channel.selectOption("stable");
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
+});
+
+test("settings keep the installed version visible without manual update controls", async ({ page }) => {
+  for (const [scenario, message] of [
+    ["update-unpublished", "No releases published in this channel yet"],
+    ["update-offline", "Could not check for updates. Retrying automatically."],
+  ]) {
+    await page.goto(`/?mock=${scenario}`);
+    await nav(page, "Settings").click();
+    const about = page.getByRole("region", { name: "About", exact: true });
+    await expect(about.locator('[data-slot="app-version"]')).toHaveText("v0.1.0");
+    await expect(about.getByRole("status")).toHaveText(message);
+    await expect(about.getByRole("button", { name: /Updates|Install and Restart/ })).toHaveCount(0);
+    await expect(about.getByRole("combobox")).toHaveCount(0);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    const advanced = page.locator(".settings-advanced");
+    await expect(advanced.getByRole("combobox", { name: "Update channel" })).toBeVisible();
+    const padding = await advanced.locator('[data-slot="item"]').first().evaluate((item) => getComputedStyle(item).paddingLeft);
+    expect(Number.parseFloat(padding)).toBeGreaterThanOrEqual(12);
+  }
+  await page.goto("/?mock=update-recover");
+  await nav(page, "Settings").click();
+  const status = page.getByRole("region", { name: "About", exact: true }).getByRole("status");
+  await expect(status).toContainText("Retrying automatically");
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect(status).toHaveText("You're up to date");
+});
+
+test("local copy hover follows the grouped row shape and profiles use a menu", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  const copy = page.getByRole("button", { name: /^Local endpoint:/ });
+  await copy.hover();
+  await expect(copy).toHaveCSS("border-radius", "0px");
+  const shape = await copy.evaluate((button) => {
+    const row = button.parentElement;
+    const group = button.closest(".module");
+    if (!row || !group) throw new Error("Copy row structure missing");
+    return { height: button.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, clipped: getComputedStyle(group).overflow, radius: getComputedStyle(group).borderRadius };
+  });
+  expect(Math.abs(shape.height - shape.rowHeight)).toBeLessThanOrEqual(1);
+  expect(shape.clipped).toBe("hidden");
+  expect(Number.parseFloat(shape.radius)).toBeGreaterThan(0);
+  const profile = page.getByRole("button", { name: "Profiles: RedPill" });
+  await expect(profile).toHaveAttribute("aria-haspopup", "menu");
+  await profile.click();
+  await expect(page.getByRole("menuitemradio", { name: "RedPill" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  await expect(profile).toBeFocused();
+  await page.goto("/?mock=profile-switch");
+  await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("menuitemradio", { name: "Phala" }).click();
+  await expect(page.getByRole("button", { name: "Profiles: Phala" })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -575,6 +632,7 @@ test("installed agents stay ordered and protection state is consistent across pa
 test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await page.getByRole("menuitem", { name: "Manage profiles" }).click();
   const profiles = page.getByRole("dialog", { name: "Profiles" });
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   const editor = page.getByRole("dialog", { name: "Edit profile" });

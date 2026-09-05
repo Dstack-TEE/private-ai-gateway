@@ -2,14 +2,14 @@ import { useId, type ComponentProps, type PropsWithChildren, type ReactNode } fr
 import { ChevronRight, ExternalLink } from "lucide-react";
 import { SwitchControl } from "./controls";
 import { Button } from "./ui/button";
-import { Field, FieldLabel, FieldDescription, FieldContent, FieldGroup } from "./ui/field";
-import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./ui/item";
+import { Field, FieldLabel, FieldDescription } from "./ui/field";
+import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions, ItemGroup } from "./ui/item";
 
 export function SettingsSection({ title, children }: PropsWithChildren<{ title: string }>): React.JSX.Element {
   const id = useId();
   return <section className="group" aria-labelledby={id}>
     <h2 className="group-title" id={id}>{title}</h2>
-    <FieldGroup>{children}</FieldGroup>
+    <ItemGroup className="gap-0 overflow-hidden rounded-2xl border divide-y">{children}</ItemGroup>
   </section>;
 }
 
@@ -19,7 +19,7 @@ export function RowContent({ title, description, descriptionId }: { title: React
 
 export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof Button>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {
   const Icon = external ? ExternalLink : ChevronRight;
-  return <Item render={<Button type="button" variant="ghost" className="h-auto justify-start whitespace-normal" {...props} />}>
+  return <Item className="rounded-none" render={<Button type="button" variant="ghost" className="h-auto justify-start whitespace-normal" {...props} />}>
     <ItemContent><ItemTitle>{title}</ItemTitle>{description && <ItemDescription>{description}</ItemDescription>}</ItemContent>
     <ItemActions><Icon aria-hidden="true" /></ItemActions>
   </Item>;
@@ -28,10 +28,10 @@ export function SettingsLink({ title, description, external = false, ...props }:
 export function SettingsToggle({ label, description, ...props }: ComponentProps<typeof SwitchControl> & { description?: ReactNode }): React.JSX.Element {
   const descriptionId = useId();
   const controlId = useId();
-  return <Field orientation="horizontal">
-    <FieldContent><FieldLabel htmlFor={controlId}>{label}</FieldLabel>{description && <FieldDescription id={descriptionId}>{description}</FieldDescription>}</FieldContent>
-    <SwitchControl id={controlId} label={label} aria-describedby={description ? descriptionId : undefined} {...props} />
-  </Field>;
+  return <Item>
+    <ItemContent><ItemTitle><FieldLabel htmlFor={controlId}>{label}</FieldLabel></ItemTitle>{description && <ItemDescription id={descriptionId}>{description}</ItemDescription>}</ItemContent>
+    <ItemActions><SwitchControl id={controlId} label={label} aria-describedby={description ? descriptionId : undefined} {...props} /></ItemActions>
+  </Item>;
 }
 
 export function FormField({ id, label, description, children }: PropsWithChildren<{ id: string; label: string; description?: ReactNode }>): React.JSX.Element {

@@ -22,6 +22,7 @@ desktop-runtime = { package = "private-ai-gateway-desktop-runtime", path = "../r
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 semver = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 tauri = { version = "2.11.5", features = ["image-png", "tray-icon"] }
 tauri-plugin-clipboard-manager = "2.3.3"
 tauri-plugin-autostart = "2"

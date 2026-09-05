@@ -11,6 +11,7 @@ export interface UpdateInfo {
   enabled: boolean;
   currentVersion: string;
   version?: string | null;
+  channelPublished: boolean;
 }
 
 export type UpdateChannel = "beta" | "stable";
@@ -250,6 +251,7 @@ export interface LaunchPreferences {
 }
 
 export interface DesktopApi {
+  getAppVersion(): Promise<string>;
   getUpdateChannel(): Promise<UpdateChannel>;
   setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
   checkUpdate(): Promise<UpdateInfo>;

@@ -83,12 +83,18 @@ embedded public key. Packages without a release version remain non-updating
 test builds. Existing 0.1.0 test installations need one manual installation of
 an updater-enabled version. The withdrawn 0.1.1 used the retired
 `desktop-updates` URL and also needs a manual migration. That URL is not reused.
-Settings > About > Update channel selects Stable or Beta and persists locally.
+Settings > Advanced > Update channel selects Stable or Beta and persists locally.
 The initial default follows the installed package's version. Switching clears
 any pending update and immediately checks the selected channel. Installation
 only accepts a newer version from that channel: choosing Stable while running
 a newer beta waits for a higher stable version instead of downgrading.
-Updates are discovered at startup; installation
+Updates are checked at startup, every six hours, when connectivity returns,
+and on window activation if the last check was over fifteen minutes ago.
+About reads the installed version locally even when update checks fail; it has
+no manual check button, only an install action when a newer version is available.
+A confirmed HTTP 404 means that channel has no published feed yet, not that the
+app is current. Other failures remain errors and are retried automatically.
+Installation
 requires confirmation before stopping protection and restoring agent configs.
 
 Keep policy, persistence and verification in their existing runtime/page owners;

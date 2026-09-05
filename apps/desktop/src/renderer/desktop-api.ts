@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { confirm } from "@tauri-apps/plugin-dialog";
 
@@ -27,6 +28,7 @@ export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
 delete window.__GATEWAY_INITIAL_STATE__;
 
 export const desktopApi: DesktopApi = {
+  getAppVersion: getVersion,
   getUpdateChannel: () => invoke("get_update_channel"),
   setUpdateChannel: (channel) => invoke("set_update_channel", { channel }),
   checkUpdate: () => invoke("check_update"),
