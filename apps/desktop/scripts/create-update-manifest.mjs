@@ -1,13 +1,15 @@
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { releaseChannel } from "./release-channel.mjs";
 
-const [directory, version, repository] = process.argv.slice(2);
-if (!directory || !/^\d+\.\d+\.\d+$/.test(version ?? "") || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "")) {
-  throw new Error("Usage: create-update-manifest.mjs <artifact directory> <version> <owner/repo>");
+const [directory, version, repository, channel = "beta"] = process.argv.slice(2);
+const release = releaseChannel(version, channel);
+if (!directory || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "")) {
+  throw new Error("Usage: create-update-manifest.mjs <artifact directory> <version> <owner/repo> [beta|stable]");
 }
 const entries = await readdir(directory, { recursive: true, withFileTypes: true });
 const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
-const tag = `desktop-v${version}`;
+const tag = release.tag;
 const platforms = {};
 const suffixes = { "darwin-aarch64": ".app.tar.gz", "windows-x86_64": ".exe", "linux-x86_64": ".AppImage" };
 for (const [target, suffix] of Object.entries(suffixes)) {
@@ -29,4 +31,4 @@ for (const [target, suffix] of Object.entries(suffixes)) {
     url: `https://github.com/${repository}/releases/download/${tag}/${filename}`,
   };
 }
-await writeFile(path.join(directory, "latest.json"), `${JSON.stringify({ version, pub_date: new Date().toISOString(), platforms }, null, 2)}\n`);
+await writeFile(path.join(directory, "latest.json"), `${JSON.stringify({ version, channel, pub_date: new Date().toISOString(), platforms }, null, 2)}\n`);

@@ -9,9 +9,17 @@ on:
         default: false
         type: boolean
       release_version:
-        description: 'Optional stable version for an updater-enabled draft release (for example 0.1.1)'
+        description: 'Optional update version matching the channel (for example 0.1.2-beta.1)'
         required: false
         type: string
+      release_channel:
+        description: Update channel (stable must be explicitly selected)
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
       publish_release:
         description: Publish the signed version and advance the desktop update channel
         required: true
@@ -109,8 +117,9 @@ jobs:
     needs: verify
     env:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
+      DESKTOP_RELEASE_CHANNEL: ${{ inputs.release_channel || 'beta' }}
       TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.release_version && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
-      TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && 'https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates/latest.json' || '' }}
+      TAURI_UPDATER_ENDPOINT: ${{ inputs.release_version && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.release_channel || 'beta') || '' }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     strategy:
@@ -137,7 +146,11 @@ jobs:
           PRODUCTION_MACOS: ${{ inputs.production_macos }}
         run: |
           set -euo pipefail
-          [[ "$DESKTOP_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$DESKTOP_RELEASE_CHANNEL" in
+            beta) [[ "$DESKTOP_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] ;;
+            stable) [[ "$DESKTOP_RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ;;
+            *) exit 1 ;;
+          esac
           test "$PRODUCTION_MACOS" = true
           test -n "$TAURI_UPDATER_PUBLIC_KEY"
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
@@ -309,6 +322,7 @@ jobs:
       contents: write
     env:
       VERSION: ${{ inputs.release_version }}
+      CHANNEL: ${{ inputs.release_channel || 'beta' }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
@@ -320,13 +334,18 @@ jobs:
           pattern: private-ai-gateway-*
           path: release-artifacts
           merge-multiple: true
+      - name: Install release tooling
+        working-directory: apps/desktop
+        run: npm ci
       - name: Create signed update manifest and draft release
         shell: bash
         run: |
           set -euo pipefail
-          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY"
+          node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
           mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.sig' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name 'latest.json' \) -print0)
-          gh release create "desktop-v$VERSION" "${assets[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Gateway $VERSION" --generate-notes
+          release_args=()
+          if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
+          gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Gateway $VERSION" --generate-notes
       - name: Publish desktop version
         if: inputs.publish_release
         run: gh release edit "desktop-v$VERSION" --draft=false --latest=false

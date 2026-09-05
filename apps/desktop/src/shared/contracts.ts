@@ -13,6 +13,8 @@ export interface UpdateInfo {
   version?: string | null;
 }
 
+export type UpdateChannel = "beta" | "stable";
+
 export interface UpdateProgress {
   downloaded: number;
   total?: number | null;
@@ -248,6 +250,8 @@ export interface LaunchPreferences {
 }
 
 export interface DesktopApi {
+  getUpdateChannel(): Promise<UpdateChannel>;
+  setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
   checkUpdate(): Promise<UpdateInfo>;
   installUpdate(): Promise<void>;
   onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void;

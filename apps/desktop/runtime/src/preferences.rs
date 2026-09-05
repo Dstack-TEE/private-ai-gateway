@@ -3,12 +3,24 @@ use desktop_gateway::{
     tokens,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Beta,
+    Stable,
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
     #[serde(default)]
     pub connect_on_launch: bool,
+    #[serde(default)]
+    pub update_channel: Option<UpdateChannel>,
 }
 
 pub fn load() -> Result<Preferences, String> {
@@ -32,9 +44,31 @@ pub fn save(preferences: Preferences) -> Result<(), String> {
         .map_err(|error| format!("Cannot save startup preferences: {error}"))
 }
 
+pub fn update(change: impl FnOnce(&mut Preferences)) -> Result<(), String> {
+    let _guard = WRITE_LOCK
+        .lock()
+        .map_err(|_| "Preferences are unavailable")?;
+    let mut preferences = load()?;
+    change(&mut preferences);
+    save(preferences)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Preferences;
+    use super::{Preferences, UpdateChannel};
+
+    #[test]
+    fn update_channel_is_optional_and_preserves_startup_preference() {
+        let mut preferences: Preferences =
+            serde_json::from_str(r#"{"connectOnLaunch":true}"#).unwrap();
+        assert_eq!(preferences.update_channel, None);
+        preferences.update_channel = Some(UpdateChannel::Beta);
+        let restored: Preferences =
+            serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
+        assert!(restored.connect_on_launch);
+        assert_eq!(restored.update_channel, Some(UpdateChannel::Beta));
+        assert!(serde_json::from_str::<Preferences>(r#"{"updateChannel":"nightly"}"#).is_err());
+    }
 
     #[test]
     fn startup_connection_is_opt_in_and_requires_a_boolean() {
@@ -47,6 +81,7 @@ mod tests {
         assert!(serde_json::from_str::<Preferences>(r#"{"connectOnLaunch":"true"}"#).is_err());
         let saved = serde_json::to_string(&Preferences {
             connect_on_launch: true,
+            ..Preferences::default()
         })
         .unwrap();
         assert!(

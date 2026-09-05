@@ -41,7 +41,7 @@ import redpillServiceIcon from "./assets/service-redpill.png";
 import { desktopApi as liveApi, initialGatewayState } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
-import { UpdateControl, useUpdates } from "./updates";
+import { UpdateControl, UpdateChannelControl, useUpdates } from "./updates";
 import { Button } from "./components/ui/button";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
 import { Badge } from "./components/ui/badge";
@@ -2130,6 +2130,7 @@ function SettingsView({
       {anyRecorded && <SettingsSection title="Agents"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></div></SettingsSection>}
 
       <SettingsSection title="About">
+          <UpdateChannelControl updates={updates} />
           <div className="row"><span className="row-main">{brand.productName}</span><UpdateControl updates={updates} /></div>
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
       </SettingsSection>

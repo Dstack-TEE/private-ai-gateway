@@ -3355,6 +3355,7 @@ dependencies = [
  "objc2-app-kit",
  "private-ai-gateway-desktop-gateway",
  "private-ai-gateway-desktop-runtime",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

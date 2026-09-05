@@ -320,8 +320,11 @@ export function mockApi(name: string | null): DesktopApi {
   };
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
+  let updateChannel: "beta" | "stable" = "stable";
   return {
-    checkUpdate: async () => ({ enabled: true, currentVersion: "0.1.0", version: name === "update-available" ? "0.2.0" : null }),
+    getUpdateChannel: async () => updateChannel,
+    setUpdateChannel: async (channel) => { updateChannel = channel; return channel; },
+    checkUpdate: async () => ({ enabled: true, currentVersion: "0.1.0", version: name === "update-available" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null }),
     installUpdate: async () => undefined,
     onUpdateProgress: () => () => undefined,
     getLaunchPreferences: async () => launchPreferences,

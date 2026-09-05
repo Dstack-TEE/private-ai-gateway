@@ -18,6 +18,7 @@
 // anything is written: a missing asset or field is an error, never a silent
 // fallback.
 import { execFileSync } from "node:child_process";
+import { releaseChannel } from "./release-channel.mjs";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -196,16 +197,16 @@ ${rust("APP_IDENTIFIER", brand.bundle.identifier)}
 // list stays in the tracked config, and the window title is set at run time
 // from the Rust brand module.
 const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
-if (releaseVersion && !/^\d+\.\d+\.\d+$/.test(releaseVersion)) {
-  throw new Error("DESKTOP_RELEASE_VERSION must be a stable semantic version");
-}
+const release = releaseVersion ? releaseChannel(releaseVersion, process.env.DESKTOP_RELEASE_CHANNEL || "beta") : undefined;
 const updaterKey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim();
 const updaterEndpoint = process.env.TAURI_UPDATER_ENDPOINT?.trim();
 if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
   throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
 }
 if (updaterEndpoint) {
+  if (!release) throw new Error("Updater-enabled builds require a release version and channel");
   const endpoint = new URL(updaterEndpoint);
+  if (!endpoint.pathname.endsWith(`/${release.feedTag}/latest.json`)) throw new Error("Updater endpoint does not match the release channel");
   if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
     throw new Error("The updater endpoint must use HTTPS without embedded credentials");
   }

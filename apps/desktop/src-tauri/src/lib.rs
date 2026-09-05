@@ -46,11 +46,9 @@ fn set_launch_preference(
 ) -> Result<LaunchPreferences, String> {
     match name.as_str() {
         "openAtLogin" => tray::set_open_at_login(&app, enabled)?,
-        "connectOnLaunch" => {
-            desktop_runtime::preferences::save(desktop_runtime::preferences::Preferences {
-                connect_on_launch: enabled,
-            })?
-        }
+        "connectOnLaunch" => desktop_runtime::preferences::update(|preferences| {
+            preferences.connect_on_launch = enabled
+        })?,
         _ => return Err("Unknown startup preference".to_string()),
     }
     let preferences = get_launch_preferences(app.clone())?;
@@ -300,6 +298,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
             updates::check_update,
+            updates::get_update_channel,
+            updates::set_update_channel,
             updates::install_update,
             get_launch_preferences,
             set_launch_preference,

@@ -371,6 +371,15 @@ test("updates are discovered on launch and installation requires confirmation", 
   await expect(about.getByRole("button", { name: "Install and Restart…", exact: true })).toContainText("v0.1.0");
   await expect(about.getByRole("button", { name: "Documentation", exact: true })).toHaveCSS("border-bottom-width", "1px");
   await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveAttribute("data-slot", "item");
+  const channel = about.getByRole("combobox", { name: "Update channel" });
+  await expect(channel).toHaveValue("stable");
+  await channel.selectOption("beta");
+  await expect(page.getByRole("status").filter({ hasText: "Version 0.3.0-beta.1 is available" })).toBeVisible();
+  await nav(page, "Overview").click();
+  await nav(page, "Settings").click();
+  await expect(channel).toHaveValue("beta");
+  await channel.selectOption("stable");
+  await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
