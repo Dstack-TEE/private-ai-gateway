@@ -327,12 +327,7 @@ function composeIconLayer(mark, whiteAsCutout) {
 
 function standaloneMark(mark, whiteAsCutout, color) {
   const { width, height } = svgSize(mark);
-  const content = markContent(mark, whiteAsCutout);
-  // Tint the alpha silhouette after cutting out the eye, preserving source assets.
-  const painted = color
-    ? `<defs><filter id="brand-tint" color-interpolation-filters="sRGB"><feFlood flood-color="${color}"/><feComposite in2="SourceGraphic" operator="in"/></filter></defs><g filter="url(#brand-tint)">${content}</g>`
-    : content;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${painted}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout, color)}</svg>`;
 }
 
 function composeIconComposerManifest(background) {
@@ -340,7 +335,7 @@ function composeIconComposerManifest(background) {
     fill: { "automatic-gradient": iconComposerColor(background) },
     groups: [
       {
-        "blur-material": 0.08,
+        "blur-material": 0,
         layers: [
           {
             hidden: false,
@@ -351,9 +346,9 @@ function composeIconComposerManifest(background) {
         ],
         lighting: "individual",
         name: "Dstack mark",
-        shadow: { kind: "layer-color", opacity: 0.28 },
-        specular: true,
-        translucency: { enabled: true, value: 0.12 },
+        shadow: { kind: "layer-color", opacity: 0 },
+        specular: false,
+        translucency: { enabled: false, value: 0 },
       },
     ],
     "supported-platforms": { circles: ["watchOS"], squares: "shared" },
@@ -401,10 +396,13 @@ function inner(svg) {
   return svg.slice(open + 1, close);
 }
 
-function markContent(svg, whiteAsCutout) {
+function markContent(svg, whiteAsCutout, color) {
   const content = inner(svg);
+  // Recolor only the source path paints, never the clipping geometry or canvas.
+  const paint = (paths) => color ? paths.replace(/<path\b[^>]*>/gi, (path) =>
+    path.replace(/\b(fill|stroke)="(?!none"|url\()[^"]*"/gi, `$1="${color}"`)) : paths;
   if (!whiteAsCutout) {
-    return content;
+    return paint(content);
   }
   const whitePath = /<path\b[^>]*\bfill="(?:white|#fff(?:fff)?)"[^>]*\/>/gi;
   const cutouts = content.match(whitePath) ?? [];
@@ -412,8 +410,12 @@ function markContent(svg, whiteAsCutout) {
     throw new Error("assets.appIconWhiteAsCutout requires at least one white path in the app icon mark");
   }
   const { width, height } = svgSize(svg);
-  const maskPaths = cutouts.map((path) => path.replace(/fill="[^"]+"/i, 'fill="black"')).join("");
-  return `<defs><mask id="app-icon-cutouts" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"><rect width="${width}" height="${height}" fill="white"/>${maskPaths}</mask></defs><g mask="url(#app-icon-cutouts)">${content.replace(whitePath, "")}</g>`;
+  const holes = cutouts.map((path) => {
+    const d = path.match(/\bd="([^"]+)"/i)?.[1];
+    if (!d) throw new Error("App icon cutout path must have path data");
+    return d;
+  }).join(" ");
+  return `<defs><clipPath id="app-icon-cutouts" clipPathUnits="userSpaceOnUse"><path d="M0 0H${width}V${height}H0Z ${holes}" clip-rule="evenodd"/></clipPath></defs><g clip-path="url(#app-icon-cutouts)">${paint(content.replace(whitePath, ""))}</g>`;
 }
 
 function withWhiteCutouts(svg, whiteAsCutout) {

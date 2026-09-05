@@ -127,10 +127,10 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .preview-tray { position: fixed; z-index: 50; top: 32px; right: 8px; width: 286px; padding: 9px 0; color: #202022; background: rgb(255 255 255 / 0.94); border: 1px solid rgb(0 0 0 / 0.16); border-radius: 9px; box-shadow: 0 16px 40px rgb(0 0 0 / 0.3), 0 2px 8px rgb(0 0 0 / 0.18); backdrop-filter: blur(26px) saturate(140%); }
 .preview-tray-heading { min-height: 58px; padding: 5px 14px 8px; display: flex; align-items: center; gap: 10px; }
 .preview-tray-heading .brand-logo { width: 32px; height: 32px; }
-.preview-tray-heading span, .preview-tray-protection > span { min-width: 0; display: grid; }
-.preview-tray-heading strong, .preview-tray-protection strong { font-size: 14px; font-weight: 650; }
-.preview-tray-heading small, .preview-tray-protection small { color: rgb(32 32 34 / 0.62); font-size: 12px; }
-.preview-tray-protection { min-height: 58px; padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.preview-tray-heading span { min-width: 0; display: grid; }
+.preview-tray-heading strong { font-size: 14px; font-weight: 650; }
+.preview-tray-heading small, .preview-tray-status { color: rgb(32 32 34 / 0.62); font-size: 12px; }
+.preview-tray-status { padding: 4px 14px; }
 .preview-tray-separator { height: 1px; margin: 5px 13px; background: rgb(0 0 0 / 0.12); }
 .preview-tray-item { width: 100%; min-height: 30px; padding: 3px 14px; display: flex; align-items: center; color: inherit; background: transparent; border: 0; text-align: left; font-size: 13px; }
 .preview-tray-item:hover, .preview-tray-item:focus-visible { color: #fff; background: #2c6e49; box-shadow: none; }
@@ -141,7 +141,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
   .mac-menu-bar { color: #f5f5f7; background: rgb(38 36 37 / 0.82); border-bottom-color: rgb(255 255 255 / 0.13); }
   .tray-trigger:hover, .tray-trigger.is-open { background: rgb(255 255 255 / 0.13); }
   .preview-tray { color: #f5f5f7; background: rgb(45 44 46 / 0.95); border-color: rgb(255 255 255 / 0.17); }
-  .preview-tray-heading small, .preview-tray-protection small { color: rgb(245 245 247 / 0.65); }
+  .preview-tray-heading small, .preview-tray-status { color: rgb(245 245 247 / 0.65); }
   .preview-tray-separator { background: rgb(255 255 255 / 0.13); }
   .preview-tray-check { color: #7fd3a2; }
 }
@@ -222,7 +222,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .gateway-mark { width: 38px; height: 38px; }
 .gateway-core > .protected-control { margin-top: 9px; }
 .brand-logo.is-busy { animation: brand-icon-pulse 1.5s ease-in-out infinite; }
-@keyframes brand-icon-pulse { 50% { opacity: 0.68; transform: scale(0.96); } }
+@keyframes brand-icon-pulse { 50% { opacity: 0.68; } }
 .gateway-verdict { margin-top: 2px; font-size: var(--font-body); font-weight: 600; line-height: 20px; }
 .protection-status { display: inline-flex; align-items: center; justify-content: center; gap: 5px; max-width: 100%; flex-wrap: wrap; }
 .protection-status > svg { flex: 0 0 auto; }

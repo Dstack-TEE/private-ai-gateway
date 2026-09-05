@@ -1158,24 +1158,18 @@ function PreviewTrayMenu({
   onQuit(): void;
 }): React.JSX.Element {
   const verdict = presentation(state);
-  const protectionStarting = busy && !state.configurationVerification;
-  const protectionOn = running || protectionStarting;
+  const verifying = state.status === "verifying";
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
+  const action = verifying ? "Cancel verification" : running ? "Stop protection"
+    : profileIsAvailable(activeProfile, state) ? "Start protection" : "Set Up Profile…";
   return (
     <div className="preview-tray" role="menu" aria-label="Private AI Gateway">
       <div className="preview-tray-heading">
         <BrandMark />
         <span><strong>{brand.productName}</strong><small>{serviceHost(state.remoteUrl ?? state.config.remoteUrl)}</small></span>
       </div>
-      <div className="preview-tray-protection">
-        <span><strong>{developmentMode ? "Dev mode" : "Protected"}</strong><small>{running ? "On" : protectionStarting ? "Starting" : "Off"}</small></span>
-        <SwitchControl
-          checked={protectionOn}
-          label={busy ? state.configurationVerification ? "Cancel configuration verification" : "Cancel protection start" : running ? "Stop protection" : "Start protection"}
-          disabled={busy || endpointDown}
-          developmentMode={developmentMode}
-          onToggle={onProtection}
-        />
-      </div>
+      <div className="preview-tray-status" role="status">{verdict.title}{developmentMode ? " (Dev mode)" : ""}</div>
+      <button className="preview-tray-item" role="menuitem" disabled={(busy && !verifying) || (endpointDown && !running && !verifying)} onClick={onProtection}>{action}</button>
       <div className="preview-tray-separator" />
       <button className="preview-tray-item" role="menuitem" onClick={onOpen}>Open {brand.productName}</button>
       <button className="preview-tray-item" role="menuitem" onClick={onSettings}>Settings…</button>
@@ -1185,7 +1179,6 @@ function PreviewTrayMenu({
         Open at Login
       </button>
       <button className="preview-tray-item" role="menuitem" onClick={onQuit}>Quit {brand.productName}</button>
-      <span className="sr-only" role="status">{verdict.title}</span>
     </div>
   );
 }

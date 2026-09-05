@@ -4,7 +4,7 @@
   },
   "groups": [
     {
-      "blur-material": 0.08,
+      "blur-material": 0,
       "layers": [
         {
           "hidden": false,
@@ -23,12 +23,12 @@
       "name": "Dstack mark",
       "shadow": {
         "kind": "layer-color",
-        "opacity": 0.28
+        "opacity": 0
       },
-      "specular": true,
+      "specular": false,
       "translucency": {
-        "enabled": true,
-        "value": 0.12
+        "enabled": false,
+        "value": 0
       }
     }
   ],

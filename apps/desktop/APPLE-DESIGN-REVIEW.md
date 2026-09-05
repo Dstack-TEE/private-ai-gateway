@@ -79,13 +79,19 @@ The default brand is `dstack`, using the official Dstack logo kit from
 `brand.json`). The app icon uses a soft-white mark on one graphite
 rounded square in every appearance. Window marks use charcoal in light mode
 and soft white in dark mode, without a tile or shadow. The original source
-assets are unchanged; tinting preserves the transparent eye. The tray uses a smaller monochrome
+assets are unchanged; direct vector path paints and an even-odd clip preserve
+the transparent eye without SVG filters. The native mark layer disables blur,
+translucency, specular effects and shadow. The tray uses a smaller monochrome
 template mark at full alpha while protected and reduced alpha otherwise, without
 a badge. Green is reserved for protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
 templates; the script refuses to build them until their official assets are
 added.
+
+The tray uses Tauri's standard native menu items, not a WebView popup or a custom
+switch view. Status and elapsed time are separate from the Start/Stop/Cancel
+command; profiles, agent selections and Open at Login retain native checkmarks.
 
 The brand and the service are deliberately separate layers. The shell (window
 title, About, tray, menus, app icon) is the brand, Dstack TEE by default. The

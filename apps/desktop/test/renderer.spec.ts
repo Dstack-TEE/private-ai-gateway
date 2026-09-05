@@ -28,7 +28,8 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
 
   await page.getByRole("button", { name: "Private AI Gateway menu" }).click();
   const tray = page.getByRole("menu", { name: "Private AI Gateway" });
-  await expect(tray.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+  await expect(tray.getByRole("switch")).toHaveCount(0);
+  await expect(tray.getByRole("menuitem", { name: "Stop protection" })).toBeVisible();
   for (const name of ["Open Private AI Gateway", "Settings…", "Quit Private AI Gateway"]) {
     await expect(tray.getByRole("menuitem", { name })).toBeVisible();
   }
@@ -47,6 +48,17 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   );
   expect(brandIcons).toHaveLength(3);
   expect(brandIcons.every(({ source }) => /brand-mark-(light|dark)/.test(source) && !source.startsWith("data:"))).toBe(true);
+  for (const source of new Set(brandIcons.map((icon) => icon.source))) {
+    const vector = await page.evaluate(async (url) => {
+      const response = await fetch(url);
+      const document = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
+      return {
+        rasterEffects: document.querySelectorAll("filter, mask, image").length,
+        vectorCutout: document.querySelector('clipPath path[clip-rule="evenodd"]') !== null,
+      };
+    }, source);
+    expect(vector).toEqual({ rasterEffects: 0, vectorCutout: true });
+  }
   await expect(page.locator(".tray-template-icon")).toHaveClass(/is-protected/);
   await expect(page.locator(".tray-template-icon")).toHaveCSS("mask-image", /tray-mark/);
   await expect(page.locator(".tray-template-icon")).toHaveCSS("opacity", "1");

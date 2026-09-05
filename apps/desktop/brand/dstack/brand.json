@@ -5,7 +5,7 @@
   "organizationName": "Dstack TEE",
   "tagline": "The open framework for confidential AI",
   "homepageUrl": "https://dstack.org",
-  "supportUrl": "https://docs.phala.com/dstack",
+  "supportUrl": "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md",
   "service": {
     "name": "RedPill",
     "defaultUrl": "https://tee.redpill.ai",

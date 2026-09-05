@@ -16,7 +16,7 @@ use desktop_runtime::{contracts::GatewayState, controller::DesktopRuntime};
 
 /// Native menu handles mirror runtime state; actions use the same controller as the window.
 pub struct TrayMenu {
-    toggle: CheckMenuItem<Wry>,
+    toggle: MenuItem<Wry>,
     status: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
     endpoint: MenuItem<Wry>,
@@ -33,11 +33,10 @@ struct ProfileMenuItem {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let (checked, status_line) = menu_state(&GatewayState::default());
-    let toggle = CheckMenuItemBuilder::with_id("toggle", "Protected")
-        .checked(checked)
-        .build(app)?;
-    let status = MenuItemBuilder::with_id("status", status_line)
+    let state = GatewayState::default();
+    let status_line = protection_title(&state);
+    let toggle = MenuItemBuilder::with_id("toggle", protection_action(&state)).build(app)?;
+    let status = MenuItemBuilder::with_id("status", &status_line)
         .enabled(false)
         .build(app)?;
     let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
@@ -65,8 +64,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     agents_menu.append(&tauri::menu::PredefinedMenuItem::separator(app)?)?;
     agents_menu.append(&MenuItemBuilder::with_id("agents", "Manage Agents…").build(app)?)?;
     let menu = MenuBuilder::new(app)
-        .item(&toggle)
         .item(&status)
+        .item(&toggle)
         .separator()
         .text("open", format!("Open {APP_NAME}"))
         .text("settings", "Settings…")
@@ -147,6 +146,14 @@ fn perform_action(app: &AppHandle, id: String) {
         let runtime = app.state::<Arc<DesktopRuntime>>().inner().clone();
         let result = (|| -> Result<(), String> {
             match id.as_str() {
+                "toggle" => {
+                    let state = runtime.state()?;
+                    if should_stop(&state) {
+                        runtime.stop()?;
+                    } else {
+                        runtime.start(state.config)?;
+                    }
+                }
                 "copy-endpoint" => {
                     let endpoint = runtime
                         .state()?
@@ -299,8 +306,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
     let Ok(state) = runtime.state() else {
         return;
     };
-    let running = matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
-    if !running && !active_profile_ready(&state) {
+    if !should_stop(&state) && !active_profile_ready(&state) {
         sync(app, &state);
         show_window(app);
         if let Err(error) = crate::native_dialog::open_profiles(app, true) {
@@ -308,7 +314,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
         }
         return;
     }
-    runtime.inner().clone().toggle();
+    perform_action(app, "toggle".to_string());
 }
 
 fn sync_autostart(app: &AppHandle) {
@@ -338,7 +344,7 @@ pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Reflect the gateway state in the checkmark, the status row, and the tooltip.
+/// Keep the status separate from the action the user can take.
 pub fn sync(app: &AppHandle, state: &GatewayState) {
     let handle = app.clone();
     let state = state.clone();
@@ -346,11 +352,13 @@ pub fn sync(app: &AppHandle, state: &GatewayState) {
 }
 
 fn sync_inner(app: &AppHandle, state: &GatewayState) {
-    let (checked, status_line) = menu_state(state);
+    let status_line = protection_title(state);
     if let Some(menu) = app.try_state::<TrayMenu>() {
-        let _ = menu.toggle.set_checked(checked);
-        let _ = menu.status.set_text(status_line);
-        let _ = menu.toggle.set_text(protection_title(state));
+        let _ = menu.status.set_text(&status_line);
+        let _ = menu.toggle.set_text(protection_action(state));
+        let _ = menu
+            .toggle
+            .set_enabled(should_stop(state) || state.endpoint_error.is_none());
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         if let Err(error) = sync_profiles(app, state, &menu) {
             eprintln!("Cannot refresh tray profiles: {error}");
@@ -398,7 +406,7 @@ fn is_protected(state: &GatewayState) -> bool {
 
 fn protection_title(state: &GatewayState) -> String {
     if !is_protected(state) {
-        return "Protected".into();
+        return menu_state(state).into();
     }
     let mode = if state.config.require_production_os {
         "Protected"
@@ -428,26 +436,39 @@ pub fn show_window(app: &AppHandle) {
     });
 }
 
-/// Checkmark state and the plain-language status row for the gateway state.
-fn menu_state(state: &GatewayState) -> (bool, &'static str) {
+fn should_stop(state: &GatewayState) -> bool {
+    matches!(state.status.as_str(), "verifying" | "blocked")
+        || (state.status == "verified" && !state.configuration_verification)
+}
+
+fn protection_action(state: &GatewayState) -> &'static str {
+    if state.status == "verifying" {
+        "Cancel verification"
+    } else if should_stop(state) {
+        "Stop protection"
+    } else if !active_profile_ready(state) {
+        "Set Up Profile…"
+    } else {
+        "Start protection"
+    }
+}
+
+fn menu_state(state: &GatewayState) -> &'static str {
     if state.endpoint_error.is_some() {
-        return (false, "Local API unavailable");
+        return "Local API unavailable";
     }
     if state.status == "stopped" && !active_profile_ready(state) {
-        return (false, "Profile required");
+        return "Not protected - profile required";
     }
     match state.status.as_str() {
-        "verifying" if state.configuration_verification => (false, "Verifying configuration"),
-        "verifying" => (true, "Starting - verifying service"),
-        "verified" if state.configuration_verification => (false, "Configuration verified"),
-        "verified" if !state.api_key_saved => (true, "Verified - add your API key"),
-        "verified" if !state.config.require_production_os => {
-            (true, "Ready - development OS allowed")
-        }
-        "verified" => (true, "Ready - requests protected"),
-        "blocked" => (true, "Blocked - service identity changed"),
-        "error" => (false, "Failed - open for details"),
-        _ => (false, "Stopped"),
+        "verifying" if state.configuration_verification => "Verifying configuration",
+        "verifying" => "Verifying service",
+        "verified" if state.configuration_verification => "Not protected - configuration verified",
+        "verified" if !state.api_key_saved => "Not protected - API key required",
+        "verified" => "Protected",
+        "blocked" => "Protection blocked - service identity changed",
+        "error" => "Not protected - verification failed",
+        _ => "Not protected",
     }
 }
 
@@ -476,7 +497,7 @@ fn activate_app() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_state, tray_icon};
+    use super::{menu_state, protection_action, should_stop, tray_icon};
     use desktop_runtime::contracts::{
         ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
     };
@@ -525,22 +546,27 @@ mod tests {
     }
 
     #[test]
-    fn checkmark_tracks_running_states() {
+    fn protection_action_matches_the_runtime_operation() {
         assert_eq!(
             menu_state(&GatewayState::default()),
-            (false, "Profile required")
+            "Not protected - profile required"
         );
-        assert_eq!(
-            menu_state(&state("verified", true)),
-            (true, "Ready - requests protected")
-        );
+        assert_eq!(menu_state(&state("verified", true)), "Protected");
         assert_eq!(
             menu_state(&state("verified", false)),
-            (true, "Verified - add your API key")
+            "Not protected - API key required"
         );
-        assert!(menu_state(&state("verifying", false)).0);
-        assert!(menu_state(&state("blocked", true)).0);
-        assert!(!menu_state(&state("error", true)).0);
+        assert_eq!(
+            protection_action(&state("verified", true)),
+            "Stop protection"
+        );
+        assert_eq!(
+            protection_action(&state("verifying", false)),
+            "Cancel verification"
+        );
+        assert!(should_stop(&state("verifying", false)));
+        assert!(should_stop(&state("blocked", true)));
+        assert!(!should_stop(&state("error", true)));
     }
 
     #[test]
@@ -556,9 +582,20 @@ mod tests {
             credential_saved: Some(true),
             verified_at: Some(1),
         });
-        assert_eq!(menu_state(&ready), (false, "Stopped"));
+        assert_eq!(menu_state(&ready), "Not protected");
+        assert_eq!(protection_action(&ready), "Start protection");
+
+        ready.status = "verified".into();
+        ready.configuration_verification = true;
+        assert!(!should_stop(&ready));
+        assert_eq!(protection_action(&ready), "Start protection");
+        assert_eq!(menu_state(&ready), "Not protected - configuration verified");
+
+        ready.status = "stopped".into();
+        ready.configuration_verification = false;
 
         ready.profiles[0].credential_saved = Some(false);
-        assert_eq!(menu_state(&ready), (false, "Profile required"));
+        assert_eq!(menu_state(&ready), "Not protected - profile required");
+        assert_eq!(protection_action(&ready), "Set Up Profile…");
     }
 }

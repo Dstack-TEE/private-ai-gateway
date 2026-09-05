@@ -20,7 +20,7 @@ was not supported by the verification performed.
 | 10. Muted inactive/verifying | Follow-up found the neutral CSS rule was missing; now explicitly uses the neutral color token with computed-color assertions | Native rendering |
 | 11. Overview mark/spacing | Mark 38px; switch top margin 9px | User visual acceptance |
 | 12. Four preview rows/window fit | Both lists capped at four; default window 1052x784; mock content fits | Native fonts, longer agent attention messages |
-| 13. About links | Documentation and GitHub present | Documentation still points to the brand's general dstack docs, not gateway-specific documentation |
+| 13. About links | Documentation points to the gateway quickstart; GitHub opens its source repository | Desktop-specific onboarding documentation remains limited |
 | 14. Unified Settings group | General includes startup, Profiles and Local API; configuration rows clickable | None identified in renderer |
 | 15. Equal module spacing | Overview top/inter-row spacing both 28px | Native visual acceptance |
 | 16. Nonselectable chrome | Body disables selection; inputs and evidence opt back in | Native selection behavior |
@@ -57,6 +57,24 @@ coordinates, and no Settings row horizontal overflow. Screenshot capture worked,
 but image inspection was unavailable; this is not pixel-level visual acceptance.
 
 ## Release Gate
+
+Additional follow-up corrections:
+
+- Brand marks now use direct vector path paint and an even-odd clip for the eye,
+  with no tint filter or mask. The macOS mark layer has no material blur,
+  translucency, specular effect or shadow. Source logo geometry is preserved.
+- The native tray separates status (including elapsed time) from explicit Start,
+  Stop and Cancel actions. It no longer presents a checkmark labelled Protected.
+- Configuration-only verification does not make the tray choose Stop. Its next
+  action starts protection. Native operations use the existing runtime controller
+  on a worker thread rather than performing lifecycle work on the menu thread.
+- The browser tray no longer draws a switch that the native menu does not have;
+  it remains a limited preview, not an acceptance test for native submenus.
+
+Still not release-complete: these version-0.1.0 test packages do not configure the
+updater endpoint (the workflow requires an explicit release version). Publishing
+an update channel and validating Windows distribution signing are separate from
+Apple notarization. No full HIG or VoiceOver compliance claim is justified.
 
 Do not label this audit as full product acceptance or present the previous
 download as containing these local corrections. Native tray interactions and
