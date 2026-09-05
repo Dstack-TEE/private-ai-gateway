@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const [directory, version, repository] = process.argv.slice(2);
@@ -16,9 +16,17 @@ for (const [target, suffix] of Object.entries(suffixes)) {
   const file = candidates[0];
   const signature = (await readFile(`${file}.sig`, "utf8")).trim();
   if (!signature) throw new Error(`Missing signature for ${target}`);
+  // GitHub rewrites asset names containing spaces. Stage portable names first
+  // so upload and manifest URLs refer to exactly the same signed bytes.
+  const filename = `${target}-${version}${suffix}`;
+  const staged = path.join(path.dirname(file), filename);
+  if (staged !== file) {
+    await rename(file, staged);
+    await rename(`${file}.sig`, `${staged}.sig`);
+  }
   platforms[target] = {
     signature,
-    url: `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(path.basename(file))}`,
+    url: `https://github.com/${repository}/releases/download/${tag}/${filename}`,
   };
 }
 await writeFile(path.join(directory, "latest.json"), `${JSON.stringify({ version, pub_date: new Date().toISOString(), platforms }, null, 2)}\n`);

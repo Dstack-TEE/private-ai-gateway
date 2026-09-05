@@ -18,9 +18,14 @@ test("release manifests use signed platform artifacts and reject incomplete rele
     const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
     assert.equal(manifest.version, "0.1.1");
     assert.deepEqual(Object.keys(manifest.platforms).sort(), ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]);
-    assert.match(manifest.platforms["windows-x86_64"].url, /desktop-v0\.1\.1\/Gateway%20Setup\.exe$/);
+    assert.match(manifest.platforms["windows-x86_64"].url, /desktop-v0\.1\.1\/windows-x86_64-0\.1\.1\.exe$/);
+    for (const entry of Object.values(manifest.platforms)) {
+      const filename = path.basename(new URL(entry.url).pathname);
+      assert.equal(await readFile(path.join(directory, filename), "utf8"), "fixture");
+      assert.equal((await readFile(path.join(directory, `${filename}.sig`), "utf8")).trim(), entry.signature);
+    }
     assert.equal(manifest.platforms["darwin-aarch64"].signature, "test-signature");
-    await rm(path.join(directory, "Gateway.AppImage.sig"));
+    await rm(path.join(directory, "linux-x86_64-0.1.1.AppImage.sig"));
     await assert.rejects(run);
   } finally {
     await rm(directory, { recursive: true, force: true });

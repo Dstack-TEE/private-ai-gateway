@@ -45,6 +45,13 @@ jobs:
           import { existsSync, readFileSync, appendFileSync } from 'node:fs';
           const candidate = JSON.parse(readFileSync('candidate/latest.json', 'utf8'));
           if (`desktop-v${candidate.version}` !== process.env.TAG) throw new Error('Release version does not match manifest');
+          const prefix = `https://github.com/${process.env.GH_REPO}/releases/download/${process.env.TAG}/`;
+          for (const platform of ['darwin-aarch64', 'windows-x86_64', 'linux-x86_64']) {
+            const entry = candidate.platforms?.[platform];
+            if (!entry?.signature || !entry.url?.startsWith(prefix)) throw new Error(`Invalid update entry: ${platform}`);
+            const response = await fetch(entry.url, { method: 'HEAD', signal: AbortSignal.timeout(30000) });
+            if (!response.ok) throw new Error(`Update artifact unavailable: ${platform} (${response.status})`);
+          }
           const current = existsSync('current/latest.json') ? JSON.parse(readFileSync('current/latest.json', 'utf8')).version : '0.0.0';
           const a = candidate.version.split('.').map(BigInt);
           const b = current.split('.').map(BigInt);
