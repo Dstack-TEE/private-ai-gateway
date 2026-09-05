@@ -295,7 +295,7 @@ jobs:
       - name: Upload desktop package
         uses: actions/upload-artifact@v6
         with:
-          name: private-ai-gateway-${{ runner.os == 'macOS' && inputs.production_macos && 'release' || 'beta' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
+          name: private-ai-gateway-${{ inputs.release_version && (inputs.release_channel || 'beta') || 'test' }}-${{ inputs.release_version || '0.1.0' }}-${{ github.sha }}-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
           path: |
