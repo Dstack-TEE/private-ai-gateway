@@ -7,6 +7,17 @@ export type GatewayStatus =
 
 export type CheckStatus = "pass" | "fail" | "skip" | "info";
 
+export interface UpdateInfo {
+  enabled: boolean;
+  currentVersion: string;
+  version?: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total?: number | null;
+}
+
 export interface VerificationCheck {
   id: string;
   section: string;
@@ -237,6 +248,9 @@ export interface LaunchPreferences {
 }
 
 export interface DesktopApi {
+  checkUpdate(): Promise<UpdateInfo>;
+  installUpdate(): Promise<void>;
+  onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void;
   getLaunchPreferences(): Promise<LaunchPreferences>;
   setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;

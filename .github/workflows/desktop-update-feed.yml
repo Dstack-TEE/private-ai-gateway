@@ -1,0 +1,51 @@
+name: Publish desktop update feed
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-update-feed
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'desktop-v') && !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Publish the desktop-only update channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release download "$TAG" --pattern latest.json --dir candidate
+          if gh release view desktop-updates >/dev/null 2>&1; then
+            if [[ "$(gh release view desktop-updates --json assets --jq 'any(.assets[]; .name == "latest.json")')" == true ]]; then
+              gh release download desktop-updates --pattern latest.json --dir current
+            fi
+          else
+            gh release create desktop-updates --target "$GITHUB_SHA" --title "Desktop update feed" --notes "Signed desktop installers are linked by latest.json." --prerelease --latest=false
+          fi
+          node --input-type=module <<'NODE'
+          import { existsSync, readFileSync, appendFileSync } from 'node:fs';
+          const candidate = JSON.parse(readFileSync('candidate/latest.json', 'utf8'));
+          if (`desktop-v${candidate.version}` !== process.env.TAG) throw new Error('Release version does not match manifest');
+          const current = existsSync('current/latest.json') ? JSON.parse(readFileSync('current/latest.json', 'utf8')).version : '0.0.0';
+          const a = candidate.version.split('.').map(BigInt);
+          const b = current.split('.').map(BigInt);
+          const changed = a.findIndex((part, i) => part !== b[i]);
+          appendFileSync(process.env.GITHUB_ENV, `PUBLISH_UPDATE=${changed >= 0 && a[changed] > b[changed]}\n`);
+          NODE
+      - name: Advance update manifest
+        if: env.PUBLISH_UPDATE == 'true'
+        run: gh release upload desktop-updates candidate/latest.json --clobber

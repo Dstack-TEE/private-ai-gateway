@@ -22,7 +22,14 @@ declare global {
   }
 }
 
+// Native windows receive this non-secret snapshot before the renderer starts.
+export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
+delete window.__GATEWAY_INITIAL_STATE__;
+
 export const desktopApi: DesktopApi = {
+  checkUpdate: () => invoke("check_update"),
+  installUpdate: () => invoke("install_update"),
+  onUpdateProgress: (listener) => subscribe("gateway://update-progress", listener),
   getLaunchPreferences: () => invoke("get_launch_preferences"),
   setLaunchPreference: (name, enabled) => invoke("set_launch_preference", { name, enabled }),
   onLaunchPreferencesChange: (listener) => subscribe("gateway://launch-preferences", listener),
@@ -39,11 +46,6 @@ export const desktopApi: DesktopApi = {
     return invoke("save_local_api_config", { config });
   },
   getState(): Promise<GatewayState> {
-    const initial = window.__GATEWAY_INITIAL_STATE__;
-    if (initial) {
-      delete window.__GATEWAY_INITIAL_STATE__;
-      return Promise.resolve(initial);
-    }
     return invoke("get_gateway_state");
   },
   onStateChange(listener: (state: GatewayState) => void): () => void {

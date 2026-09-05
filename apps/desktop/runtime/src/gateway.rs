@@ -374,7 +374,7 @@ impl GatewayManager {
     }
 
     /// Record whether the stable local endpoint is bound. A failure blocks
-    /// starting and connecting until the app is relaunched.
+    /// starting and connecting until the listener is successfully rebound.
     pub fn set_endpoint(&self, config: LocalApiConfig, bound: Result<String, String>) {
         self.update(|state| match bound {
             Ok(endpoint) => {

@@ -85,6 +85,17 @@ test("Profiles keeps its list underneath the profile editor", async ({ page }) =
 });
 
 test("complex dialogs render as native child-window surfaces", async ({ page }) => {
+  await page.addInitScript(() => {
+    new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node instanceof HTMLElement && /Loading (profiles|privacy verification|Local API settings|usage proof)/.test(node.textContent ?? "")) {
+            document.documentElement.dataset.loadingFrameObserved = "true";
+          }
+        }
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   const cases = [
     {
       size: { width: 580, height: 510 },
@@ -118,6 +129,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(page.locator(".desktop-window, .sidebar")).toHaveCount(0);
     const dialog = page.getByRole("dialog", { name: entry.name });
     await expect(dialog).toContainText(entry.text);
+    await expect(page.locator("html")).not.toHaveAttribute("data-loading-frame-observed", "true");
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
     if (entry.name === "Usage proof" || entry.name === "Privacy verification") {
       const done = dialog.getByRole("button", { name: "Done", exact: true });
@@ -285,12 +297,29 @@ test("overview shows five agents, five current-session records, truthful copy su
   await expect(localSheet.getByRole("button", { name: "Copy OpenAI-style endpoint" })).toBeVisible();
   await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
-  await expect(localSheet.getByRole("button", { name: "Save" })).toBeDisabled();
-  await page.keyboard.press("Escape");
+  await expect(localSheet.getByRole("button", { name: "Save" })).toBeEnabled();
+  await expect(localSheet).toContainText("Saving briefly restarts protection");
+  await localSheet.getByLabel("Port", { exact: true }).fill("4181");
+  await localSheet.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(localSheet).not.toBeVisible();
+  await expect(endpoint).toContainText("4181");
   await page.getByRole("switch", { name: "Stop protection" }).click();
   await expect(session.locator("strong")).toHaveText(["—", "—", "—", "—"]);
   await expect(usageModule.locator(".usage-row")).toHaveCount(0);
   await expect(page.locator(".protection-duration")).toHaveCount(0);
+});
+
+test("updates are discovered on launch and installation requires confirmation", async ({ page }) => {
+  await page.goto("/?mock=update-available");
+  await page.getByRole("button", { name: "Update available", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("connected agent configurations will be restored");
+    await dialog.dismiss();
+  });
+  await page.getByRole("button", { name: "Install and Restart…", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Install and Restart…", exact: true })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "Updates", exact: true })).toBeVisible();
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
@@ -387,22 +416,31 @@ test("overview presents local availability and the active profile without sessio
 
   const status = page.getByLabel("Protection status");
   await expect(status.getByText("Local API available", { exact: true })).toBeVisible();
-  await expect(status.getByText("1 agent linked", { exact: true })).toBeVisible();
-  await expect(status.getByText("AI Provider", { exact: true })).toBeVisible();
+  await expect(status.getByText("1 agent connected", { exact: true })).toBeVisible();
+  await expect(status.getByText("Confidential AI", { exact: true })).toBeVisible();
+  const localHeader = page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) });
+  const badgeOffset = await localHeader.evaluate((header) => {
+    const title = header.querySelector("h2")?.getBoundingClientRect();
+    const badge = header.querySelector(".state")?.getBoundingClientRect();
+    if (!title || !badge) throw new Error("Missing Local API heading or status");
+    return Math.abs(title.y + title.height / 2 - badge.y - badge.height / 2);
+  });
+  expect(badgeOffset).toBeLessThanOrEqual(0.5);
   await expect(status.getByRole("button", { name: "Profiles: RedPill" })).toBeVisible();
   await expect(status.locator(".status-endpoint")).toHaveText("https://tee.redpill.ai");
   await expect(status.locator(".protection-duration")).toHaveText(/00:10:\d{2}/);
-  const rowOffsets = await status.evaluate((node) => {
-    const centers = (selector: string) => Array.from(node.querySelector(selector)?.children ?? []).map((child) => {
-      const box = child.getBoundingClientRect();
-      return box.y + box.height / 2;
-    });
-    const left = centers(".status-local");
-    const right = centers(".status-remote");
-    return left.map((center, index) => Math.abs(center - right[index]));
+  const alignment = await status.evaluate((node) => {
+    const facts = Array.from(node.querySelectorAll(".status-local .status-fact"));
+    const text = facts.map((fact) => fact.lastElementChild?.getBoundingClientRect().x);
+    const icons = facts.map((fact) => fact.firstElementChild?.getBoundingClientRect().width);
+    const left = node.querySelector(".status-local .status-heading")?.getBoundingClientRect();
+    const right = node.querySelector(".status-remote .status-heading")?.getBoundingClientRect();
+    return { text, icons, heights: facts.map((fact) => fact.getBoundingClientRect().height), headings: [left?.y, right?.y] };
   });
-  expect(rowOffsets).toHaveLength(4);
-  expect(rowOffsets.every((offset) => offset <= 1)).toBe(true);
+  expect(alignment.text[0]).toBe(alignment.text[1]);
+  expect(alignment.icons).toEqual([14, 14]);
+  expect(alignment.heights).toEqual([18, 18]);
+  expect(alignment.headings[0]).toBe(alignment.headings[1]);
   await status.getByRole("button", { name: "Verified", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
   await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();

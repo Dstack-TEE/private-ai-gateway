@@ -39,9 +39,10 @@ import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import phalaServiceIcon from "./assets/service-phala.svg";
 import redpillServiceIcon from "./assets/service-redpill.png";
 
-import { desktopApi as liveApi } from "./desktop-api";
+import { desktopApi as liveApi, initialGatewayState } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
+import { UpdateSettings, useUpdates } from "./updates";
 import type {
   AgentStatus,
   ConfidentialProfile,
@@ -274,8 +275,8 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   closed: boolean;
   close(): void;
 } {
-  const [state, setState] = useState<GatewayState>(INITIAL_STATE);
-  const [loaded, setLoaded] = useState(false);
+  const [state, setState] = useState<GatewayState>(initialGatewayState ?? INITIAL_STATE);
+  const [loaded, setLoaded] = useState(Boolean(initialGatewayState));
   const [loadError, setLoadError] = useState<string>();
   const [closed, setClosed] = useState(false);
   const presented = useRef(false);
@@ -330,17 +331,20 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   return { state, setState, loaded, loadError, closed, close };
 }
 
-function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element {
+function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element | null {
   useEffect(() => {
+    if (!error) return;
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
-  }, [onClose]);
+  }, [error, onClose]);
+  // The native window remains hidden until content or an actionable error is ready.
+  if (!error) return null;
   return (
-    <main className="native-dialog-host native-dialog-loading">
-      {error ? <TriangleAlert aria-hidden="true" /> : <LoaderCircle className="is-spinning" aria-hidden="true" />}
-      <span role={error ? "alert" : "status"}>{error ?? `Loading ${label}…`}</span>
-      <button className="button" onClick={onClose}>{error ? "Done" : "Cancel"}</button>
+    <main className="native-dialog-host native-dialog-loading" aria-label={label}>
+      <TriangleAlert aria-hidden="true" />
+      <span role="alert">{error}</span>
+      <button className="button" onClick={onClose}>Done</button>
     </main>
   );
 }
@@ -475,7 +479,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
     <main className="native-dialog-host">
       <LocalApiSheet
         state={native.state}
-        frozen={busy || running}
+        frozen={busy}
         clientKey={clientKey}
         clientKeyVisible={clientKeyVisible}
         copied={copied}
@@ -492,13 +496,13 @@ function NativeLocalApiWindow(): React.JSX.Element {
 
 function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }): React.JSX.Element {
   const [recordId, setRecordId] = useState(initialRecordId);
-  const [activity, setActivity] = useState<RequestActivity>();
+  const [activity, setActivity] = useState<RequestActivity | undefined>(() => initialGatewayState?.activity.find((item) => item.id === initialRecordId));
   const [error, setError] = useState<string>();
   const native = useNativeGatewayWindow("Usage Proof", Boolean(activity || error));
   useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
   useEffect(() => {
     let active = true;
-    setActivity(undefined);
+    setActivity((current) => current?.id === recordId ? current : undefined);
     setError(undefined);
     void desktopApi.getUsageRecord(recordId).then(
       (record) => active && setActivity(record),
@@ -512,6 +516,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
 }
 
 function App(): React.JSX.Element {
+  const updates = useUpdates(desktopApi);
   const [view, setView] = useState<View>("overview");
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
@@ -875,7 +880,7 @@ function App(): React.JSX.Element {
 
   const windowContent = (
     <main className="app-shell">
-      <Sidebar view={view} previewControls={previewMode} onChange={changeView} />
+      <Sidebar view={view} previewControls={previewMode} updateAvailable={Boolean(updates.info?.version)} onChange={changeView} />
       <section className="workspace">
         <PageHeader
           view={view}
@@ -931,6 +936,7 @@ function App(): React.JSX.Element {
         )}
         {view === "settings" && (
           <SettingsView
+            updates={updates}
             state={state}
             busy={busy}
             running={running}
@@ -972,7 +978,7 @@ function App(): React.JSX.Element {
       {settingsTarget === "local-api" && (
         <LocalApiSheet
           state={state}
-          frozen={busy || running}
+          frozen={busy}
           clientKey={clientKey}
           clientKeyVisible={clientKeyVisible}
           copied={copied}
@@ -1029,9 +1035,11 @@ function Sidebar({
   view,
   previewControls,
   onChange,
+  updateAvailable,
 }: {
   view: View;
   previewControls: boolean;
+  updateAvailable: boolean;
   onChange(view: View, focusHeading?: boolean): void;
 }): React.JSX.Element {
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
@@ -1079,6 +1087,7 @@ function Sidebar({
           );
         })}
       </nav>
+      {updateAvailable && <button className="nav-item" onClick={() => onChange("settings", true)}><Download size={18} aria-hidden="true" /><span>Update available</span></button>}
     </aside>
   );
 }
@@ -1379,10 +1388,10 @@ function StatusSurface({
       <div className="status-segment status-local">
         <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This Mac</span></div>
         <div className={`status-fact ${localApiAvailable ? "state-success" : ""}`}>
-          <span className="dot" aria-hidden="true" />
+          <span className="status-icon" aria-hidden="true"><span className="dot" /></span>
           <span>Local API {localApiAvailable ? "available" : "unavailable"}</span>
         </div>
-        <div className="status-fact"><Bot size={13} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} linked</span></div>
+        <div className="status-fact"><Bot size={14} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} connected</span></div>
         <div className="status-agent-icons" role="group" aria-label="Installed agents">
           {sortAgents(agents.filter((agent) => agent.installed)).sort((a, b) => Number(b.connected) - Number(a.connected)).map((agent) => (
             <span className={`status-agent-icon${agent.connected ? "" : " is-disconnected"}`} key={agent.id} title={`${agent.name} · ${agent.connected ? "Connected" : "Not connected"}`}>
@@ -1410,7 +1419,7 @@ function StatusSurface({
       </div>
 
       <div className="status-segment status-remote">
-        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>AI Provider</span></div>
+        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
         <button className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus size={18} aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
@@ -2138,6 +2147,7 @@ function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; 
 }
 
 function SettingsView({
+  updates,
   state,
   busy,
   running,
@@ -2153,6 +2163,7 @@ function SettingsView({
   savingPreference,
   onLaunchPreference,
 }: {
+  updates: ReturnType<typeof useUpdates>;
   state: GatewayState;
   busy: boolean;
   running: boolean;
@@ -2224,7 +2235,8 @@ function SettingsView({
 
       {anyRecorded && <section className="group" aria-labelledby="agents-settings-title"><h2 className="group-title" id="agents-settings-title">Agents</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><button className="button" disabled={locked} onClick={onRestoreAll}>Restore all</button></div></div></section>}
 
-      <section className="group" aria-labelledby="support-title"><h2 className="group-title" id="support-title">Support</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">{brand.productName}</span><span className="row-note">Version 0.1.0</span></span><button className="button" onClick={onSupport}>Get Help…</button></div></div></section>
+      <UpdateSettings updates={updates} />
+      <section className="group" aria-labelledby="support-title"><h2 className="group-title" id="support-title">Support</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">{brand.productName}</span></span><button className="button" onClick={onSupport}>Get Help…</button></div></div></section>
     </div>
   );
 }
@@ -2657,7 +2669,7 @@ function LocalApiSheet({
             <IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
           </div>
           </div>
-          {frozen && <p className="sheet-text">Stop protection before changing the listener.</p>}
+          {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
           {(error || externalError) && <p className="sheet-text error" role="alert">{error ?? externalError}</p>}
         </div>
         <div className="sheet-actions split-actions">
@@ -2797,7 +2809,7 @@ function presentation(state: GatewayState): {
   if (state.endpointError) {
     return {
       title: "Not protected",
-      detail: "Port 4180 is in use, so agents cannot reach this app. Free it and relaunch.",
+      detail: `The Local API on port ${state.localApi.port} is unavailable. Check Local API settings and save to retry.`,
       tone: "danger",
     };
   }

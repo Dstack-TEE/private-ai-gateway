@@ -321,6 +321,9 @@ export function mockApi(name: string | null): DesktopApi {
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   return {
+    checkUpdate: async () => ({ enabled: true, currentVersion: "0.1.0", version: name === "update-available" ? "0.2.0" : null }),
+    installUpdate: async () => undefined,
+    onUpdateProgress: () => () => undefined,
     getLaunchPreferences: async () => launchPreferences,
     setLaunchPreference: async (name, enabled) => {
       launchPreferences = { ...launchPreferences, [name]: enabled };

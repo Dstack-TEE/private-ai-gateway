@@ -40,6 +40,7 @@ pub struct DesktopRuntime {
     endpoint: EndpointRuntime,
     codex_sync: CodexCatalogSync,
     agent_policy: Mutex<()>,
+    lifecycle: tokio::sync::Mutex<()>,
     helper_path: PathBuf,
     #[allow(dead_code)]
     instance: Option<lock::InstanceLock>,
@@ -263,6 +264,7 @@ impl DesktopRuntime {
             endpoint: EndpointRuntime::new(task_runtime.clone()),
             codex_sync: CodexCatalogSync::default(),
             agent_policy: Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::new(()),
             helper_path: options.helper_path,
             instance,
         });
@@ -408,6 +410,14 @@ impl DesktopRuntime {
     }
 
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
+        self.start_inner(config)
+    }
+
+    fn start_inner(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let _guard = self
             .agent_policy
             .lock()
@@ -438,6 +448,27 @@ impl DesktopRuntime {
     }
 
     pub fn stop(&self) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
+        self.stop_inner()
+    }
+
+    /// Keep configuration mutations out of the restore/install boundary, including Windows exit.
+    pub fn install_update(
+        &self,
+        install: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
+        self.stop_inner()?;
+        install()
+    }
+
+    fn stop_inner(&self) -> Result<GatewayState, String> {
         let _guard = self
             .agent_policy
             .lock()
@@ -477,7 +508,11 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let gateway = self.stop().map(|_| ());
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
+        let gateway = self.stop_inner().map(|_| ());
         let endpoint = self.endpoint.stop().await;
         gateway.and(endpoint)
     }
@@ -538,6 +573,10 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
         let initial = self.manager.snapshot()?;
         if initial.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -577,7 +616,7 @@ impl DesktopRuntime {
             None => return Err("Enter an API key for this profile".to_string()),
         };
         if reconnect {
-            self.stop()?;
+            self.stop_inner()?;
         }
         let previous = self.manager.snapshot()?;
         let mut settings = service_config::settings_from_state(
@@ -669,13 +708,17 @@ impl DesktopRuntime {
             true,
         );
         if reconnect {
-            self.start(config)
+            self.start_inner(config)
         } else {
             self.manager.snapshot()
         }
     }
 
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -696,7 +739,7 @@ impl DesktopRuntime {
             .cloned()
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
         if reconnect {
-            self.stop()?;
+            self.stop_inner()?;
         }
         settings.active_profile_id = profile.id;
         let settings = service_config::save(settings)?;
@@ -713,13 +756,17 @@ impl DesktopRuntime {
             false,
         );
         if reconnect {
-            self.start(config)
+            self.start_inner(config)
         } else {
             self.manager.snapshot()
         }
     }
 
     pub fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile".to_string());
         }
@@ -773,6 +820,10 @@ impl DesktopRuntime {
     }
 
     pub fn clear_api_key(&self) -> Result<GatewayState, String> {
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile credential".to_string());
         }
@@ -846,19 +897,43 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         config: LocalApiConfig,
     ) -> Result<GatewayState, String> {
-        if self.manager.is_running()? {
-            return Err("Stop protection before changing Local API settings".to_string());
+        let _operation = self
+            .lifecycle
+            .try_lock()
+            .map_err(|_| "A configuration change is in progress")?;
+        let previous = self.manager.snapshot()?;
+        if previous.status == "verifying" {
+            return Err("Wait for the current verification to finish".to_string());
         }
         let current = self.manager.local_api()?;
         let resolved = local_api::resolve(config.clone())?;
-        if current.endpoint != resolved.endpoint {
-            let statuses = self.projector(&current.endpoint)?.scan(None)?.0;
-            if statuses.iter().any(|agent| agent.recorded) {
-                return Err(
-                    "Disconnect managed agents before changing the endpoint they use".to_string(),
-                );
+        if current.config == resolved.config && previous.endpoint_error.is_none() {
+            return Ok(previous);
+        }
+        let reconnect = self.manager.is_running()? && !previous.configuration_verification;
+        // Suspend projections before changing the URL; reconnect rebuilds them against the new endpoint.
+        self.stop_inner()?;
+        let result = self.rebind_local_api(config, current, resolved).await;
+        if reconnect && self.manager.snapshot()?.endpoint_error.is_none() {
+            if let Err(error) = self.start_inner(previous.config) {
+                return Err(match result {
+                    Ok(_) => format!(
+                        "Local API settings saved, but protection could not restart: {error}"
+                    ),
+                    Err(original) => format!("{original}. Protection could not restart: {error}"),
+                });
             }
         }
+        result?;
+        self.manager.snapshot()
+    }
+
+    async fn rebind_local_api(
+        self: &Arc<Self>,
+        config: LocalApiConfig,
+        current: ResolvedLocalApi,
+        resolved: ResolvedLocalApi,
+    ) -> Result<GatewayState, String> {
         let needs_bind =
             current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
         if !needs_bind {
@@ -892,12 +967,17 @@ impl DesktopRuntime {
                 return Err(error);
             }
         };
-        self.endpoint.start(
-            self.manager.clone(),
-            self.proxy.clone(),
-            listener,
-            resolved.config.clone(),
-        )?;
+        self.endpoint
+            .start(
+                self.manager.clone(),
+                self.proxy.clone(),
+                listener,
+                resolved.config.clone(),
+            )
+            .inspect_err(|error| {
+                self.manager
+                    .set_endpoint(resolved.config.clone(), Err(error.clone()));
+            })?;
         self.manager
             .set_endpoint(resolved.config, Ok(resolved.endpoint));
         self.manager.snapshot()
@@ -1124,8 +1204,54 @@ fn restore_secret_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::protection_active;
+    use super::*;
     use crate::contracts::GatewayState;
+
+    struct NoSidecar;
+    impl SidecarLauncher for NoSidecar {
+        fn spawn(&self, _: Vec<String>) -> Result<(tokio::sync::mpsc::Receiver<crate::gateway::SidecarEvent>, Box<dyn crate::gateway::SidecarChild>), String> {
+            Err("No sidecar in this listener test".to_string())
+        }
+    }
+
+    #[test]
+    fn occupied_listener_restores_previous_endpoint_and_serializes_mutations() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        executor.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let old_listener = proxy::bind_std("127.0.0.1:0".parse().unwrap()).unwrap();
+            let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let config = LocalApiConfig { port: old_listener.local_addr().unwrap().port(), ..LocalApiConfig::default() };
+            let original = local_api::resolve(config.clone()).unwrap();
+            let (events, _) = tokio::sync::mpsc::channel(8);
+            let proxy = ProxyState::new(events);
+            let usage = Arc::new(UsageStore::memory().unwrap());
+            let manager = Arc::new(GatewayManager::new(proxy.clone(), usage.clone(), Arc::new(NoSidecar), executor.handle().clone(), GatewayState { local_api: config.clone(), ..GatewayState::default() }));
+            manager.set_endpoint(config.clone(), Ok(original.endpoint.clone()));
+            let runtime = Arc::new(DesktopRuntime {
+                manager, proxy, usage,
+                secrets: Arc::new(KeyringStore),
+                credentials: ClientCredentials(Mutex::new(TokenFiles::new(temp.path()))),
+                legacy_credential_pending: Mutex::new(false),
+                endpoint: EndpointRuntime::new(executor.handle().clone()),
+                codex_sync: CodexCatalogSync::default(), agent_policy: Mutex::new(()),
+                lifecycle: tokio::sync::Mutex::new(()), helper_path: temp.path().join("helper"), instance: None,
+            });
+            runtime.endpoint.start(runtime.manager.clone(), runtime.proxy.clone(), old_listener, config.clone()).unwrap();
+            let gate = runtime.lifecycle.lock().await;
+            assert!(runtime.stop().unwrap_err().contains("in progress"));
+            assert!(runtime.save_local_api_config(config.clone()).await.unwrap_err().contains("in progress"));
+            drop(gate);
+            let candidate = LocalApiConfig { port: occupied.local_addr().unwrap().port(), ..config.clone() };
+            assert!(runtime.save_local_api_config(candidate).await.is_err());
+            let state = runtime.state().unwrap();
+            assert_eq!(state.local_api, config);
+            assert_eq!(state.proxy_url.as_deref(), Some(original.endpoint.as_str()));
+            assert!(state.endpoint_error.is_none());
+            assert!(std::net::TcpStream::connect(original.bind).is_ok());
+            runtime.endpoint.stop().await.unwrap();
+        });
+    }
 
     #[test]
     fn only_live_protection_allows_agent_projection() {

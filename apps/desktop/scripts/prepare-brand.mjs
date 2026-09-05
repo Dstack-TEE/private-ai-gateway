@@ -189,13 +189,31 @@ pub const APP_IDENTIFIER: &str = ${rust(brand.bundle.identifier)};
 // carries the same values. Only scalar product metadata goes here; the window
 // list stays in the tracked config, and the window title is set at run time
 // from the Rust brand module.
+const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
+if (releaseVersion && !/^\d+\.\d+\.\d+$/.test(releaseVersion)) {
+  throw new Error("DESKTOP_RELEASE_VERSION must be a stable semantic version");
+}
+const updaterKey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim();
+const updaterEndpoint = process.env.TAURI_UPDATER_ENDPOINT?.trim();
+if (Boolean(updaterKey) !== Boolean(updaterEndpoint)) {
+  throw new Error("Set both TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINT, or neither");
+}
+if (updaterEndpoint) {
+  const endpoint = new URL(updaterEndpoint);
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
+    throw new Error("The updater endpoint must use HTTPS without embedded credentials");
+  }
+}
 await writeFile(
   path.join(appRoot, "src-tauri/tauri.brand.conf.json"),
   `${JSON.stringify(
     {
       productName: brand.productName,
       identifier: brand.bundle.identifier,
+      ...(releaseVersion ? { version: releaseVersion } : {}),
+      ...(updaterKey ? { plugins: { updater: { pubkey: updaterKey, endpoints: [updaterEndpoint] } } } : {}),
       bundle: {
+        createUpdaterArtifacts: Boolean(updaterKey),
         category: brand.bundle.category,
         shortDescription: brand.bundle.shortDescription,
         longDescription: brand.bundle.longDescription,

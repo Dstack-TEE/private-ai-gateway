@@ -19,6 +19,9 @@ operating system's native dialogs directly.
 New/Edit Profile opens a separate child dialog over the Profiles chooser.
 Dialog webviews receive a non-secret state snapshot at initialization and are
 presented after their first content commit, not as empty windows while IPC loads.
+The initial state is consumed synchronously for the first render. Windows that
+still need a credential or historical record stay hidden without a transient
+Loading/Cancel page; errors remain actionable and dismissible.
 
 macOS tray image updates preserve the template flag atomically; replacing only
 the image resets that flag in the underlying tray implementation and can make
@@ -39,6 +42,44 @@ Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
 Settings exposes **Open at Login** (the operating system's login item, also
 available in the tray) and **Connect on launch** (off by default). Automatic
 connection verifies the selected profile before applying any agent config.
+
+Local API settings can be saved during protection. The runtime serializes this
+with start/stop and profile changes, restores connected agent configurations,
+rebinds and persists the listener, then re-verifies protection. Reconnection
+projects the new endpoint into connected, installed agents. A bind or save
+failure restores the old listener before attempting to resume protection.
+Requests in flight can be interrupted. Saving identical settings is a no-op.
+
+## Application Updates
+
+The main window checks once at launch; Settings also supports manual checks.
+Installation requires confirmation. The official Tauri updater downloads and
+verifies the signed archive before the runtime restores agent configurations
+and allows installation. Failed download/signature verification leaves running
+protection untouched; failed installation leaves protection stopped.
+
+Update signatures are separate from Apple Developer ID signing/notarization.
+Release administrators must provision these repository settings:
+
+- Secret `TAURI_SIGNING_PRIVATE_KEY`, generated with the Tauri signer and retained securely.
+- Optional secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, if the key is encrypted.
+- Variable `TAURI_UPDATER_PUBLIC_KEY`, containing the matching public key.
+
+Dispatch `desktop-native.yml` with `production_macos=true` and a stable
+`release_version` greater than the installed version. CI requires the signing
+settings, creates all three platform signatures and `latest.json`, then creates
+a **draft** GitHub release. Review its assets and publish it to activate updates.
+The release-published workflow advances the dedicated `desktop-updates` feed
+only to a newer desktop version, independently of this repository's client SDK
+releases. The configured feed is the public repository's
+`releases/download/desktop-updates/latest.json`; private Actions artifacts are not a feed.
+Do not replace an existing version's assets or rotate the signing key casually.
+
+Ordinary test builds without `release_version` keep updates disabled explicitly.
+The first updater-enabled app must be installed manually. For local distribution
+builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and the
+Tauri signing secret; the brand overlay enables updater artifacts only when
+both public settings are present. No signing secrets are embedded in the app.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.

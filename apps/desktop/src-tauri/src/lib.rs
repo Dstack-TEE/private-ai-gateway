@@ -2,6 +2,7 @@ mod menu;
 mod native_dialog;
 mod runtime_adapter;
 mod tray;
+mod updates;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -285,8 +286,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(updates::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
+            updates::check_update,
+            updates::install_update,
             get_launch_preferences,
             set_launch_preference,
             start_gateway,
@@ -315,6 +319,10 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
+            if app.config().plugins.0.contains_key("updater") {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
             launcher_for_setup.initialize(app.handle().clone())?;
             let helper_path = std::env::current_exe()
                 .map_err(|error| format!("Cannot locate the app executable: {error}"))?

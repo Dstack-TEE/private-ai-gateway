@@ -17,7 +17,8 @@
     "dist": "npm run prepare:brand && npm run build:sidecars && tauri build --config src-tauri/tauri.brand.conf.json",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
-    "test:renderer": "playwright test"
+    "test:renderer": "playwright test",
+    "test:release": "node --test scripts/create-update-manifest.test.mjs"
   },
   "engines": {
     "node": ">=22.19.0"
