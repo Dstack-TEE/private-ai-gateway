@@ -19,7 +19,11 @@ operating system's native dialogs directly.
 ### Renderer Components
 
 The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
-Tailwind CSS 4, Lucide, and the official Neutral light/dark palette.
+Tailwind CSS 4, Lucide, and the official Neutral light/dark palette with a single
+dstack-derived primary: `#3f5c16` on light surfaces and `#afce70` on dark surfaces.
+Only primary and its foreground differ; component styles and other palette
+tokens remain unchanged. Primary text contrast is 7.63:1 light / 9.31:1 dark;
+the standard 80% opacity hover retains at least 4.5:1 on the window background.
 `src/renderer/theme.css` defines the palette and aliases for existing page layouts.
 `styles.css` owns product layout, not a second button/switch implementation.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain

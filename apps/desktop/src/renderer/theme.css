@@ -34,7 +34,7 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-/* Official shadcn Neutral palette. Luma component styles live in components/ui. */
+/* Neutral palette with one dstack-derived primary, adapted for each appearance. */
 :root {
   color-scheme: light;
   font-family: var(--font-sans);
@@ -42,8 +42,8 @@
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  --primary: #3f5c16;
+  --primary-foreground: #ffffff;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -108,8 +108,8 @@
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
+    --primary: #afce70;
+    --primary-foreground: #19220e;
     --secondary: oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.269 0 0);
