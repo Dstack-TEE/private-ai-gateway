@@ -153,9 +153,9 @@ fn rotate_client_key(
     app: AppHandle,
     runtime: State<'_, Arc<DesktopRuntime>>,
 ) -> Result<String, String> {
-    let key = runtime.rotate_client_key()?;
-    let _ = app.emit("gateway://client-key-changed", ());
-    Ok(key)
+    let result = runtime.rotate_client_key();
+    let _ = app.emit("gateway://client-key-changed", result.is_ok());
+    result
 }
 
 #[tauri::command]

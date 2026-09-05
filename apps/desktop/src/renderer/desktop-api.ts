@@ -65,7 +65,7 @@ export const desktopApi: DesktopApi = {
   onUsageProofRequest(listener: (recordId: string) => void): () => void {
     return subscribe("gateway://usage-proof", listener);
   },
-  onClientKeyChange(listener: () => void): () => void {
+  onClientKeyChange(listener: (available: boolean) => void): () => void {
     return subscribe("gateway://client-key-changed", listener);
   },
   openNativeDialog(kind, options): Promise<void> {

@@ -15,6 +15,8 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 3. Client-key rotation retains revoke-first behavior on storage failure. Other
    agent credentials remain unchanged, but the confirmation now correctly warns
    that in-flight requests can be interrupted by a credential mutation.
+   Failed rotations broadcast availability (never the secret) and clear cached
+   keys in open windows so revoked credentials cannot be copied as current.
 4. Configuration-only verification disables the protection switch instead of
    offering cancellation that the backend lifecycle transaction cannot perform.
 5. A native editor for a deleted/nonexistent profile displays a dismissible error

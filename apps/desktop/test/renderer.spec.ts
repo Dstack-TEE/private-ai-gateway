@@ -232,6 +232,22 @@ test("rotating the client key requires an explicit native confirmation", async (
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Rotate key" }).click();
   await expect(key).not.toHaveValue(original);
+  for (const surface of ["&native-dialog=local-api", ""]) {
+    await page.goto(`/?mock=key-rotation-error${surface}`);
+    if (!surface) await page.getByRole("button", { name: "Local API settings", exact: true }).click();
+    await expect(key).not.toHaveValue("");
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Rotate key" }).click();
+    await expect(key).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Copy client key" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Rotate key" })).toBeEnabled();
+    await expect(page.getByRole("alert")).toContainText("Could not store the replacement client key");
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Rotate key" }).click();
+    await expect(key).toHaveValue(/^sk-pag-/);
+    await expect(page.getByRole("button", { name: "Copy client key" })).toBeEnabled();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  }
 });
 
 test("protection flow, page headers, and focus follow the native desktop contract", async ({ page }) => {

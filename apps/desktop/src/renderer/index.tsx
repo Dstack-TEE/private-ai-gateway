@@ -404,7 +404,14 @@ function NativeLocalApiWindow(): React.JSX.Element {
   }, []);
   useEffect(() => {
     loadClientKey();
-    const unsubscribe = desktopApi.onClientKeyChange(loadClientKey);
+    const unsubscribe = desktopApi.onClientKeyChange((available) => {
+      if (available) loadClientKey();
+      else {
+        setClientKey("");
+        setClientKeyVisible(false);
+        setActionError("Client key unavailable. Rotate the key again to restore access.");
+      }
+    });
     return () => {
       unsubscribe();
       if (copyTimer.current !== undefined) window.clearTimeout(copyTimer.current);
@@ -434,6 +441,8 @@ function NativeLocalApiWindow(): React.JSX.Element {
       setClientKey(await desktopApi.rotateClientKey());
       setClientKeyVisible(true);
     } catch (error) {
+      setClientKey("");
+      setClientKeyVisible(false);
       setActionError(errorMessage(error));
     }
   };
@@ -497,6 +506,7 @@ function App(): React.JSX.Element {
   const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
   const [savingPreference, setSavingPreference] = useState(false);
   const [actionError, setActionError] = useState<string>();
+  const [clientKeyError, setClientKeyError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
@@ -590,15 +600,33 @@ function App(): React.JSX.Element {
       },
       (error: unknown) => active && setActionError(errorMessage(error)),
     );
-    void desktopApi.getClientKey().then(
-      (key) => active && setClientKey(key),
-      (error: unknown) => active && setActionError(errorMessage(error)),
-    );
-    const unsubscribeClientKey = desktopApi.onClientKeyChange(() => {
+    let keyRead = 0;
+    const loadClientKey = () => {
+      const read = ++keyRead;
       void desktopApi.getClientKey().then(
-        (key) => active && setClientKey(key),
-        (error: unknown) => active && setActionError(errorMessage(error)),
+        (key) => {
+          if (!active || read !== keyRead) return;
+          setClientKey(key);
+          setClientKeyError(undefined);
+        },
+        (error: unknown) => {
+          if (!active || read !== keyRead) return;
+          setClientKey("");
+          setClientKeyError(errorMessage(error));
+        },
       );
+    };
+    loadClientKey();
+    const unsubscribeClientKey = desktopApi.onClientKeyChange((available) => {
+      if (!active) return;
+      if (!available) {
+        keyRead += 1;
+        setClientKey("");
+        setClientKeyVisible(false);
+        setClientKeyError("Client key unavailable. Rotate the key again to restore access.");
+        return;
+      }
+      loadClientKey();
     });
     return () => {
       active = false;
@@ -755,6 +783,8 @@ function App(): React.JSX.Element {
       setClientKeyVisible(true);
       setNotice({ id: Date.now(), text: "Client key replaced" });
     } catch (error) {
+      setClientKey("");
+      setClientKeyVisible(false);
       setActionError(errorMessage(error));
     }
   };
@@ -831,7 +861,7 @@ function App(): React.JSX.Element {
   };
 
   const anyRecorded = agents.some((agent) => agent.recorded);
-  const problem = actionError ?? state.error;
+  const problem = actionError ?? clientKeyError ?? state.error;
   const locked = Boolean(agentBusy) || applying;
   const focusPageHeading = (next: View) => {
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());

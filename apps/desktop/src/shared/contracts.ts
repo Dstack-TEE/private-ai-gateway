@@ -271,7 +271,7 @@ export interface DesktopApi {
   onAgentsChange(listener: () => void): () => void;
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
-  onClientKeyChange(listener: () => void): () => void;
+  onClientKeyChange(listener: (available: boolean) => void): () => void;
   openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   closeNativeDialog(): Promise<void>;

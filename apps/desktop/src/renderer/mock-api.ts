@@ -310,6 +310,7 @@ export function mockApi(name: string | null): DesktopApi {
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
+  const keyListeners = new Set<(available: boolean) => void>();
   // Each start gets its own verification run; stop or a newer start makes a
   // pending timer a no-op instead of completing the wrong run.
   let verifyRun = 0;
@@ -325,6 +326,7 @@ export function mockApi(name: string | null): DesktopApi {
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
+  let keyRotations = 0;
   return {
     getAppVersion: async () => "0.1.0",
     getUpdateChannel: async () => updateChannel,
@@ -345,7 +347,14 @@ export function mockApi(name: string | null): DesktopApi {
     copyText: async () => undefined,
     getClientKey: async () => clientKey,
     rotateClientKey: async () => {
+      keyRotations += 1;
+      if (name === "key-rotation-error" && keyRotations === 1) {
+        clientKey = "";
+        keyListeners.forEach((listener) => listener(false));
+        throw new Error("Could not store the replacement client key");
+      }
       clientKey = `sk-pag-${Array.from({ length: 4 }, () => Math.random().toString(16).slice(2).padEnd(16, "0")).join("").slice(0, 64)}`;
+      keyListeners.forEach((listener) => listener(true));
       return clientKey;
     },
     saveLocalApiConfig: async (config) => {
@@ -367,7 +376,7 @@ export function mockApi(name: string | null): DesktopApi {
     onNavigate: () => () => undefined,
     onProfileRepairRequest: () => () => undefined,
     onUsageProofRequest: () => () => undefined,
-    onClientKeyChange: () => () => undefined,
+    onClientKeyChange: (listener) => { keyListeners.add(listener); return () => { keyListeners.delete(listener); }; },
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => undefined,
