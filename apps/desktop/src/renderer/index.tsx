@@ -42,7 +42,7 @@ import redpillServiceIcon from "./assets/service-redpill.png";
 import { desktopApi as liveApi, initialGatewayState } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
-import { UpdateSettings, useUpdates } from "./updates";
+import { UpdateControl, useUpdates } from "./updates";
 import type {
   AgentStatus,
   ConfidentialProfile,
@@ -531,6 +531,7 @@ function App(): React.JSX.Element {
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [agentBusy, setAgentBusy] = useState<string>();
+  const [refreshingAgents, setRefreshingAgents] = useState(false);
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string }>();
@@ -664,6 +665,15 @@ function App(): React.JSX.Element {
       if (scan === agentScan.current) setActionError(errorMessage(error));
     }
   }, []);
+
+  const refreshAgents = async () => {
+    setRefreshingAgents(true);
+    try {
+      await loadAgents();
+    } finally {
+      setRefreshingAgents(false);
+    }
+  };
 
   // Agent status depends on the verified catalog, so reload with the session.
   const catalogRevision = state.catalog?.revision;
@@ -891,6 +901,8 @@ function App(): React.JSX.Element {
           endpointDown={endpointDown}
           developmentMode={allowDevelopmentOs}
           onToggle={toggleGateway}
+          refreshingAgents={refreshingAgents}
+          onRefreshAgents={() => void refreshAgents()}
         />
         <div className="content" id={`page-${view}`} key={view}>
         {view === "overview" && (
@@ -1186,6 +1198,8 @@ function PageHeader({
   endpointDown,
   developmentMode,
   onToggle,
+  refreshingAgents,
+  onRefreshAgents,
 }: {
   view: View;
   state: GatewayState;
@@ -1194,17 +1208,20 @@ function PageHeader({
   endpointDown: boolean;
   developmentMode: boolean;
   onToggle(): void;
+  refreshingAgents: boolean;
+  onRefreshAgents(): void;
 }): React.JSX.Element {
   const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
-  const protectionStarting = busy && !state.configurationVerification;
+  const verdict = presentation(state);
   return (
     <header className="page-header" data-tauri-drag-region>
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
         <div className="page-protection">
+          {view === "agents" && <button className="icon-button" aria-label="Detect installed agents" title="Detect installed agents" disabled={refreshingAgents} onClick={onRefreshAgents}><RefreshCw size={15} className={refreshingAgents ? "is-spinning" : undefined} aria-hidden="true" /></button>}
           {developmentMode && <span className="state state-warning">Dev mode</span>}
-          <span className={`page-switch-copy state-${isProtected(state) ? "success" : "neutral"}`}>
-            <strong><ProtectionStatus state={state} label={isProtected(state) ? "Protected" : protectionStarting ? "Verifying…" : "Not protected"} /></strong>
+          <span className={`page-switch-copy state-${verdict.tone}`}>
+            <strong><ProtectionStatus state={state} label={verdict.title} /></strong>
           </span>
           <ProtectedControl
             state={state}
@@ -1426,7 +1443,6 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Setup provider"}</span>
           {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
         </button>
-        <div className="status-endpoint" title={activeProfile?.remoteUrl}>{activeProfile?.remoteUrl ?? "No endpoint configured"}</div>
         <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
           {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
@@ -2225,11 +2241,10 @@ function SettingsView({
 
       {anyRecorded && <section className="group" aria-labelledby="agents-settings-title"><h2 className="group-title" id="agents-settings-title">Agents</h2><div className="inset"><div className="row"><span className="row-main"><span className="row-title">Restore all agent configs</span><span className="row-note">Turns every agent off and puts every config back, even while protection is off.</span></span><button className="button" disabled={locked} onClick={onRestoreAll}>Restore all</button></div></div></section>}
 
-      <UpdateSettings updates={updates} />
       <section className="group" aria-labelledby="about-title">
         <h2 className="group-title" id="about-title">About</h2>
         <div className="inset">
-          <div className="row"><span className="row-main">{brand.productName}</span><span className="row-side">{updates.info?.currentVersion ?? ""}</span></div>
+          <div className="row"><span className="row-main">{brand.productName}</span><UpdateControl updates={updates} /></div>
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <button key={target} className="row list-row" onClick={() => onAboutLink(target)}><span className="row-main">{label}</span><ExternalLink size={15} className="row-chevron" aria-hidden="true" /></button>)}
         </div>
       </section>

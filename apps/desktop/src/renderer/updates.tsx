@@ -46,7 +46,7 @@ export function useUpdates(api: DesktopApi) {
   return { info, busy, error, progress, check, install };
 }
 
-export function UpdateSettings({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
+export function UpdateControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
   const { info, busy, error, progress } = updates;
   const label = busy === "checking" ? "Checking for updates…"
     : busy === "installing" ? progress?.total ? `Downloading ${Math.min(100, Math.floor(progress.downloaded / progress.total * 100))}%` : "Preparing update…"
@@ -54,14 +54,13 @@ export function UpdateSettings({ updates }: { updates: ReturnType<typeof useUpda
     : info?.enabled === false ? "Updates are not configured for this build"
     : info?.version ? `Version ${info.version} is available`
     : info ? "You're up to date" : "Update status unavailable";
-  return <section className="group" aria-labelledby="updates-title">
-    <h2 className="group-title" id="updates-title">Updates</h2>
-    <div className="inset"><div className="row">
-      <span className="row-main"><span className="row-title" role="status">{label}</span><span className="row-note">{info ? `Installed version ${info.currentVersion}` : ""}</span></span>
-      {info?.version
-        ? <button className="button" disabled={Boolean(busy)} onClick={() => void updates.install()}><Download size={14} />Install and Restart…</button>
-        : <button className="button" disabled={Boolean(busy) || info?.enabled === false} onClick={() => void updates.check()}><RefreshCw size={14} />Check for Updates</button>}
-    </div></div>
-    {error && <p className="banner" role="alert">{error}</p>}
-  </section>;
+  const action = info?.version ? "Install and Restart…" : "Check for Updates";
+  return <span className="update-control">
+    <button className="button" aria-label={action} title={action} disabled={Boolean(busy) || info?.enabled === false} onClick={() => void (info?.version ? updates.install() : updates.check())}>
+      {info?.currentVersion ? `v${info.currentVersion}` : "Updates"}
+      {info?.version ? <Download size={14} aria-hidden="true" /> : <RefreshCw size={14} className={busy ? "is-spinning" : undefined} aria-hidden="true" />}
+    </button>
+    <small role="status">{label}</small>
+    {error && <small role="alert">{error}</small>}
+  </span>;
 }
