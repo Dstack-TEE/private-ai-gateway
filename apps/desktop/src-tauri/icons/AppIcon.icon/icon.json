@@ -1,0 +1,41 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.16078,0.17255,0.18824,1.00000"
+  },
+  "groups": [
+    {
+      "blur-material": 0,
+      "layers": [
+        {
+          "hidden": false,
+          "image-name": "mark.png",
+          "name": "Brand mark",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "individual",
+      "name": "Dstack mark",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

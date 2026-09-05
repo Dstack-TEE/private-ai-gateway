@@ -1,0 +1,38 @@
+name: Publish desktop update feed
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-update-feed
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: inputs.tag != '' || startsWith(github.event.release.tag_name, 'desktop-v')
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install release tooling
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Validate and advance the selected channel
+        run: node apps/desktop/scripts/publish-update-feed.mjs

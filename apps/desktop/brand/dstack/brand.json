@@ -1,0 +1,56 @@
+{
+  "id": "dstack",
+  "productName": "Private AI Gateway",
+  "shortName": "Gateway",
+  "organizationName": "Dstack TEE",
+  "tagline": "The open framework for confidential AI",
+  "homepageUrl": "https://dstack.org",
+  "supportUrl": "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md",
+  "service": {
+    "name": "RedPill",
+    "defaultUrl": "https://tee.redpill.ai",
+    "keyLabel": "RedPill API key"
+  },
+  "bundle": {
+    "identifier": "org.dstack.private-ai-gateway",
+    "category": "DeveloperTool",
+    "shortDescription": "Verified local AI gateway",
+    "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
+  },
+  "theme": {
+    "accentLight": "#2c6e49",
+    "accentDark": "#7fd3a2",
+    "brandColor": "#C6EB3D",
+    "iconBackground": "#292c30",
+    "iconForeground": "#f2f3f5",
+    "markLight": "#303236",
+    "markDark": "#e8e9eb"
+  },
+  "assets": {
+    "appIconMark": "icon-primary.svg",
+    "appIconWhiteAsCutout": true,
+    "trayTemplate": "icon-dark.svg",
+    "wordmarkLight": "horizontal-primary.svg",
+    "wordmarkDark": "horizontal-dark.svg"
+  },
+  "source": {
+    "repository": "https://github.com/Dstack-TEE/dstack",
+    "commit": "982621521b435cc10b535cb8646efecb8c3fc255",
+    "license": "Apache-2.0 (LICENSE alongside; logo kit is the project's own mark, used to identify the Dstack TEE brand)",
+    "files": {
+      "icon-primary.svg": "docs/assets/dstack-logo-kit/03 icon/01 Dstack icon_primary.svg",
+      "icon-primary.png": "docs/assets/dstack-logo-kit/03 icon/01 Dstack icon_primary.png",
+      "icon-dark.svg": "docs/assets/dstack-logo-kit/03 icon/02 Dstack icon_dark.svg",
+      "horizontal-primary.svg": "docs/assets/dstack-logo-kit/01 Horizontal/01 Dstack _Horizontal_primary.svg",
+      "horizontal-dark.svg": "docs/assets/dstack-logo-kit/01 Horizontal/02 Dstack _Horizontal_dark.svg",
+      "LICENSE": "LICENSE"
+    },
+    "sha256": {
+      "icon-primary.svg": "3f96478abff27c34b52ea3561810e6b55eda9e4adab48c1e8a253d27eabae614",
+      "icon-primary.png": "e1beb93b06d6dc9157cbd147178c4e4bf1744e62b59cee8cf713402ddfba74ee",
+      "icon-dark.svg": "351eb08ea6d2572641a5d1ec27585e54ad2e266412cd5412685292fb3f1afe7c",
+      "horizontal-primary.svg": "0effe62ef8518cb0a9cfa684c442a3eacc5c65d166143161f4718e68e771dc57",
+      "horizontal-dark.svg": "04c0a9260093cdefde580cdc97de1449a2a5556b1d8e027323266b1543f0bd6a"
+    }
+  }
+}

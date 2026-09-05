@@ -1,0 +1,39 @@
+[package]
+name = "private-ai-gateway-desktop-gateway"
+version = "0.1.0"
+description = "Desktop-owned local agent gateway: loopback proxy, catalog, secrets, and agent projections"
+license = "Apache-2.0"
+edition = "2021"
+# Highest MSRV in the locked graph (aes 0.9.3: 1.89; keyring 4.2: 1.88); CI checks this crate on 1.89.
+rust-version = "1.89"
+
+[lib]
+name = "desktop_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "private-ai-gateway-helper"
+path = "src/bin/private-ai-gateway-helper.rs"
+
+[dependencies]
+axum = "0.7"
+async-stream = "0.3"
+bytes = "1"
+fd-lock = "4"
+futures-util = "0.3"
+keyring = "4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+shlex = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-util = "0.7"
+toml_edit = "0.25"
+yaml-edit = { version = "0.3.1", default-features = false }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process"] }

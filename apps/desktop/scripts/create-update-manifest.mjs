@@ -1,0 +1,34 @@
+import { readdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { releaseChannel } from "./release-channel.mjs";
+
+const [directory, version, repository, channel = "beta"] = process.argv.slice(2);
+const release = releaseChannel(version, channel);
+if (!directory || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "")) {
+  throw new Error("Usage: create-update-manifest.mjs <artifact directory> <version> <owner/repo> [beta|stable]");
+}
+const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
+const tag = release.tag;
+const platforms = {};
+const suffixes = { "darwin-aarch64": ".app.tar.gz", "windows-x86_64": ".exe", "linux-x86_64": ".AppImage" };
+for (const [target, suffix] of Object.entries(suffixes)) {
+  const candidates = files.filter((file) => file.endsWith(suffix));
+  if (candidates.length !== 1) throw new Error(`Expected one ${target} update package; found ${candidates.length}`);
+  const file = candidates[0];
+  const signature = (await readFile(`${file}.sig`, "utf8")).trim();
+  if (!signature) throw new Error(`Missing signature for ${target}`);
+  // GitHub rewrites asset names containing spaces. Stage portable names first
+  // so upload and manifest URLs refer to exactly the same signed bytes.
+  const filename = `${target}-${version}${suffix}`;
+  const staged = path.join(path.dirname(file), filename);
+  if (staged !== file) {
+    await rename(file, staged);
+    await rename(`${file}.sig`, `${staged}.sig`);
+  }
+  platforms[target] = {
+    signature,
+    url: `https://github.com/${repository}/releases/download/${tag}/${filename}`,
+  };
+}
+await writeFile(path.join(directory, "latest.json"), `${JSON.stringify({ version, channel, pub_date: new Date().toISOString(), platforms }, null, 2)}\n`);

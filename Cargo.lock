@@ -3411,6 +3411,7 @@ dependencies = [
  "sha3 0.10.9",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",

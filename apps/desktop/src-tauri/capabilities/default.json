@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main",
+    "profiles",
+    "profile-editor",
+    "privacy",
+    "local-api",
+    "usage-proof"
+  ],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "dialog:allow-confirm",
+    "dialog:allow-save"
+  ]
+}

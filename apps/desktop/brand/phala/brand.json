@@ -1,0 +1,39 @@
+{
+  "id": "phala",
+  "productName": "Phala Private AI Gateway",
+  "shortName": "Phala",
+  "organizationName": "Phala",
+  "tagline": "Confidential AI cloud",
+  "homepageUrl": "https://phala.com",
+  "supportUrl": "https://docs.phala.com",
+  "service": {
+    "name": "RedPill",
+    "defaultUrl": "https://tee.redpill.ai",
+    "keyLabel": "RedPill API key"
+  },
+  "bundle": {
+    "identifier": "com.phala.private-ai-gateway",
+    "category": "DeveloperTool",
+    "shortDescription": "Verified local AI gateway",
+    "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
+  },
+  "theme": {
+    "accentLight": "#2a6d4f",
+    "accentDark": "#8adcb4",
+    "brandColor": "#c4f142",
+    "iconBackground": "#0f1a14"
+  },
+  "assets": {
+    "appIconMark": "icon.svg",
+    "trayTemplate": "icon-mono.svg",
+    "wordmarkLight": "wordmark.svg",
+    "wordmarkDark": "wordmark-dark.svg"
+  },
+  "source": {
+    "repository": "",
+    "commit": "",
+    "license": "Add the official Phala assets and their source before building this brand; prepare-brand fails until every file in `assets` exists.",
+    "files": {},
+    "sha256": {}
+  }
+}
