@@ -77,7 +77,10 @@ const IDENTITY: GatewayState["identity"] = {
 
 const CHECKS: GatewayState["checks"] = [
   { id: "id-1", section: "9.1(1)", title: "hardware quote", status: "pass", detail: "TDX quote verified" },
+  { id: "id-2", section: "9.1(2)", title: "session binding", status: "pass", detail: "Nonce and keyset match the attestation" },
+  { id: "id-3", section: "9.1(3)", title: "key validity", status: "pass", detail: "Keyset is current" },
   { id: "id-4", section: "9.1(4)", title: "source provenance", status: "pass", detail: "compose matches" },
+  { id: "id-5", section: "9.1(5)", title: "key custody", status: "skip", detail: "Custody policy is not implemented by the CLI" },
   { id: "id-6", section: "9.1(6)", title: "channel binding", status: "pass", detail: "TLS key matches the attested keyset" },
   { id: "policy-os", section: "1.3", title: "production os", status: "skip", detail: "not required" },
 ];

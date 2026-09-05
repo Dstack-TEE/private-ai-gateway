@@ -119,6 +119,15 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     const dialog = page.getByRole("dialog", { name: entry.name });
     await expect(dialog).toContainText(entry.text);
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
+    if (entry.name === "Usage proof" || entry.name === "Privacy verification") {
+      const done = dialog.getByRole("button", { name: "Done", exact: true });
+      await expect(done).toBeInViewport();
+      const content = dialog.locator(entry.name === "Usage proof" ? ".proof-card" : ".privacy-content");
+      expect(await content.evaluate((node) => node.scrollTop)).toBe(0);
+      await content.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+      await expect(done).toBeInViewport();
+      await expect(dialog.getByRole("list")).toHaveCount(entry.name === "Usage proof" ? 1 : 0);
+    }
   }
 });
 
@@ -317,6 +326,8 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   const blockedProof = page.getByRole("dialog", { name: "Usage proof" });
   await expect(blockedProof.getByText("Blocked locally", { exact: true })).toBeVisible();
   await expect(blockedProof.getByText(/did not leave this Mac/)).toBeVisible();
+  await expect(blockedProof.getByText("Request kept on this Mac", { exact: true })).toBeVisible();
+  await expect(blockedProof.locator(".proof-flow, .privacy-verdict.state-success")).toHaveCount(0);
   await blockedProof.getByRole("button", { name: "Done" }).click();
   await expect(history).not.toContainText("/v1/models");
 
@@ -396,6 +407,17 @@ test("overview presents local availability and the active profile without sessio
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
   await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();
   await expect(status.getByText(/answers this session/i)).toHaveCount(0);
+
+  await page.getByRole("switch", { name: "Stop protection" }).click();
+  await expect(status.getByRole("button", { name: "Verified", exact: true })).toHaveCount(0);
+  await status.getByRole("button", { name: "Not connected", exact: true }).click();
+  const stoppedPrivacy = page.getByRole("dialog", { name: "Privacy verification" });
+  await expect(stoppedPrivacy).toContainText("No verified live connection");
+  await expect(stoppedPrivacy).toContainText("Key custody is not independently established");
+  await expect(stoppedPrivacy.locator(".privacy-verdict.state-success")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(stoppedPrivacy).not.toBeVisible();
+  await expect(status.getByRole("button", { name: "Not connected", exact: true })).toBeFocused();
 
   await page.goto("/?mock=no-key");
   await expect(page.getByLabel("Protection status").getByText("Credential unavailable", { exact: true })).toBeVisible();

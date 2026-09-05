@@ -482,6 +482,15 @@ input:disabled, select:disabled { opacity: 0.55; }
 .proof-mark.state-warning { background: var(--warning-bg); }
 .proof-mark.state-danger { background: var(--danger-bg); }
 .proof-card { padding: 13px; }
+.proof-flow { list-style: none; margin: 16px 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.proof-flow li { min-width: 0; border-top: 2px solid var(--separator); padding-top: 10px; display: grid; align-content: start; gap: 6px; }
+.proof-flow strong { font-size: 12px; }
+.proof-flow span, .proof-boundary { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.proof-boundary { margin: 12px 0 18px; }
+.privacy-verdict.state-neutral { background: transparent; border-color: var(--separator); }
+.native-dialog-host .usage-evidence-sheet .proof-card { min-height: 0; flex: 1 1 auto; overflow: auto; }
+.privacy-verdict.state-danger { background: transparent; border-color: currentColor; }
+@media (max-width: 520px) { .proof-flow { grid-template-columns: 1fr; } }
 .privacy-content { margin-top: 14px; }
 .privacy-verdict { padding: 13px; display: flex; align-items: flex-start; gap: 10px; background: var(--warning-bg); border: 1px solid color-mix(in srgb, var(--warning) 18%, transparent); border-radius: var(--radius); }
 .privacy-verdict.state-success { background: var(--success-bg); border-color: color-mix(in srgb, var(--success) 18%, transparent); }

@@ -139,6 +139,12 @@ function isProtected(state: GatewayState): boolean {
   return state.status === "verified" && !state.configurationVerification && state.apiKeySaved && !state.endpointError;
 }
 
+function hasLiveVerification(state: GatewayState): boolean {
+  // The runtime admits a session only after sidecar verification and catalog loading.
+  return isProtected(state)
+    && state.identity?.trustLevel === "hardware_verified";
+}
+
 function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
   const active = isProtected(state);
   const since = active ? state.protectedSince : undefined;
@@ -235,7 +241,7 @@ function useModalDialog(
   const [opener] = useState<HTMLElement | null>(() =>
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = ref.current;
     node?.showModal();
     if (node) {
@@ -272,11 +278,17 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string>();
   const [closed, setClosed] = useState(false);
+  const presented = useRef(false);
 
   useEffect(() => {
-    if (!loaded || (!contentReady && !loadError) || previewMode) return;
-    // Present after the initial React commit, so the native sheet never opens empty.
-    void desktopApi.nativeDialogReady().catch((error: unknown) => setLoadError(errorMessage(error)));
+    if (!loaded || (!contentReady && !loadError) || previewMode || presented.current) return;
+    let active = true;
+    // The dialog's layout effect has opened it before this presentation effect runs.
+    presented.current = true;
+    void desktopApi.nativeDialogReady().catch((error: unknown) => {
+      if (active) setLoadError(errorMessage(error));
+    });
+    return () => { active = false; };
   }, [loaded, contentReady, loadError]);
 
   useEffect(() => {
@@ -385,10 +397,9 @@ function NativePrivacyWindow(): React.JSX.Element {
   const native = useNativeGatewayWindow("Privacy Verification");
   if (native.closed) return <main className="native-dialog-host" aria-label="Privacy verification closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} onClose={native.close} />;
-  const verified = !native.state.configurationVerification && native.state.status === "verified";
   return (
     <main className="native-dialog-host">
-      <PrivacyVerificationSheet state={native.state} verified={verified} onClose={native.close} />
+      <PrivacyVerificationSheet state={native.state} onClose={native.close} />
     </main>
   );
 }
@@ -956,7 +967,7 @@ function App(): React.JSX.Element {
         />
       )}
       {settingsTarget === "privacy" && (
-        <PrivacyVerificationSheet state={state} verified={verified} onClose={() => setSettingsTarget(undefined)} />
+        <PrivacyVerificationSheet state={state} onClose={() => setSettingsTarget(undefined)} />
       )}
       {settingsTarget === "local-api" && (
         <LocalApiSheet
@@ -1343,10 +1354,17 @@ function StatusSurface({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
   const localApiAvailable = protectedNow && Boolean(state.proxyUrl) && !endpointDown;
+  const liveVerified = hasLiveVerification(state);
   const profileStatus = !activeProfile
     ? "Not configured"
-    : activeProfileAvailable
+    : liveVerified
       ? "Verified"
+      : state.status === "verifying"
+        ? "Verifying…"
+      : state.status === "blocked" || state.status === "error"
+        ? "Not verified"
+      : activeProfileAvailable
+        ? "Not connected"
       : profileHasCredential(activeProfile)
         ? "Verification required"
         : "Credential unavailable";
@@ -1399,8 +1417,8 @@ function StatusSurface({
           {activeProfile && <ChevronDown size={14} aria-hidden="true" />}
         </button>
         <div className="status-endpoint" title={activeProfile?.remoteUrl}>{activeProfile?.remoteUrl ?? "No endpoint configured"}</div>
-        <button className={`status-fact status-profile-state ${activeProfileAvailable ? "state-success" : "state-warning"}`} aria-haspopup="dialog" onClick={activeProfileAvailable ? onPrivacy : onSettings}>
-          {activeProfileAvailable ? <Check size={13} aria-hidden="true" /> : <TriangleAlert size={13} aria-hidden="true" />}
+        <button className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`} aria-haspopup="dialog" onClick={activeProfile ? onPrivacy : onSettings}>
+          {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
           <span>{profileStatus}</span>
         </button>
       </div>
@@ -2025,6 +2043,8 @@ function chartLabelIndexes(length: number): Set<number> {
 
 function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {
   const outcome = outcomeOf(activity);
+  const receiptVerified = activity.leftDevice && activity.verified === true && Boolean(activity.receiptId);
+  const ReceiptIcon = !activity.leftDevice ? Ban : receiptVerified ? ShieldCheck : ShieldX;
   const failed = activity.leftDevice && (activity.status < 200 || activity.status >= 300);
   const deliveryUnconfirmed = activity.leftDevice
     && !activity.receiptId
@@ -2037,6 +2057,17 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
     activity.rewritten ? "The service rewrote the request before inference; the receipt records it." : undefined,
   ].filter(Boolean);
   return (
+    <>
+    <div className={`privacy-verdict state-${receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral"}`}>
+      <ReceiptIcon size={22} aria-hidden="true" />
+      <span><strong>{!activity.leftDevice ? "Request kept on this Mac" : receiptVerified ? "Request and response verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</strong><small>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Do not treat this response as verified. See the recorded reason below." : receiptVerified ? "Verification recorded when this request completed." : "No successful verification result is recorded for this request."}</small></span>
+    </div>
+    {activity.leftDevice && <ol className="proof-flow" aria-label="What a receipt verifies">
+      <li><strong>1. Your request</strong><span>The verifier compares the sent bytes with the receipt's request digest.</span></li>
+      <li><strong>2. Service signature</strong><span>The signature must belong to the attested service keyset.</span></li>
+      <li><strong>3. Returned answer</strong><span>The received bytes must match the receipt's response digest.</span></li>
+    </ol>}
+    {activity.leftDevice && <p className="proof-boundary">Verifies the exchanged data, not answer accuracy. Only the verification result and receipt ID are saved here, not the full signed receipt.</p>}
     <dl className="evidence">
       <dt>Request</dt>
       <dd>
@@ -2074,7 +2105,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
               ? "Signed receipt verified: request and response bytes match what this app sent and received."
               : activity.verified === false
                 ? "Signed receipt did not verify; treat this response as unprotected."
-                : "Signed receipt is present and has not finished verification."}
+                : "A receipt identifier was recorded, but no verification result is available."}
             <code>{activity.receiptId}</code>
           </dd>
         </>
@@ -2086,6 +2117,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
+    </>
   );
 }
 
@@ -2099,8 +2131,8 @@ function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; 
         <span className={`proof-mark state-${outcome.tone}`} aria-hidden="true"><ProofIcon size={18} /></span>
         <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, false)}</small></span>
       </div>
-      <div className="sheet-card proof-card"><Evidence activity={activity} /></div>
-      <div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div>
+      <div className="proof-card"><Evidence activity={activity} /></div>
+      <div className="sheet-actions"><button className="button" onClick={onClose}>Done</button></div>
     </dialog>
   );
 }
@@ -2509,9 +2541,9 @@ function ProfileEditorSheet({
   );
 }
 
-function PrivacyVerificationSheet({ state, verified, onClose }: { state: GatewayState; verified: boolean; onClose(): void }): React.JSX.Element {
+function PrivacyVerificationSheet({ state, onClose }: { state: GatewayState; onClose(): void }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
-  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2>Privacy verification</h2></div><PrivacyVerification state={state} verified={verified} /><div className="sheet-actions"><button className="button primary" onClick={onClose}>Done</button></div></dialog>;
+  return <dialog ref={dialog} className="sheet privacy-sheet" aria-label="Privacy verification"><div className="sheet-heading"><h2>Privacy verification</h2></div><PrivacyVerification state={state} /><div className="sheet-actions"><button className="button" onClick={onClose}>Done</button></div></dialog>;
 }
 
 function LocalApiSheet({
@@ -2640,7 +2672,8 @@ function LocalApiSheet({
 }
 
 /** The three facts behind "Protected", each shown only when it holds now. */
-function PrivacyVerification({ state, verified }: { state: GatewayState; verified: boolean }): React.JSX.Element {
+function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Element {
+  const verified = hasLiveVerification(state);
   const identity = state.identity;
   const checks = state.checks;
   const passed = (id: string) => checks.some((check) => check.id === id && check.status === "pass");
@@ -2653,28 +2686,28 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
       title: "Attested encrypted channel",
       detail: verified
         ? "Requests leave this Mac only over an SPKI-pinned TLS channel whose key is bound to the verified service identity."
-        : "Not established while protection is off.",
+        : "No verified connection is active.",
     },
     {
       ok: verified && identity?.trustLevel === "hardware_verified",
-      title: "Confidential service verified",
-      detail: identity
+      title: "Service identity",
+      detail: verified && identity
         ? `Hardware attestation checked: ${hardwareName(identity.teeType)}, ${trustName(identity.trustLevel).toLowerCase()}, built from source ${identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "(unknown)"}.`
-        : "Not established while protection is off.",
+        : "No current identity verification. Any retained evidence below is historical.",
     },
     {
-      ok: provenProofs > 0 && failedProofs === 0,
-      title: "Response proof verified",
+      ok: proofs.length > 0 && provenProofs === proofs.length,
+      title: "Individual response receipts",
       detail: proofs.length
-        ? `${provenProofs} of ${proofs.length} recent answers came with a signed receipt this app verified${failedProofs ? `; ${failedProofs} failed` : ""}.`
-        : "Each answer from the service carries a signed receipt this app checks; none checked yet.",
+        ? `${provenProofs} verified · ${failedProofs} failed · ${proofs.length - provenProofs - failedProofs} unknown. Recent receipts only; open Usage for individual requests.`
+        : "No recent receipts. Each request is verified separately in Usage.",
     },
   ];
   return (
     <section className="privacy-content" aria-label="Privacy">
-      <div className={`privacy-verdict state-${verified ? "success" : "warning"}`}>
+      <div className={`privacy-verdict state-${verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral"}`}>
         {verified ? <ShieldCheck size={22} aria-hidden="true" /> : <ShieldX size={22} aria-hidden="true" />}
-        <span><strong>{verified ? "Protection is cryptographically verified" : "Protection is not established"}</strong><small>{verified ? "Identity, channel binding, and response receipts are checked locally by this app." : "Start protection to verify the service before sending requests."}</small></span>
+        <span><strong>{verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}</strong><small>{verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}</small></span>
       </div>
       <div className="sheet-card privacy-facts">
         {facts.map((fact) => (
@@ -2689,16 +2722,17 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
           </div>
         ))}
       </div>
+      <p className="proof-boundary">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
         <section className="privacy-section" aria-labelledby="verified-identity-title">
-          <div className="privacy-section-heading"><h3 id="verified-identity-title">Verified identity</h3><span>{checkCount(checks)} checks passed</span></div>
+          <div className="privacy-section-heading"><h3 id="verified-identity-title">{verified ? "Current service identity" : "Last reported identity"}</h3><span>{checkCount(checks)} checks passed</span></div>
           <div className="sheet-card identity-grid">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
-            <Detail label="Source commit" value={identity.source.repoCommit ? shorten(identity.source.repoCommit, 11) : "Unknown"} mono />
+            <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono />
             <Detail label="Valid until" value={formatTimestamp(identity.keysetNotAfter * 1_000, true)} />
             <Detail label="Serving mode" value={identity.serving} />
-            <Detail label="Channel" value={passed("id-6") ? "SPKI-pinned attested TLS" : "Not established"} />
+            <Detail label="Channel" value={verified && passed("id-6") ? "SPKI-pinned attested TLS" : "Not established"} />
             <Detail label="Keyset digest" value={identity.keysetDigest} mono wide />
             {identity.tlsSpki && <Detail label="TLS public key" value={identity.tlsSpki} mono wide />}
             {identity.source.repoUrl && <Detail label="Source repository" value={identity.source.repoUrl} mono wide />}
