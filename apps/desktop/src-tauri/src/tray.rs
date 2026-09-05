@@ -417,12 +417,15 @@ fn protection_title(state: &GatewayState) -> String {
 }
 
 pub fn show_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let _ = window.show();
-    activate_app();
-    let _ = window.set_focus();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        let _ = window.show();
+        activate_app();
+        let _ = window.set_focus();
+    });
 }
 
 /// Checkmark state and the plain-language status row for the gateway state.
