@@ -1158,7 +1158,7 @@ function PreviewTrayMenu({
   onQuit(): void;
 }): React.JSX.Element {
   const verdict = presentation(state);
-  const verifying = state.status === "verifying";
+  const verifying = state.status === "verifying" && !state.configurationVerification;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const action = verifying ? "Cancel verification" : running ? "Stop protection"
     : profileIsAvailable(activeProfile, state) ? "Start protection" : "Set Up Profile…";

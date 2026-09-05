@@ -306,6 +306,10 @@ fn toggle_or_open_settings(app: &AppHandle) {
     let Ok(state) = runtime.state() else {
         return;
     };
+    if !protection_action_enabled(&state) {
+        sync(app, &state);
+        return;
+    }
     if !should_stop(&state) && !active_profile_ready(&state) {
         sync(app, &state);
         show_window(app);
@@ -356,9 +360,7 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
     if let Some(menu) = app.try_state::<TrayMenu>() {
         let _ = menu.status.set_text(&status_line);
         let _ = menu.toggle.set_text(protection_action(state));
-        let _ = menu
-            .toggle
-            .set_enabled(should_stop(state) || state.endpoint_error.is_none());
+        let _ = menu.toggle.set_enabled(protection_action_enabled(state));
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
         if let Err(error) = sync_profiles(app, state, &menu) {
             eprintln!("Cannot refresh tray profiles: {error}");
@@ -437,12 +439,17 @@ pub fn show_window(app: &AppHandle) {
 }
 
 fn should_stop(state: &GatewayState) -> bool {
-    matches!(state.status.as_str(), "verifying" | "blocked")
-        || (state.status == "verified" && !state.configuration_verification)
+    !state.configuration_verification
+        && matches!(state.status.as_str(), "verifying" | "verified" | "blocked")
+}
+
+fn protection_action_enabled(state: &GatewayState) -> bool {
+    !(state.status == "verifying" && state.configuration_verification)
+        && (should_stop(state) || state.endpoint_error.is_none())
 }
 
 fn protection_action(state: &GatewayState) -> &'static str {
-    if state.status == "verifying" {
+    if state.status == "verifying" && !state.configuration_verification {
         "Cancel verification"
     } else if should_stop(state) {
         "Stop protection"
@@ -497,7 +504,7 @@ fn activate_app() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_state, protection_action, should_stop, tray_icon};
+    use super::{menu_state, protection_action, protection_action_enabled, should_stop, tray_icon};
     use desktop_runtime::contracts::{
         ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
     };
@@ -590,6 +597,12 @@ mod tests {
         assert!(!should_stop(&ready));
         assert_eq!(protection_action(&ready), "Start protection");
         assert_eq!(menu_state(&ready), "Not protected - configuration verified");
+        assert!(protection_action_enabled(&ready));
+
+        ready.status = "verifying".into();
+        assert!(!should_stop(&ready));
+        assert!(!protection_action_enabled(&ready));
+        assert_eq!(protection_action(&ready), "Start protection");
 
         ready.status = "stopped".into();
         ready.configuration_verification = false;

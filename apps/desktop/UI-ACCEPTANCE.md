@@ -66,7 +66,9 @@ Additional follow-up corrections:
 - The native tray separates status (including elapsed time) from explicit Start,
   Stop and Cancel actions. It no longer presents a checkmark labelled Protected.
 - Configuration-only verification does not make the tray choose Stop. Its next
-  action starts protection. Native operations use the existing runtime controller
+  action starts protection. While the profile save transaction is verifying,
+  the action is disabled; only protection startup verification can be cancelled.
+  Native operations use the existing runtime controller
   on a worker thread rather than performing lifecycle work on the menu thread.
 - The browser tray no longer draws a switch that the native menu does not have;
   it remains a limited preview, not an acceptance test for native submenus.
