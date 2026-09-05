@@ -7,29 +7,38 @@ controls, Toolbars, Windows, read on 2026-09-02) and the structure of
 Tailscale, Cloudflare WARP, Mullvad, 1Password, Little Snitch, and Raycast on
 macOS.
 
-## HIG checklist
+## Review Status
+
+The renderer uses React, shared local components and CSS, not a full UI component
+library. Lucide supplies interface icons; LobeHub supplies locally bundled agent
+marks. HTML controls inside WKWebView are not AppKit controls. This document is
+an implementation review, not a claim of complete HIG compliance.
+
+The current renderer regressions run in Chromium with mock runtime state.
+AppKit sheets, VoiceOver, native menu actions and WKWebView rendering still need
+macOS acceptance testing. Browser geometry checks cannot replace that work.
+
+## Implementation Checklist
 
 | Topic | HIG guidance | This app |
 | --- | --- | --- |
-| Type size | macOS default 13 pt, minimum 10 pt; prefer regular to bold weights, avoid thin | Body 13 px, controls 14 px, captions 12 px (nothing below), group titles 13 px semibold, verdict 26 px semibold (large title). Regular/medium/semibold only. |
+| Type size | Keep work-focused views compact and readable | CSS body 14 px, captions 13 px, page titles 17 px; smaller metadata is used in proof details. |
 | Type family | System font | `-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`; monospace only for identifiers. |
-| Layout | Group related items with negative space, backgrounds, or separators; put the most important item first | 8 pt spacing grid (4/8/12/16/20/24); 20 px content margins; inset groups with hairline separators; the verdict and switch come first. |
-| Buttons | One or two prominent buttons per view; a hit region people can hit easily; title-case verb labels; a press state | One prominent button per view (Start/Connect); regular controls 32 px, primary 40 px; hover, pressed, disabled, focus states; ellipsis on labels that open a sheet (Restore All…). |
+| Layout | Group related items; put the most important item first | 24 px content margins, grouped rows with separators and 28 px Overview module gaps; the verdict and switch come first. |
+| Buttons | Clear actions and restrained emphasis | One prominent save action where needed; neutral Done/Cancel; connect/disconnect switches without a confirmation sheet. |
 | Sidebar | Use a source-list style sidebar for stable top-level destinations | Overview, Agents, Usage, and Settings use one persistent sidebar with native system typography, restrained selection styling, and arrow-key navigation. |
 | Page headers | Keep titles and primary state controls predictable | Every destination has a separate title row; non-Overview pages place the labeled Protected switch at the trailing edge. |
 | Settings | Minimize settings; Command-Comma opens them; respect system settings | General groups startup, Profiles, and Local API; Advanced stays collapsed; About links to documentation and source. Appearance, contrast, and motion follow the system. |
 | Windows | Preserve standard window behavior and controls | A decorated Tauri `NSWindow` uses the supported overlay title-bar style. The real AppKit traffic lights are positioned over the sidebar; production HTML never draws replacement controls. |
-| Sheets | Cancel left of the default action; default button is prominent | Native `<dialog>` styled as a sheet, Cancel then the default action, one prominent button. |
-| Accessibility | Don't rely on colour alone; keyboard access; legible at larger sizes | Every state pairs colour with an icon or dot; the segmented control is a tab list with arrow keys, the activity list is a native `<ul>` of plain buttons whose selection is `aria-pressed`, and sheets, disclosures, and fields are native elements, so Tab order and VoiceOver names come from the platform; `prefers-contrast: more` strengthens separators; `prefers-reduced-motion` stops the spinner and toggle animation; every view is checked at 360 px and 200 % zoom with no horizontal overflow. |
+| Sheets | Clear dismissal and one default action | Complex dialogs use native child-window hosts with HTML content; browser previews use HTML dialog elements. OS confirmation and file pickers use Tauri plugins. |
+| Accessibility | Don't rely on colour alone; keyboard access | State labels remain explicit even without an icon. Focus, contrast and reduced-motion behavior have renderer coverage; VoiceOver remains a native acceptance item. |
 
 ## What was taken from reference products
 
 - **Tailscale / WARP / Mullvad**: one verdict, one switch, a short list of
   what is connected; everything else behind Settings.
-- **1Password mini / Raycast**: a single compact window whose navigation is a
-  segmented control, not a sidebar; secondary content as grouped lists.
-- **Little Snitch**: activity as a selectable list with an inspector, so the
-  proof for one request is read on demand instead of every row expanding.
+- Compact utility windows: persistent sidebar navigation and grouped settings.
+- Activity details open on demand rather than expanding every request row.
 
 ## Native boundaries
 
@@ -67,10 +76,12 @@ tray template.
 The default brand is `dstack`, using the official Dstack logo kit from
 `Dstack-TEE/dstack` at commit `982621521b435cc10b535cb8646efecb8c3fc255`
 (`docs/assets/dstack-logo-kit/`, Apache-2.0 alongside; SHA-256 recorded in
-`brand.json`). The app icon is the original green mark on one dark-green
-rounded square in every appearance; the tray uses a smaller monochrome
+`brand.json`). The app icon uses a soft-white mark on one graphite
+rounded square in every appearance. Window marks use charcoal in light mode
+and soft white in dark mode, without a tile or shadow. The original source
+assets are unchanged; tinting preserves the transparent eye. The tray uses a smaller monochrome
 template mark at full alpha while protected and reduced alpha otherwise, without
-a badge. The brand accent is
+a badge. Green is reserved for protection and verification state; the action accent is
 applied only to the primary action, selection, and links; the rest of the
 palette is system-neutral. `redpill` and `phala` are configuration
 templates; the script refuses to build them until their official assets are

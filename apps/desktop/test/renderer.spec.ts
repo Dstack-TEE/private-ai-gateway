@@ -146,7 +146,11 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       }
       await content.evaluate((node) => { node.scrollTop = node.scrollHeight; });
       await expect(done).toBeInViewport();
-      await expect(dialog.getByRole("list")).toHaveCount(entry.name === "Usage proof" ? 1 : 0);
+      await expect(dialog.getByRole("list")).toHaveCount(0);
+      if (entry.name === "Usage proof") {
+        await expect(dialog.locator("svg")).toHaveCount(1);
+        await expect(dialog.getByRole("region", { name: "Proof scope" })).toBeVisible();
+      }
     }
   }
 });
@@ -627,6 +631,14 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
 
   await profiles.getByRole("button", { name: "New Profile" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "Custom", exact: true }).click();
+  await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
+  await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
+  await editor.getByLabel("Profile name").fill("Research account");
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await expect(editor.getByLabel("Profile name")).toHaveValue("Research account");
+  await editor.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeVisible();
   await editor.getByLabel("Profile name").fill("Private Lab");

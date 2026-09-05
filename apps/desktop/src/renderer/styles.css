@@ -157,7 +157,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .sidebar-brand { min-height: 38px; margin: 0 6px 10px; display: flex; align-items: center; gap: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; }
 .sidebar-brand > * { pointer-events: none; }
 .sidebar-brand span { overflow: hidden; text-overflow: ellipsis; }
-.brand-logo { display: inline-grid; place-items: center; flex: 0 0 auto; filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.18)); }
+.brand-logo { display: inline-grid; place-items: center; flex: 0 0 auto; }
 .brand-logo > img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brand-mark { width: 30px; height: 30px; }
 .sidebar nav { display: grid; gap: 2px; }
@@ -486,20 +486,14 @@ input:disabled, select:disabled { opacity: 0.55; }
 .split-actions > span { flex: 1 1 auto; }
 .usage-proof-heading > span:last-child { min-width: 0; display: grid; gap: 2px; }
 .usage-proof-heading small { color: var(--text-tertiary); font-size: 12px; }
-.proof-mark { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; background: var(--neutral-bg); border-radius: 50%; }
-.proof-mark.state-success { background: var(--success-bg); }
-.proof-mark.state-warning { background: var(--warning-bg); }
-.proof-mark.state-danger { background: var(--danger-bg); }
 .proof-card { padding: 13px; }
-.proof-flow { list-style: none; margin: 20px 0; padding: 0; display: grid; gap: 12px; }
-.proof-flow li { min-width: 0; border-left: 2px solid var(--separator); padding-left: 12px; display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; gap: 6px 12px; }
-.proof-flow strong { font-size: 12px; }
-.proof-flow span, .proof-boundary { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
-.proof-boundary { margin: 12px 0 18px; }
+.proof-explanation { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--separator); }
+.proof-explanation h3 { font-size: 12px; font-weight: 600; }
+.proof-explanation p { margin-top: 6px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.proof-boundary { margin: 12px 0 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .privacy-verdict.state-neutral { background: transparent; border-color: var(--separator); }
 .native-dialog-host .usage-evidence-sheet .proof-card { min-height: 0; flex: 1 1 auto; overflow: auto; }
 .privacy-verdict.state-danger { background: transparent; border-color: currentColor; }
-@media (max-width: 520px) { .proof-flow li { grid-template-columns: 1fr; } }
 .privacy-content { margin-top: 14px; }
 .privacy-verdict { padding: 14px; display: flex; align-items: flex-start; gap: 12px; background: var(--neutral-bg); border: 1px solid var(--separator); border-radius: var(--radius); }
 .privacy-verdict.state-success { background: var(--success-bg); border-color: color-mix(in srgb, var(--success) 18%, transparent); }

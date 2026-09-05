@@ -60,6 +60,9 @@ const required = {
   "assets.wordmarkDark": "file",
 };
 const optional = {
+  "theme.iconForeground": "color",
+  "theme.markLight": "color",
+  "theme.markDark": "color",
   "assets.appIconLightMark": "file",
   "assets.appIconDarkMark": "file",
   "assets.appIconWhiteAsCutout": "boolean",
@@ -112,9 +115,10 @@ const appIconMark = await asset("appIconMark");
 const uiMarkLight = brand.assets.appIconLightMark ? await asset("appIconLightMark") : appIconMark;
 const uiMarkDark = brand.assets.appIconDarkMark ? await asset("appIconDarkMark") : appIconMark;
 const appIconWhiteAsCutout = brand.assets.appIconWhiteAsCutout ?? false;
-const appIconSvg = composeAppIcon(appIconMark, brand.theme.iconBackground, appIconWhiteAsCutout);
+const iconMark = standaloneMark(appIconMark, appIconWhiteAsCutout, brand.theme.iconForeground);
+const appIconSvg = composeAppIcon(iconMark, brand.theme.iconBackground, false);
 const appIconComposerManifest = composeIconComposerManifest(brand.theme.iconBackground);
-const appIconLayer = render(composeIconLayer(appIconMark, appIconWhiteAsCutout), 1024);
+const appIconLayer = render(composeIconLayer(iconMark, false), 1024);
 const traySource = await asset("trayTemplate");
 const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout);
 
@@ -127,8 +131,8 @@ await mkdir(generatedDir, { recursive: true });
 await writeFile(path.join(generatedDir, "app-icon.svg"), appIconSvg);
 await rm(path.join(generatedDir, "app-icon-light.svg"), { force: true });
 await rm(path.join(generatedDir, "app-icon-dark.svg"), { force: true });
-await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout));
-await writeFile(path.join(generatedDir, "brand-mark-dark.svg"), standaloneMark(uiMarkDark, appIconWhiteAsCutout));
+await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout, brand.theme.markLight));
+await writeFile(path.join(generatedDir, "brand-mark-dark.svg"), standaloneMark(uiMarkDark, appIconWhiteAsCutout, brand.theme.markDark));
 await writeFile(path.join(generatedDir, "tray-mark.svg"), trayTemplateSvg);
 await copyFile(path.join(brandDir, brand.assets.wordmarkLight), path.join(generatedDir, "wordmark-light.svg"));
 await copyFile(path.join(brandDir, brand.assets.wordmarkDark), path.join(generatedDir, "wordmark-dark.svg"));
@@ -231,7 +235,7 @@ await writeFile(
 
 // --- icons ------------------------------------------------------------------
 // The macOS 26 Icon Composer package and every fallback use the same dark
-// green tile with the original brand-green mark. `prepare-macos-icon.mjs`
+// tile and foreground from the brand configuration. `prepare-macos-icon.mjs`
 // compiles it before bundling; older macOS releases use the matching ICNS and
 // other desktop platforms use the generated PNG/ICO set.
 const composerDir = path.join(appRoot, "src-tauri/icons/AppIcon.icon");
@@ -321,9 +325,14 @@ function composeIconLayer(mark, whiteAsCutout) {
 </svg>`;
 }
 
-function standaloneMark(mark, whiteAsCutout) {
+function standaloneMark(mark, whiteAsCutout, color) {
   const { width, height } = svgSize(mark);
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout)}</svg>`;
+  const content = markContent(mark, whiteAsCutout);
+  // Tint the alpha silhouette after cutting out the eye, preserving source assets.
+  const painted = color
+    ? `<defs><filter id="brand-tint" color-interpolation-filters="sRGB"><feFlood flood-color="${color}"/><feComposite in2="SourceGraphic" operator="in"/></filter></defs><g filter="url(#brand-tint)">${content}</g>`
+    : content;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${painted}</svg>`;
 }
 
 function composeIconComposerManifest(background) {

@@ -2087,14 +2087,8 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
     <>
     <div className={`privacy-verdict state-${receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral"}`}>
       <ReceiptIcon size={22} aria-hidden="true" />
-      <span><strong>{!activity.leftDevice ? "Request kept on this Mac" : receiptVerified ? "Request and response verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</strong><small>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Do not treat this response as verified. See the recorded reason below." : receiptVerified ? "Verification recorded when this request completed." : "No successful verification result is recorded for this request."}</small></span>
+      <span><strong>{!activity.leftDevice ? "Request kept on this Mac" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</strong><small>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Do not treat this response as verified. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}</small></span>
     </div>
-    {activity.leftDevice && <ol className="proof-flow" aria-label="What a receipt verifies">
-      <li><strong>1. Your request</strong><span>The verifier compares the sent bytes with the receipt's request digest.</span></li>
-      <li><strong>2. Service signature</strong><span>The signature must belong to the attested service keyset.</span></li>
-      <li><strong>3. Returned answer</strong><span>The received bytes must match the receipt's response digest.</span></li>
-    </ol>}
-    {activity.leftDevice && <p className="proof-boundary">Verifies the exchanged data, not answer accuracy. Only the verification result and receipt ID are saved here, not the full signed receipt.</p>}
     <dl className="evidence">
       <dt>Request</dt>
       <dd>
@@ -2103,7 +2097,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       {activity.model && <><dt>Model</dt><dd><code>{activity.model}</code></dd></>}
       <dt>Outcome</dt>
       <dd>
-        <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
+        <StateLabel tone={outcome.tone} text={outcome.label} />
         {failed && <span className="dim"> HTTP {activity.status}</span>}
         {activity.detail && <span className="dim"> · {activity.detail}</span>}
       </dd>
@@ -2126,15 +2120,8 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       </dd>
       {activity.receiptId && (
         <>
-          <dt>Proof</dt>
-          <dd>
-            {activity.verified === true
-              ? "Signed receipt verified: request and response bytes match what this app sent and received."
-              : activity.verified === false
-                ? "Signed receipt did not verify; treat this response as unprotected."
-                : "A receipt identifier was recorded, but no verification result is available."}
-            <code>{activity.receiptId}</code>
-          </dd>
+          <dt>Receipt ID</dt>
+          <dd><code>{activity.receiptId}</code></dd>
         </>
       )}
       {notes.length > 0 && (
@@ -2144,18 +2131,20 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
+    {activity.leftDevice && <section className="proof-explanation" aria-label="Proof scope">
+      <h3>What the proof checks</h3>
+      <p>The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.</p>
+      <p>Only the verification result and receipt ID are saved here, not the full signed receipt.</p>
+    </section>}
     </>
   );
 }
 
 function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
   const dialog = useModalDialog(onClose);
-  const outcome = outcomeOf(activity);
-  const ProofIcon = outcome.icon;
   return (
     <dialog ref={dialog} className="sheet usage-evidence-sheet" aria-label="Usage proof">
       <div className="sheet-heading usage-proof-heading">
-        <span className={`proof-mark state-${outcome.tone}`} aria-hidden="true"><ProofIcon size={18} /></span>
         <span><h2>Usage proof</h2><small>{formatTimestamp(activity.at * 1_000, true)}</small></span>
       </div>
       <div className="proof-card"><Evidence activity={activity} /></div>
@@ -2433,6 +2422,7 @@ function ProfileEditorSheet({
 }): React.JSX.Element {
   const frozen = busy;
   const isNew = !profile;
+  const [nameEdited, setNameEdited] = useState(Boolean(profile));
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
     id: profile?.id ?? `profile-${crypto.randomUUID()}`,
     name: profile?.name ?? "Phala",
@@ -2459,7 +2449,7 @@ function ProfileEditorSheet({
     setDraft((current) => ({
       ...current,
       provider: next,
-      name: isNew && preset ? preset.name : current.name,
+      name: nameEdited ? current.name : preset?.name ?? "Custom",
       remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
     }));
     setApiKeyDraft("");
@@ -2539,7 +2529,7 @@ function ProfileEditorSheet({
           </button>
         </div>
         <div className="sheet-card">
-          <label className="sheet-field"><span>Profile name</span><input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></label>
+          <label className="sheet-field"><span>Profile name</span><input value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></label>
           <label className="sheet-field"><span>Service endpoint</span><input value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></label>
           <div className="sheet-field key-field">
             <span>
