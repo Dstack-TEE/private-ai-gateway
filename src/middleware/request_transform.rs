@@ -10,7 +10,14 @@
 //! Strongly typed endpoint structs may replace `serde_json::Value` later; for now
 //! the dynamic shape keeps behavior aligned with the source.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::aggregator::service::{
+    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+};
 
 use super::reasoning::validate_effective;
 use super::types::{
@@ -32,6 +39,17 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
+    /// The path this endpoint is served on downstream and forwarded to upstream.
+    pub fn path(self) -> &'static str {
+        match self {
+            Endpoint::ChatComplete => CHAT_COMPLETIONS_PATH,
+            Endpoint::Complete => COMPLETIONS_PATH,
+            Endpoint::Embed => EMBEDDINGS_PATH,
+            Endpoint::Messages => MESSAGES_PATH,
+            Endpoint::CreateModelResponse => RESPONSES_PATH,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Endpoint::ChatComplete => "chatComplete",
@@ -44,7 +62,7 @@ impl Endpoint {
 }
 
 /// Error from shaping a request.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TransformError {
     Unsupported {
         format: ProviderFormat,
@@ -190,7 +208,14 @@ pub fn transform_to_provider_request(
 }
 
 /// Shape one body per candidate, preserving failover order. Each entry is the
-/// candidate's `route_id` and its transformed body.
+/// candidate's `route_id`, its transformed body, and the endpoint the body is
+/// shaped for — the upstream path it must be forwarded to.
+///
+/// `responses` is the client's original Responses request. A candidate listing
+/// `/v1/responses` in `supportedEndpoints` gets that original shaped for the
+/// Responses endpoint; every other candidate gets `params`, the chat body.
+/// When that conversion failed, `bridge_error` skips only bridge candidates so
+/// a native route can still serve the original request.
 ///
 /// A candidate that cannot shape THIS request is skipped (logged at debug,
 /// never surfaced to the client), and the remaining candidates keep the
@@ -199,27 +224,62 @@ pub fn transform_to_provider_request(
 /// candidate fails does the first error surface — that is a request nothing
 /// could serve, and the 400 it produces is the same one the all-or-nothing
 /// version produced.
+#[derive(Clone, Copy)]
+pub struct ResponsesCandidateInput<'a> {
+    pub original: &'a Value,
+    pub bridge_error: Option<&'a TransformError>,
+}
+
 pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
     candidates: &[RouteCandidate],
     requested_reasoning: Option<&ReasoningConfig>,
-) -> Result<Vec<(String, Value)>, TransformError> {
-    let mut shaped: Vec<(String, Value)> = Vec::new();
+    responses: Option<ResponsesCandidateInput<'_>>,
+) -> Result<Vec<(String, Value, Endpoint)>, TransformError> {
+    let mut shaped: Vec<(String, Value, Endpoint)> = Vec::new();
     let mut first_error: Option<TransformError> = None;
     for candidate in candidates {
-        let body = candidate_params(params, endpoint, candidate, requested_reasoning).and_then(
-            |candidate_params| {
+        let (upstream_endpoint, body) = match responses {
+            Some(responses) if candidate.supports_endpoint(RESPONSES_PATH) => (
+                Endpoint::CreateModelResponse,
                 transform_to_provider_request(
                     candidate.format,
-                    &candidate_params,
-                    endpoint,
+                    responses.original,
+                    Endpoint::CreateModelResponse,
                     candidate.engine,
-                )
-            },
-        );
+                ),
+            ),
+            _ => {
+                let upstream_endpoint = responses.map_or(endpoint, |_| Endpoint::ChatComplete);
+                let body = match responses.and_then(|responses| responses.bridge_error) {
+                    Some(err) => Err(err.clone()),
+                    None => responses
+                        .map_or(Ok(()), |responses| {
+                            validate_responses_chat_compatibility(responses.original)
+                        })
+                        .and_then(|()| {
+                            candidate_params(
+                                params,
+                                upstream_endpoint,
+                                candidate,
+                                requested_reasoning,
+                            )
+                        })
+                        .and_then(|candidate_params| {
+                            transform_to_provider_request(
+                                candidate.format,
+                                &candidate_params,
+                                upstream_endpoint,
+                                candidate.engine,
+                            )
+                        }),
+                };
+                (upstream_endpoint, body)
+            }
+        };
         match body {
-            Ok(body) => shaped.push((candidate.route_id.clone(), body)),
+            Ok(body) => shaped.push((candidate.route_id.clone(), body, upstream_endpoint)),
             Err(err) => {
                 tracing::debug!(
                     route_id = %candidate.route_id,
@@ -1351,6 +1411,851 @@ fn openai_create_model_response_config() -> ProviderConfig {
     config
 }
 
+// ── Responses API → OpenAI chat.completion request ───────────────────────────
+
+/// Rewrite a Responses API request as the Chat Completions request that
+/// serves it: `instructions` and the `input` items become `messages`; the
+/// tool, output-format and reasoning controls take their chat spellings.
+/// The stateful fields the gateway cannot honour are refused, not dropped:
+/// it stores no response, so nothing could be continued or retrieved.
+pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError> {
+    validate_responses_request(params)?;
+    let input = params
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+
+    let effective_tools = effective_responses_tools(params)?;
+    let (chat_tools, tool_map, function_names) = chat_tools(&effective_tools)?;
+
+    let mut messages = Vec::new();
+    let mut input_state = ResponsesInputState::default();
+    if let Some(instructions) = input
+        .get("instructions")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        messages.push(json!({ "role": "system", "content": instructions }));
+    }
+    match input.get("input") {
+        Some(Value::String(text)) => messages.push(json!({ "role": "user", "content": text })),
+        Some(Value::Array(items)) => {
+            for item in items {
+                push_input_item(item, &mut messages, &mut input_state)?;
+            }
+            input_state.finish()?;
+        }
+        _ => {
+            return Err(TransformError::invalid_request(
+                "input must be a string or an array of items",
+            ))
+        }
+    }
+
+    let mut chat = Map::new();
+    chat.insert("messages".into(), Value::Array(messages));
+    for (key, chat_key) in [
+        ("model", "model"),
+        // Gateway-local routing metadata. Provider configs omit it before the
+        // request is sent upstream, but consult must see it unchanged.
+        ("provider", "provider"),
+        // The current spelling: gpt-5-era OpenAI models refuse `max_tokens`
+        // on chat, and the self-hosted engines accept both.
+        ("max_output_tokens", "max_completion_tokens"),
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+        ("stream", "stream"),
+        ("parallel_tool_calls", "parallel_tool_calls"),
+        ("user", "user"),
+        ("prompt_cache_key", "prompt_cache_key"),
+    ] {
+        if let Some(value) = input.get(key) {
+            chat.insert(chat_key.into(), value.clone());
+        }
+    }
+    if !chat_tools.is_empty() {
+        chat.insert("tools".into(), Value::Array(chat_tools));
+    }
+    if let Some(choice) = input.get("tool_choice") {
+        if let Some(choice) = chat_tool_choice(choice, &function_names, &tool_map)? {
+            chat.insert("tool_choice".into(), choice);
+        }
+    }
+    if let Some(text) = input.get("text").and_then(Value::as_object) {
+        if let Some(format) = text.get("format").and_then(Value::as_object) {
+            if let Some(response_format) = chat_response_format(format) {
+                chat.insert("response_format".into(), response_format);
+            }
+        }
+        if let Some(verbosity) = text.get("verbosity") {
+            chat.insert("verbosity".into(), verbosity.clone());
+        }
+    }
+    if let Some(effort) = input
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("effort"))
+        .filter(|effort| !effort.is_null())
+    {
+        chat.insert("reasoning_effort".into(), effort.clone());
+    }
+    Ok(Value::Object(chat))
+}
+
+/// Reject stateful controls the gateway cannot honor even when the selected
+/// upstream implements Responses directly. Response ids are gateway-owned,
+/// so forwarding continuation or storage controls would expose a contract the
+/// client cannot reliably use on the next request.
+pub fn validate_responses_request(params: &Value) -> Result<(), TransformError> {
+    let input = params
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+    if input
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Err(TransformError::invalid_request(
+            "previous_response_id is not supported: the gateway stores no responses",
+        ));
+    }
+    if input
+        .get("conversation")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(TransformError::invalid_request(
+            "conversation is not supported: the gateway stores no responses",
+        ));
+    }
+    for key in ["store", "background"] {
+        if input.get(key) == Some(&Value::Bool(true)) {
+            return Err(TransformError::invalid_request(format!(
+                "{key}: true is not supported: the gateway stores no responses"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject request controls whose behavior Chat Completions cannot preserve.
+/// This runs per candidate because a mixed failover chain may still send the
+/// original request to a route that implements Responses directly.
+fn validate_responses_chat_compatibility(params: &Value) -> Result<(), TransformError> {
+    let input = params
+        .as_object()
+        .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
+
+    if input.get("prompt").is_some_and(|value| !value.is_null()) {
+        return Err(TransformError::invalid_request(
+            "prompt templates require an upstream that supports /v1/responses",
+        ));
+    }
+    if let Some(value) = input.get("truncation").filter(|value| !value.is_null()) {
+        if value.as_str() != Some("disabled") {
+            return Err(TransformError::invalid_request(
+                "truncation must be disabled when /v1/responses is served through Chat Completions",
+            ));
+        }
+    }
+    if let Some(value) = input.get("modalities").filter(|value| !value.is_null()) {
+        let text_only = value
+            .as_array()
+            .is_some_and(|items| items.len() == 1 && items[0].as_str() == Some("text"));
+        if !text_only {
+            return Err(TransformError::invalid_request(
+                "only text output is supported when /v1/responses is served through Chat Completions",
+            ));
+        }
+    }
+    if let Some(value) = input.get("include").filter(|value| !value.is_null()) {
+        let supported = value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| item.as_str() == Some("reasoning.encrypted_content"))
+        });
+        if !supported {
+            return Err(TransformError::invalid_request(
+                "the requested include values require an upstream that supports /v1/responses",
+            ));
+        }
+    }
+    if let Some(format) = input
+        .get("text")
+        .and_then(Value::as_object)
+        .and_then(|text| text.get("format"))
+        .filter(|format| !format.is_null())
+    {
+        let supported = format.as_object().is_some_and(|format| {
+            matches!(
+                format.get("type").and_then(Value::as_str),
+                Some("text" | "json_object" | "json_schema")
+            )
+        });
+        if !supported {
+            return Err(TransformError::invalid_request(
+                "text.format is not supported by the Chat Completions bridge",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Append the chat message(s) for one Responses input item: a `message` (or
+/// the role-only shorthand), a `function_call` the model made, its
+/// `function_call_output`, or a `reasoning` item. Clear reasoning text is
+/// attached to the following assistant turn; encrypted-only reasoning cannot
+/// be replayed through Chat Completions and is omitted.
+#[derive(Default)]
+struct ResponsesInputState {
+    calls: HashMap<String, ResponsesCallKind>,
+    outputs: HashSet<String>,
+    pending_reasoning: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponsesCallKind {
+    Function,
+    Custom,
+}
+
+impl ResponsesCallKind {
+    fn output_type(self) -> &'static str {
+        match self {
+            Self::Function => "function_call_output",
+            Self::Custom => "custom_tool_call_output",
+        }
+    }
+}
+
+impl ResponsesInputState {
+    fn finish(&self) -> Result<(), TransformError> {
+        if let Some(call_id) = self
+            .calls
+            .keys()
+            .find(|call_id| !self.outputs.contains(*call_id))
+        {
+            return Err(TransformError::invalid_request(format!(
+                "tool call {call_id} is missing its output"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn push_input_item(
+    item: &Value,
+    messages: &mut Vec<Value>,
+    state: &mut ResponsesInputState,
+) -> Result<(), TransformError> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message") | None => {
+            let role = item
+                .get("role")
+                .and_then(Value::as_str)
+                .ok_or_else(|| TransformError::invalid_request("input message requires a role"))?;
+            if !matches!(role, "user" | "assistant" | "system" | "developer") {
+                return Err(TransformError::invalid_request(format!(
+                    "input message role {role} is not supported"
+                )));
+            }
+            let content = chat_message_content(role, item.get("content"))?;
+            let mut message = json!({ "role": role, "content": content });
+            if role == "assistant" {
+                if let Some(reasoning) = state.pending_reasoning.take() {
+                    message["reasoning_content"] = json!(reasoning);
+                }
+            } else {
+                state.pending_reasoning = None;
+            }
+            messages.push(message);
+        }
+        Some("function_call") => {
+            let call_id = required_string(item, "call_id", "function_call")?;
+            let name = response_call_name(item, "function_call")?;
+            let arguments = required_string(item, "arguments", "function_call")?;
+            if !matches!(
+                serde_json::from_str::<Value>(arguments),
+                Ok(Value::Object(_))
+            ) {
+                return Err(TransformError::invalid_request(format!(
+                    "function call {call_id} arguments must be a JSON object"
+                )));
+            }
+            push_chat_call(
+                call_id,
+                &name,
+                arguments,
+                ResponsesCallKind::Function,
+                messages,
+                state,
+            )?;
+        }
+        Some("custom_tool_call") => {
+            let call_id = required_string(item, "call_id", "custom_tool_call")?;
+            let name = required_string(item, "name", "custom_tool_call")?;
+            let input = item.get("input").and_then(Value::as_str).ok_or_else(|| {
+                TransformError::invalid_request("custom_tool_call requires a string input")
+            })?;
+            let arguments = json!({ "input": input }).to_string();
+            push_chat_call(
+                call_id,
+                name,
+                &arguments,
+                ResponsesCallKind::Custom,
+                messages,
+                state,
+            )?;
+        }
+        Some("function_call_output" | "custom_tool_call_output") => {
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            let call_id = required_string(item, "call_id", item_type)?;
+            let Some(call_kind) = state.calls.get(call_id).copied() else {
+                return Err(TransformError::invalid_request(format!(
+                    "tool output references unknown call {call_id}"
+                )));
+            };
+            if item_type != call_kind.output_type() {
+                return Err(TransformError::invalid_request(format!(
+                    "tool call {call_id} requires {}",
+                    call_kind.output_type()
+                )));
+            }
+            if !state.outputs.insert(call_id.to_string()) {
+                return Err(TransformError::invalid_request(format!(
+                    "duplicate tool output for call {call_id}"
+                )));
+            }
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": tool_output_text(item.get("output"))?,
+            }));
+        }
+        Some("reasoning") => {
+            let content = text_of(item.get("content"));
+            let reasoning = if content.is_empty() {
+                text_of(item.get("summary"))
+            } else {
+                content
+            };
+            if !reasoning.is_empty() {
+                state
+                    .pending_reasoning
+                    .get_or_insert_with(String::new)
+                    .push_str(&reasoning);
+            }
+        }
+        Some("additional_tools") => {}
+        Some(other) => {
+            return Err(TransformError::invalid_request(format!(
+                "input item type {other} is not supported"
+            )))
+        }
+    }
+    Ok(())
+}
+
+fn push_chat_call(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    kind: ResponsesCallKind,
+    messages: &mut Vec<Value>,
+    state: &mut ResponsesInputState,
+) -> Result<(), TransformError> {
+    if state.calls.insert(call_id.to_string(), kind).is_some() {
+        return Err(TransformError::invalid_request(format!(
+            "duplicate tool call id {call_id}"
+        )));
+    }
+    let call = json!({
+        "id": call_id,
+        "type": "function",
+        "function": { "name": name, "arguments": arguments },
+    });
+    // Consecutive calls are one assistant turn, as the model made them.
+    let calls = state
+        .pending_reasoning
+        .is_none()
+        .then(|| messages.last_mut())
+        .flatten()
+        .and_then(|message| message.get_mut("tool_calls"))
+        .and_then(Value::as_array_mut);
+    if let Some(calls) = calls {
+        calls.push(call);
+    } else {
+        let mut message = json!({ "role": "assistant", "tool_calls": [call] });
+        if let Some(reasoning) = state.pending_reasoning.take() {
+            message["reasoning_content"] = json!(reasoning);
+        }
+        messages.push(message);
+    }
+    Ok(())
+}
+
+fn required_string<'a>(
+    object: &'a Value,
+    key: &str,
+    item_type: &str,
+) -> Result<&'a str, TransformError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TransformError::invalid_request(format!("{item_type} requires a non-empty {key}"))
+        })
+}
+
+fn response_call_name(item: &Value, item_type: &str) -> Result<String, TransformError> {
+    let name = required_string(item, "name", item_type)?;
+    Ok(match item.get("namespace").and_then(Value::as_str) {
+        Some(namespace) if !namespace.is_empty() => flatten_namespace_tool_name(namespace, name),
+        _ => name.to_string(),
+    })
+}
+
+/// Chat `content` for a Responses message: a string stays one; content parts
+/// take their chat spellings. Assistant history is flattened only when every
+/// part is text, the shape every chat upstream accepts.
+fn chat_message_content(role: &str, content: Option<&Value>) -> Result<Value, TransformError> {
+    let parts = match content {
+        Some(Value::String(text)) => return Ok(json!(text)),
+        Some(Value::Array(parts)) => parts,
+        _ => {
+            return Err(TransformError::invalid_request(
+                "input message requires content",
+            ))
+        }
+    };
+    if role == "assistant" {
+        return Ok(json!(text_parts(parts, "assistant content")?));
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let converted = match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => {
+                json!({ "type": "text", "text": str_or_empty(part.get("text")) })
+            }
+            Some("input_image") => {
+                let mut image_url = Map::new();
+                match part.get("image_url").and_then(Value::as_str) {
+                    Some(url) => image_url.insert("url".into(), json!(url)),
+                    None => {
+                        return Err(TransformError::invalid_request(
+                            "input_image requires image_url: file ids are not supported",
+                        ))
+                    }
+                };
+                if let Some(detail) = part.get("detail") {
+                    image_url.insert("detail".into(), detail.clone());
+                }
+                json!({ "type": "image_url", "image_url": image_url })
+            }
+            Some("input_file") => {
+                if part.get("file_url").is_some_and(|value| !value.is_null()) {
+                    return Err(TransformError::invalid_request(
+                        "input_file file_url is not supported through Chat Completions",
+                    ));
+                }
+                if part.get("detail").is_some_and(|value| !value.is_null()) {
+                    return Err(TransformError::invalid_request(
+                        "input_file detail is not supported through Chat Completions",
+                    ));
+                }
+                let file_id = optional_non_empty_string(part, "file_id", "input_file")?;
+                let file_data = optional_non_empty_string(part, "file_data", "input_file")?;
+                if file_id.is_some() == file_data.is_some() {
+                    return Err(TransformError::invalid_request(
+                        "input_file requires exactly one of file_id or file_data",
+                    ));
+                }
+                let mut file = Map::new();
+                if let Some(file_id) = file_id {
+                    file.insert("file_id".into(), json!(file_id));
+                }
+                if let Some(file_data) = file_data {
+                    file.insert("file_data".into(), json!(file_data));
+                }
+                if let Some(filename) = optional_non_empty_string(part, "filename", "input_file")? {
+                    file.insert("filename".into(), json!(filename));
+                }
+                json!({ "type": "file", "file": file })
+            }
+            Some(other) => {
+                return Err(TransformError::invalid_request(format!(
+                    "input content type {other} is not supported"
+                )))
+            }
+            None => {
+                return Err(TransformError::invalid_request(
+                    "input content part requires a type",
+                ))
+            }
+        };
+        out.push(converted);
+    }
+    Ok(Value::Array(out))
+}
+
+fn tool_output_text(output: Option<&Value>) -> Result<String, TransformError> {
+    match output {
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::Array(parts)) => text_parts(parts, "tool output content"),
+        Some(_) => Err(TransformError::invalid_request(
+            "tool output must be a string or an array of text parts",
+        )),
+        None => Err(TransformError::invalid_request(
+            "tool output requires an output value",
+        )),
+    }
+}
+
+fn text_parts(parts: &[Value], context: &str) -> Result<String, TransformError> {
+    let mut text = String::new();
+    for part in parts {
+        let part_type = part.get("type").and_then(Value::as_str);
+        if !matches!(part_type, Some("input_text" | "output_text" | "text")) {
+            return Err(TransformError::invalid_request(format!(
+                "{context} type {} is not supported through Chat Completions",
+                part_type.unwrap_or("(none)")
+            )));
+        }
+        let part_text = part.get("text").and_then(Value::as_str).ok_or_else(|| {
+            TransformError::invalid_request(format!("{context} text part requires text"))
+        })?;
+        text.push_str(part_text);
+    }
+    Ok(text)
+}
+
+fn optional_non_empty_string<'a>(
+    object: &'a Value,
+    key: &str,
+    item_type: &str,
+) -> Result<Option<&'a str>, TransformError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(_) => Err(TransformError::invalid_request(format!(
+            "{item_type} {key} must be a non-empty string"
+        ))),
+    }
+}
+
+/// The text of a Responses `output` or content: a string as is, content parts
+/// joined, anything else serialized — a tool result is whatever the tool said.
+fn text_of(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(""),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NamespacedTool {
+    pub namespace: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResponsesToolMap {
+    custom: HashSet<String>,
+    namespaces: HashMap<String, NamespacedTool>,
+}
+
+impl ResponsesToolMap {
+    pub(super) fn from_echo(echo: &Value) -> Self {
+        let Some(tools) = echo.get("tools").and_then(Value::as_array) else {
+            return Self::default();
+        };
+        Self::from_tools(tools)
+    }
+
+    fn from_tools(tools: &[Value]) -> Self {
+        let mut map = Self::default();
+        for tool in tools {
+            match tool.get("type").and_then(Value::as_str) {
+                Some("custom") => {
+                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                        map.custom.insert(name.to_string());
+                    }
+                }
+                Some("namespace") => {
+                    let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(children) = tool.get("tools").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for child in children {
+                        if child.get("type").and_then(Value::as_str) != Some("function") {
+                            continue;
+                        }
+                        let Some(name) = child.get("name").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        map.namespaces.insert(
+                            flatten_namespace_tool_name(namespace, name),
+                            NamespacedTool {
+                                namespace: namespace.to_string(),
+                                name: name.to_string(),
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        map
+    }
+
+    pub(super) fn is_custom(&self, name: &str) -> bool {
+        self.custom.contains(name)
+    }
+
+    pub(super) fn namespace(&self, name: &str) -> Option<&NamespacedTool> {
+        self.namespaces.get(name)
+    }
+
+    fn has_namespace(&self, namespace: &str) -> bool {
+        self.namespaces
+            .values()
+            .any(|tool| tool.namespace == namespace)
+    }
+}
+
+/// Merge ordinary Responses tools with the `additional_tools` input item used
+/// by newer Codex clients. Keeping this in one helper makes request lowering
+/// and response tool-name restoration use the same declaration set.
+pub(super) fn effective_responses_tools(params: &Value) -> Result<Vec<Value>, TransformError> {
+    let mut tools = match params.get("tools") {
+        None => Vec::new(),
+        Some(Value::Array(tools)) => tools.clone(),
+        Some(_) => return Err(TransformError::invalid_request("tools must be an array")),
+    };
+    if let Some(items) = params.get("input").and_then(Value::as_array) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            let additional = item.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                TransformError::invalid_request("additional_tools requires a tools array")
+            })?;
+            tools.extend(additional.iter().cloned());
+        }
+    }
+    Ok(tools)
+}
+
+fn chat_tools(
+    tools: &[Value],
+) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
+    let tool_map = ResponsesToolMap::from_tools(tools);
+    let mut translated = Vec::new();
+    let mut function_names = HashSet::new();
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {
+                let name = required_string(tool, "name", "function tool")?;
+                push_chat_tool(tool, name, None, &mut translated, &mut function_names)?;
+            }
+            Some("custom") => {
+                let name = required_string(tool, "name", "custom tool")?;
+                if let Some(format) = tool.get("format").filter(|value| !value.is_null()) {
+                    let plain_text = format
+                        .as_object()
+                        .and_then(|format| format.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("text");
+                    if !plain_text {
+                        return Err(TransformError::invalid_request(
+                            "custom tool format cannot be preserved through Chat Completions",
+                        ));
+                    }
+                }
+                push_chat_tool(
+                    tool,
+                    name,
+                    Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "The raw input for this tool, passed through verbatim."
+                            }
+                        },
+                        "required": ["input"]
+                    })),
+                    &mut translated,
+                    &mut function_names,
+                )?;
+            }
+            Some("namespace") => {
+                let namespace = required_string(tool, "name", "namespace tool")?;
+                let children = tool.get("tools").and_then(Value::as_array).ok_or_else(|| {
+                    TransformError::invalid_request("namespace tool requires a tools array")
+                })?;
+                for child in children {
+                    let child_type = child.get("type").and_then(Value::as_str);
+                    if child_type != Some("function") {
+                        return Err(TransformError::invalid_request(format!(
+                            "namespace tool child type {} is not supported",
+                            child_type.unwrap_or("(none)")
+                        )));
+                    }
+                    let name = required_string(child, "name", "namespace function tool")?;
+                    let flat = flatten_namespace_tool_name(namespace, name);
+                    push_chat_tool(child, &flat, None, &mut translated, &mut function_names)?;
+                }
+            }
+            // Hosted tools have no equivalent on a Chat-only upstream. Codex
+            // advertises them alongside client tools even when a turn does not
+            // need them, so preserve the client-executed tools and omit these.
+            Some("tool_search" | "web_search") => {}
+            other => {
+                return Err(TransformError::invalid_request(format!(
+                    "tool type {} is not supported",
+                    other.unwrap_or("(none)")
+                )))
+            }
+        }
+    }
+    Ok((translated, tool_map, function_names))
+}
+
+fn push_chat_tool(
+    source: &Value,
+    name: &str,
+    parameters: Option<Value>,
+    translated: &mut Vec<Value>,
+    function_names: &mut HashSet<String>,
+) -> Result<(), TransformError> {
+    if !function_names.insert(name.to_string()) {
+        return Err(TransformError::invalid_request(format!(
+            "duplicate function tool name {name}"
+        )));
+    }
+    let mut function = Map::new();
+    function.insert("name".into(), json!(name));
+    for key in ["description", "parameters", "strict"] {
+        if let Some(value) = source.get(key) {
+            function.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(parameters) = parameters {
+        function.insert("parameters".into(), parameters);
+        function.remove("strict");
+    }
+    translated.push(json!({ "type": "function", "function": function }));
+    Ok(())
+}
+
+fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
+    let full = format!("{namespace}__{name}");
+    if full.len() <= CHAT_TOOL_NAME_MAX_LEN {
+        return full;
+    }
+    let digest = Sha256::digest(full.as_bytes());
+    let suffix = format!("__{}", hex::encode(&digest[..4]));
+    let prefix_len = CHAT_TOOL_NAME_MAX_LEN - suffix.len();
+    let mut end = 0;
+    for (index, character) in full.char_indices() {
+        let next = index + character.len_utf8();
+        if next > prefix_len {
+            break;
+        }
+        end = next;
+    }
+    format!("{}{}", &full[..end], suffix)
+}
+
+fn chat_tool_choice(
+    choice: &Value,
+    function_names: &HashSet<String>,
+    tool_map: &ResponsesToolMap,
+) -> Result<Option<Value>, TransformError> {
+    match choice {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
+            Ok((!function_names.is_empty()).then(|| json!(choice)))
+        }
+        Value::String(choice) if choice == "required" && function_names.is_empty() => Err(
+            TransformError::invalid_request("tool_choice required needs a function tool"),
+        ),
+        Value::String(choice) if choice == "required" => Ok(Some(json!(choice))),
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function" | "custom")
+            ) =>
+        {
+            let item_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut name = required_string(choice, "name", "tool_choice")?.to_string();
+            if item_type == "function" {
+                if let Some(namespace) = object.get("namespace").and_then(Value::as_str) {
+                    name = flatten_namespace_tool_name(namespace, &name);
+                }
+            } else if !tool_map.is_custom(&name) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown custom tool {name}"
+                )));
+            }
+            if !function_names.contains(&name) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown function {name}"
+                )));
+            }
+            Ok(Some(json!({
+                "type": "function",
+                "function": { "name": name },
+            })))
+        }
+        Value::Object(object)
+            if object.get("type").and_then(Value::as_str) == Some("namespace") =>
+        {
+            let namespace = required_string(choice, "name", "namespace tool_choice")?;
+            if !tool_map.has_namespace(namespace) {
+                return Err(TransformError::invalid_request(format!(
+                    "tool_choice references unknown namespace {namespace}"
+                )));
+            }
+            Err(TransformError::invalid_request(
+                "namespace tool_choice cannot be preserved through Chat Completions",
+            ))
+        }
+        _ => Err(TransformError::invalid_request(
+            "tool_choice must be auto, none, required, or a named function or custom tool",
+        )),
+    }
+}
+
+/// Chat `response_format` for a Responses `text.format`; `text` (the default)
+/// and anything unknown ask for nothing.
+fn chat_response_format(format: &Map<String, Value>) -> Option<Value> {
+    match format.get("type").and_then(Value::as_str)? {
+        "json_object" => Some(json!({ "type": "json_object" })),
+        "json_schema" => {
+            let mut schema = Map::new();
+            for key in ["name", "description", "schema", "strict"] {
+                if let Some(value) = format.get(key) {
+                    schema.insert(key.into(), value.clone());
+                }
+            }
+            Some(json!({ "type": "json_schema", "json_schema": schema }))
+        }
+        _ => None,
+    }
+}
+
 fn openai_to_anthropic_messages_config() -> ProviderConfig {
     vec![
         p!("model", required),
@@ -1517,6 +2422,7 @@ mod tests {
         let params = json!({ "model": "m", "input": "x" });
         let shapeable = |id: &str| RouteCandidate {
             route_id: id.into(),
+            supported_endpoints: Vec::new(),
             format: ProviderFormat::Openai,
             engine: None,
             reasoning_format: None,
@@ -1526,6 +2432,7 @@ mod tests {
         // the shapeable one still carries the request.
         let unshapeable = RouteCandidate {
             route_id: "anthropic:a".into(),
+            supported_endpoints: Vec::new(),
             format: ProviderFormat::Anthropic,
             engine: None,
             reasoning_format: None,
@@ -1536,6 +2443,7 @@ mod tests {
             Endpoint::Embed,
             &[unshapeable.clone(), shapeable("openai:b")],
             None,
+            None,
         )
         .unwrap();
         assert_eq!(bodies.len(), 1);
@@ -1543,8 +2451,89 @@ mod tests {
 
         // Only when EVERY candidate fails does the error surface — the same
         // 400 the all-or-nothing version produced.
-        let err = build_candidates(&params, Endpoint::Embed, &[unshapeable], None);
+        let err = build_candidates(&params, Endpoint::Embed, &[unshapeable], None, None);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn responses_bridge_rejects_lossy_controls_per_candidate() {
+        let original = json!({
+            "model": "m",
+            "input": "hello",
+            "prompt": { "id": "pmpt_1" }
+        });
+        let chat = responses_to_chat_params(&original).unwrap();
+        let bridge: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "chat:m",
+            "format": "openai"
+        }))
+        .unwrap();
+        let native: RouteCandidate = serde_json::from_value(json!({
+            "routeId": "responses:m",
+            "format": "openai",
+            "supportedEndpoints": ["/v1/responses"]
+        }))
+        .unwrap();
+
+        let bodies = build_candidates(
+            &chat,
+            Endpoint::ChatComplete,
+            &[bridge.clone(), native.clone()],
+            None,
+            Some(ResponsesCandidateInput {
+                original: &original,
+                bridge_error: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "responses:m");
+        assert_eq!(bodies[0].2, Endpoint::CreateModelResponse);
+        assert_eq!(bodies[0].1["prompt"]["id"], "pmpt_1");
+
+        let native_only = json!({
+            "model": "m",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_file", "file_url": "https://example.com/a.pdf" }]
+            }]
+        });
+        let bridge_error = responses_to_chat_params(&native_only).unwrap_err();
+        let bodies = build_candidates(
+            &native_only,
+            Endpoint::CreateModelResponse,
+            &[bridge, native],
+            None,
+            Some(ResponsesCandidateInput {
+                original: &native_only,
+                bridge_error: Some(&bridge_error),
+            }),
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "responses:m");
+        assert_eq!(bodies[0].1, native_only);
+
+        for incompatible in [
+            original,
+            json!({ "model": "m", "input": "hello", "truncation": "auto" }),
+            json!({ "model": "m", "input": "hello", "modalities": ["audio"] }),
+            json!({ "model": "m", "input": "hello", "include": ["file_search_call.results"] }),
+            json!({ "model": "m", "input": "hello", "text": { "format": { "type": "future_format" } } }),
+        ] {
+            assert!(validate_responses_chat_compatibility(&incompatible).is_err());
+        }
+
+        let compatible = json!({
+            "model": "m",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "modalities": ["text"],
+            "truncation": "disabled",
+            "text": { "format": { "type": "text" } }
+        });
+        assert!(validate_responses_chat_compatibility(&compatible).is_ok());
     }
 
     #[test]
@@ -1559,6 +2548,7 @@ mod tests {
         let candidates = vec![
             RouteCandidate {
                 route_id: "openai:a".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: Some(ReasoningFormat::Reasoning),
@@ -1569,6 +2559,7 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "openai:b".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: Some(Engine::Sglang),
                 reasoning_format: None,
@@ -1579,6 +2570,7 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "openai:c".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -1591,6 +2583,7 @@ mod tests {
             Endpoint::ChatComplete,
             &candidates,
             Some(&requested),
+            None,
         )
         .unwrap();
         assert_eq!(bodies.len(), 3);
@@ -1638,6 +2631,7 @@ mod tests {
             });
             let candidate = RouteCandidate {
                 route_id: "self-hosted:m".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: Some(engine),
                 reasoning_format: None,
@@ -1652,6 +2646,7 @@ mod tests {
                 Endpoint::ChatComplete,
                 &[candidate],
                 Some(&reasoning(requested)),
+                None,
             )
             .unwrap();
             let kwargs = &bodies[0].1["chat_template_kwargs"];
@@ -1691,6 +2686,7 @@ mod tests {
                 Endpoint::ChatComplete,
                 &[candidate],
                 requested.as_ref(),
+                None,
             )
             .unwrap();
             let body = &bodies[0].1;
@@ -1747,6 +2743,7 @@ mod tests {
                 Endpoint::ChatComplete,
                 &[candidate],
                 requested.as_ref(),
+                None,
             )
             .unwrap();
             let body = &bodies[0].1;
@@ -1791,6 +2788,7 @@ mod tests {
             Endpoint::ChatComplete,
             &[candidate("openai", Some("reasoning_effort"))],
             requested.as_ref(),
+            None,
         )
         .unwrap();
         assert_eq!(bodies[0].1["reasoning_effort"], "high");
@@ -1822,6 +2820,7 @@ mod tests {
                 Endpoint::ChatComplete,
                 &[candidate(format, dialect)],
                 requested.as_ref(),
+                None,
             )
             .expect("a derived intent must never be the reason a request fails");
             let body = &bodies[0].1;
@@ -1861,7 +2860,8 @@ mod tests {
             .unwrap();
 
             let bodies =
-                build_candidates(&params, Endpoint::ChatComplete, &[candidate], None).unwrap();
+                build_candidates(&params, Endpoint::ChatComplete, &[candidate], None, None)
+                    .unwrap();
             let body = &bodies[0].1;
             assert_eq!(body["chat_template_kwargs"][key], false);
             assert!(body.get("reasoning_effort").is_none());
@@ -1888,6 +2888,7 @@ mod tests {
                 Endpoint::ChatComplete,
                 std::slice::from_ref(&candidate),
                 requested.as_ref(),
+                None,
             )
             .map(|bodies| bodies[0].1.clone())
         };
@@ -1955,7 +2956,7 @@ mod tests {
         }))
         .unwrap();
         let bodies =
-            build_candidates(&callers, Endpoint::ChatComplete, &[anthropic], None).unwrap();
+            build_candidates(&callers, Endpoint::ChatComplete, &[anthropic], None, None).unwrap();
         assert_eq!(bodies[0].1["thinking"]["budget_tokens"], 1024);
     }
 
@@ -1980,6 +2981,7 @@ mod tests {
             Endpoint::ChatComplete,
             &[candidate],
             requested.as_ref(),
+            None,
         )
         .unwrap();
 
@@ -2007,6 +3009,7 @@ mod tests {
             Endpoint::ChatComplete,
             &[candidate],
             requested.as_ref(),
+            None,
         )
         .unwrap();
 
@@ -2025,6 +3028,7 @@ mod tests {
             Endpoint::ChatComplete,
             &[effort_candidate],
             requested.as_ref(),
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("cannot represent max_tokens"));
@@ -2047,6 +3051,7 @@ mod tests {
         let candidates = vec![
             RouteCandidate {
                 route_id: "openai:m".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -2054,13 +3059,15 @@ mod tests {
             },
             RouteCandidate {
                 route_id: "anthropic:m".into(),
+                supported_endpoints: Vec::new(),
                 format: ProviderFormat::Anthropic,
                 engine: None,
                 reasoning_format: None,
                 reasoning_policy: None,
             },
         ];
-        let bodies = build_candidates(&params, Endpoint::ChatComplete, &candidates, None).unwrap();
+        let bodies =
+            build_candidates(&params, Endpoint::ChatComplete, &candidates, None, None).unwrap();
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0].0, "openai:m");
         // OpenAI passthrough keeps messages as-is.

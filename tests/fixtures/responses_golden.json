@@ -1,0 +1,793 @@
+{
+  "requests": [
+    {
+      "name": "text_input",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "max_output_tokens": 32,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stream": true,
+        "parallel_tool_calls": false,
+        "user": "user-1",
+        "prompt_cache_key": "cache-1",
+        "provider": { "aci_verified": true }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [{ "role": "user", "content": "hello" }],
+        "max_completion_tokens": 32,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stream": true,
+        "parallel_tool_calls": false,
+        "user": "user-1",
+        "prompt_cache_key": "cache-1",
+        "provider": { "aci_verified": true }
+      }
+    },
+    {
+      "name": "instructions",
+      "input": {
+        "model": "gpt-test",
+        "instructions": "Be concise.",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_text", "text": "hello" }]
+        }]
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "system", "content": "Be concise." },
+          { "role": "user", "content": [{ "type": "text", "text": "hello" }] }
+        ]
+      }
+    },
+    {
+      "name": "function_call_history",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "message", "role": "user", "content": "weather" },
+          {
+            "type": "reasoning",
+            "id": "rs-old",
+            "encrypted_content": "opaque",
+            "content": [{ "type": "reasoning_text", "text": "choose tools" }]
+          },
+          { "type": "function_call", "call_id": "call_1", "name": "city", "namespace": "weather", "arguments": "{\"q\":\"SF\"}" },
+          { "type": "function_call", "call_id": "call_2", "name": "units", "arguments": "{}" },
+          { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_text", "text": "foggy" }] },
+          { "type": "function_call_output", "call_id": "call_2", "output": "metric" }
+        ]
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "user", "content": "weather" },
+          {
+            "role": "assistant",
+            "reasoning_content": "choose tools",
+            "tool_calls": [
+              { "id": "call_1", "type": "function", "function": { "name": "weather__city", "arguments": "{\"q\":\"SF\"}" } },
+              { "id": "call_2", "type": "function", "function": { "name": "units", "arguments": "{}" } }
+            ]
+          },
+          { "role": "tool", "tool_call_id": "call_1", "content": "foggy" },
+          { "role": "tool", "tool_call_id": "call_2", "content": "metric" }
+        ]
+      }
+    },
+    {
+      "name": "json_schema_and_function_tool",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "function",
+          "name": "lookup",
+          "description": "Lookup a value",
+          "parameters": { "type": "object" },
+          "strict": true
+        }],
+        "tool_choice": { "type": "function", "name": "lookup" },
+        "text": {
+          "verbosity": "low",
+          "format": {
+            "type": "json_schema",
+            "name": "answer",
+            "description": "Answer shape",
+            "schema": { "type": "object" },
+            "strict": true
+          }
+        }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [{ "role": "user", "content": "hello" }],
+        "tools": [{
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "Lookup a value",
+            "parameters": { "type": "object" },
+            "strict": true
+          }
+        }],
+        "tool_choice": { "type": "function", "function": { "name": "lookup" } },
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "answer",
+            "description": "Answer shape",
+            "schema": { "type": "object" },
+            "strict": true
+          }
+        },
+        "verbosity": "low"
+      }
+    },
+    {
+      "name": "codex_default_tools",
+      "input": {
+        "model": "gpt-test",
+        "instructions": "Act as a coding agent.",
+        "input": [
+          {
+            "type": "additional_tools",
+            "tools": [{
+              "type": "namespace",
+              "name": "mcp__example",
+              "description": "Optional plugin tools",
+              "tools": [{ "type": "function", "name": "_lookup", "parameters": { "type": "object" } }]
+            }]
+          },
+          { "type": "message", "role": "developer", "content": "Follow repository rules." },
+          { "type": "message", "role": "user", "content": "Inspect the project." }
+        ],
+        "include": ["reasoning.encrypted_content"],
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command",
+            "parameters": {
+              "type": "object",
+              "properties": { "cmd": { "type": "string" } },
+              "required": ["cmd"]
+            },
+            "strict": false
+          },
+          { "type": "web_search", "external_web_access": false }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "stream": true,
+        "text": { "verbosity": "medium" },
+        "reasoning": { "effort": "high" }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "system", "content": "Act as a coding agent." },
+          { "role": "developer", "content": "Follow repository rules." },
+          { "role": "user", "content": "Inspect the project." }
+        ],
+        "stream": true,
+        "parallel_tool_calls": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a command",
+              "parameters": {
+                "type": "object",
+                "properties": { "cmd": { "type": "string" } },
+                "required": ["cmd"]
+              },
+              "strict": false
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "mcp__example___lookup",
+              "parameters": { "type": "object" }
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "verbosity": "medium",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "reasoning_effort",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "reasoning": { "effort": "high", "summary": "detailed" }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [{ "role": "user", "content": "hello" }],
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "previous_response_id_rejected",
+      "input": { "model": "gpt-test", "input": "hello", "previous_response_id": "resp_old" },
+      "error": true
+    },
+    {
+      "name": "store_rejected",
+      "input": { "model": "gpt-test", "input": "hello", "store": true },
+      "error": true
+    },
+    {
+      "name": "background_rejected",
+      "input": { "model": "gpt-test", "input": "hello", "background": true },
+      "error": true
+    },
+    {
+      "name": "conversation_rejected",
+      "input": { "model": "gpt-test", "input": "hello", "conversation": "conv_1" },
+      "error": true
+    },
+    {
+      "name": "namespace_non_function_child_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "tools",
+          "tools": [{ "type": "custom", "name": "shell" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "unknown_namespace_tool_choice_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "crm",
+          "tools": [{ "type": "function", "name": "lookup" }]
+        }],
+        "tool_choice": { "type": "namespace", "name": "missing" }
+      },
+      "error": true
+    },
+    {
+      "name": "namespace_tool_choice_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "namespace",
+          "name": "crm",
+          "tools": [{ "type": "function", "name": "lookup" }]
+        }],
+        "tool_choice": { "type": "namespace", "name": "crm" }
+      },
+      "error": true
+    },
+    {
+      "name": "custom_tool_and_history",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "message", "role": "user", "content": "inspect" },
+          { "type": "custom_tool_call", "call_id": "call_shell", "name": "shell", "input": "pwd" },
+          { "type": "custom_tool_call_output", "call_id": "call_shell", "output": "/workspace" }
+        ],
+        "tools": [{ "type": "custom", "name": "shell", "description": "Run shell input" }],
+        "tool_choice": { "type": "custom", "name": "shell" }
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [
+          { "role": "user", "content": "inspect" },
+          {
+            "role": "assistant",
+            "tool_calls": [{
+              "id": "call_shell",
+              "type": "function",
+              "function": { "name": "shell", "arguments": "{\"input\":\"pwd\"}" }
+            }]
+          },
+          { "role": "tool", "tool_call_id": "call_shell", "content": "/workspace" }
+        ],
+        "tools": [{
+          "type": "function",
+          "function": {
+            "name": "shell",
+            "description": "Run shell input",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "string",
+                  "description": "The raw input for this tool, passed through verbatim."
+                }
+              },
+              "required": ["input"]
+            }
+          }
+        }],
+        "tool_choice": { "type": "function", "function": { "name": "shell" } }
+      }
+    },
+    {
+      "name": "orphan_function_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{ "type": "function_call_output", "call_id": "call_missing", "output": "no call" }]
+      },
+      "error": true
+    },
+    {
+      "name": "mismatched_tool_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "custom_tool_call", "call_id": "call_shell", "name": "shell", "input": "pwd" },
+          { "type": "function_call_output", "call_id": "call_shell", "output": "/workspace" }
+        ]
+      },
+      "error": true
+    },
+    {
+      "name": "non_text_tool_output_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          { "type": "function_call", "call_id": "call_1", "name": "inspect", "arguments": "{}" },
+          { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_image", "image_url": "https://example.com/a.png" }] }
+        ]
+      },
+      "error": true
+    },
+    {
+      "name": "assistant_refusal_history_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "assistant",
+          "content": [{ "type": "refusal", "refusal": "cannot comply" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "custom_tool_grammar_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [{
+          "type": "custom",
+          "name": "sql",
+          "format": { "type": "grammar", "syntax": "lark", "definition": "start: /.+/" }
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "invalid_message_role_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{ "type": "message", "role": "tool", "content": "result" }]
+      },
+      "error": true
+    },
+    {
+      "name": "file_inputs",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [
+            { "type": "input_file", "file_id": "file_1" },
+            { "type": "input_file", "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" }
+          ]
+        }]
+      },
+      "output": {
+        "model": "gpt-test",
+        "messages": [{
+          "role": "user",
+          "content": [
+            { "type": "file", "file": { "file_id": "file_1" } },
+            { "type": "file", "file": { "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" } }
+          ]
+        }]
+      }
+    },
+    {
+      "name": "empty_file_input_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_file" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "file_url_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_file", "file_url": "https://example.com/file.pdf" }]
+        }]
+      },
+      "error": true
+    },
+    {
+      "name": "unsupported_input_item_rejected",
+      "input": { "model": "gpt-test", "input": [{ "type": "computer_call" }] },
+      "error": true
+    },
+    {
+      "name": "image_file_id_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": [{
+          "type": "message",
+          "role": "user",
+          "content": [{ "type": "input_image", "file_id": "file_1" }]
+        }]
+      },
+      "error": true
+    }
+  ],
+  "responses": [
+    {
+      "name": "text",
+      "echo": { "instructions": "Be concise.", "store": false },
+      "input": {
+        "id": "chatcmpl_1",
+        "model": "gpt-test",
+        "choices": [{ "message": { "role": "assistant", "content": "hello" }, "finish_reason": "stop" }],
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 4,
+          "total_tokens": 14,
+          "prompt_tokens_details": { "cached_tokens": 3 },
+          "completion_tokens_details": { "reasoning_tokens": 1 }
+        }
+      },
+      "output": {
+        "id": "chatcmpl_1",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "instructions": "Be concise.",
+        "store": false,
+        "output": [{
+          "id": "msg_chatcmpl_1_0",
+          "type": "message",
+          "role": "assistant",
+          "status": "completed",
+          "content": [{ "type": "output_text", "text": "hello", "annotations": [] }]
+        }],
+        "usage": {
+          "input_tokens": 10,
+          "input_tokens_details": { "cached_tokens": 3 },
+          "output_tokens": 4,
+          "output_tokens_details": { "reasoning_tokens": 1 },
+          "total_tokens": 14
+        }
+      }
+    },
+    {
+      "name": "tool_calls",
+      "echo": {
+        "tools": [
+          { "type": "function", "name": "lookup" },
+          {
+            "type": "namespace",
+            "name": "crm",
+            "tools": [{ "type": "function", "name": "search" }]
+          },
+          { "type": "custom", "name": "shell" }
+        ],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_2",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              { "id": "call_1", "type": "function", "function": { "name": "lookup", "arguments": "{\"x\":1}" } },
+              { "id": "call_2", "type": "function", "function": { "name": "crm__search", "arguments": "{\"q\":\"open\"}" } },
+              { "id": "call_3", "type": "function", "function": { "name": "shell", "arguments": "{\"input\":\"pwd\"}" } }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_2",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "tools": [
+          { "type": "function", "name": "lookup" },
+          {
+            "type": "namespace",
+            "name": "crm",
+            "tools": [{ "type": "function", "name": "search" }]
+          },
+          { "type": "custom", "name": "shell" }
+        ],
+        "store": false,
+        "output": [
+          { "id": "fc_call_1", "type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"x\":1}", "status": "completed" },
+          { "id": "fc_call_2", "type": "function_call", "call_id": "call_2", "name": "search", "namespace": "crm", "arguments": "{\"q\":\"open\"}", "status": "completed" },
+          { "id": "ctc_call_3", "type": "custom_tool_call", "call_id": "call_3", "name": "shell", "input": "pwd", "status": "completed" }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "reasoning_content",
+      "echo": { "reasoning": { "effort": "high" }, "store": false },
+      "input": {
+        "id": "chatcmpl_3",
+        "model": "gpt-test",
+        "choices": [{
+          "message": { "role": "assistant", "reasoning_content": "think", "content": "answer" },
+          "finish_reason": "stop"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_3",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "reasoning": { "effort": "high" },
+        "store": false,
+        "output": [
+          { "id": "rs_chatcmpl_3_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think" }], "status": "completed" },
+          { "id": "msg_chatcmpl_3_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer", "annotations": [] }] }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "invalid_function_arguments",
+      "echo": {
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_bad_args",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+              "id": "call_bad",
+              "type": "function",
+              "function": { "name": "lookup", "arguments": "{\"x\":" }
+            }]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_bad_args",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider returned invalid tool-call arguments"
+        },
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false,
+        "output": [],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "missing_tool_identity",
+      "echo": {
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_bad_tool",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+              "id": "call_bad",
+              "type": "function",
+              "function": { "arguments": "{}" }
+            }]
+          },
+          "finish_reason": "tool_calls"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_bad_tool",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider returned a tool call without a valid id or name"
+        },
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false,
+        "output": [],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "length",
+      "echo": {
+        "max_output_tokens": 8,
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_4",
+        "model": "gpt-test",
+        "choices": [{
+          "message": {
+            "role": "assistant",
+            "content": "partial",
+            "tool_calls": [{
+              "id": "call_truncated",
+              "type": "function",
+              "function": { "name": "lookup", "arguments": "{\"x\":" }
+            }]
+          },
+          "finish_reason": "length"
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_4",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "incomplete",
+        "incomplete_details": { "reason": "max_output_tokens" },
+        "error": null,
+        "max_output_tokens": 8,
+        "tools": [{ "type": "function", "name": "lookup" }],
+        "store": false,
+        "output": [{
+          "id": "msg_chatcmpl_4_0",
+          "type": "message",
+          "role": "assistant",
+          "status": "completed",
+          "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+        }],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "missing_finish_reason",
+      "echo": { "store": false },
+      "input": {
+        "id": "chatcmpl_missing_finish",
+        "model": "gpt-test",
+        "choices": [{
+          "message": { "role": "assistant", "content": "partial" }
+        }]
+      },
+      "output": {
+        "id": "chatcmpl_missing_finish",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": {
+          "code": "server_error",
+          "message": "The upstream provider ended without a valid finish reason"
+        },
+        "store": false,
+        "output": [{
+          "id": "msg_chatcmpl_missing_finish_0",
+          "type": "message",
+          "role": "assistant",
+          "status": "completed",
+          "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+        }],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "error",
+      "echo": { "store": false },
+      "input": {
+        "id": "chatcmpl_5",
+        "model": "gpt-test",
+        "error": { "code": "server_error", "message": "upstream failed" }
+      },
+      "output": {
+        "id": "chatcmpl_5",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "failed",
+        "incomplete_details": null,
+        "error": { "code": "server_error", "message": "upstream failed" },
+        "store": false,
+        "output": [],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": { "cached_tokens": 0 },
+          "output_tokens": 0,
+          "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    }
+  ]
+}
