@@ -278,15 +278,26 @@ pub async fn run(
 
     let started = Instant::now();
     let client_endpoint = endpoint;
-    let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
-    if let Some(original) = responses.as_ref() {
-        if let Err(err) = validate_responses_request(original) {
-            let model = original.get("model").and_then(Value::as_str).unwrap_or("");
+    let validated = match endpoint {
+        Endpoint::ChatComplete => reasoning::normalize_chat_request(&params)
+            .map(Some)
+            .map_err(TransformError::invalid_request),
+        Endpoint::CreateModelResponse => validate_responses_request(&params).map(|()| None),
+        _ => Ok(None),
+    };
+    let (params, reasoning_requirements, exclude_reasoning) = match validated {
+        Ok(normalized) => normalized.unwrap_or((params, None, false)),
+        Err(err) => {
+            let model = params.get("model").and_then(Value::as_str).unwrap_or("");
             let message = err.to_string();
             log_generated_outcome(
                 &request_id,
                 model,
-                "request_validation",
+                if endpoint == Endpoint::ChatComplete {
+                    "reasoning_validation"
+                } else {
+                    "request_validation"
+                },
                 400,
                 0,
                 "",
@@ -318,80 +329,32 @@ pub async fn run(
             );
         }
     };
+    let responses = (endpoint == Endpoint::CreateModelResponse).then(|| params.clone());
     // A bridge-only conversion failure is retained until candidates are known:
     // native Responses routes can still receive the original request, while
     // Chat-only routes are skipped by `build_candidates`.
-    let (params, endpoint, responses_bridge_error) = match responses.as_ref() {
-        Some(original) => match responses_to_chat_params(original) {
-            Ok(chat) => (chat, Endpoint::ChatComplete, None),
-            Err(err) => (original.clone(), Endpoint::CreateModelResponse, Some(err)),
-        },
-        None => (params, endpoint, None),
-    };
+    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge_error) =
+        if let Some(original) = responses.as_ref() {
+            match responses_to_chat_params(original).and_then(|chat| {
+                reasoning::normalize_chat_request(&chat).map_err(TransformError::invalid_request)
+            }) {
+                Ok((chat, requirements, exclude)) => {
+                    (chat, Endpoint::ChatComplete, requirements, exclude, None)
+                }
+                Err(err) => (params, endpoint, None, false, Some(err)),
+            }
+        } else {
+            (
+                params,
+                endpoint,
+                reasoning_requirements,
+                exclude_reasoning,
+                None,
+            )
+        };
     let echo = responses
         .as_ref()
         .map(|params| Arc::new(response_transform::responses_echo(params)));
-    let (params, endpoint, reasoning_requirements, exclude_reasoning, responses_bridge_error) =
-        if endpoint == Endpoint::ChatComplete {
-            match reasoning::normalize_chat_request(&params) {
-                Ok((params, requirements, exclude)) => (
-                    params,
-                    endpoint,
-                    requirements,
-                    exclude,
-                    responses_bridge_error,
-                ),
-                Err(err) => {
-                    if let Some(original) = responses.as_ref() {
-                        (
-                            original.clone(),
-                            Endpoint::CreateModelResponse,
-                            None,
-                            false,
-                            Some(TransformError::invalid_request(err)),
-                        )
-                    } else {
-                        let model = params.get("model").and_then(Value::as_str).unwrap_or("");
-                        let message = err.to_string();
-                        log_generated_outcome(
-                            &request_id,
-                            model,
-                            "reasoning_validation",
-                            400,
-                            0,
-                            "",
-                            0,
-                            started,
-                            &detail_snippet(message.as_bytes()),
-                        );
-                        let body = errors::envelope_bytes(
-                            surface,
-                            errors::error_type(surface, 400),
-                            &message,
-                            Some(&request_id),
-                        );
-                        return finalize_generated(
-                            400,
-                            body,
-                            &[],
-                            e2ee,
-                            OutcomeCtx {
-                                surface,
-                                service,
-                                endpoint_path,
-                                request_id: &request_id,
-                                model,
-                                started,
-                                received_body: received_body.as_slice(),
-                                requester: &requester,
-                            },
-                        );
-                    }
-                }
-            }
-        } else {
-            (params, endpoint, None, false, responses_bridge_error)
-        };
     let model = params.get("model").and_then(Value::as_str);
     let outcome_ctx = OutcomeCtx {
         surface,
@@ -809,15 +772,6 @@ pub async fn run(
                         "buffered response with nonstandard finish reason"
                     );
                 }
-                meter.success(
-                    upstream_status,
-                    attempt_index,
-                    Some(&forward.selected_route),
-                    raw_usage,
-                    None,
-                );
-                meter.failed_attempts(&forward.failed_attempts, false);
-
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(transformed, echo);
                 }
@@ -841,6 +795,28 @@ pub async fn run(
                     client_endpoint,
                     Some(request_id.as_str()),
                 );
+                // A valid Responses envelope can carry a failed operation over
+                // HTTP 200. Record its outcome after conversion and scrubbing,
+                // while retaining the upstream usage for billing.
+                let failed_response = echo.is_some()
+                    && transformed.get("status").and_then(Value::as_str) == Some("failed");
+                meter.success(
+                    if failed_response {
+                        502
+                    } else {
+                        upstream_status
+                    },
+                    attempt_index,
+                    Some(&forward.selected_route),
+                    raw_usage,
+                    failed_response.then(|| {
+                        transformed["error"]["message"]
+                            .as_str()
+                            .unwrap_or("The upstream response failed")
+                            .to_string()
+                    }),
+                );
+                meter.failed_attempts(&forward.failed_attempts, false);
                 (
                     upstream_status,
                     serde_json::to_vec(&transformed).unwrap_or_default(),

@@ -860,7 +860,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
 
 #[tokio::test]
 async fn supported_responses_endpoint_keeps_protocol_and_path() {
-    let control_url = spawn_control(
+    let (control_url, posts) = spawn_control_capturing(
         200,
         json!({
             "allow": true,
@@ -883,29 +883,47 @@ async fn supported_responses_endpoint_keeps_protocol_and_path() {
         "output":[],
         "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
     }"#;
-    let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
-    let mut input = responses_input(false);
-    input.params["reasoning"] = json!({ "effort": "future-native-value" });
-    input.received_body = serde_json::to_vec(&input.params).unwrap();
-    let (status, _, body) = response_parts(
-        middleware(control_url)
-            .handle_completion(&service, input)
-            .await,
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(body["id"], json!("req-responses"));
-    assert_eq!(body["object"], json!("response"));
+    let mw = middleware(control_url);
+    for outcome in ["completed", "failed"] {
+        let mut upstream: Value = serde_json::from_slice(upstream).unwrap();
+        upstream["status"] = json!(outcome);
+        if outcome == "failed" {
+            upstream["error"] = json!({ "code": "server_error", "message": "Generation failed" });
+        }
+        let (service, requests) = build_recording_service(
+            200,
+            serde_json::to_vec(&upstream).unwrap(),
+            "application/json",
+        );
+        let mut input = responses_input(false);
+        input.request_id = format!("req-{outcome}");
+        input.params["reasoning"] = json!({ "effort": "future-native-value" });
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["id"], format!("req-{outcome}"));
+        assert_eq!(body["object"], json!("response"));
+        assert_eq!(body["status"], outcome);
+        let report = wait_for_post(&posts, |report| {
+            report["requestId"] == format!("req-{outcome}")
+        })
+        .await;
+        assert_eq!(
+            report["status"],
+            if outcome == "failed" { 502 } else { 200 }
+        );
+        assert_eq!(report["usage"]["input_tokens"], 1);
 
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path.as_deref(), Some("/v1/responses"));
-    assert_eq!(requests[0].body["input"], json!("hello"));
-    assert_eq!(
-        requests[0].body["reasoning"]["effort"],
-        json!("future-native-value")
-    );
-    assert!(requests[0].body.get("messages").is_none());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path.as_deref(), Some("/v1/responses"));
+        assert_eq!(requests[0].body["input"], json!("hello"));
+        assert_eq!(
+            requests[0].body["reasoning"]["effort"],
+            json!("future-native-value")
+        );
+        assert!(requests[0].body.get("messages").is_none());
+    }
 }
 
 #[tokio::test]
@@ -1256,6 +1274,116 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     );
     assert_eq!(report["userId"], json!(7));
     assert_eq!(report["isStreaming"], json!(false));
+}
+
+#[tokio::test]
+async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome() {
+    for (arguments, finish_reason, expected_status, expected_input) in [
+        (
+            r#"{"input":"pwd"}"#,
+            Some("tool_calls"),
+            "completed",
+            Some("pwd"),
+        ),
+        (r#"{"input":""}"#, Some("tool_calls"), "completed", Some("")),
+        ("{}", Some("tool_calls"), "failed", None),
+        (r#"{"input":42}"#, Some("tool_calls"), "failed", None),
+        (r#"{"input":"pwd"#, Some("tool_calls"), "failed", None),
+        (r#"{"input":"pwd"#, Some("length"), "incomplete", None),
+        (r#"{"input":"pwd"#, None, "failed", None),
+    ] {
+        for streaming in [false, true] {
+            let (control_url, posts) = spawn_control_capturing(
+                200,
+                json!({
+                    "allow": true,
+                    "candidates": [{ "routeId": "compatible:gpt-test", "format": "openai" }],
+                    "pricing": { "inputCostPerToken": "1", "outputCostPerToken": "2" },
+                    "userId": 7
+                }),
+            )
+            .await;
+            let usage = json!({ "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 });
+            let call = json!({
+                "index": 0, "id": "call_shell", "type": "function",
+                "function": { "name": "shell", "arguments": arguments }
+            });
+            let payload = json!({
+                "id": "upstream", "model": "internal-model",
+                "choices": [{
+                    "index": 0,
+                    "message": { "tool_calls": [call.clone()] },
+                    "delta": { "tool_calls": [call] },
+                    "finish_reason": finish_reason
+                }],
+                "usage": usage
+            });
+            let (wire, content_type) = if streaming {
+                (
+                    format!("data: {payload}\n\ndata: [DONE]\n\n"),
+                    "text/event-stream",
+                )
+            } else {
+                (payload.to_string(), "application/json")
+            };
+            let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+            let mut input = responses_input(streaming);
+            input.params["tools"] = json!([{ "type": "custom", "name": "shell" }]);
+            input.received_body = serde_json::to_vec(&input.params).unwrap();
+            let response = middleware(control_url)
+                .handle_completion(&service, input)
+                .await;
+            assert_eq!(response.status(), 200);
+            let (headers, wire) = raw_body(response).await;
+            assert!(headers.get("x-receipt-id").is_some());
+            let body = if streaming {
+                let events = sse_events(&wire);
+                if expected_input.is_none() {
+                    assert!(
+                        !events.iter().any(|event| matches!(
+                            event["type"].as_str(),
+                            Some(
+                                "response.custom_tool_call_input.done"
+                                    | "response.output_item.done"
+                            )
+                        )),
+                        "{wire}"
+                    );
+                }
+                events.last().unwrap()["response"].clone()
+            } else {
+                serde_json::from_str::<Value>(&wire).unwrap()
+            };
+            assert_eq!(body["status"], expected_status, "{wire}");
+            assert_eq!(body["usage"]["cost"], 5);
+            match expected_input {
+                Some(value) => assert_eq!(body["output"][0]["input"], value),
+                None => assert_eq!(body["output"], json!([])),
+            }
+            let report = wait_for_post(&posts, |_| true).await;
+            assert_eq!(
+                report["status"],
+                if expected_status == "failed" {
+                    502
+                } else {
+                    200
+                }
+            );
+            assert_eq!(report["selectedRouteId"], "compatible:gpt-test");
+            assert!(report["errorSource"].is_null());
+            assert_eq!(report["isStreaming"], streaming);
+            assert!(report["usage"].get("cost").is_none());
+            let input_tokens = report["usage"]
+                .get("prompt_tokens")
+                .or_else(|| report["usage"].get("input_tokens"));
+            assert_eq!(input_tokens, Some(&json!(1)));
+            if expected_status == "failed" {
+                assert!(report["errorMessage"]
+                    .as_str()
+                    .is_some_and(|message| !message.is_empty()));
+            }
+        }
+    }
 }
 
 #[tokio::test]

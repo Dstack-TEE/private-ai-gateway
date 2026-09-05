@@ -23,7 +23,7 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
     self, custom_tool_call_item, custom_tool_input, function_call_item, i64_field,
-    invalid_finish_reason_error, invalid_function_call_arguments_error,
+    invalid_finish_reason_error, invalid_tool_call_arguments_error,
     invalid_tool_call_identity_error, item_id, map_finish_reason, message_item,
     normalize_function_call_arguments, now_millis, now_secs, output_text_part, reasoning_item,
     reasoning_text, refusal_part, responses_object, responses_terminal, responses_usage,
@@ -168,7 +168,7 @@ struct ResponsesStream {
     usage: Option<Value>,
     finish_reason: Option<String>,
     error: Option<Value>,
-    invalid_function_arguments: bool,
+    invalid_tool_arguments: bool,
     invalid_tool_call_identity: bool,
 }
 
@@ -245,15 +245,17 @@ impl CallItem {
     }
 }
 
-/// Accept both true fragments and providers that repeat a cumulative id/name.
-fn merge_tool_identity(current: &mut String, fragment: &str) {
-    if fragment.trim().is_empty() {
-        return;
+/// Identity fields may arrive late or repeat, but must not change. There is no
+/// unambiguous way to distinguish fragmented names from cumulative updates.
+fn set_tool_identity(current: &mut String, value: &str) -> Result<(), ()> {
+    if value.is_empty() || current == value {
+        return Ok(());
     }
-    if fragment.starts_with(current.as_str()) {
-        current.clear();
+    if !current.is_empty() {
+        return Err(());
     }
-    current.push_str(fragment);
+    current.push_str(value);
+    Ok(())
 }
 
 /// One SSE event reduced to the fields the transforms consume: the last
@@ -999,7 +1001,7 @@ fn responses_text_delta(kind: TextKind, delta: &str, state: &mut ResponsesStream
     output
 }
 
-fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> String {
+fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> Result<String, ()> {
     let mut output = String::new();
     for tool_call in tool_calls {
         let index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
@@ -1016,8 +1018,8 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
 
         let was_started = {
             let call = state.calls.entry(index).or_default();
-            merge_tool_identity(&mut call.call_id, call_id);
-            merge_tool_identity(&mut call.chat_name, name);
+            set_tool_identity(&mut call.call_id, call_id)?;
+            set_tool_identity(&mut call.chat_name, name)?;
             if !arguments.is_empty() {
                 call.arguments.push_str(arguments);
             }
@@ -1043,7 +1045,7 @@ fn responses_tool_deltas(tool_calls: &[Value], state: &mut ResponsesStream) -> S
         }
         output.push_str(&flush_ready_responses_calls(state));
     }
-    output
+    Ok(output)
 }
 
 fn flush_ready_responses_calls(state: &mut ResponsesStream) -> String {
@@ -1054,7 +1056,6 @@ fn flush_ready_responses_calls(state: &mut ResponsesStream) -> String {
             call.output_index.is_none()
                 && !call.call_id.trim().is_empty()
                 && !call.chat_name.trim().is_empty()
-                && !call.arguments.is_empty()
         });
         if !ready {
             break;
@@ -1124,7 +1125,10 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
         };
         let item_id = call.item_id();
         if call.kind == CallKind::Custom {
-            let input = custom_tool_input(&call.arguments);
+            let Some(input) = custom_tool_input(&call.arguments) else {
+                state.invalid_tool_arguments = true;
+                continue;
+            };
             if !input.is_empty() {
                 output.push_str(&responses_event(
                     state,
@@ -1155,7 +1159,7 @@ fn close_responses_calls(state: &mut ResponsesStream) -> String {
             continue;
         }
         let Some(arguments) = normalize_function_call_arguments(&call.arguments) else {
-            state.invalid_function_arguments = true;
+            state.invalid_tool_arguments = true;
             continue;
         };
         output.push_str(&responses_event(
@@ -1194,8 +1198,8 @@ fn responses_stream_tail(echo: &Value, state: &mut ResponsesStream) -> String {
             Some(("completed", _)) if state.invalid_tool_call_identity => {
                 state.error = Some(invalid_tool_call_identity_error());
             }
-            Some(("completed", _)) if state.invalid_function_arguments => {
-                state.error = Some(invalid_function_call_arguments_error());
+            Some(("completed", _)) if state.invalid_tool_arguments => {
+                state.error = Some(invalid_tool_call_arguments_error());
             }
             _ => {}
         }
@@ -1286,7 +1290,7 @@ fn openai_chat_to_responses_stream(
             output.push_str(&responses_text_delta(TextKind::Refusal, refusal, state));
         }
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-            output.push_str(&responses_tool_deltas(tool_calls, state));
+            output.push_str(&responses_tool_deltas(tool_calls, state)?);
         }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             state.finish_reason = Some(reason.to_string());
@@ -2174,6 +2178,47 @@ mod tests {
             events.push(value);
         }
         (events, error, wire)
+    }
+
+    #[tokio::test]
+    async fn responses_stream_identity_is_immutable() {
+        for (first_name, id, name, accepted) in [
+            ("lookup", "call_1", "lookup", true),
+            ("lookup", "", "", true),
+            ("lookup", "call_12", "lookup", false),
+            ("lookup", "call_1", "lookup_more", false),
+            ("", "call_1", "lookup", true),
+            ("", "call_12", "lookup", false),
+        ] {
+            let first = json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": { "name": first_name, "arguments": "" }
+            }] } }] });
+            let second = json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": id,
+                "function": { "name": name, "arguments": "{}" }
+            }] }, "finish_reason": "tool_calls" }] });
+            let (events, error, wire) = replay_responses_fixture(&json!({
+                "events": [format!("data: {first}"), format!("data: {second}"), "data: [DONE]"]
+            }))
+            .await;
+            assert_eq!(error.is_none(), accepted, "{wire}");
+            for event in &events {
+                if let Some(item_id) = event.get("item_id") {
+                    assert_eq!(item_id, "fc_call_1");
+                }
+                if let Some(item) = event.get("item") {
+                    assert_eq!(item["id"], "fc_call_1");
+                    assert_eq!(item["name"], "lookup");
+                }
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| event["type"] == "response.completed"),
+                accepted
+            );
+        }
     }
 
     #[tokio::test]

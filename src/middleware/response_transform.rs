@@ -1134,7 +1134,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
     };
 
     let mut output: Vec<Value> = Vec::new();
-    let mut invalid_function_arguments = false;
+    let mut invalid_tool_arguments = false;
     let mut invalid_tool_call_identity = false;
     if let Some(text) = reasoning_text(&message) {
         let item_id = item_id("rs", &id, output.len());
@@ -1177,15 +1177,14 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                 continue;
             }
             if tool_map.is_custom(name) {
-                output.push(custom_tool_call_item(
-                    call_id,
-                    name,
-                    &custom_tool_input(arguments),
-                    "completed",
-                ));
+                let Some(input) = custom_tool_input(arguments) else {
+                    invalid_tool_arguments = true;
+                    continue;
+                };
+                output.push(custom_tool_call_item(call_id, name, &input, "completed"));
             } else {
                 let Some(arguments) = normalize_function_call_arguments(arguments) else {
-                    invalid_function_arguments = true;
+                    invalid_tool_arguments = true;
                     continue;
                 };
                 let namespace = tool_map.namespace(name);
@@ -1218,11 +1217,9 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
                 Some(("completed", _)) if invalid_tool_call_identity => {
                     ("failed", Value::Null, invalid_tool_call_identity_error())
                 }
-                Some(("completed", _)) if invalid_function_arguments => (
-                    "failed",
-                    Value::Null,
-                    invalid_function_call_arguments_error(),
-                ),
+                Some(("completed", _)) if invalid_tool_arguments => {
+                    ("failed", Value::Null, invalid_tool_call_arguments_error())
+                }
                 Some((status, details)) => (status, details, Value::Null),
             }
         }
@@ -1354,20 +1351,15 @@ pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, stat
     })
 }
 
-pub(super) fn custom_tool_input(arguments: &str) -> String {
-    let trimmed = arguments.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(Value::Object(object)) if object.is_empty() => String::new(),
-        Ok(Value::Object(object)) => object
-            .get("input")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| trimmed.to_string()),
-        _ => trimmed.to_string(),
-    }
+/// Decode only the wrapper we advertised upstream. Invalid or truncated JSON
+/// must never become executable custom-tool input.
+pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
+    serde_json::from_str::<Value>(arguments)
+        .ok()?
+        .as_object()?
+        .get("input")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Normalize Chat function arguments for a Responses function-call item.
@@ -1384,10 +1376,10 @@ pub(super) fn normalize_function_call_arguments(arguments: &str) -> Option<Strin
     .then(|| arguments.to_string())
 }
 
-pub(super) fn invalid_function_call_arguments_error() -> Value {
+pub(super) fn invalid_tool_call_arguments_error() -> Value {
     json!({
         "code": "server_error",
-        "message": "The upstream provider returned invalid function-call arguments",
+        "message": "The upstream provider returned invalid tool-call arguments",
     })
 }
 

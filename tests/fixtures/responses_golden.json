@@ -619,7 +619,7 @@
         "incomplete_details": null,
         "error": {
           "code": "server_error",
-          "message": "The upstream provider returned invalid function-call arguments"
+          "message": "The upstream provider returned invalid tool-call arguments"
         },
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
