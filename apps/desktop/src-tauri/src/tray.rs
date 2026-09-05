@@ -203,10 +203,12 @@ fn perform_action(app: &AppHandle, id: String) {
         if let Ok(state) = runtime.state() {
             sync(&app, &state);
         }
-        if let Ok(agents) = runtime.list_agents() {
-            sync_agents(&app, &agents);
+        if id.starts_with("agent:") {
+            if let Ok(agents) = runtime.list_agents() {
+                sync_agents(&app, &agents);
+            }
+            let _ = app.emit("gateway://agents-changed", ());
         }
-        let _ = app.emit("gateway://agents-changed", ());
     });
 }
 
