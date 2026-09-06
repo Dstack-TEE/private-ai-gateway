@@ -25,6 +25,54 @@ let driverError;
 let driverExited;
 let session;
 let base;
+let launchNumber = 0;
+let captureDriverLog = false;
+let driverLog = "";
+const diagnosticEvents = [];
+let previousProcesses = new Map();
+
+function record(event, details = {}) {
+  diagnosticEvents.push({ at: new Date().toISOString(), event, ...details });
+}
+
+async function sampleWindowsProcesses() {
+  // No command lines, environment, window titles, or unrelated process data.
+  const script = `
+    $all = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe' OR Name = 'msedgewebview2.exe' OR Name = 'msedgedriver.exe'")
+    $selected = @($all | Where-Object { $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION -or $_.ProcessId -eq [int]$env:TAURI_SMOKE_DRIVER_PID })
+    for ($depth = 0; $depth -lt 8; $depth++) {
+      $ids = @($selected | ForEach-Object ProcessId)
+      $next = @($all | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids })
+      if (!$next.Count) { break }
+      $selected += $next
+    }
+    ConvertTo-Json -Compress -InputObject @($selected | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate)
+  `;
+  const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64")], {
+    env: { ...process.env, TAURI_SMOKE_APPLICATION: application, TAURI_SMOKE_DRIVER_PID: String(driver?.pid ?? 0) },
+    timeout: 5000, maxBuffer: 262144,
+  });
+  const processes = JSON.parse(stdout);
+  const current = new Map(processes.map((process) => [`${process.ProcessId}:${process.CreationDate}`, process]));
+  for (const [key, process] of current) {
+    if (!previousProcesses.has(key)) record("process-first-observed", { process });
+  }
+  for (const [key, process] of previousProcesses) {
+    if (!current.has(key)) record("process-no-longer-observed", { process });
+  }
+  previousProcesses = current;
+  record("windows-process-snapshot", { launch: launchNumber, processes });
+}
+
+async function monitorWindowsLaunch(signal) {
+  while (!signal.aborted) {
+    try { await sampleWindowsProcesses(); } catch (error) {
+      record("process-snapshot-error", { message: error.message });
+    }
+    try { await delay(1000, undefined, { signal }); } catch { break; }
+  }
+}
 
 async function freePort() {
   const socket = createServer();
@@ -37,12 +85,20 @@ async function freePort() {
 }
 
 async function request(method, route, body) {
-  const response = await fetch(`${base}${route}`, { method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-  const result = await response.json();
-  assert.ok(response.ok, `WebDriver ${route}: ${JSON.stringify(result.value)}`);
-  return result.value;
+  const started = Date.now();
+  record("webdriver-request", { method, route });
+  try {
+    const response = await fetch(`${base}${route}`, { method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    record("webdriver-response", { method, route, status: response.status, elapsedMs: Date.now() - started });
+    assert.ok(response.ok, `WebDriver ${route}: ${JSON.stringify(result.value)}`);
+    return result.value;
+  } catch (error) {
+    record("webdriver-request-error", { method, route, elapsedMs: Date.now() - started, name: error.name });
+    throw new Error(`WebDriver ${method} ${route} failed after ${Date.now() - started}ms`, { cause: error });
+  }
 }
 
 async function until(check) {
@@ -69,12 +125,28 @@ async function invoke(command, args = {}) {
 }
 
 async function launch() {
+  launchNumber++;
   const port = await freePort();
   const nativePort = await freePort();
   assert.notEqual(port, nativePort, "WebDriver ports must be distinct");
   base = `http://127.0.0.1:${port}`;
-  driver = spawn(driverPath, ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver],
-    { env, detached: process.platform !== "win32", stdio: ["ignore", "inherit", "inherit"] });
+  // Match tauri-driver 2.0.6's Windows capabilities directly so the native
+  // driver can receive --verbose (the intermediary cannot forward that flag).
+  // https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
+  // https://learn.microsoft.com/microsoft-edge/webdriver/capabilities-edge-options
+  const windows = process.platform === "win32";
+  const executable = windows ? nativeDriver : driverPath;
+  const args = windows ? [`--port=${port}`, "--verbose"]
+    : ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver];
+  captureDriverLog = true;
+  driver = spawn(executable, args,
+    { env, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
+  const collectLog = (chunk) => {
+    if (captureDriverLog) driverLog = (driverLog + chunk.toString()).slice(-1_048_576);
+  };
+  driver.stdout.on("data", collectLog);
+  driver.stderr.on("data", collectLog);
+  record("driver-start", { launch: launchNumber, executable, pid: driver.pid });
   driverError = undefined;
   driverExited = false;
   driverExit = new Promise((resolve) => {
@@ -83,15 +155,32 @@ async function launch() {
       // A failed spawn has no process to reap. Other errors do not mean exit.
       if (!driver.pid) { driverExited = true; resolve(); }
     });
-    driver.once("exit", () => { driverExited = true; resolve(); });
+    driver.once("exit", (code, signal) => {
+      record("driver-exit", { launch: launchNumber, code, signal });
+      driverExited = true;
+      resolve();
+    });
   });
   await until(async () => {
     assert.equal(driver.exitCode, null, "tauri-driver exited");
     return (await request("GET", "/status")).ready;
   });
-  const created = await request("POST", "/session", { capabilities: { alwaysMatch: {
-    "tauri:options": { application },
-  } } });
+  const monitorAbort = new AbortController();
+  const monitor = windows ? monitorWindowsLaunch(monitorAbort.signal) : Promise.resolve();
+  let created;
+  try {
+    const capabilities = windows ? {
+      browserName: "webview2", "ms:edgeChromium": true,
+      "ms:edgeOptions": { binary: application, args: [] },
+    } : { "tauri:options": { application } };
+    record("session-launch", { launch: launchNumber, capabilities });
+    created = await request("POST", "/session", { capabilities: { alwaysMatch: capabilities } });
+  } finally {
+    captureDriverLog = false;
+    monitorAbort.abort();
+    await monitor;
+    await writeFile(path.join(evidenceDirectory, "driver-launch.log"), driverLog, { mode: 0o600 });
+  }
   session = created.sessionId;
   assert.ok(session);
   if (process.platform === "win32") {
@@ -109,33 +198,51 @@ async function shutdown() {
     if (session) await request("DELETE", `/session/${session}`);
   } finally {
     session = undefined;
-    if (driver?.pid) {
-      // CloseRequested deliberately hides this tray app. End the owned driver
-      // process tree too; session deletion alone is not an application quit.
-      if (process.platform === "win32") {
-        if (!driverExited) {
-          try {
-            await promisify(execFile)(path.join(process.env.SystemRoot, "System32", "taskkill.exe"),
-              ["/PID", String(driver.pid), "/T", "/F"], { timeout: 5000 });
-          } catch (error) {
-            // tauri-driver owns a kill-on-close Windows Job, including children.
-            // Kill the driver even when taskkill itself fails or times out.
-            if (!driverExited && !driver.kill("SIGKILL")) throw error;
+    try {
+      if (driver?.pid) {
+        // CloseRequested deliberately hides this tray app. End the owned driver
+        // process tree too; session deletion alone is not an application quit.
+        if (process.platform === "win32") {
+          if (!driverExited) {
+            try {
+              await promisify(execFile)(path.join(process.env.SystemRoot, "System32", "taskkill.exe"),
+                ["/PID", String(driver.pid), "/T", "/F"], { timeout: 5000 });
+            } catch (error) {
+              // Native EdgeDriver has no tauri-driver Job wrapper. Surface tree
+              // cleanup failures; killing only its parent is not sufficient.
+              driver.kill("SIGKILL");
+              throw error;
+            }
           }
+        } else {
+          try { process.kill(-driver.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
         }
-      } else {
-        try { process.kill(-driver.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        let timer;
+        try {
+          await Promise.race([driverExit, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Timed out reaping the owned driver tree")), 5000);
+          })]);
+        } finally {
+          clearTimeout(timer);
+        }
       }
-      let timer;
-      try {
-        await Promise.race([driverExit, new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("Timed out reaping the owned driver tree")), 5000);
-        })]);
-      } finally {
-        clearTimeout(timer);
+    } finally {
+      if (process.platform === "win32") {
+        // Also reap an app whose native driver exited before taskkill could
+        // follow its tree. Restrict selection to this smoke's installed path.
+        await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+          Buffer.from(`
+            $apps = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe'" | Where-Object { $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION })
+            foreach ($app in $apps) {
+              & "$env:SystemRoot/System32/taskkill.exe" /PID $app.ProcessId /T /F
+              if ($LASTEXITCODE -ne 0) { throw "Cannot clean up installed smoke app" }
+            }
+          `, "utf16le").toString("base64")], {
+          env: { ...process.env, TAURI_SMOKE_APPLICATION: application }, timeout: 8000, maxBuffer: 65536,
+        });
       }
+      driver = undefined;
     }
-    driver = undefined;
   }
 }
 
@@ -145,6 +252,7 @@ try {
   }
   await mkdir(data, { recursive: true, mode: 0o700 });
   await mkdir(evidenceDirectory, { recursive: true });
+  record("smoke-start", { platform: process.platform, application, driverPath, nativeDriver });
   const config = { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: await freePort() };
   await writeFile(path.join(data, "local-api.json"), JSON.stringify(config), { mode: 0o600 });
   await launch();
@@ -185,6 +293,7 @@ try {
   console.log("Installed WebView: real React/IPC, five-agent discovery, unverified-connect rejection, empty restore/export, local token rotation/revocation, settings persistence and restart passed");
   console.log("Not covered: verified connect/inference, native tray interaction, login registration or graceful Quit");
 } catch (error) {
+  record("smoke-failure", { name: error.name, message: error.message });
   if (session) {
     try {
       const screenshot = await request("GET", `/session/${session}/screenshot`);
@@ -195,5 +304,15 @@ try {
   }
   throw error;
 } finally {
-  try { await shutdown(); } finally { await rm(home, { recursive: true, force: true }); }
+  try { await shutdown(); } finally {
+    try {
+      if (process.platform === "win32") {
+        try { await sampleWindowsProcesses(); } catch (error) {
+          record("cleanup-snapshot-error", { message: error.message });
+        }
+      }
+      await writeFile(path.join(evidenceDirectory, "driver-launch.log"), driverLog, { mode: 0o600 });
+      await writeFile(path.join(evidenceDirectory, "launch-diagnostics.json"), JSON.stringify(diagnosticEvents, null, 2), { mode: 0o600 });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  }
 }
