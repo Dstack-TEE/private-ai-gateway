@@ -41,9 +41,9 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
 
 pub struct TokenFiles {
     dir: PathBuf,
-    /// Persists a directory-entry removal (see `sync_dir`); swappable in
-    /// tests to prove revocation order and fail-closed behaviour without
-    /// tracing syscalls.
+    /// Completes the platform revocation barrier after removal (see
+    /// `sync_dir`); swappable in tests to prove revocation order and
+    /// fail-closed behaviour without tracing syscalls.
     sync_parent: fn(&Path) -> io::Result<()>,
 }
 
@@ -69,6 +69,10 @@ impl TokenFiles {
         if let Some(existing) = self.read(agent)? {
             return Ok(existing);
         }
+        // An interrupted Windows revocation can intentionally leave an empty,
+        // durably-cleared tombstone. Remove it before create_new issues the
+        // replacement; a missing path remains a no-op.
+        self.revoke(agent)?;
         self.issue(agent)
     }
 
@@ -111,15 +115,22 @@ impl TokenFiles {
         Ok(())
     }
 
-    /// Durable revocation: the token file is removed and the removal is
-    /// persisted (parent-directory sync) before this returns, so a crash or
-    /// power loss right after cannot resurrect the token. A missing file
-    /// changed no directory entry and needs no sync.
+    /// Durable revocation: Unix persists the removal through a parent-directory
+    /// sync; Windows first persists an empty file before removing it, so a
+    /// rolled-back deletion cannot resurrect the old capability. A missing file
+    /// needs no persistence barrier.
     pub fn revoke(&self, agent: &str) -> Result<(), String> {
-        match fs::remove_file(self.path(agent)) {
+        let path = self.path(agent);
+        #[cfg(windows)]
+        match neutralize_private(&path) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => return Err(format!("Cannot revoke the {agent} token: {error}")),
+        }
+        match fs::remove_file(path) {
             Ok(()) => (self.sync_parent)(&self.dir).map_err(|error| {
                 format!(
-                    "The {agent} token file was deleted but the removal could not be \
+                    "The {agent} token file was deleted but durable revocation could not be \
                      persisted: {error}"
                 )
             }),
@@ -141,7 +152,7 @@ impl TokenFiles {
 }
 
 /// Issued tokens mapped to the agent they authenticate.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TokenSet(HashMap<String, String>);
 
 impl TokenSet {
@@ -277,30 +288,59 @@ pub fn tighten_private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Durably persist a change to a directory's entries (a file removal). On
-/// Unix this is the mature pattern: open the directory itself
-/// (`O_DIRECTORY`, `O_NOFOLLOW`; std adds `O_CLOEXEC`) and `fsync` the
-/// handle. On Windows a `FlushFileBuffers` is issued on a
-/// `FILE_FLAG_BACKUP_SEMANTICS` directory handle via `File::sync_all`;
-/// beyond that there is no POSIX-style directory fsync — NTFS journals
-/// metadata operations, so the flush plus the journal is the strongest
-/// guarantee available without raw volume access.
+/// On Windows, make the old capability durably unusable before unlinking it.
+/// `FlushFileBuffers` is supported for regular writable file handles, not by
+/// the documented directory-handle contract. If an unflushed deletion is
+/// rolled back after a crash, the recovered entry therefore names an empty
+/// file rather than the old token.
+#[cfg(windows)]
+fn neutralize_private(path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let file = match fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(symlink_refused());
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the token path is not a regular file",
+        ));
+    }
+    file.set_len(0)?;
+    file.sync_all()?;
+    Ok(true)
+}
+
+/// Durably persist a change to a directory's entries on Unix: open the
+/// directory itself (`O_DIRECTORY`, `O_NOFOLLOW`; std adds `O_CLOEXEC`) and
+/// `fsync` the handle.
+#[cfg(unix)]
 pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc_directory() | libc_nofollow());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        // FlushFileBuffers needs write access on the handle.
-        options.write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc_directory() | libc_nofollow());
     options.open(dir)?.sync_all()
+}
+
+/// Windows revocation durability comes from `neutralize_private`; there is no
+/// documented POSIX-style parent-directory flush to add after the unlink.
+#[cfg(windows)]
+pub(crate) fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -398,5 +438,39 @@ mod tests {
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));
         assert!(agent_allows("opencode", "/v1/models"));
         assert!(!agent_allows("opencode", "/v1/responses"));
+    }
+
+    #[test]
+    fn ensure_replaces_an_empty_revocation_tombstone() {
+        let dir = std::env::temp_dir().join(format!("pag-token-tombstone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let files = TokenFiles::new(&dir);
+        let old = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        fs::write(files.path(LOCAL_TOOLS_AGENT), "").unwrap();
+
+        let replacement = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        assert_ne!(replacement, old);
+        assert_eq!(
+            files.read(LOCAL_TOOLS_AGENT).unwrap().as_deref(),
+            Some(replacement.as_str())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_sync_failure_leaves_no_readable_old_token() {
+        let dir = std::env::temp_dir().join(format!("pag-token-rotate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut files = TokenFiles::new(&dir);
+        let old = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        files.set_sync_parent(|_| Err(io::Error::other("injected sync failure")));
+
+        assert!(files.rotate(LOCAL_TOOLS_AGENT).is_err());
+        assert!(files.read(LOCAL_TOOLS_AGENT).unwrap().is_none());
+
+        files.set_sync_parent(sync_dir);
+        let replacement = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        assert_ne!(replacement, old);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
