@@ -89,7 +89,7 @@ mod platform {
         let executable = current_executable()?;
         if directory.is_none() && managed_system_directory(&executable).is_some() {
             return Err(
-                "The pag command is owned by the macOS package; uninstall the package to remove it"
+                "The pag command is owned by a system package; uninstall the package to remove it"
                     .to_string(),
             );
         }
@@ -272,8 +272,12 @@ mod platform {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn managed_system_directory(_executable: &Path) -> Option<PathBuf> {
-        None
+    fn managed_system_directory(executable: &Path) -> Option<PathBuf> {
+        let directory = PathBuf::from("/usr/bin");
+        match command_state(executable, &directory.join("pag")) {
+            Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
+            Ok(CommandState::Missing) | Err(_) => None,
+        }
     }
 
     fn path_contains(directory: &Path, path_value: Option<&std::ffi::OsStr>) -> bool {
