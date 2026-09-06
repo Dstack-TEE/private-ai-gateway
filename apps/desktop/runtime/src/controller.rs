@@ -46,29 +46,55 @@ pub struct DesktopRuntime {
     lifecycle: tokio::sync::Mutex<()>,
     exiting: AtomicBool,
     helper_path: PathBuf,
-    #[allow(dead_code)]
     instance: Option<lock::InstanceLock>,
 }
 
-struct ClientCredentials(Mutex<TokenFiles>);
+struct ClientCredentials(Mutex<ClientCredentialState>);
+
+struct ClientCredentialState {
+    files: TokenFiles,
+    rotation_failed: bool,
+}
 
 impl ClientCredentials {
     fn new() -> Result<Self, String> {
-        Ok(Self(Mutex::new(TokenFiles::new(&app_data_dir()?))))
+        Ok(Self::from_files(TokenFiles::new(&app_data_dir()?)))
+    }
+
+    fn from_files(files: TokenFiles) -> Self {
+        Self(Mutex::new(ClientCredentialState {
+            files,
+            rotation_failed: false,
+        }))
     }
 
     fn token(&self) -> Result<String, String> {
-        self.0
+        self.active_token()?.ok_or_else(|| {
+            "Client key rotation failed; generate a new client key before using the Local API"
+                .to_string()
+        })
+    }
+
+    fn active_token(&self) -> Result<Option<String>, String> {
+        let state = self
+            .0
             .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .ensure(LOCAL_TOOLS_AGENT)
+            .map_err(|_| "Client credential store unavailable".to_string())?;
+        if state.rotation_failed {
+            return Ok(None);
+        }
+        state.files.ensure(LOCAL_TOOLS_AGENT).map(Some)
     }
 
     fn rotate(&self) -> Result<String, String> {
-        self.0
+        let mut state = self
+            .0
             .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .rotate(LOCAL_TOOLS_AGENT)
+            .map_err(|_| "Client credential store unavailable".to_string())?;
+        state.rotation_failed = true;
+        let token = state.files.rotate(LOCAL_TOOLS_AGENT)?;
+        state.rotation_failed = false;
+        Ok(token)
     }
 }
 
@@ -226,7 +252,7 @@ impl DesktopRuntime {
             ),
         };
         let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
-        let proxy = ProxyState::new(proxy_events_tx);
+        let proxy = ProxyState::new(proxy_events_tx)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join("usage.sqlite3")) {
             Ok(store) => (Arc::new(store), None),
             Err(error) => match UsageStore::memory() {
@@ -901,6 +927,9 @@ impl DesktopRuntime {
         config: LocalApiConfig,
     ) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
+        if self.instance.is_none() {
+            return Err("Change Local API settings in the primary app instance".to_string());
+        }
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -1196,7 +1225,9 @@ fn with_client_token(
     mut tokens: TokenSet,
     credentials: &ClientCredentials,
 ) -> Result<TokenSet, String> {
-    tokens.insert(credentials.token()?, LOCAL_TOOLS_AGENT.to_string());
+    if let Some(token) = credentials.active_token()? {
+        tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
+    }
     Ok(tokens)
 }
 
@@ -1237,7 +1268,7 @@ mod tests {
         directory: &std::path::Path,
     ) -> Arc<DesktopRuntime> {
         let (events, _) = tokio::sync::mpsc::channel(8);
-        let proxy = ProxyState::new(events);
+        let proxy = ProxyState::new(events).unwrap();
         let usage = Arc::new(UsageStore::memory().unwrap());
         let manager = Arc::new(GatewayManager::new(
             proxy.clone(),
@@ -1251,7 +1282,7 @@ mod tests {
             proxy,
             usage,
             secrets: Arc::new(KeyringStore),
-            credentials: ClientCredentials(Mutex::new(TokenFiles::new(directory))),
+            credentials: ClientCredentials::from_files(TokenFiles::new(directory)),
             legacy_credential_pending: Mutex::new(false),
             endpoint: EndpointRuntime::new(executor.handle().clone()),
             codex_sync: CodexCatalogSync::default(),
@@ -1325,6 +1356,16 @@ mod tests {
             runtime.proxy.tokens().agent_for("agent-token"),
             Some("codex")
         );
+        // A readable leftover must not be admitted by a later scan or key read.
+        std::fs::remove_dir(&token_path).unwrap();
+        std::fs::write(&token_path, &rotated).unwrap();
+        assert!(runtime.client_key().is_err());
+        let active = with_client_token(runtime.proxy.tokens(), &runtime.credentials).unwrap();
+        assert_eq!(active.agent_for(&rotated), None);
+        assert_eq!(active.agent_for("agent-token"), Some("codex"));
+        let replacement = runtime.rotate_client_key().unwrap();
+        assert_ne!(replacement, rotated);
+        assert_eq!(runtime.client_key().unwrap(), replacement);
     }
 
     #[test]
@@ -1364,7 +1405,22 @@ mod tests {
                 port: occupied.local_addr().unwrap().port(),
                 ..config.clone()
             };
-            assert!(runtime.save_local_api_config(candidate).await.is_err());
+            // A secondary instance cannot touch the listener or persisted config.
+            assert!(runtime
+                .save_local_api_config(candidate.clone())
+                .await
+                .unwrap_err()
+                .contains("primary"));
+            assert!(std::net::TcpStream::connect(original.bind).is_ok());
+            // Exercise rollback directly without a primary instance or user data.
+            assert!(runtime
+                .rebind_local_api(
+                    candidate.clone(),
+                    original.clone(),
+                    local_api::resolve(candidate).unwrap()
+                )
+                .await
+                .is_err());
             let state = runtime.state().unwrap();
             assert_eq!(state.local_api, config);
             assert_eq!(state.proxy_url.as_deref(), Some(original.endpoint.as_str()));
