@@ -100,7 +100,7 @@ function sendEnvelope(envelope) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`Timed out waiting for ${method}`));
+      reject(new Error(`Timed out waiting for ${envelope.method}`));
     }, 15_000);
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(`${message}\n`, (error) => {

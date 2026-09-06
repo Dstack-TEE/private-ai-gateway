@@ -26,12 +26,18 @@ internal static class NativeDialogs
                 list.Items.Add(row);
                 if (profile.Id == selected?.Id) list.SelectedItem = row;
             }
-            list.SelectionChanged += (_, _) => selected = (list.SelectedItem as FrameworkElement)?.Tag as ConfidentialProfile;
             var actions = Horizontal(8);
             var add = new Button { Content = IconLabel("New", "\uE710") };
             var edit = new Button { Content = IconLabel("Edit", "\uE70F"), IsEnabled = selected is not null };
             var delete = new Button { Content = IconLabel("Delete", "\uE74D"), IsEnabled = selected is not null && store.State.Profiles.Length > 1 };
             var use = new Button { Content = "Use Profile", IsEnabled = selected?.VerifiedAt is not null && selected.Id != store.State.ActiveProfileId };
+            list.SelectionChanged += (_, _) =>
+            {
+                selected = (list.SelectedItem as FrameworkElement)?.Tag as ConfidentialProfile;
+                edit.IsEnabled = selected is not null;
+                delete.IsEnabled = selected is not null && store.State.Profiles.Length > 1;
+                use.IsEnabled = selected?.VerifiedAt is not null && selected.Id != store.State.ActiveProfileId;
+            };
             add.Click += (_, _) => nextAction = "new";
             edit.Click += (_, _) => nextAction = "edit";
             delete.Click += (_, _) => nextAction = "delete";
@@ -47,9 +53,15 @@ internal static class NativeDialogs
                 case "edit" when selected is not null: await ShowProfileEditorAsync(store, selected, root); break;
                 case "delete" when selected is not null:
                     if (await ConfirmAsync("Delete profile?", "The profile credential will be removed from Windows Credential Manager.", "Delete", root))
-                        await store.DeleteProfileAsync(selected.Id);
+                    {
+                        try { await store.DeleteProfileAsync(selected.Id); }
+                        catch (Exception) { return; }
+                    }
                     break;
-                case "use" when selected is not null: await store.ActivateProfileAsync(selected.Id); break;
+                case "use" when selected is not null:
+                    try { await store.ActivateProfileAsync(selected.Id); }
+                    catch (Exception) { return; }
+                    break;
                 default: return;
             }
         }
@@ -65,9 +77,10 @@ internal static class NativeDialogs
         var key = new PasswordBox { Header = profile?.VerifiedAt is null ? "API key" : "API key (leave blank to keep)", PasswordRevealMode = PasswordRevealMode.Peek };
         var verify = new Button { Content = "Verify and Save", HorizontalAlignment = HorizontalAlignment.Right };
         var verified = new InfoBar { Severity = InfoBarSeverity.Success, Title = "Verified configuration", IsOpen = profile?.VerifiedAt is not null, IsClosable = false };
+        var validation = new InfoBar { Severity = InfoBarSeverity.Error, Title = "Configuration could not be verified", IsOpen = false, IsClosable = true };
         var allowDev = new ToggleSwitch { Header = "Allow development OS", IsOn = !store.State.Config.RequireProductionOs };
         var explanation = new TextBlock { Text = "Development OS mode weakens the production attestation policy and is shown in yellow whenever protection is running.", TextWrapping = TextWrapping.Wrap, Opacity = 0.65 };
-        var content = Vertical(14); content.Children.Add(name); content.Children.Add(provider); content.Children.Add(endpoint); content.Children.Add(key); content.Children.Add(verify); content.Children.Add(verified); content.Children.Add(allowDev); content.Children.Add(explanation);
+        var content = Vertical(14); content.Children.Add(name); content.Children.Add(provider); content.Children.Add(endpoint); content.Children.Add(key); content.Children.Add(verify); content.Children.Add(verified); content.Children.Add(validation); content.Children.Add(allowDev); content.Children.Add(explanation);
         var dialog = Dialog(profile is null ? "New Profile" : "Edit Profile", content, root, "Cancel");
         provider.SelectionChanged += (_, _) =>
         {
@@ -80,9 +93,16 @@ internal static class NativeDialogs
         {
             verify.IsEnabled = false;
             verify.Content = "Verifying…";
+            validation.IsOpen = false;
             var providerId = provider.SelectedIndex switch { 0 => "phala", 2 => "custom", _ => "redpill" };
             var input = new ConfidentialProfileInput(profile?.Id ?? $"profile-{Guid.NewGuid():N}", name.Text, providerId, endpoint.Text);
-            if (await store.VerifyAndSaveAsync(input, allowDev.IsOn, key.Password)) dialog.Hide();
+            var result = await store.VerifyAndSaveAsync(input, allowDev.IsOn, key.Password);
+            if (result.Success) dialog.Hide();
+            else
+            {
+                validation.Message = result.Error ?? "The configuration could not be verified.";
+                validation.IsOpen = true;
+            }
             verify.IsEnabled = true;
             verify.Content = "Verify and Save";
         };
@@ -96,9 +116,10 @@ internal static class NativeDialogs
         var network = new ToggleSwitch { Header = "Allow network access", IsOn = current.AllowNetworkAccess };
         var port = new NumberBox { Header = "Port", Value = current.Port, Minimum = 1024, Maximum = 65535, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact };
         var host = new TextBox { Header = "Client host", Text = current.ClientHost ?? "" };
-        var note = new InfoBar { Title = "Network access exposes the Local API beyond this PC.", Message = "Connected agents must be disconnected before changing the endpoint.", Severity = InfoBarSeverity.Warning, IsOpen = false, IsClosable = false };
+        var note = new InfoBar { Title = "Network access exposes the Local API beyond this PC.", Message = "Connected agents must be disconnected before changing the endpoint.", Severity = InfoBarSeverity.Warning, IsOpen = network.IsOn, IsClosable = false };
+        var validation = new InfoBar { Title = "Local API settings could not be saved", Severity = InfoBarSeverity.Error, IsOpen = false, IsClosable = true };
         network.Toggled += (_, _) => note.IsOpen = network.IsOn;
-        var content = Vertical(14); content.Children.Add(address); content.Children.Add(network); content.Children.Add(note); content.Children.Add(port); content.Children.Add(host);
+        var content = Vertical(14); content.Children.Add(address); content.Children.Add(network); content.Children.Add(note); content.Children.Add(port); content.Children.Add(host); content.Children.Add(validation);
         var dialog = new ContentDialog { Title = "Local API Settings", Content = content, PrimaryButtonText = "Save", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary, XamlRoot = root, MinWidth = 540 };
         dialog.PrimaryButtonClick += async (_, args) =>
         {
@@ -106,11 +127,16 @@ internal static class NativeDialogs
             try
             {
                 args.Cancel = true;
+                validation.IsOpen = false;
                 var value = double.IsNaN(port.Value) ? 0 : port.Value;
                 await store.SaveLocalApiAsync(new(address.Text, network.IsOn, (ushort)value, string.IsNullOrWhiteSpace(host.Text) ? null : host.Text));
                 dialog.Hide();
             }
-            catch { }
+            catch (Exception error)
+            {
+                validation.Message = error.Message;
+                validation.IsOpen = true;
+            }
             finally { deferral.Complete(); }
         };
         await dialog.ShowAsync();

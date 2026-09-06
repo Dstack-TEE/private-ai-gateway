@@ -6,6 +6,7 @@ namespace PrivateAIGateway.Windows;
 public partial class App : Application
 {
     public static MainWindow MainWindow { get; private set; } = null!;
+    public static bool IsSmokeTest { get; private set; }
     private static readonly Mutex Instance;
     private static readonly bool IsFirstInstance;
 
@@ -29,11 +30,12 @@ public partial class App : Application
             Exit();
             return;
         }
+        IsSmokeTest = Environment.GetCommandLineArgs().Contains("--smoke-test");
         MainWindow = new MainWindow();
         Trace("app:activating");
         MainWindow.Activate();
         Trace("app:activated");
-        if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideAfterLaunch();
+        if (Environment.GetCommandLineArgs().Contains("--autostart") || IsSmokeTest) MainWindow.HideAfterLaunch();
     }
 
     private static void WriteCrashLog(Exception error)

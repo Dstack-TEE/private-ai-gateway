@@ -113,5 +113,7 @@ All four clients must expose the same product behavior:
   and platform-standard confirmation dialogs.
 
 The native clients are release-ready only after their dedicated CI runner
-compiles, packages, launches, and smoke-tests the real runtime protocol. Source
-that has not passed its platform compiler is not counted as complete.
+compiles, packages, and completes a runtime RPC handshake through the packaged
+GUI client before exercising bounded shutdown. A standalone protocol smoke is
+supplementary and does not prove that the GUI owns a live runtime. Source that
+has not passed its platform compiler is not counted as complete.

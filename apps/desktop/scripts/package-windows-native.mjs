@@ -21,7 +21,7 @@ run(process.execPath, ["scripts/prepare-native-assets.mjs"]);
 run("node", ["scripts/bundle-native.mjs"]);
 await rm(stage, { recursive: true, force: true });
 await mkdir(stage, { recursive: true });
-run("dotnet", ["publish", project, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:Platform=x64", "-o", stage]);
+run("dotnet", ["publish", project, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:Platform=x64", "-m:2", "-o", stage]);
 
 const target = execFileSync(process.env.RUSTC ?? "rustc", ["-vV"], { encoding: "utf8" }).match(/^host: (.+)$/m)?.[1];
 if (!target) throw new Error("Cannot determine the Rust target triple");

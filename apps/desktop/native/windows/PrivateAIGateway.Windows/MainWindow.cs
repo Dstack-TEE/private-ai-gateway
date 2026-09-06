@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -12,15 +13,19 @@ public sealed class MainWindow : Window
 {
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
-    private readonly NavigationView Navigation = new();
-    private readonly TextBlock PageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
-    private readonly Border DevBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
-    private readonly TextBlock StatusText = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
-    private readonly ToggleSwitch ProtectionSwitch = new();
-    private readonly ContentPresenter PageHost = new();
+    private readonly IReadOnlyDictionary<string, INativePage> pages;
+    private readonly NavigationView navigation = new();
+    private readonly TextBlock pageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Border devBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
+    private readonly TextBlock statusText = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.7 };
+    private readonly ToggleSwitch protectionSwitch = new();
+    private readonly ContentPresenter pageHost = new();
+    private readonly InfoBar errorBar = new() { Severity = InfoBarSeverity.Error, IsOpen = false, IsClosable = true };
+    private readonly Button restartButton = new() { Content = "Restart Runtime", Visibility = Visibility.Collapsed };
     private string page = "overview";
     private bool syncingSwitch;
     private bool initialized;
+    private bool quitting;
     private AppWindow appWindow = null!;
 
     public MainWindow()
@@ -28,95 +33,95 @@ public sealed class MainWindow : Window
         App.Trace("window:constructing");
         Title = "Private AI Gateway";
         BuildShell();
+        pages = NativeViews.CreatePages(store, this);
+        pageHost.Content = pages[page].Content;
         App.Trace("window:shell-built");
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
         appWindow.Resize(new global::Windows.Graphics.SizeInt32(1052, 820));
         appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
-        appWindow.Closing += (_, args) => { args.Cancel = true; appWindow.Hide(); };
+        appWindow.Closing += (_, args) =>
+        {
+            args.Cancel = !quitting;
+            if (!quitting) appWindow.Hide();
+        };
         App.Trace("window:app-window-ready");
         tray = new NativeTray(hwnd, ShowMainWindow, ShowSettings, ToggleFromTray, QuitAsync);
         App.Trace("window:tray-ready");
-        store.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(Render);
-        store.Error += message => DispatcherQueue.TryEnqueue(async () => await ShowErrorAsync(message));
-        Activated += async (_, _) => { if (!initialized) { initialized = true; await InitializeAsync(); } };
-        Navigation.Loaded += SelectInitialPage;
+        store.PropertyChanged += (_, args) => DispatcherQueue.TryEnqueue(() => Update(args.PropertyName));
+        store.Error += message => DispatcherQueue.TryEnqueue(() => ShowError(message));
+        restartButton.Click += async (_, _) => await RestartRuntimeAsync();
+        errorBar.ActionButton = restartButton;
+        Activated += async (_, _) =>
+        {
+            if (!initialized)
+            {
+                initialized = true;
+                await InitializeAsync();
+            }
+        };
+        navigation.Loaded += SelectInitialPage;
         App.Trace("window:constructed");
     }
 
     private void SelectInitialPage(object sender, RoutedEventArgs args)
     {
-        Navigation.Loaded -= SelectInitialPage;
-        App.Trace("navigation:loaded");
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            App.Trace("navigation:selecting");
-            Navigation.SelectedItem = Navigation.MenuItems[0];
-            App.Trace("navigation:selected");
-        });
+        navigation.Loaded -= SelectInitialPage;
+        DispatcherQueue.TryEnqueue(() => navigation.SelectedItem = navigation.MenuItems[0]);
     }
 
     private void BuildShell()
     {
-        Navigation.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed;
-        Navigation.IsSettingsVisible = true;
-        Navigation.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
-        Navigation.OpenPaneLength = 220;
-        Navigation.SelectionChanged += Navigation_SelectionChanged;
-        Navigation.MenuItems.Add(NavigationItem("Overview", "overview", new SymbolIcon(Symbol.Home)));
-        Navigation.MenuItems.Add(NavigationItem("Agents", "agents", new FontIcon { Glyph = "\uE756" }));
-        Navigation.MenuItems.Add(NavigationItem("Usage", "usage", new FontIcon { Glyph = "\uE9D2" }));
+        navigation.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed;
+        navigation.IsSettingsVisible = true;
+        navigation.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
+        navigation.OpenPaneLength = 220;
+        navigation.SelectionChanged += Navigation_SelectionChanged;
+        navigation.MenuItems.Add(NavigationItem("Overview", "overview", new SymbolIcon(Symbol.Home)));
+        navigation.MenuItems.Add(NavigationItem("Agents", "agents", new FontIcon { Glyph = "\uE756" }));
+        navigation.MenuItems.Add(NavigationItem("Usage", "usage", new FontIcon { Glyph = "\uE9D2" }));
 
         var brand = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Padding = new Thickness(4, 8, 0, 16) };
-        brand.Children.Add(new Image
-        {
-            Source = new SvgImageSource(new Uri("ms-appx:///Assets/brand/mark.svg")),
-            Width = 34,
-            Height = 34,
-        });
+        brand.Children.Add(new Image { Source = new SvgImageSource(new Uri("ms-appx:///Assets/brand/mark.svg")), Width = 34, Height = 34 });
         var brandText = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         brandText.Children.Add(new TextBlock { Text = "Private AI Gateway", FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold });
         brandText.Children.Add(new TextBlock { Text = "Confidential inference", FontSize = 12, Opacity = 0.65 });
         brand.Children.Add(brandText);
-        Navigation.PaneHeader = brand;
+        navigation.PaneHeader = brand;
 
         var shell = new Grid();
         shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(58) });
+        shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var header = new Grid { Padding = new Thickness(24, 0, 24, 0) };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(PageTitle);
-
-        DevBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold };
+        header.Children.Add(pageTitle);
+        devBadge.Child = new TextBlock { Text = "Dev mode", Foreground = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0xB8, 0x78, 0)), FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold };
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
-        controls.Children.Add(DevBadge);
-        controls.Children.Add(StatusText);
+        controls.Children.Add(devBadge);
+        controls.Children.Add(statusText);
         controls.Children.Add(new TextBlock { Text = "Protected", VerticalAlignment = VerticalAlignment.Center });
-        ProtectionSwitch.Toggled += ProtectionSwitch_Toggled;
-        controls.Children.Add(ProtectionSwitch);
+        protectionSwitch.Toggled += ProtectionSwitch_Toggled;
+        controls.Children.Add(protectionSwitch);
         Grid.SetColumn(controls, 1);
         header.Children.Add(controls);
-
-        var headerBorder = new Border
+        shell.Children.Add(new Border
         {
             BorderBrush = new SolidColorBrush(ColorHelper.FromArgb(0x20, 0x80, 0x80, 0x80)),
             BorderThickness = new Thickness(0, 0, 0, 1),
             Child = header,
-        };
-        shell.Children.Add(headerBorder);
-        Grid.SetRow(PageHost, 1);
-        shell.Children.Add(PageHost);
-        Navigation.Content = shell;
-        Content = Navigation;
+        });
+        errorBar.Margin = new Thickness(24, 8, 24, 0);
+        Grid.SetRow(errorBar, 1);
+        shell.Children.Add(errorBar);
+        Grid.SetRow(pageHost, 2);
+        shell.Children.Add(pageHost);
+        navigation.Content = shell;
+        Content = navigation;
     }
 
-    private static NavigationViewItem NavigationItem(string title, string tag, IconElement icon) => new()
-    {
-        Content = title,
-        Tag = tag,
-        Icon = icon,
-    };
+    private static NavigationViewItem NavigationItem(string title, string tag, IconElement icon) => new() { Content = title, Tag = tag, Icon = icon };
 
     public void ShowMainWindow()
     {
@@ -124,112 +129,180 @@ public sealed class MainWindow : Window
         Activate();
     }
 
-    public void HideMainWindow() => appWindow.Hide();
-
-    public void HideAfterLaunch() => DispatcherQueue.TryEnqueue(() =>
-    {
-        App.Trace("window:hiding");
-        appWindow.Hide();
-        App.Trace("window:hidden");
-    });
+    public void HideAfterLaunch() => DispatcherQueue.TryEnqueue(appWindow.Hide);
 
     public void ShowSettings()
     {
         ShowMainWindow();
-        Navigation.SelectedItem = Navigation.SettingsItem;
+        navigation.SelectedItem = navigation.SettingsItem;
     }
 
     private async Task InitializeAsync()
     {
-        try { await store.InitializeAsync(); Render(); }
-        catch (Exception error) { await ShowErrorAsync(error.Message); }
+        var healthy = false;
+        try
+        {
+            healthy = await store.InitializeAsync();
+            if (healthy) ClearError();
+        }
+        catch (Exception error) { ShowError(error.Message); }
+        Update(null);
+        var passed = healthy && store.IsRuntimeAvailable && store.Agents.Length == 5;
+        WriteHealthResult(passed);
+        if (App.IsSmokeTest)
+        {
+            if (!passed) Environment.ExitCode = 1;
+            await QuitCoreAsync();
+        }
     }
 
-    private void Render()
+    private void Update(string? propertyName)
     {
         syncingSwitch = true;
-        ProtectionSwitch.IsOn = store.IsRunning;
-        ProtectionSwitch.IsEnabled = !store.IsBusy;
+        protectionSwitch.IsOn = store.IsRunning;
+        protectionSwitch.IsEnabled = store.IsRuntimeAvailable && !store.IsBusy;
         syncingSwitch = false;
-        StatusText.Text = StatusLabel(store.State);
-        DevBadge.Visibility = store.IsRunning && store.IsDevMode ? Visibility.Visible : Visibility.Collapsed;
-        tray.Update(store.IsRunning, store.IsProtected, StatusLabel(store.State));
-        PageHost.Content = page switch
+        statusText.Text = store.IsRuntimeAvailable ? RuntimePresentation.StatusLabel(store.State) : "Runtime unavailable";
+        devBadge.Visibility = RuntimePresentation.ShowDevMode(store.State) && store.IsRuntimeAvailable ? Visibility.Visible : Visibility.Collapsed;
+        tray.Update(store.IsProtected, statusText.Text);
+
+        switch (propertyName)
         {
-            "agents" => NativeViews.Agents(store),
-            "usage" => NativeViews.Usage(store, this),
-            "settings" => NativeViews.Settings(store, this),
-            _ => NativeViews.Overview(store, this),
-        };
+            case nameof(RuntimeStore.Agents):
+                pages["overview"].Update();
+                pages["agents"].Update();
+                break;
+            case nameof(RuntimeStore.Usage):
+                pages["usage"].Update();
+                break;
+            case nameof(RuntimeStore.ClientKey):
+                pages["overview"].Update();
+                break;
+            case nameof(RuntimeStore.State):
+                pages["overview"].Update();
+                pages["settings"].Update();
+                break;
+            case nameof(RuntimeStore.IsRuntimeAvailable):
+            case null:
+                foreach (var nativePage in pages.Values) nativePage.Update();
+                break;
+        }
     }
 
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         page = args.IsSettingsSelected ? "settings" : (args.SelectedItemContainer?.Tag?.ToString() ?? "overview");
-        PageTitle.Text = page switch { "agents" => "Agents", "usage" => "Usage", "settings" => "Settings", _ => "Overview" };
-        Render();
+        pageTitle.Text = page switch { "agents" => "Agents", "usage" => "Usage", "settings" => "Settings", _ => "Overview" };
+        pages[page].Update();
+        if (!ReferenceEquals(pageHost.Content, pages[page].Content)) pageHost.Content = pages[page].Content;
     }
 
     private async void ProtectionSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         if (syncingSwitch) return;
-        if (ProtectionSwitch.IsOn && (!store.State.ApiKeySaved || store.State.Profiles.Length == 0))
+        if (protectionSwitch.IsOn && (!store.State.ApiKeySaved || store.State.Profiles.Length == 0))
         {
             syncingSwitch = true;
-            ProtectionSwitch.IsOn = false;
+            protectionSwitch.IsOn = false;
             syncingSwitch = false;
             await ShowProfilesAsync();
             return;
         }
-        try { await store.SetProtectionAsync(ProtectionSwitch.IsOn); }
-        catch { Render(); }
+        try { await store.SetProtectionAsync(protectionSwitch.IsOn); }
+        catch (Exception) { Update(null); }
     }
 
     private async void ToggleFromTray()
     {
+        if (!store.IsRuntimeAvailable)
+        {
+            ShowMainWindow();
+            ShowError("The desktop runtime is not running. Restart it to continue.");
+            return;
+        }
         if (!store.IsRunning && (!store.State.ApiKeySaved || store.State.Profiles.Length == 0))
         {
             ShowMainWindow();
             await ShowProfilesAsync();
             return;
         }
-        try { await store.SetProtectionAsync(!store.IsRunning); } catch { }
+        try { await store.SetProtectionAsync(!store.IsRunning); }
+        catch (Exception) { }
     }
 
-    public async Task ShowProfilesAsync() => await NativeDialogs.ShowProfilesAsync(store, ContentRoot());
-    public async Task ShowLocalApiAsync() => await NativeDialogs.ShowLocalApiAsync(store, ContentRoot());
-    public async Task ShowProofAsync(RequestActivity item) => await NativeDialogs.ShowProofAsync(store.State, item, ContentRoot());
-    public async Task ShowPrivacyAsync() => await NativeDialogs.ShowPrivacyAsync(store.State, ContentRoot());
+    public Task ShowProfilesAsync() => NativeDialogs.ShowProfilesAsync(store, ContentRoot());
+    public Task ShowLocalApiAsync() => NativeDialogs.ShowLocalApiAsync(store, ContentRoot());
+    public Task ShowProofAsync(RequestActivity item) => NativeDialogs.ShowProofAsync(store.State, item, ContentRoot());
+    public Task ShowPrivacyAsync() => NativeDialogs.ShowPrivacyAsync(store.State, ContentRoot());
+
     public async Task ConfirmRestoreAsync()
     {
         if (await NativeDialogs.ConfirmAsync("Restore all agent configurations?", "Private AI Gateway will revoke every managed agent token and restore its previous configuration where possible.", "Restore All", ContentRoot()))
             await store.RestoreAllAgentsAsync();
     }
+
     public async Task ConfirmClearUsageAsync()
     {
         if (await NativeDialogs.ConfirmAsync("Clear all usage history?", "This permanently deletes the local usage database. It does not affect provider records.", "Clear History", ContentRoot()))
             await store.ClearUsageAsync();
     }
 
-    private async Task ShowErrorAsync(string message)
+    private async Task RestartRuntimeAsync()
     {
-        var dialog = new ContentDialog { Title = "Private AI Gateway", Content = message, CloseButtonText = "OK", XamlRoot = ContentRoot() };
-        await dialog.ShowAsync();
+        restartButton.IsEnabled = false;
+        var restarted = await store.RestartAsync();
+        restartButton.IsEnabled = true;
+        if (restarted) ClearError();
+    }
+
+    private void ShowError(string message)
+    {
+        errorBar.Title = store.IsRuntimeAvailable ? "Operation failed" : "Desktop runtime unavailable";
+        errorBar.Message = message;
+        restartButton.Visibility = store.IsRuntimeAvailable ? Visibility.Collapsed : Visibility.Visible;
+        errorBar.IsClosable = store.IsRuntimeAvailable;
+        errorBar.IsOpen = true;
+    }
+
+    private void ClearError()
+    {
+        errorBar.IsOpen = false;
+        restartButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void WriteHealthResult(bool healthy)
+    {
+        var path = Environment.GetEnvironmentVariable("PRIVATE_AI_GATEWAY_GUI_HEALTH");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new
+            {
+                ok = healthy,
+                runtimeAvailable = store.IsRuntimeAvailable,
+                status = store.State.Status,
+                agents = store.Agents.Length,
+                clientKeyPresent = !string.IsNullOrEmpty(store.ClientKey),
+            }));
+            File.Move(temporary, path, true);
+        }
+        catch (Exception error) { App.Trace($"health-write-failed:{error.GetType().Name}"); }
+        finally
+        {
+            try { File.Delete(temporary); }
+            catch (Exception) { }
+        }
     }
 
     private XamlRoot ContentRoot() => Content.XamlRoot;
-    private static string StatusLabel(GatewayState state) => state.Status switch
-    {
-        "verifying" => state.ConfigurationVerification ? "Verifying configuration" : "Starting",
-        "verified" when !state.Config.RequireProductionOs => "Protected · Dev mode",
-        "verified" => "Protected",
-        "blocked" => "Blocked",
-        "error" => "Needs attention",
-        _ => "Not protected",
-    };
 
-    private async void QuitAsync()
+    private async void QuitAsync() => await QuitCoreAsync();
+
+    private async Task QuitCoreAsync()
     {
+        if (quitting) return;
+        quitting = true;
         tray.Dispose();
         await store.DisposeAsync();
         appWindow.Destroy();

@@ -37,7 +37,7 @@ internal sealed class NativeTray : IDisposable
     private readonly WindowProc callback;
     private readonly nint normalIcon;
     private readonly nint protectedIcon;
-    private bool running;
+    private bool protectedState;
     private string status = "Not protected";
 
     internal NativeTray(nint window, Action open, Action settings, Action toggle, Action quit)
@@ -69,9 +69,9 @@ internal sealed class NativeTray : IDisposable
         Notify(NimAdd, normalIcon, "Private AI Gateway - Not protected");
     }
 
-    internal void Update(bool running, bool protectedState, string status)
+    internal void Update(bool protectedState, string status)
     {
-        this.running = running;
+        this.protectedState = protectedState;
         this.status = status;
         Notify(NimModify, protectedState ? protectedIcon : normalIcon, $"Private AI Gateway - {status}");
     }
@@ -90,7 +90,7 @@ internal sealed class NativeTray : IDisposable
     private void ShowMenu()
     {
         var menu = CreatePopupMenu();
-        AppendMenu(menu, MfString | (running ? MfChecked : 0), 1, "Protected");
+        AppendMenu(menu, MfString | (protectedState ? MfChecked : 0), 1, "Protected");
         AppendMenu(menu, MfString | MfGray, 2, status);
         AppendMenu(menu, MfSeparator, 0, null);
         AppendMenu(menu, MfString, 3, "Open Private AI Gateway");

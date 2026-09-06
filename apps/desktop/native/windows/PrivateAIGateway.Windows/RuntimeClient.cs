@@ -5,7 +5,7 @@ using System.Text.Json;
 
 namespace PrivateAIGateway.Windows;
 
-public sealed class RuntimeException(string code, string message) : Exception(message)
+public sealed class RuntimeException(string code, string message, Exception? innerException = null) : Exception(message, innerException)
 {
     public string Code { get; } = code;
 }
@@ -13,24 +13,39 @@ public sealed class RuntimeException(string code, string message) : Exception(me
 public sealed class RuntimeClient : IAsyncDisposable
 {
     private const int MaxMessageBytes = 1024 * 1024;
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(2);
     private readonly JsonSerializerOptions json = new(JsonSerializerDefaults.Web);
+    private readonly UTF8Encoding utf8 = new(false, true);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pending = new();
     private readonly SemaphoreSlim writeLock = new(1, 1);
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly object disposeLock = new();
     private Process? process;
     private StreamWriter? input;
+    private Task? readTask;
+    private Task? errorTask;
+    private Exception? failure;
+    private Task? disposeTask;
     private long nextId;
+    private int failed;
+    private int disposing;
 
     public event Action<GatewayState>? StateChanged;
     public event Action<Exception?>? Exited;
+    internal bool IsAvailable => Volatile.Read(ref failed) == 0 && IsRunning(process);
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var configured = Environment.GetEnvironmentVariable("PRIVATE_AI_GATEWAY_RUNTIME");
         var service = string.IsNullOrWhiteSpace(configured)
             ? Path.Combine(AppContext.BaseDirectory, "private-ai-gateway-desktop-service.exe")
             : configured;
         if (!File.Exists(service)) throw new RuntimeException("runtime_missing", "The bundled desktop runtime is missing.");
-        process = new Process
+
+        var started = new Process
         {
             StartInfo = new ProcessStartInfo(service)
             {
@@ -42,77 +57,224 @@ public sealed class RuntimeClient : IAsyncDisposable
             },
             EnableRaisingEvents = true,
         };
-        process.Exited += (_, _) => Exited?.Invoke(process.ExitCode == 0 ? null : new RuntimeException("runtime_exited", $"The desktop runtime exited with status {process.ExitCode}."));
-        if (!process.Start()) throw new RuntimeException("runtime_start_failed", "The desktop runtime could not be started.");
-        input = process.StandardInput;
-        _ = Task.Run(() => ReadAsync(process.StandardOutput, cancellationToken), cancellationToken);
-        _ = Task.Run(() => DrainErrorsAsync(process.StandardError, cancellationToken), cancellationToken);
+        started.Exited += ProcessExited;
+        process = started;
+        try
+        {
+            if (!started.Start()) throw new RuntimeException("runtime_start_failed", "The desktop runtime could not be started.");
+        }
+        catch (Exception error)
+        {
+            started.Exited -= ProcessExited;
+            process = null;
+            started.Dispose();
+            throw error is RuntimeException ? error : new RuntimeException("runtime_start_failed", "The desktop runtime could not be started.", error);
+        }
+
+        input = started.StandardInput;
+        readTask = Task.Run(() => ReadAsync(started.StandardOutput.BaseStream, lifetime.Token));
+        errorTask = Task.Run(() => DrainErrorsAsync(started.StandardError, lifetime.Token));
         await Task.Yield();
+        if (Volatile.Read(ref failed) != 0)
+            throw failure ?? new RuntimeException("runtime_exited", "The desktop runtime stopped during startup.");
     }
 
     public async Task<T> RequestAsync<T>(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
-        if (input is null) throw new RuntimeException("runtime_unavailable", "The desktop runtime is not running.");
         var id = Interlocked.Increment(ref nextId).ToString();
-        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!pending.TryAdd(id, completion)) throw new RuntimeException("request_conflict", "A runtime request id was reused.");
         var payload = JsonSerializer.Serialize(new { schemaVersion = 1, id, method, @params = parameters }, json);
         if (Encoding.UTF8.GetByteCount(payload) > MaxMessageBytes)
-        {
-            pending.TryRemove(id, out _);
             throw new RuntimeException("message_too_large", "Desktop runtime message exceeds the 1 MiB limit.");
+
+        var writer = input ?? throw new RuntimeException("runtime_unavailable", "The desktop runtime is not running.");
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!pending.TryAdd(id, completion)) throw new RuntimeException("request_conflict", "A runtime request id was reused.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        timeout.CancelAfter(RequestTimeout);
+        using var registration = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
+        try
+        {
+            if (Volatile.Read(ref failed) != 0)
+                throw failure ?? new RuntimeException("runtime_unavailable", "The desktop runtime is not running.");
+            await writeLock.WaitAsync(timeout.Token);
+            try
+            {
+                await writer.WriteLineAsync(payload.AsMemory(), timeout.Token);
+                await writer.FlushAsync(timeout.Token);
+            }
+            finally { writeLock.Release(); }
+            var element = await completion.Task;
+            if (typeof(T) == typeof(JsonElement)) return (T)(object)element;
+            return element.Deserialize<T>(json) ?? throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid response.");
         }
-        await writeLock.WaitAsync(cancellationToken);
-        try { await input.WriteLineAsync(payload.AsMemory(), cancellationToken); await input.FlushAsync(cancellationToken); }
-        catch { pending.TryRemove(id, out _); throw; }
-        finally { writeLock.Release(); }
-        using var registration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
-        var element = await completion.Task;
-        if (typeof(T) == typeof(JsonElement)) return (T)(object)element;
-        return element.Deserialize<T>(json) ?? throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid response.");
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw failure ?? new RuntimeException("runtime_unavailable", "The desktop runtime is not running.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var timeoutError = new RuntimeException("request_timeout", $"The desktop runtime did not answer {method} within {RequestTimeout.TotalSeconds:0} seconds.");
+            Fail(timeoutError);
+            throw timeoutError;
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException)
+        {
+            var transport = new RuntimeException("runtime_write_failed", "The desktop runtime connection failed while sending a request.", error);
+            Fail(transport);
+            throw transport;
+        }
+        finally { pending.TryRemove(id, out _); }
     }
 
-    private async Task ReadAsync(StreamReader reader, CancellationToken cancellationToken)
+    private async Task ReadAsync(Stream stream, CancellationToken cancellationToken)
     {
         try
         {
-            while (!cancellationToken.IsCancellationRequested && await reader.ReadLineAsync(cancellationToken) is { } line)
+            var chunk = new byte[8192];
+            using var frame = new MemoryStream();
+            while (!cancellationToken.IsCancellationRequested)
             {
-                if (Encoding.UTF8.GetByteCount(line) > MaxMessageBytes) throw new RuntimeException("message_too_large", "Desktop runtime response exceeds the 1 MiB limit.");
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                if (root.TryGetProperty("event", out var eventName) && eventName.GetString() == "stateChanged")
+                var count = await stream.ReadAsync(chunk, cancellationToken);
+                if (count == 0)
                 {
-                    var state = root.GetProperty("payload").Deserialize<GatewayState>(json);
-                    if (state is not null) StateChanged?.Invoke(state);
-                    continue;
+                    if (frame.Length != 0) throw new RuntimeException("invalid_response", "The desktop runtime closed its connection mid-message.");
+                    Fail(new RuntimeException("runtime_eof", "The desktop runtime closed its connection."));
+                    return;
                 }
-                if (!root.TryGetProperty("id", out var idValue) || !pending.TryRemove(idValue.GetString() ?? "", out var completion)) continue;
-                if (root.TryGetProperty("error", out var error))
+                var start = 0;
+                for (var index = 0; index < count; index++)
                 {
-                    completion.TrySetException(new RuntimeException(
-                        error.TryGetProperty("code", out var code) ? code.GetString() ?? "operation_failed" : "operation_failed",
-                        error.TryGetProperty("message", out var message) ? message.GetString() ?? "The operation failed." : "The operation failed."));
+                    if (chunk[index] != (byte)'\n') continue;
+                    AppendFrame(frame, chunk.AsSpan(start, index - start));
+                    if (frame.Length > 0) HandleFrame(frame.ToArray());
+                    frame.SetLength(0);
+                    start = index + 1;
                 }
-                else completion.TrySetResult(root.GetProperty("result").Clone());
+                AppendFrame(frame, chunk.AsSpan(start, count - start));
             }
         }
-        catch (Exception error) { Exited?.Invoke(error); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            Fail(error is RuntimeException ? error : new RuntimeException("runtime_read_failed", "The desktop runtime connection failed while reading a response.", error));
+        }
+    }
+
+    private void AppendFrame(MemoryStream frame, ReadOnlySpan<byte> bytes)
+    {
+        if (frame.Length + bytes.Length > MaxMessageBytes)
+            throw new RuntimeException("message_too_large", "Desktop runtime response exceeds the 1 MiB limit.");
+        frame.Write(bytes);
+    }
+
+    private void HandleFrame(byte[] frame)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(utf8.GetString(frame));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("schemaVersion", out var schema) || schema.GetInt32() != 1)
+                throw new RuntimeException("unsupported_schema", "The desktop runtime returned an unsupported protocol version.");
+            if (root.TryGetProperty("event", out var eventName) && eventName.GetString() == "stateChanged")
+            {
+                var state = root.GetProperty("payload").Deserialize<GatewayState>(json);
+                if (state is not null) StateChanged?.Invoke(state);
+                return;
+            }
+            if (!root.TryGetProperty("id", out var idValue))
+                throw new RuntimeException("invalid_response", "The desktop runtime returned a response without an id.");
+            if (!pending.TryRemove(idValue.GetString() ?? "", out var completion)) return;
+            if (root.TryGetProperty("error", out var error))
+            {
+                completion.TrySetException(new RuntimeException(
+                    error.TryGetProperty("code", out var code) ? code.GetString() ?? "operation_failed" : "operation_failed",
+                    error.TryGetProperty("message", out var message) ? message.GetString() ?? "The operation failed." : "The operation failed."));
+            }
+            else if (root.TryGetProperty("result", out var result)) completion.TrySetResult(result.Clone());
+            else throw new RuntimeException("invalid_response", "The desktop runtime returned a response without a result.");
+        }
+        catch (Exception error)
+        {
+            throw error is RuntimeException ? error : new RuntimeException("invalid_response", "The desktop runtime returned invalid JSON.", error);
+        }
     }
 
     private static async Task DrainErrorsAsync(StreamReader reader, CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested && await reader.ReadLineAsync(cancellationToken) is not null) { }
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && await reader.ReadLineAsync(cancellationToken) is not null) { }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (IOException) { }
     }
 
-    public async ValueTask DisposeAsync()
+    private void ProcessExited(object? sender, EventArgs args)
     {
-        if (process is { HasExited: false })
+        var exited = sender as Process;
+        var status = exited is null ? null : SafeExitCode(exited);
+        var error = status == 0
+            ? new RuntimeException("runtime_exited", "The desktop runtime stopped.")
+            : new RuntimeException("runtime_exited", status is null
+                ? "The desktop runtime stopped unexpectedly."
+                : $"The desktop runtime exited with status {status}.");
+        Fail(error);
+    }
+
+    private static int? SafeExitCode(Process process)
+    {
+        try { return process.ExitCode; }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    private void Fail(Exception error)
+    {
+        if (Interlocked.Exchange(ref failed, 1) != 0) return;
+        failure = error;
+        foreach (var entry in pending.ToArray())
+            if (pending.TryRemove(entry.Key, out var completion)) completion.TrySetException(error);
+        lifetime.Cancel();
+        if (Volatile.Read(ref disposing) == 0) Exited?.Invoke(error);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (disposeLock) return new ValueTask(disposeTask ??= DisposeCoreAsync());
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        Interlocked.Exchange(ref disposing, 1);
+        if (IsRunning(process))
         {
-            try { await RequestAsync<JsonElement>("shutdown", new { }); }
-            catch { process.Kill(true); }
+            using var shutdown = new CancellationTokenSource(ShutdownTimeout);
+            try { await RequestAsync<JsonElement>("shutdown", new { }, shutdown.Token); }
+            catch (Exception) { }
+            try { await process.WaitForExitAsync(shutdown.Token); }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(true); }
+                catch (Exception) { }
+                using var killed = new CancellationTokenSource(DrainTimeout);
+                try { await process.WaitForExitAsync(killed.Token); }
+                catch (Exception) { }
+            }
+            catch (InvalidOperationException) { }
         }
+
+        lifetime.Cancel();
+        Fail(new RuntimeException("runtime_unavailable", "The desktop runtime is not running."));
+        var drains = new[] { readTask, errorTask }.Where(task => task is not null).Cast<Task>().ToArray();
+        if (drains.Length > 0) await Task.WhenAny(Task.WhenAll(drains), Task.Delay(DrainTimeout));
+        input?.Dispose();
+        if (process is not null) process.Exited -= ProcessExited;
         process?.Dispose();
-        writeLock.Dispose();
+    }
+
+    private static bool IsRunning(Process? process)
+    {
+        if (process is null) return false;
+        try { return !process.HasExited; }
+        catch (InvalidOperationException) { return false; }
     }
 }
