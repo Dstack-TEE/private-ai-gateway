@@ -42,9 +42,12 @@ public partial class App : Application
     {
         try
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Private AI Gateway");
-            Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "crash.log"), $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{error}{Environment.NewLine}{Environment.NewLine}");
+            var path = Environment.GetEnvironmentVariable("PRIVATE_AI_GATEWAY_CRASH_LOG");
+            if (string.IsNullOrWhiteSpace(path))
+                path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Private AI Gateway", "crash.log");
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+            File.AppendAllText(path, $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{error}{Environment.NewLine}{Environment.NewLine}");
         }
         catch { }
     }

@@ -58,8 +58,12 @@ public sealed class RuntimeStore : INotifyPropertyChanged, IAsyncDisposable
             next.Exited += error => App.MainWindow.DispatcherQueue.TryEnqueue(() => RuntimeExited(next, error));
             try
             {
+                App.Trace("runtime:start:starting");
                 await next.StartAsync();
+                App.Trace("runtime:start:completed");
+                App.Trace("runtime:handshake:starting");
                 await LoadInitialDataAsync(next);
+                App.Trace("runtime:handshake:completed");
                 EnsureOwned(next);
                 if (!next.IsAvailable)
                     throw new RuntimeException("runtime_exited", "The desktop runtime stopped during startup.");
@@ -68,6 +72,7 @@ public sealed class RuntimeStore : INotifyPropertyChanged, IAsyncDisposable
             }
             catch (Exception error)
             {
+                App.Trace($"runtime:restart-failed:{error.GetType().Name}");
                 if (ReferenceEquals(client, next)) client = null;
                 IsRuntimeAvailable = false;
                 ClearRuntimeData();

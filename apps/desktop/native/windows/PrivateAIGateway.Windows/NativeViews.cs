@@ -18,14 +18,19 @@ internal static class NativeViews
     private static readonly SolidColorBrush Success = new(global::Windows.UI.Color.FromArgb(255, 44, 110, 73));
     private static readonly SolidColorBrush Warning = new(global::Windows.UI.Color.FromArgb(255, 184, 120, 0));
 
-    internal static IReadOnlyDictionary<string, INativePage> CreatePages(RuntimeStore store, MainWindow window) =>
-        new Dictionary<string, INativePage>
+    internal static INativePage CreatePage(string pageName, RuntimeStore store, MainWindow window)
+    {
+        App.Trace($"page:{pageName}:creating");
+        var page = pageName switch
         {
-            ["overview"] = new OverviewPage(store, window),
-            ["agents"] = new AgentsPage(store),
-            ["usage"] = new UsagePageView(store, window),
-            ["settings"] = new SettingsPage(store, window),
+            "agents" => new AgentsPage(store),
+            "usage" => new UsagePageView(store, window),
+            "settings" => new SettingsPage(store, window),
+            _ => new OverviewPage(store, window),
         };
+        App.Trace($"page:{pageName}:created");
+        return page;
+    }
 
     private sealed class OverviewPage : INativePage
     {

@@ -270,18 +270,19 @@ public sealed class RuntimeClient : IAsyncDisposable
     private async Task DisposeCoreAsync()
     {
         Interlocked.Exchange(ref disposing, 1);
-        if (IsRunning(process))
+        var ownedProcess = process;
+        if (ownedProcess is not null && IsRunning(ownedProcess))
         {
             using var shutdown = new CancellationTokenSource(ShutdownTimeout);
             try { await RequestAsync<JsonElement>("shutdown", new { }, shutdown.Token); }
             catch (Exception) { }
-            try { await process.WaitForExitAsync(shutdown.Token); }
+            try { await ownedProcess.WaitForExitAsync(shutdown.Token); }
             catch (OperationCanceledException)
             {
-                try { process.Kill(true); }
+                try { ownedProcess.Kill(true); }
                 catch (Exception) { }
                 using var killed = new CancellationTokenSource(DrainTimeout);
-                try { await process.WaitForExitAsync(killed.Token); }
+                try { await ownedProcess.WaitForExitAsync(killed.Token); }
                 catch (Exception) { }
             }
             catch (InvalidOperationException) { }
@@ -292,8 +293,8 @@ public sealed class RuntimeClient : IAsyncDisposable
         var drains = new[] { readTask, errorTask }.Where(task => task is not null).Cast<Task>().ToArray();
         if (drains.Length > 0) await Task.WhenAny(Task.WhenAll(drains), Task.Delay(DrainTimeout));
         input?.Dispose();
-        if (process is not null) process.Exited -= ProcessExited;
-        process?.Dispose();
+        if (ownedProcess is not null) ownedProcess.Exited -= ProcessExited;
+        ownedProcess?.Dispose();
     }
 
     private static bool IsRunning(Process? process)

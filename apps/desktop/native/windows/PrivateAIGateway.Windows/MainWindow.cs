@@ -13,7 +13,7 @@ public sealed class MainWindow : Window
 {
     private readonly RuntimeStore store = new();
     private readonly NativeTray tray;
-    private readonly IReadOnlyDictionary<string, INativePage> pages;
+    private readonly Dictionary<string, INativePage> pages = [];
     private readonly NavigationView navigation = new();
     private readonly TextBlock pageTitle = new() { Text = "Overview", FontSize = 20, FontWeight = global::Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
     private readonly Border devBadge = new() { Background = new SolidColorBrush(ColorHelper.FromArgb(0x33, 0xE9, 0xA4, 0)), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 3, 7, 3), Visibility = Visibility.Collapsed };
@@ -25,6 +25,7 @@ public sealed class MainWindow : Window
     private string page = "overview";
     private bool syncingSwitch;
     private bool initialized;
+    private bool navigationReady;
     private bool quitting;
     private AppWindow appWindow = null!;
 
@@ -33,8 +34,6 @@ public sealed class MainWindow : Window
         App.Trace("window:constructing");
         Title = "Private AI Gateway";
         BuildShell();
-        pages = NativeViews.CreatePages(store, this);
-        pageHost.Content = pages[page].Content;
         App.Trace("window:shell-built");
         var hwnd = WindowNative.GetWindowHandle(this);
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
@@ -67,7 +66,15 @@ public sealed class MainWindow : Window
     private void SelectInitialPage(object sender, RoutedEventArgs args)
     {
         navigation.Loaded -= SelectInitialPage;
-        DispatcherQueue.TryEnqueue(() => navigation.SelectedItem = navigation.MenuItems[0]);
+        App.Trace("navigation:loaded");
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            navigationReady = true;
+            App.Trace("navigation:selecting");
+            navigation.SelectedItem = navigation.MenuItems[0];
+            if (pageHost.Content is null) ShowPage("overview");
+            App.Trace("navigation:selected");
+        });
     }
 
     private void BuildShell()
@@ -139,25 +146,36 @@ public sealed class MainWindow : Window
 
     private async Task InitializeAsync()
     {
+        App.Trace("runtime:initializing");
         var healthy = false;
         try
         {
             healthy = await store.InitializeAsync();
+            App.Trace(healthy ? "runtime:initialized" : "runtime:unavailable");
             if (healthy) ClearError();
         }
-        catch (Exception error) { ShowError(error.Message); }
+        catch (Exception error)
+        {
+            App.Trace($"runtime:initialization-failed:{error.GetType().Name}");
+            ShowError(error.Message);
+        }
+        App.Trace("runtime:updating-ui");
         Update(null);
+        App.Trace("runtime:ui-updated");
         var passed = healthy && store.IsRuntimeAvailable && store.Agents.Length == 5;
         WriteHealthResult(passed);
+        App.Trace(passed ? "health:passed" : "health:failed");
         if (App.IsSmokeTest)
         {
             if (!passed) Environment.ExitCode = 1;
+            App.Trace("smoke:quitting");
             await QuitCoreAsync();
         }
     }
 
     private void Update(string? propertyName)
     {
+        App.Trace($"update:{propertyName ?? "all"}:starting");
         syncingSwitch = true;
         protectionSwitch.IsOn = store.IsRunning;
         protectionSwitch.IsEnabled = store.IsRuntimeAvailable && !store.IsBusy;
@@ -166,35 +184,67 @@ public sealed class MainWindow : Window
         devBadge.Visibility = RuntimePresentation.ShowDevMode(store.State) && store.IsRuntimeAvailable ? Visibility.Visible : Visibility.Collapsed;
         tray.Update(store.IsProtected, statusText.Text);
 
+        if (pages.Count == 0)
+        {
+            App.Trace($"update:{propertyName ?? "all"}:shell-only");
+            return;
+        }
+
         switch (propertyName)
         {
             case nameof(RuntimeStore.Agents):
-                pages["overview"].Update();
-                pages["agents"].Update();
+                UpdatePage("overview");
+                UpdatePage("agents");
                 break;
             case nameof(RuntimeStore.Usage):
-                pages["usage"].Update();
+                UpdatePage("usage");
                 break;
             case nameof(RuntimeStore.ClientKey):
-                pages["overview"].Update();
+                UpdatePage("overview");
                 break;
             case nameof(RuntimeStore.State):
-                pages["overview"].Update();
-                pages["settings"].Update();
+                UpdatePage("overview");
+                UpdatePage("settings");
                 break;
             case nameof(RuntimeStore.IsRuntimeAvailable):
             case null:
-                foreach (var nativePage in pages.Values) nativePage.Update();
+                foreach (var pageName in pages.Keys) UpdatePage(pageName);
                 break;
         }
+        App.Trace($"update:{propertyName ?? "all"}:completed");
+    }
+
+    private void UpdatePage(string pageName)
+    {
+        if (!pages.TryGetValue(pageName, out var nativePage)) return;
+        App.Trace($"page:{pageName}:updating");
+        nativePage.Update();
+        App.Trace($"page:{pageName}:updated");
+    }
+
+    private void ShowPage(string pageName)
+    {
+        if (!pages.TryGetValue(pageName, out var nativePage))
+        {
+            nativePage = NativeViews.CreatePage(pageName, store, this);
+            pages.Add(pageName, nativePage);
+        }
+        else UpdatePage(pageName);
+        if (!ReferenceEquals(pageHost.Content, nativePage.Content)) pageHost.Content = nativePage.Content;
     }
 
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
+        App.Trace("navigation:selection-changing");
         page = args.IsSettingsSelected ? "settings" : (args.SelectedItemContainer?.Tag?.ToString() ?? "overview");
         pageTitle.Text = page switch { "agents" => "Agents", "usage" => "Usage", "settings" => "Settings", _ => "Overview" };
-        pages[page].Update();
-        if (!ReferenceEquals(pageHost.Content, pages[page].Content)) pageHost.Content = pages[page].Content;
+        if (!navigationReady)
+        {
+            App.Trace("navigation:selection-deferred");
+            return;
+        }
+        ShowPage(page);
+        App.Trace($"navigation:selection-changed:{page}");
     }
 
     private async void ProtectionSwitch_Toggled(object sender, RoutedEventArgs e)
@@ -303,9 +353,13 @@ public sealed class MainWindow : Window
     {
         if (quitting) return;
         quitting = true;
+        App.Trace("quit:disposing-tray");
         tray.Dispose();
+        App.Trace("quit:disposing-runtime");
         await store.DisposeAsync();
+        App.Trace("quit:destroying-window");
         appWindow.Destroy();
+        App.Trace("quit:exiting");
         Application.Current.Exit();
     }
 }
