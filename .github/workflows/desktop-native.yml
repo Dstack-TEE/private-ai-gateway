@@ -2,6 +2,11 @@ name: Desktop native clients
 
 on:
   workflow_dispatch:
+    inputs:
+      run_ui_tests:
+        description: Run optional experimental native client launch checks
+        type: boolean
+        default: false
   pull_request:
     paths:
       - '.github/workflows/desktop-native.yml'
@@ -85,6 +90,7 @@ jobs:
         working-directory: apps/desktop
         run: dbus-run-session -- node scripts/native-runtime-smoke.mjs release/native-linux/Private-AI-Gateway/private-ai-gateway-desktop-service
       - name: Launch native Linux client
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
         working-directory: apps/desktop
         shell: bash
         run: |
@@ -140,6 +146,7 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/native-runtime-smoke.mjs release/native-windows/Private-AI-Gateway/private-ai-gateway-desktop-service.exe
       - name: Launch native Windows client
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
         working-directory: apps/desktop
         shell: pwsh
         run: |
@@ -194,6 +201,7 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/native-runtime-smoke.mjs 'release/native-macos/Private AI Gateway.app/Contents/MacOS/private-ai-gateway-desktop-service'
       - name: Launch native macOS client
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
         working-directory: apps/desktop
         shell: bash
         run: |

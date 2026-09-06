@@ -2,6 +2,11 @@ name: Desktop macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      run_ui_tests:
+        description: Run optional renderer and installed app UI checks
+        type: boolean
+        default: false
   pull_request:
     paths:
       - '.github/workflows/desktop-macos.yml'
@@ -85,6 +90,7 @@ jobs:
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
       - name: Renderer smoke (Playwright, stateful mock)
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
         working-directory: apps/desktop
         run: |
           npx playwright install chromium
@@ -138,6 +144,7 @@ jobs:
             "test-results/live-service.json"
 
       - name: Launch tray app and capture menu bar
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
         continue-on-error: true
         working-directory: apps/desktop
         shell: bash

@@ -304,16 +304,18 @@ package: its temporary mount path would be persisted in agents' helper
 commands and become invalid after the app restarts.
 
 The `Desktop Tauri Windows and Linux` workflow builds the actual NSIS and DEB
-packages, runs the shared production renderer tests and Rust backend tests,
-and checks the sidecars without contacting a live provider. Renderer tests use
-the existing stateful mock; they do not prove native WebView or tray behavior.
-Hosted package builds and installed-app smoke checks are still required before
-claiming a platform release is ready.
+packages, checks TypeScript and the Tauri/shared Rust libraries, and checks the
+installed sidecars without contacting a live provider. UI checks are disabled
+by default and require the explicit `run_ui_tests` manual input. This includes
+the stateful mock renderer tests, which do not prove native WebView behavior.
+The macOS and experimental native workflows also require an explicit opt-in
+before launching UI. Passing code checks alone is not a full release acceptance.
 
 The package workflow now installs and uninstalls the NSIS/DEB on disposable
-runners. `tauri-driver` uses the installed release app with the real React
-bundle and WebView bridge, without test hooks or weakened verification. The
-smoke covers startup, agent discovery, unverified-connect rejection, empty
+runners. The optional WebDriver checks use the installed release app with the
+real React bundle and WebView bridge; Windows uses EdgeDriver attach with
+process-local debugging arguments, while Linux uses `tauri-driver`. The
+checks target startup, agent discovery, unverified-connect rejection, empty
 restore/export, local client-token rotation, endpoint settings and restart
 persistence. Gateway and agent configuration files use a temporary
 `PRIVATE_AI_GATEWAY_HOME`. Linux XDG data/config/cache/state directories are
