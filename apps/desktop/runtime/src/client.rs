@@ -144,7 +144,7 @@ impl Client {
     }
 
     pub fn watch_connection(mut receive: impl FnMut(GatewayState) -> bool) -> Result<(), String> {
-        let (mut reader, _) = open().map_err(connection_error)?;
+        let (mut reader, hello) = open().map_err(connection_error)?;
         reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -160,7 +160,8 @@ impl Client {
         )
         .map_err(connection_error)?;
         loop {
-            let state = decode(&mut reader, id)?;
+            let mut state: GatewayState = decode(&mut reader, id)?;
+            state.backend_instance = Some(hello.instance_id.clone());
             if !receive(state) {
                 return Ok(());
             }

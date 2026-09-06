@@ -653,13 +653,17 @@ pub fn run() {
             let mut states = client.subscribe();
             let initial = states.borrow().clone();
             let mut client_key_revision = initial.client_key_revision;
+            let mut backend_instance = initial.backend_instance.clone();
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
-                    if state.client_key_revision != client_key_revision {
+                    if state.client_key_revision != client_key_revision
+                        || state.backend_instance != backend_instance
+                    {
                         client_key_revision = state.client_key_revision;
+                        backend_instance = state.backend_instance.clone();
                         // A restarted backend may retain a token without a rotation result yet.
                         let _ = handle.emit(
                             "gateway://client-key-changed",

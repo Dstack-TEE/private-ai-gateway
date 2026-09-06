@@ -189,6 +189,7 @@ export interface LocalApiConfig {
 }
 
 export interface GatewayState {
+  backendInstance?: string;
   clientKeyRevision?: number;
   clientKeyAvailable?: boolean;
   backendConnected?: boolean;
