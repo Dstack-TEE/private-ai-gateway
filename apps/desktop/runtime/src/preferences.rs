@@ -59,7 +59,12 @@ pub struct NotificationPreferences {
 
 impl Default for NotificationPreferences {
     fn default() -> Self {
-        Self { enabled: true, gateway: true, local_api: true, verification: true }
+        Self {
+            enabled: true,
+            gateway: true,
+            local_api: true,
+            verification: true,
+        }
     }
 }
 
