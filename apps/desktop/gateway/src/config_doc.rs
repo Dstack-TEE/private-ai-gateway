@@ -7,7 +7,7 @@ use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
-use yaml_edit::{path::YamlPath, YamlFile};
+use yaml_edit::{path::YamlPath, AsYaml, YamlFile};
 
 /// Read-only JSONC inspection. Never render this value back over a user's file:
 /// the regular JSON writer does not preserve comments.
@@ -42,7 +42,7 @@ pub enum Format {
     Yaml,
 }
 
-/// The scalar shapes a projection writes.
+/// The scalar and structured values a projection writes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConfigValue {
@@ -187,7 +187,12 @@ impl ConfigDoc {
                 .map(|text| text + "\n")
                 .map_err(|error| error.to_string()),
             Self::Toml(doc) => Ok(doc.to_string()),
-            Self::Yaml(doc) => Ok(doc.to_string()),
+            Self::Yaml(doc) => {
+                let text = doc.to_string();
+                text.parse::<YamlFile>()
+                    .map_err(|_| "YAML edit produced invalid syntax".to_string())?;
+                Ok(text)
+            }
         }
     }
 
@@ -199,12 +204,15 @@ impl ConfigDoc {
             }
             Self::Json(root) => ConfigValue::from_json(json_get(root, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
-            Self::Yaml(file) => yaml_value(
-                file.documents()
-                    .next()?
-                    .try_get_path(&path.join("."))
-                    .ok()?,
-            ),
+            Self::Yaml(file) => {
+                let document = file.documents().next()?;
+                let node = if path.is_empty() {
+                    yaml_edit::YamlNode::Mapping(document.as_mapping()?)
+                } else {
+                    document.try_get_path(&path.join(".")).ok()?
+                };
+                yaml_value(node)
+            }
         }
     }
 
@@ -256,7 +264,7 @@ impl ConfigDoc {
                     }
                     ConfigValue::Bool(value) => doc.try_set_path(&path, *value),
                     ConfigValue::List(_) | ConfigValue::Json(_) => {
-                        return Err("complex values are not used in YAML projections".to_string())
+                        doc.try_set_path(&path, yaml_input(value.to_json())?)
                     }
                 }
                 .map_err(|_| format!("cannot edit YAML path {path}"))?;
@@ -321,7 +329,14 @@ impl ConfigDoc {
                             .try_get_path(&parent)
                             .ok()
                             .and_then(|node| node.as_mapping().cloned())
-                            .is_some_and(|mapping| mapping.is_empty());
+                            .is_some_and(|mapping| {
+                                mapping.is_empty()
+                                    && !mapping.as_node().is_some_and(|node| {
+                                        node.descendants_with_tokens().any(|element| {
+                                            element.kind() == yaml_edit::SyntaxKind::COMMENT
+                                        })
+                                    })
+                            });
                         if empty {
                             let _ = doc.try_remove_path(&parent);
                         } else {
@@ -451,14 +466,73 @@ fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String,
 }
 
 fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
-    if let Some(value) = node.to_bool() {
-        return Some(ConfigValue::Bool(value));
+    ConfigValue::from_json(&yaml_json(&node)?)
+}
+
+/// Inspect structured YAML without resolving aliases, tags or merge keys.
+fn yaml_json(node: &yaml_edit::YamlNode) -> Option<Value> {
+    use yaml_edit::{ScalarType, ScalarValue, YamlNode};
+    match node {
+        YamlNode::Mapping(mapping) => {
+            let mut values = Map::new();
+            for (key, value) in mapping {
+                let key = key.as_scalar()?;
+                if ScalarValue::from_scalar(key).scalar_type() != ScalarType::String {
+                    return None;
+                }
+                let key = key.as_string();
+                if key == "<<" || values.insert(key, yaml_json(&value)?).is_some() {
+                    return None;
+                }
+            }
+            Some(Value::Object(values))
+        }
+        YamlNode::Sequence(sequence) => sequence
+            .into_iter()
+            .map(|value| yaml_json(&value))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        YamlNode::Scalar(scalar) => {
+            let value = ScalarValue::from_scalar(scalar);
+            match value.scalar_type() {
+                ScalarType::String => Some(Value::String(scalar.as_string())),
+                ScalarType::Null => Some(Value::Null),
+                ScalarType::Boolean => value.to_bool().map(Value::Bool),
+                ScalarType::Integer => value.to_i64().map(|number| Value::Number(number.into())),
+                ScalarType::Float => value
+                    .to_f64()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number),
+                _ => None,
+            }
+        }
+        _ => None,
     }
-    if let Some(value) = node.to_i64().and_then(|value| u64::try_from(value).ok()) {
-        return Some(ConfigValue::Number(value));
+}
+
+/// Construct only a new value subtree. The surrounding document stays a CST.
+fn yaml_input(value: Value) -> Result<yaml_edit::YamlNode, String> {
+    use yaml_edit::YamlNode;
+    // JSON is a YAML flow value, valid beneath either block or flow parents.
+    // Encode only the newly supplied value, never the existing user document.
+    let fragment = serde_json::to_string(&value).map_err(|_| "Cannot encode YAML value")?;
+    let file = fragment
+        .parse::<YamlFile>()
+        .map_err(|_| "Cannot construct YAML value")?;
+    let doc = file
+        .documents()
+        .next()
+        .ok_or("Cannot construct YAML value")?;
+    let node = doc
+        .as_mapping()
+        .map(YamlNode::Mapping)
+        .or_else(|| doc.as_sequence().map(YamlNode::Sequence))
+        .or_else(|| doc.as_scalar().map(YamlNode::Scalar))
+        .ok_or_else(|| "Cannot construct YAML value".to_string())?;
+    if yaml_json(&node).as_ref() != Some(&value) {
+        return Err("The YAML value cannot be represented without semantic loss".to_string());
     }
-    node.as_scalar()
-        .map(|scalar| ConfigValue::Str(scalar.as_string()))
+    Ok(node)
 }
 
 fn split_leaf<'a>(path: &'a [&'a str]) -> Result<(&'a str, &'a [&'a str]), String> {

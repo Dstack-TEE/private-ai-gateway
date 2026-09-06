@@ -21,6 +21,7 @@ use std::{
 
 use std::process::Command;
 
+mod oh_my_pi;
 mod openclaw;
 
 use rand::RngCore;
@@ -117,16 +118,18 @@ pub enum Agent {
     Pi,
     Hermes,
     OpenClaw,
+    OhMyPi,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 6] = [
+    pub const ALL: [Agent; 7] = [
         Agent::Codex,
         Agent::ClaudeCode,
         Agent::OpenCode,
         Agent::Pi,
         Agent::Hermes,
         Agent::OpenClaw,
+        Agent::OhMyPi,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -144,6 +147,7 @@ impl Agent {
             Agent::Pi => "pi",
             Agent::Hermes => "hermes",
             Agent::OpenClaw => "openclaw",
+            Agent::OhMyPi => "oh-my-pi",
         }
     }
 
@@ -155,6 +159,7 @@ impl Agent {
             Agent::Pi => "Pi",
             Agent::Hermes => "Hermes",
             Agent::OpenClaw => "OpenClaw",
+            Agent::OhMyPi => "Oh My Pi",
         }
     }
 
@@ -167,6 +172,7 @@ impl Agent {
             Agent::Pi => &["pi"],
             Agent::Hermes => &["hermes"],
             Agent::OpenClaw => &["openclaw"],
+            Agent::OhMyPi => &["omp"],
         }
     }
 
@@ -176,6 +182,7 @@ impl Agent {
             Agent::ClaudeCode | Agent::OpenCode | Agent::Pi => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
+            Agent::OhMyPi => Format::Yaml,
         }
     }
 
@@ -185,6 +192,7 @@ impl Agent {
         let override_dir = |name: &str| tool_env.then(|| env_path(name)).flatten();
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
+            Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("config.toml"),
@@ -224,6 +232,7 @@ impl Agent {
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local gateway token. Restart OpenClaw after applying.",
+            Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Choose a model in omp and restart after applying. CLI/profile/dotenv overrides must use the same native directory; native defaults and auth storage are not changed.",
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
@@ -305,6 +314,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let base = inputs.endpoint.trim_end_matches('/');
     Ok(match agent {
         Agent::OpenClaw => openclaw::fields(inputs)?,
+        Agent::OhMyPi => oh_my_pi::fields(inputs)?,
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_gateway"),
@@ -793,6 +803,7 @@ fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
         ),
         Agent::OpenCode => return false,
         Agent::OpenClaw => return false, // Validated with the token path by Projector.
+        Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe),
     };
     // Only inspect the helper-bearing field we recorded, not provider metadata.
     record.fields.iter().any(|field| {
@@ -976,6 +987,9 @@ impl Projector {
                 record.validate_recovery()?;
                 return record.restore_path().map(Path::to_path_buf);
             }
+        }
+        if agent == Agent::OhMyPi {
+            oh_my_pi::validate_host(&self.home, self.tool_env)?;
         }
         let configured = agent.config_path(&self.home, self.tool_env);
         if !configured.is_absolute() {
@@ -1573,6 +1587,7 @@ impl Projector {
         catalog: Option<&Catalog>,
     ) -> Result<(), String> {
         match agent {
+            Agent::OhMyPi => oh_my_pi::validate_config(doc, prior),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_gateway", "aws"]) => {
                 Err("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string())
             }
@@ -2313,6 +2328,7 @@ fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
         Agent::Pi => None,
         Agent::Hermes => doc.get_str(&["model", "default"]),
         Agent::OpenClaw => openclaw::selected_model(doc),
+        Agent::OhMyPi => None,
     }
 }
 
@@ -2545,7 +2561,7 @@ mod tests {
 
     const ENDPOINT: &str = "http://127.0.0.1:4180";
 
-    fn catalog() -> Catalog {
+    pub(super) fn catalog() -> Catalog {
         Catalog::from_remote(
             &json!({
                 "data": [
@@ -2558,9 +2574,9 @@ mod tests {
         .unwrap()
     }
 
-    struct Sandbox {
-        home: PathBuf,
-        projector: Projector,
+    pub(super) struct Sandbox {
+        pub(super) home: PathBuf,
+        pub(super) projector: Projector,
         secrets: Arc<MemoryStore>,
     }
 
@@ -2573,7 +2589,7 @@ mod tests {
     /// A fresh home directory under the system temp dir with a fake helper
     /// binary; tool env overrides are ignored so no real config is
     /// touched.
-    fn sandbox(name: &str) -> Sandbox {
+    pub(super) fn sandbox(name: &str) -> Sandbox {
         let home = env::temp_dir().join(format!("pag-agents-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
@@ -2613,7 +2629,7 @@ mod tests {
         }
     }
 
-    fn write(path: &Path, text: &str) {
+    pub(super) fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
     }
@@ -2749,6 +2765,7 @@ mod tests {
                 Agent::Pi => &["providers", "private-ai-gateway", "apiKey"][..],
                 Agent::Hermes => &["providers", "private-ai-gateway", "key_cmd"][..],
                 Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
+                Agent::OhMyPi => &["providers", "private-ai-gateway", "apiKey"][..],
             };
             config.set_str(field, "external-edit").unwrap();
             write(&path, &config.render().unwrap());
@@ -2973,7 +2990,7 @@ mod tests {
             .unwrap()
     }
 
-    fn disconnect(sandbox: &Sandbox, agent: Agent) -> AgentStatus {
+    pub(super) fn disconnect(sandbox: &Sandbox, agent: Agent) -> AgentStatus {
         let options = ConnectOptions::default();
         let preview = sandbox
             .projector
