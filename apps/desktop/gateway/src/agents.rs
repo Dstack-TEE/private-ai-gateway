@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     brand::PRODUCT_NAME,
     catalog::Catalog,
-    config_doc::{ConfigDoc, ConfigValue, Format},
+    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
     lock,
     secrets::SecretStore,
     tokens::{self, TokenFiles, TokenSet},
@@ -1398,7 +1398,90 @@ impl Projector {
             catalog,
             options,
         };
-        project(doc, &fields(agent, &inputs)?, store.get(agent.id()), agent)
+        let fields = fields(agent, &inputs)?;
+        let edit = project(doc, &fields, store.get(agent.id()), agent)?;
+        if agent == Agent::OpenCode {
+            self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))?;
+        }
+        Ok(edit)
+    }
+
+    /// OpenCode v1.18.29 deep-merges these process-level sources in order.
+    /// Keep the original write/restore path: selecting JSONC instead would
+    /// strand old connection journals and our JSON writer would lose comments.
+    /// Project/managed/remote sources need CLI context; references stay opaque
+    /// here so inspection never reads an API key file or executes anything.
+    fn check_opencode_merge(&self, doc: &ConfigDoc, owns_model: bool) -> Result<(), String> {
+        let ConfigDoc::Json(projected) = doc else {
+            return Err("OpenCode requires a JSON projection".to_string());
+        };
+        let global = self.tool_env
+            .then(|| env_path("XDG_CONFIG_HOME"))
+            .flatten()
+            .unwrap_or_else(|| self.home.join(".config"))
+            .join("opencode");
+        let target = Agent::OpenCode.config_path(&self.home, self.tool_env);
+        let mut paths = vec![
+            global.join("config.json"),
+            global.join("opencode.json"),
+            global.join("opencode.jsonc"),
+        ];
+        if self.tool_env {
+            if let Some(path) = env_path("OPENCODE_CONFIG") {
+                paths.push(path);
+            }
+            if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
+                paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
+            }
+        }
+        let mut merged = serde_json::json!({});
+        let mut sources = Vec::new();
+        for path in paths {
+            let layer = if path == target {
+                projected.clone()
+            } else {
+                let text = match fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(format!(
+                        "Cannot verify OpenCode config merge: {} is unreadable. Access is disabled; \
+                         fix that file or Disconnect to restore the original config.", path.display(),
+                    )),
+                };
+                parse_jsonc(&text).map_err(|reason| format!(
+                    "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; \
+                     fix that file or Disconnect to restore the original config.", path.display(),
+                ))?
+            };
+            sources.push(path.display().to_string());
+            merge_opencode_config(&mut merged, layer);
+        }
+        if self.tool_env {
+            if let Some(text) = env::var_os("OPENCODE_CONFIG_CONTENT").filter(|text| !text.is_empty()) {
+                let layer = text.to_str()
+                    .ok_or_else(|| "not valid Unicode".to_string())
+                    .and_then(parse_jsonc)
+                    .map_err(|reason| format!(
+                        "Cannot verify OpenCode config merge: OPENCODE_CONFIG_CONTENT is {reason}. \
+                         Access is disabled; fix that override or Disconnect.",
+                    ))?;
+                sources.push("OPENCODE_CONFIG_CONTENT".to_string());
+                merge_opencode_config(&mut merged, layer);
+            }
+        }
+        for pointer in ["/provider/private-ai-gateway", "/model"] {
+            if pointer == "/model" && !owns_model {
+                continue;
+            }
+            if merged.pointer(pointer) != projected.pointer(pointer) {
+                return Err(format!(
+                    "OpenCode's merged config changes the gateway-owned field {pointer}. \
+                     Access is disabled. Review {} without changing unrelated providers, \
+                     or Disconnect to restore the original config.", sources.join(", "),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn status(&self, agent: Agent, store: &Store, catalog: Option<&Catalog>) -> AgentStatus {
@@ -1501,6 +1584,16 @@ impl Projector {
                 }
             }
         }
+        if agent == Agent::OpenCode && status.authorized {
+            if let Some(doc) = &doc {
+                let owns_model = record.fields.iter().any(|field| field.path == ["model"]);
+                if let Err(attention) = self.check_opencode_merge(doc, owns_model) {
+                    status.connected = false;
+                    status.authorized = false;
+                    status.attention = Some(attention);
+                }
+            }
+        }
         status
     }
 
@@ -1571,6 +1664,18 @@ struct Rollback {
     revoke_token: bool,
     delete_secrets: Vec<String>,
     config: Option<(PathBuf, Option<String>)>,
+}
+
+// OpenCode uses remeda mergeDeep: objects merge recursively; other values replace.
+fn merge_opencode_config(target: &mut serde_json::Value, source: serde_json::Value) {
+    match (target, source) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(source)) => {
+            for (key, value) in source {
+                merge_opencode_config(target.entry(key).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (target, source) => *target = source,
+    }
 }
 
 /// SHA-256 over everything a preview was computed from: the config text, the
@@ -2550,6 +2655,136 @@ mod tests {
             doc(&sandbox, agent).get_value(&["model"]),
             Some(ConfigValue::Str("user-choice".into()))
         );
+    }
+
+    #[test]
+    fn opencode_merge_conflicts_revoke_without_writes_and_keep_original_restore_path() {
+        let sandbox = sandbox("opencode-merge");
+        let path = Agent::OpenCode.config_path(&sandbox.home, false);
+        let jsonc = path.with_extension("jsonc");
+        let original = json!({
+            "model": "other/original",
+            "provider": {"other": {"name": "User provider"}}
+        });
+        write(&path, &original.to_string());
+        let benign = "{/* user's comment */\"provider\":{\"other\":{\"name\":\"JSONC user provider\"}},}";
+        write(&jsonc, benign);
+        let catalog = catalog();
+        let options = claude_options();
+        let preview = sandbox.projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &options).unwrap();
+        assert!(sandbox.projector.apply(
+            Agent::OpenCode, true, &preview.revision, Some(&catalog), &options,
+        ).unwrap().authorized);
+        assert_eq!(fs::read_to_string(&jsonc).unwrap(), benign);
+        assert_eq!(doc(&sandbox, Agent::OpenCode)
+            .get_str(&["provider", "other", "name"]).as_deref(), Some("User provider"));
+        let preview = sandbox.projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &options).unwrap();
+        let config_before = fs::read(&path).unwrap();
+        let record_before = fs::read(sandbox.projector.store_path()).unwrap();
+        let token_path = sandbox.projector.tokens.path("opencode");
+        let token_before = fs::read(&token_path).unwrap();
+        for conflict in [
+            "{\"model\":\"other/override\",}",
+            "{/* keep */\"provider\":{\"private-ai-gateway\":{\"options\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
+            "{\"provider\":{\"private-ai-gateway\":{\"options\":{\"apiKey\":\"synthetic-never-log-me\"}}}}",
+            "{\"provider\":null}",
+            "{/* broken",
+        ] {
+            write(&jsonc, conflict);
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let status = statuses.iter().find(|status| status.id == "opencode").unwrap();
+            assert!(status.recorded && !status.connected && !status.authorized);
+            assert!(tokens.is_empty());
+            let attention = status.attention.as_deref().unwrap();
+            assert!(attention.contains("opencode.jsonc"), "{attention}");
+            assert!(!attention.contains("synthetic-never-log-me"));
+            assert!(sandbox.projector
+                .preview(Agent::OpenCode, true, Some(&catalog), &options).is_err());
+            // Re-read companion files at apply, even when the main revision is unchanged.
+            assert!(sandbox.projector.apply(
+                Agent::OpenCode, true, &preview.revision, Some(&catalog), &options,
+            ).is_err());
+            assert_eq!(fs::read(&path).unwrap(), config_before);
+            assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), record_before);
+            assert_eq!(fs::read(&token_path).unwrap(), token_before);
+            assert_eq!(fs::read_to_string(&jsonc).unwrap(), conflict);
+        }
+        fs::remove_file(&jsonc).unwrap();
+        fs::create_dir(&jsonc).unwrap();
+        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+        let status = statuses.iter().find(|status| status.id == "opencode").unwrap();
+        assert!(!status.authorized && tokens.is_empty());
+        assert!(status.attention.as_deref().unwrap().contains("unreadable"));
+        fs::remove_dir(&jsonc).unwrap();
+        write(&jsonc, benign);
+        assert!(sandbox.projector.scan(None).unwrap().0.iter()
+            .find(|status| status.id == "opencode").unwrap().authorized);
+        write(&jsonc, "{/* keep on disconnect */\"model\":\"other/override\"}");
+        let jsonc_before = fs::read(&jsonc).unwrap();
+        let mut edited = doc(&sandbox, Agent::OpenCode);
+        edited.set_str(&["provider", "other", "name"], "Edited outside the app").unwrap();
+        write(&path, &edited.render().unwrap());
+        disconnect(&sandbox, Agent::OpenCode);
+        let mut restored = original;
+        restored["provider"]["other"]["name"] = json!("Edited outside the app");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(), restored);
+        assert_eq!(fs::read(&jsonc).unwrap(), jsonc_before);
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
+        assert!(!token_path.exists());
+    }
+
+    #[test]
+    fn opencode_process_overrides_follow_official_merge_order() {
+        const CASE: &str = "PAG_TEST_OPENCODE_MERGE_CASE";
+        if let Ok(case) = env::var(CASE) {
+            let mut sandbox = sandbox("opencode-env-merge");
+            sandbox.projector.tool_env = true;
+            let global = env_path("XDG_CONFIG_HOME").unwrap().join("opencode");
+            write(&global.join("opencode.jsonc"), "{/* preserved */\"model\":\"other/model\"}");
+            let expected = ConfigDoc::Json(json!({
+                "model": "private-ai-gateway/test",
+                "provider": {"private-ai-gateway": {"name": "Gateway"}}
+            }));
+            if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
+                write(&dir.join("opencode.json"), "{\"model\":\"other/dir-json\"}");
+                write(&dir.join("opencode.jsonc"), "{\"model\":\"private-ai-gateway/test\",}");
+            }
+            let result = sandbox.projector.check_opencode_merge(&expected, true);
+            assert_eq!(result.is_ok(), matches!(case.as_str(), "explicit" | "directory"), "{case}: {result:?}");
+            if case == "global" {
+                // A default model is not owned when the user did not select one.
+                assert!(sandbox.projector.check_opencode_merge(&expected, false).is_ok());
+            }
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        for case in ["global", "explicit", "directory", "content", "invalid-content"] {
+            let dir = root.path().join(case);
+            let mut command = Command::new(env::current_exe().unwrap());
+            command.args(["--exact", "agents::tests::opencode_process_overrides_follow_official_merge_order"])
+                .env(CASE, case)
+                .env("XDG_CONFIG_HOME", &dir)
+                .env_remove("OPENCODE_CONFIG")
+                .env_remove("OPENCODE_CONFIG_DIR")
+                .env_remove("OPENCODE_CONFIG_CONTENT");
+            if case != "global" {
+                // Even pointing back at global JSON makes it higher priority than global JSONC.
+                command.env("OPENCODE_CONFIG", dir.join("opencode/opencode.json"));
+            }
+            if matches!(case, "directory" | "content" | "invalid-content") {
+                command.env("OPENCODE_CONFIG_DIR", dir.join("extra"));
+            }
+            if case == "content" {
+                command.env("OPENCODE_CONFIG_CONTENT", "{\"model\":\"other/content\"}");
+            } else if case == "invalid-content" {
+                command.env("OPENCODE_CONFIG_CONTENT", "{invalid");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
     }
 
     #[test]

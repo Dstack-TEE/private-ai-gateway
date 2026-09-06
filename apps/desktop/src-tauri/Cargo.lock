@@ -2457,6 +2457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0560e3f9a9a03ea6b6e90b41138c5db9e21526c99eb192c1a26c68176593285"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jsonptr"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3467,6 +3476,7 @@ dependencies = [
  "bytes",
  "fd-lock",
  "futures-util",
+ "jsonc-parser",
  "keyring",
  "rand",
  "reqwest 0.12.28",

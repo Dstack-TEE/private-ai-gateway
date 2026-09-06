@@ -8,6 +8,31 @@ use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 use yaml_edit::{path::YamlPath, YamlFile};
 
+/// Read-only JSONC inspection. Never render this value back over a user's file:
+/// the regular JSON writer does not preserve comments.
+pub(crate) fn parse_jsonc(text: &str) -> Result<Value, String> {
+    if text.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    let value: Value = jsonc_parser::parse_to_serde_value(
+        text,
+        &jsonc_parser::ParseOptions {
+            allow_comments: true,
+            allow_trailing_commas: true,
+            allow_loose_object_property_names: false,
+            allow_missing_commas: false,
+            allow_single_quoted_strings: false,
+            allow_hexadecimal_numbers: false,
+            allow_unary_plus_numbers: false,
+        },
+    )
+    .map_err(|_| "not valid JSONC".to_string())?;
+    if !value.is_object() {
+        return Err("not a JSONC object".to_string());
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Json,
@@ -345,6 +370,20 @@ fn toml_container<'a>(root: &'a mut Item, path: &[&str]) -> Result<&'a mut dyn T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonc_inspection_accepts_comments_not_json5_or_malformed_json() {
+        assert_eq!(
+            parse_jsonc("{/* keep */\"url\":\"https://host/a//b\", // keep too\n}").unwrap(),
+            serde_json::json!({"url": "https://host/a//b"}),
+        );
+        for invalid in [
+            "{unquoted:1}", "{'single':1}", "{\"a\":1 \"b\":2}",
+            "{\"a\":0xff}", "{\"a\":+1}", "{", "[]", "null", "// comment only", " \n",
+        ] {
+            assert!(parse_jsonc(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn toml_lists_and_numbers_round_trip_and_prune() {
