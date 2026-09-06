@@ -11,6 +11,7 @@
     "build": "npm run prepare:brand && npm run prepare:macos-icon && vite build",
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
+    "package:cli": "node scripts/package-cli.mjs",
     "check": "npm run prepare:brand && tsc --noEmit",
     "dev": "npm run prepare:brand && npm run build:sidecars:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
     "dev:web": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
@@ -18,7 +19,7 @@
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "test:renderer": "playwright test",
-    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/release-channel.test.mjs"
+    "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/package-cli.test.mjs scripts/release-channel.test.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

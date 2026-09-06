@@ -11,9 +11,14 @@ const entries = await readdir(directory, { recursive: true, withFileTypes: true 
 const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
 const tag = release.tag;
 const platforms = {};
-const suffixes = { "darwin-aarch64": ".app.tar.gz", "windows-x86_64": ".exe", "linux-x86_64": ".AppImage" };
+const suffixes = {
+  "darwin-aarch64": ".app.tar.gz",
+  "windows-x86_64": ".exe",
+  "linux-x86_64-deb": ".deb",
+  "linux-x86_64-rpm": ".rpm",
+};
 for (const [target, suffix] of Object.entries(suffixes)) {
-  const candidates = files.filter((file) => file.endsWith(suffix));
+  const candidates = files.filter((file) => file.endsWith(suffix) && !path.basename(file).startsWith("private-ai-gateway-cli"));
   if (candidates.length !== 1) throw new Error(`Expected one ${target} update package; found ${candidates.length}`);
   const file = candidates[0];
   const signature = (await readFile(`${file}.sig`, "utf8")).trim();

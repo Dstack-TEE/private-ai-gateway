@@ -25,6 +25,7 @@ import {
   Settings,
   ShieldCheck,
   ShieldX,
+  SquareTerminal,
   TriangleAlert,
   Trash2,
   Wifi,
@@ -73,6 +74,7 @@ import { ChoiceSelect } from "./components/choice-select";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
   AgentStatus,
+  CliRegistration,
   ConfidentialProfile,
   ConfidentialProfileInput,
   DesktopApi,
@@ -116,6 +118,16 @@ const INITIAL_STATE: GatewayState = {
   localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
   apiKeySaved: false,
 };
+
+function unavailableState(error: unknown): GatewayState {
+  return {
+    ...INITIAL_STATE,
+    status: "error",
+    backendConnected: false,
+    endpointError: "The background service is unavailable.",
+    error: errorMessage(error),
+  };
+}
 
 const CHECK_TITLES: Record<string, string> = {
   "id-1": "Hardware attestation is genuine",
@@ -554,6 +566,7 @@ function App(): React.JSX.Element {
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
   const [savingPreference, setSavingPreference] = useState(false);
+  const [connectingBackend, setConnectingBackend] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [clientKeyError, setClientKeyError] = useState<string>();
   const [copied, setCopied] = useState<string>();
@@ -595,6 +608,22 @@ function App(): React.JSX.Element {
     catch (error) { setActionError(errorMessage(error)); }
     finally { setSavingPreference(false); }
   };
+
+  const requestStopAllAndQuit = useCallback(async () => {
+    setActionError(undefined);
+    try {
+      const confirmed = await desktopApi.confirm({
+        title: "Stop all services and quit?",
+        message: "This stops protection, restores managed agent configurations, shuts down the background service, and quits the app. In-flight requests may be interrupted.",
+        confirmLabel: "Stop All and Quit",
+      });
+      if (confirmed) await desktopApi.stopAllAndQuit();
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
+  }, []);
+
+  useEffect(() => desktopApi.onStopAllRequest(() => { void requestStopAllAndQuit(); }), [requestStopAllAndQuit]);
 
   useEffect(() => {
     document.title = brand.productName;
@@ -650,7 +679,12 @@ function App(): React.JSX.Element {
         setState(nextState);
         setStateLoaded(true);
       },
-      (error: unknown) => active && setActionError(errorMessage(error)),
+      (error: unknown) => {
+        if (!active) return;
+        setState(unavailableState(error));
+        setStateLoaded(true);
+        setActionError(errorMessage(error));
+      },
     );
     let keyRead = 0;
     const loadClientKey = () => {
@@ -989,6 +1023,19 @@ function App(): React.JSX.Element {
           onToggle={toggleGateway}
         />
         <div className="content" id={`page-${view}`} key={view}>
+        {state.backendConnected === false && <Alert>
+          <AlertDescription className="flex items-center justify-between gap-4">
+            <span>Backend disconnected</span>
+            <Button disabled={connectingBackend} onClick={() => {
+              setConnectingBackend(true);
+              void desktopApi.startBackendService().then((next) => {
+                setState(next);
+                setActionError(undefined);
+              }).catch((error: unknown) => setActionError(errorMessage(error)))
+                .finally(() => setConnectingBackend(false));
+            }}><RefreshCw aria-hidden="true" />{connectingBackend ? "Connecting" : "Start backend"}</Button>
+          </AlertDescription>
+        </Alert>}
         {view === "overview" && (
           <Overview
             pendingAgentChanges={pendingAgentChanges}
@@ -1131,6 +1178,10 @@ function App(): React.JSX.Element {
             setPreviewTrayOpen(false);
             setNotice({ id: Date.now(), text: "Quit is available in the installed macOS app" });
           }}
+          onStopAllQuit={() => {
+            setPreviewTrayOpen(false);
+            void requestStopAllAndQuit();
+          }}
         />
       )}
     </div>
@@ -1249,6 +1300,7 @@ function PreviewTrayMenu({
   onSettings,
   onOpenAtLogin,
   onQuit,
+  onStopAllQuit,
 }: {
   state: GatewayState;
   busy: boolean;
@@ -1261,6 +1313,7 @@ function PreviewTrayMenu({
   onSettings(): void;
   onOpenAtLogin(): void;
   onQuit(): void;
+  onStopAllQuit(): void;
 }): React.JSX.Element {
   const verdict = presentation(state);
   const verifying = state.status === "verifying" && !state.configurationVerification;
@@ -1284,6 +1337,7 @@ function PreviewTrayMenu({
         Open at Login
       </Button>
       <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onQuit}>Quit {brand.productName}</Button>
+      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onStopAllQuit}>Stop All and Quit…</Button>
     </div>
   );
 }
@@ -2100,6 +2154,57 @@ function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; 
   );
 }
 
+function CliRegistrationControl(): React.JSX.Element {
+  const [registration, setRegistration] = useState<CliRegistration>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    let active = true;
+    void desktopApi.getCliRegistration().then(
+      (status) => {
+        if (!active) return;
+        setRegistration(status);
+      },
+      (loadError: unknown) => active && setError(errorMessage(loadError)),
+    );
+    return () => { active = false; };
+  }, []);
+
+  const change = async () => {
+    if (!registration || busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      setRegistration(await desktopApi.setCliRegistration(!registration.installed));
+    } catch (changeError) {
+      setError(errorMessage(changeError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const directory = registration ? parentDirectory(registration.commandPath) : undefined;
+  const description = error
+    ?? (registration?.installed
+      ? registration.onPath
+        ? `Installed at ${directory}. This app can resolve pag; terminal PATH may differ.`
+        : `Installed at ${directory}. Open a new terminal to refresh PATH.`
+      : directory ? `Default location: ${directory}` : "Command registration is unavailable.");
+  return <Item>
+    <ItemContent>
+      <ItemTitle>pag command</ItemTitle>
+      <ItemDescription>{description}</ItemDescription>
+    </ItemContent>
+    <ItemActions>
+      <Button variant="outline" disabled={busy || !registration} onClick={() => void change()}>
+        <SquareTerminal aria-hidden="true" />
+        {busy ? "Working…" : registration?.installed ? "Remove" : "Install"}
+      </Button>
+    </ItemActions>
+  </Item>;
+}
+
 function SettingsView({
   updates,
   state,
@@ -2151,6 +2256,10 @@ function SettingsView({
       <SettingsSection title="Connections">
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
+      </SettingsSection>
+
+      <SettingsSection title="Command Line">
+        <CliRegistrationControl />
       </SettingsSection>
 
       <Collapsible className="group settings-advanced">
@@ -2804,6 +2913,11 @@ function shorten(value: string, length: number): string {
   }
   const half = Math.floor((length - 3) / 2);
   return `${value.slice(0, half)}...${value.slice(-half)}`;
+}
+
+function parentDirectory(value: string): string {
+  const separator = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+  return separator > 0 ? value.slice(0, separator) : value;
 }
 
 function formatTimestamp(value: number, date = false): string {

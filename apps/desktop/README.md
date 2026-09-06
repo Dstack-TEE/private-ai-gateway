@@ -200,9 +200,9 @@ existing lifecycle locks.
 
 ### Publishing Updates
 
-The pipeline uses official Tauri CLI signing/updater artifacts, Apple notarytool,
-and GitHub Actions/CLI. Rust setup/cache actions are third-party, not GitHub
-official actions. All external actions are pinned to commit SHAs; checkout does
+The pipeline uses official Tauri CLI signing/updater artifacts for macOS,
+Windows, and Linux DEB/RPM packages, Apple notarytool, and GitHub Actions/CLI. Rust setup/cache actions are
+third-party, not GitHub official actions. All external actions are pinned to commit SHAs; checkout does
 not persist credentials, and signing/publishing secrets are scoped to their steps.
 Release-only npm installs skip lifecycle scripts. PRs and main pushes run CI;
 manual dispatch publishes releases. Feed updates serialize separately by channel.
@@ -218,8 +218,10 @@ to publish signed updates. Leave publication disabled to create a draft.
 | beta (default) | `0.1.2-beta.1` | Pre-release | `desktop-updates-beta` |
 | stable (explicit) | `0.1.2` | Release | `desktop-updates-stable` |
 
-Each feed hosts its own `latest.json`. Canonical SemVer, channel, manifest and
-GitHub Pre-release metadata must agree. Feed advancement uses SemVer comparison,
+Each feed hosts its own `latest.json` with macOS, Windows, and installer-specific
+Linux DEB/RPM targets. Canonical SemVer, channel, manifest and GitHub Pre-release
+metadata must agree. Feed advancement uses
+SemVer comparison,
 including numeric beta sequence numbers, and never falls back to another channel.
 Release tooling uses `node-semver`; clients use the official Tauri updater's
 default version comparator, signature verification and installer. No custom
@@ -293,11 +295,15 @@ Requests in flight can be interrupted. Saving identical settings is a no-op.
 
 ## Application Updates
 
-The main window checks once at launch; Settings also supports manual checks.
-Installation requires confirmation. The official Tauri updater downloads and
-verifies the signed archive before the runtime restores agent configurations
-and allows installation. Failed download/signature verification leaves running
-protection untouched; failed installation leaves protection stopped.
+On macOS, Windows, and installed Linux DEB/RPM builds, the main window checks once at launch; Settings also
+supports manual checks. Installation requires confirmation. The official Tauri
+updater downloads and verifies the signed archive before the runtime restores
+agent configurations and allows installation. Failed download/signature
+verification leaves running protection untouched; failed installation leaves
+protection stopped. Linux updater manifests use separate
+`linux-x86_64-deb` and `linux-x86_64-rpm` entries, and the locked updater invokes
+the matching native installer with user authorization. AppImage is not shipped;
+existing AppImage users must manually migrate to DEB or RPM.
 
 Update signatures are separate from Apple Developer ID signing/notarization.
 Release administrators must provision these repository settings:
@@ -308,7 +314,8 @@ Release administrators must provision these repository settings:
 
 Dispatch `desktop-native.yml` with `production_macos=true`, `release_channel`
 (`beta` by default), and a matching `release_version`. CI requires signing
-settings and creates all three platform signatures and `latest.json`.
+settings and creates macOS, Windows, Linux DEB, and Linux RPM signatures plus
+`latest.json`.
 Publishing requires `publish_release=true` or explicitly publishing the draft.
 The selected channel's feed advances only to a newer version. Its public URL is
 `releases/download/desktop-updates-beta/latest.json` or
@@ -320,6 +327,13 @@ The first updater-enabled app must be installed manually. For local distribution
 builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and the
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
+
+The DMG leaves CLI registration explicit. An optional signed PKG installs the
+same app and owns `/usr/local/bin/pag`; enable it with `build_macos_pkg=true` and
+provision a Developer ID Installer PKCS#12/password plus
+`APPLE_INSTALLER_SIGN_IDENTITY`. Normal macOS CI always builds and expands an
+unsigned PKG to inspect its payload and preinstall conflict checks. Signed PKG
+acceptance, notarization, and installation remain pending native CI evidence.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -547,11 +561,14 @@ npm ci
 npm run dev
 ```
 
-Tauri launches the target-triple-specific `aci` binary as an external sidecar.
+The persistent backend launches the target-triple-specific bundled `aci`
+binary as an external sidecar.
 The development command builds debug sidecars; packaged builds compile release
 sidecars from this repository. `npm run dist` produces the native bundle for
 the current platform. CI builds the same Tauri application as a macOS DMG and
-app, a Windows NSIS installer, and Linux DEB and AppImage packages.
+app, a Windows NSIS installer, and Linux DEB and RPM packages. AppImage is
+excluded because its temporary mount cannot own a persistent backend after the
+UI exits.
 
 Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
 covers the proxy (token scope, fail-closed session, revocation gate, and a
@@ -569,25 +586,31 @@ media, 200% zoom, and
 workflow input and are disabled on ordinary PR builds. TypeScript, release
 manifest tests, and Rust checks still run. Windows package jobs also execute
 the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
-ACI and helper without opening the app, then uninstall the package; temporary
+CLI, backend, ACI and helper without opening the app, then uninstall the package; temporary
 credential-store fixtures are separate from real provider credentials.
 
 ## Packaging
 
 `npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
 newer is required to package the adaptive macOS app icon. The platform bundle
-contains the shared renderer, Rust runtime, `aci`, and the credential helper;
-there is no second GUI or management service process.
+contains the shared renderer, `pag`, the persistent `pag-service`, `aci`, and
+the credential helper. The UI and CLI are clients of the same per-user backend;
+there is no second GUI process.
 
-`scripts/bundle-sidecars.mjs` builds two sidecars with `--locked`: the `aci`
-verifier and `private-ai-gateway-helper`, a console binary from the gateway
-crate that prints an agent's local token (kept separate from the GUI app so
-stdout works on Windows). The desktop gateway and Tauri crates declare
+`scripts/bundle-sidecars.mjs` builds four executables with `--locked`: `pag`,
+`pag-service`, the `aci` verifier, and `private-ai-gateway-helper`, a console
+binary from the gateway crate that prints an agent's local token (kept separate
+from the GUI app so stdout works on Windows). A release build passes
+`DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAG_BUILD_VERSION`; ordinary
+builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
 The root `aci` follows the root workspace toolchain. CI tests the gateway,
 runtime, renderer, and Tauri backend, then compiles and bundles the same app on
-macOS, Windows, and Linux. macOS additionally verifies the compiled asset
+macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
+platforms and CLI-only DEB/RPM packages on Linux. See
+[`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
+upgrade behavior, and the explicit macOS registration step. macOS additionally verifies the compiled asset
 catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.
 
 ### macOS distribution signing

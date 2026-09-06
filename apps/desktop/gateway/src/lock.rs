@@ -28,6 +28,20 @@ pub struct InstanceLock {
     _file: fs::File,
 }
 
+/// Coordinates client-driven startup with installer replacement before spawn.
+pub struct StartupLock {
+    _file: fs::File,
+}
+
+pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
+    let file = open(data_dir, "startup.lock")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(StartupLock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// Try to become the primary instance; `None` when another process holds it.
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {

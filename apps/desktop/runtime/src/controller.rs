@@ -387,6 +387,12 @@ impl DesktopRuntime {
         self.recovery.changed.notify_one();
     }
 
+    pub fn instance_lock(&self) -> Result<&lock::InstanceLock, String> {
+        self.instance
+            .as_ref()
+            .ok_or_else(|| "The backend does not own its instance lock".to_string())
+    }
+
     pub fn state(&self) -> Result<GatewayState, String> {
         self.manager.snapshot()
     }
@@ -497,13 +503,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    pub fn prepare_exit(&self) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
-        self.stop_inner()?;
-        self.exiting.store(true, Ordering::Release);
-        Ok(())
-    }
-
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         self.start_inner(config)
@@ -542,16 +541,6 @@ impl DesktopRuntime {
     pub fn stop(&self) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         self.stop_inner()
-    }
-
-    /// Keep configuration mutations out of the restore/install boundary, including Windows exit.
-    pub fn install_update(
-        &self,
-        install: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
-        self.stop_inner()?;
-        install()
     }
 
     fn stop_inner(&self) -> Result<GatewayState, String> {
@@ -594,10 +583,16 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
-        let gateway = self.stop_inner().map(|_| ());
-        let endpoint = self.endpoint.stop().await;
-        gateway.and(endpoint)
+        // Shutdown waits for a configuration transaction to commit or roll back.
+        // Cancelling that future midway could split credential and config state.
+        let _operation = self.lifecycle.lock().await;
+        if self.exiting.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.stop_inner()?;
+        self.endpoint.stop().await?;
+        self.exiting.store(true, Ordering::Release);
+        Ok(())
     }
 
     fn projector(&self, endpoint: &str) -> Result<Projector, String> {
@@ -1433,15 +1428,11 @@ mod tests {
     }
 
     #[test]
-    fn preparing_exit_blocks_later_configuration_changes_and_can_retry_if_busy() {
+    fn shutdown_blocks_later_configuration_changes() {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let runtime = test_runtime(&executor, directory.path());
-        let operation = runtime.lifecycle.try_lock().unwrap();
-        assert!(runtime.prepare_exit().is_err());
-        assert!(!runtime.exiting.load(Ordering::Acquire));
-        drop(operation);
-        runtime.prepare_exit().unwrap();
+        executor.block_on(runtime.shutdown()).unwrap();
         let state = runtime.state().unwrap();
         assert_eq!(state.status, "stopped");
         assert_eq!(

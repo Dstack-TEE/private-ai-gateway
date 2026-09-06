@@ -189,6 +189,7 @@ export interface LocalApiConfig {
 }
 
 export interface GatewayState {
+  backendConnected?: boolean;
   /** Unix seconds when the current protection session became verified. */
   protectedSince?: number;
   status: GatewayStatus;
@@ -269,7 +270,15 @@ export interface LaunchPreferences {
   connectOnLaunch: boolean;
 }
 
+export interface CliRegistration {
+  executable: string;
+  commandPath: string;
+  installed: boolean;
+  onPath: boolean;
+}
+
 export interface DesktopApi {
+  startBackendService(): Promise<GatewayState>;
   showEditMenu(editable: boolean): Promise<void>;
   getAppearance(): Promise<Appearance>;
   setAppearance(appearance: Appearance): Promise<void>;
@@ -283,6 +292,10 @@ export interface DesktopApi {
   getLaunchPreferences(): Promise<LaunchPreferences>;
   setLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): Promise<LaunchPreferences>;
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
+  getCliRegistration(): Promise<CliRegistration>;
+  setCliRegistration(installed: boolean): Promise<CliRegistration>;
+  onStopAllRequest(listener: () => void): () => void;
+  stopAllAndQuit(): Promise<void>;
   copyText(text: string): Promise<void>;
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;

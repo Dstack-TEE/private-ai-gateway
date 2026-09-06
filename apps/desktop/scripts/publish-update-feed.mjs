@@ -18,7 +18,7 @@ const request = async (url, options = {}) => {
 };
 const manifest = await (await request(`${prefix}latest.json`)).json();
 if (manifest.version !== release.version || manifest.channel !== release.channel) throw new Error("Manifest and release channel do not match");
-for (const platform of ["darwin-aarch64", "windows-x86_64", "linux-x86_64"]) {
+for (const platform of ["darwin-aarch64", "windows-x86_64", "linux-x86_64-deb", "linux-x86_64-rpm"]) {
   const entry = manifest.platforms?.[platform];
   if (typeof entry?.signature !== "string" || !entry.signature.trim() || typeof entry.url !== "string" || !entry.url.startsWith(prefix)) throw new Error(`Invalid update entry: ${platform}`);
   await request(entry.url, { method: "HEAD" });

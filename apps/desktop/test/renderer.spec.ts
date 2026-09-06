@@ -13,6 +13,18 @@ async function choose(page: Page, control: import("@playwright/test").Locator, l
   await page.getByRole("option", { name: label, exact: true }).click();
 }
 
+test("CLI registration and explicit backend recovery are reachable", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings" }).click();
+  const cli = page.getByRole("region", { name: "Command Line", exact: true });
+  await cli.getByRole("button", { name: "Install", exact: true }).click();
+  await cli.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(cli.getByRole("button", { name: "Install", exact: true })).toBeVisible();
+  await page.goto("/?mock=backend-disconnected");
+  await page.getByRole("button", { name: "Start backend", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Start backend", exact: true })).toHaveCount(0);
+});
+
 test("Local API examples safely embed the local client credential", async () => {
   const calls: { url?: string; authorization?: string; body: unknown }[] = [];
   const server = createServer((request, response) => {

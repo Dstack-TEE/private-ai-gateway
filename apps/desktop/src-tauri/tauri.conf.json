@@ -41,7 +41,12 @@
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
     "shortDescription": "Verified local AI gateway",
-    "externalBin": ["binaries/aci", "binaries/private-ai-gateway-helper"],
+    "externalBin": [
+      "binaries/aci",
+      "binaries/pag",
+      "binaries/pag-service",
+      "binaries/private-ai-gateway-helper"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -51,6 +56,22 @@
     ],
     "macOS": {
       "hardenedRuntime": true
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer/windows.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "preInstallScript": "installer/deb-pre-install.sh",
+        "preRemoveScript": "installer/deb-pre-remove.sh"
+      },
+      "rpm": {
+        "preInstallScript": "installer/rpm-pre-install.sh",
+        "preRemoveScript": "installer/rpm-pre-remove.sh"
+      }
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

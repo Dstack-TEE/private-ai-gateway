@@ -1,86 +1,124 @@
-# Backend and CLI Refactor
+# PAG Backend and CLI
 
-Baseline: PR #177 (`feat/private-ai-gateway-native-clients`), checked at
-`2af6240e0fb92665a21d1c20041c76cd138420c8` on 2026-09-06.
+The desktop UI and `pag` connect to one per-user `pag-service` backend. Only the
+backend owns gateway state, profile credentials, agent projection, usage,
+preferences, and the ACI subprocess. Neither client opens an inference listener
+or writes backend configuration directly.
 
-## Target
+```text
+React -> Tauri commands -> Rust Client --+
+                                       +-> private IPC -> pag-service -> aci
+pag --------------------> Rust Client --+
+```
 
-The Tauri UI and a standalone `pag` CLI will connect to one user-owned backend.
-That backend will own configuration, credentials, agent projection, usage,
-listeners, and ACI children. Closing either client must not stop the backend.
-The CLI-only distribution must not depend on Tauri or an installed UI.
+This is stacked on desktop PR #177. It retains the shared renderer and existing
+gateway/verifier implementation; it does not restore the older experimental
+native clients or their stdio runtime.
 
-This branch starts that work; it does not yet ship a CLI or IPC service.
-Unlike the older desktop branch, this baseline has no standalone stdio service
-or shared wire protocol. Do not restore those implementations wholesale.
+## Commands
 
-## First Slice: Instance Ownership
+```sh
+pag status --json
+pag status --watch --json
+pag service start
+pag service run
+pag start --profile work
+pag stop
+pag service stop --yes
+pag profiles add --id work --name Work --url https://tee.redpill.ai --provider redpill
+pag profiles verify work
+pag profiles list
+pag profiles use work --yes
+pag agents list
+pag agents connect codex --model MODEL --dry-run
+pag agents connect codex --model MODEL --yes
+pag agents disconnect codex --yes
+pag models list --refresh
+pag usage list --limit 20
+pag usage export --format csv --output usage.csv
+pag settings show
+pag settings set appearance dark --yes
+pag token rotate --yes
+pag cli status --json
+pag cli install
+pag app open
+pag doctor
+```
 
-`DesktopRuntime::launch` acquires the instance lock before loading settings,
-opening usage storage, binding listeners, or initializing tokens. Failure to
-acquire the lock returns an error; it no longer constructs a secondary runtime.
-A listener bind failure remains a recoverable error in the owning runtime.
-Tauri's existing single-instance plugin remains responsible for ordinary
-second-launch window activation.
+`--help` lists the complete command and option set. Credentials use a hidden
+prompt or explicit `--key-stdin`, never command-line key values. API profile
+credentials are not returned. `token show --yes` is the explicit operation that
+reveals the local inference token; rotation does not print its value.
 
-The instance lock owns its file handle rather than leaking a borrowed lock.
-Rust's file locking API is stable in the existing Rust 1.89 minimum version.
-The agent transaction lock continues to use `fd-lock`; a compatibility test
-checks that the new instance lock excludes the old implementation both ways.
-The lock file is not unlinked: removing a held lock path would allow another
-process to lock a different file at the same path.
+Destructive operations require interactive confirmation or `--yes`.
+Noninteractive callers receive an error instead of a hanging prompt. `--json`
+produces machine-readable results; watch output is NDJSON. Errors go to stderr
+with a nonzero exit status. No mutation is retried after a lost response.
 
-The subprocess regression exercises both an already-held lock and a lock-open
-failure in an isolated app home. Neither path may create configuration, usage,
-or token files. No real credentials or agent configurations are needed.
+## Lifecycle
 
-## Next Slices
+- `status`, `doctor`, and help/version do not launch the backend. `service start`
+  and `start` explicitly launch it without opening a window.
+- Closing or quitting the UI leaves the backend and gateway running. The tray's
+  Stop All and Quit action requests confirmation, then shuts down the backend.
+- A disconnected UI offers Start backend. It does not silently restart a service
+  during an updater operation or replay an earlier mutation.
+- Connect on launch belongs to backend startup, not opening/reopening a UI.
+  Login startup remains an explicit desktop OS preference.
+- The service acquires its instance lock before loading or migrating state.
+  Client startup and update replacement share an additional pre-spawn gate.
+- Shutdown enters draining before taking the exclusive operation gate, waits
+  for existing mutations, restores managed agent configuration, stops listeners,
+  and awaits process exit. Failure to restore leaves management available for
+  recovery instead of closing the inference listener halfway through shutdown.
+- A parent-pipe supervisor owns ACI. Backend death closes the pipe in the kernel;
+  the supervisor terminates and reaps its ACI child. Normal stop waits for the
+  supervisor; reap timeout preserves the completion handle for a later retry.
 
-1. Define typed, versioned control requests and a shared Rust client. Audit the
-   current lifecycle mutex and side-effecting agent queries before allowing
-   concurrent clients. Keep wire errors sanitized and requests bounded.
-2. Add a foreground backend and local-only IPC: Unix sockets with peer identity
-   checks; Windows named pipes with explicit user ACLs and remote rejection.
-   Client disconnect releases only connection resources. Service shutdown must
-   await owned tasks and children; `kill_on_drop` does not prove crash cleanup.
-3. Add `pag status`, `service run/start/stop`, and gateway `start/stop`. Query-only
-   commands do not launch a backend. Start waits for an authenticated readiness
-   handshake; incompatible versions never replace a running backend implicitly.
-4. Connect Tauri and tray actions through the shared client, preserving the
-   existing renderer and adding reconnect/unavailable states. Revalidate updater
-   shutdown because UI exit will no longer imply backend exit.
-5. Expose profiles, agent preview/apply, models, usage, settings, and explicit
-   credential operations. Preserve existing verification and rollback policy.
-6. Package CLI/backend with Desktop and separately without UI. Add installer-owned
-   PATH registration, installation conflict handling, and coordinated upgrades.
+## Security and Protocol
 
-## Platform Gates
+Local management uses bounded, versioned NDJSON over Unix sockets or Windows
+named pipes. It is separate from the local inference HTTP API. An inference key
+never authorizes administration.
 
-- macOS DMG drag-and-drop does not install a command in PATH. Provide an explicit
-  registration action, or a separate signed PKG pipeline for install-time
-  registration. Evaluate SMAppService for optional bundled background services;
-  it does not replace CLI registration or define CLI-only packaging.
-- Windows NSIS supports install/uninstall hooks. Use explicit per-user PATH
-  registration without rewriting the whole PATH; test in a fresh terminal.
-  Default named-pipe ACLs are insufficient for the management channel.
-- Linux DEB/RPM should own executable paths. Secret Service can depend on an
-  unlocked user login session: UI-independent use is not a promise of unattended
-  server support. Never fall back to plaintext credential storage.
-- CLI registration, user-requested backend startup, and login autostart are
-  separate choices. No privileged system daemon is required for this design.
-- Native security, installed UI/CLI synchronization, upgrade, and process cleanup
-  require real-OS acceptance. Cross-compilation or renderer mocks are not proof.
+Unix endpoints live in a validated private per-user directory and authenticate
+peer UID in both directions. Endpoint paths are shortened for Unix socket limits.
+Only an instance-lock owner may reclaim a stale socket, and only the socket inode
+owned by a listener is removed when it closes.
 
-## Official References
+Windows uses a protected current-user DACL, rejects remote clients, protects the
+first pipe instance, and verifies both peer process token SIDs. Read/write
+operations use overlapped I/O with timeout cancellation and completion draining.
+Same-user malicious code and OS administrators are outside this isolation boundary.
 
-Checked on 2026-09-06; recheck version-sensitive contracts before implementation.
+Clients validate the server handshake before sending requests. Shutdown includes
+the expected instance ID on that same authenticated connection. Update validation
+also checks that the running executable belongs to the current installation.
+The service bounds frame sizes, frame deadlines, clients, subscriptions, and
+exports. Slow or malformed clients cannot close the service. Subscriptions have
+a separate quota so they cannot consume every short-request slot.
 
-- [Rust File locking](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock)
-- [VS Code CLI installation](https://code.visualstudio.com/docs/editor/command-line)
-- [Tauri sidecar bundling](https://v2.tauri.app/develop/sidecar/)
-- [Tauri Windows installer hooks](https://v2.tauri.app/distribute/windows-installer/)
-- [Apple SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
-- [Windows named-pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
-- [XDG runtime directories](https://specifications.freedesktop.org/basedir/latest/)
-- [Tokio graceful shutdown](https://tokio.rs/tokio/topics/shutdown)
-- [Secret Service login-session contract](https://specifications.freedesktop.org/secret-service/latest/ch01.html)
+Agent changes retain preview/revision/apply validation. CSV exports are streamed
+one row at a time into a newly created private file; existing targets and symlinks
+are not overwritten. OS credential stores remain the only persistent provider
+credential store. UI-free operation does not imply an unlocked credential store
+on an unattended machine; there is no plaintext fallback.
+
+## Distribution and Verification
+
+See [CLI distribution](CLI-DISTRIBUTION.md) for package layouts, PATH ownership,
+PKG versus DMG registration, and the stable-path requirement that excludes
+AppImage from this backend model. CLI-only distributions contain no UI.
+
+Verification uses the existing gateway/runtime suites, a small set of real-binary
+CLI lifecycle tests, native transport tests, package smoke tests, and renderer
+interaction tests. No provider credentials, paid inference, or production state
+are required. Native CI must run the packaged binaries on each OS; cross-type
+checking and renderer mocks are supplementary, not installed-app proof.
+
+Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/struct.File.html#method.try_lock),
+[Tauri sidecars](https://v2.tauri.app/develop/sidecar/),
+[Tauri NSIS hooks](https://v2.tauri.app/distribute/windows-installer/),
+[Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[XDG runtime directories](https://specifications.freedesktop.org/basedir/latest/),
+[Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch01.html).

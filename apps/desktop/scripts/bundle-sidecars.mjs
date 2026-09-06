@@ -11,9 +11,12 @@ const cargo = process.env.CARGO ?? "cargo";
 const rustc = process.env.RUSTC ?? "rustc";
 const cargoDirectory = path.dirname(cargo);
 const pathValue = process.env.PATH ?? "";
-const buildEnv = path.isAbsolute(cargo)
-  ? { ...process.env, PATH: `${cargoDirectory}${path.delimiter}${pathValue}` }
-  : process.env;
+const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
+const buildEnv = {
+  ...process.env,
+  ...(path.isAbsolute(cargo) ? { PATH: `${cargoDirectory}${path.delimiter}${pathValue}` } : {}),
+  ...(releaseVersion ? { PAG_BUILD_VERSION: releaseVersion } : {}),
+};
 const rustcOutput = execFileSync(rustc, ["-vV"], {
   cwd: repoRoot,
   encoding: "utf8",
@@ -31,6 +34,16 @@ await mkdir(destinationDir, { recursive: true });
 // process so credential commands work on Windows.
 const sidecars = [
   { name: "aci", manifestPath: path.join(repoRoot, "Cargo.toml"), targetDir: path.join(repoRoot, "target") },
+  {
+    name: "pag",
+    manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
+    targetDir: path.join(appRoot, "runtime/target"),
+  },
+  {
+    name: "pag-service",
+    manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
+    targetDir: path.join(appRoot, "runtime/target"),
+  },
   {
     name: "private-ai-gateway-helper",
     manifestPath: path.join(appRoot, "gateway/Cargo.toml"),

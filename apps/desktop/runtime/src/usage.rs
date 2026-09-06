@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -250,9 +251,23 @@ impl UsageStore {
         let rows = statement
             .query_map(params_from_iter(bindings.iter()), row_to_activity)
             .map_err(db_error)?;
-        let records = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
-        let mut csv = String::from("timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n");
-        for item in &records {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let output = options.open(path).map_err(|_| {
+            "Cannot create the usage export. Choose a new writable file path.".to_string()
+        })?;
+        let mut writer = std::io::BufWriter::new(output);
+        let write_error =
+            |_| "The usage export could not be completed; its file may be partial.".to_string();
+        writer.write_all(b"timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n").map_err(write_error)?;
+        let mut count = 0;
+        for item in rows {
+            let item = item.map_err(db_error)?;
             let fields = [
                 item.at.to_string(),
                 item.id.clone(),
@@ -277,17 +292,19 @@ impl UsageStore {
                     .unwrap_or_default(),
                 item.detail.clone(),
             ];
-            csv.push_str(
-                &fields
-                    .iter()
-                    .map(|field| csv_field(field))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            csv.push('\n');
+            let line = fields
+                .iter()
+                .map(|field| csv_field(field))
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(writer, "{line}").map_err(write_error)?;
+            count += 1;
         }
-        fs::write(path, csv).map_err(|error| format!("Cannot write the usage export: {error}"))?;
-        Ok(records.len())
+        writer
+            .flush()
+            .and_then(|()| writer.get_ref().sync_all())
+            .map_err(write_error)?;
+        Ok(count)
     }
 
     pub fn clear(&self) -> Result<u64, String> {
@@ -787,7 +804,9 @@ mod tests {
             store.export_csv(&UsageQuery::default(), &output).unwrap(),
             1
         );
-        let csv = fs::read_to_string(output).unwrap();
+        let csv = fs::read_to_string(&output).unwrap();
+        assert!(store.export_csv(&UsageQuery::default(), &output).is_err());
+        assert_eq!(fs::read_to_string(&output).unwrap(), csv);
         let mut lines = csv.lines();
         assert_eq!(lines.next().unwrap().split(',').count(), 18);
         assert_eq!(lines.next().unwrap().split(',').count(), 18);

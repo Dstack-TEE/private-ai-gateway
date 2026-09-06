@@ -231,6 +231,9 @@ impl CatalogSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayState {
+    /// Client connection state; the backend leaves this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_connected: Option<bool>,
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
     /// `blocked`, or `error`.
     pub status: String,
@@ -281,6 +284,7 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             status: "stopped".to_string(),
+            backend_connected: None,
             configuration_verification: false,
             progress: None,
             remote_url: None,

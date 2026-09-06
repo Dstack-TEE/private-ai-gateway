@@ -2,31 +2,25 @@ mod autostart;
 mod menu;
 mod native_dialog;
 mod notifications;
-mod power;
-mod runtime_adapter;
 mod tray;
 mod updates;
 
-use std::{
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{path::PathBuf, sync::Arc};
 
-use desktop_gateway::agents::helper_binary_name;
 use desktop_runtime::{
+    cli_install::Registration,
+    client::Client,
     contracts::{
         AgentPreview, AgentStatus, ConfidentialProfileInput, ConnectOptions, GatewayState,
         LocalApiConfig, RequestActivity, StartGatewayConfig,
     },
-    controller::{DesktopRuntime, RuntimeOptions},
+    preferences::Appearance,
+    protocol::Preference,
     usage::{UsagePage, UsageQuery},
 };
-use runtime_adapter::TauriSidecarLauncher;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_shell::ShellExt;
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -41,12 +35,6 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
 struct LaunchPreferences {
     open_at_login: bool,
     connect_on_launch: bool,
-}
-
-#[derive(Default)]
-struct ExitState {
-    pending: AtomicBool,
-    allowed: AtomicBool,
 }
 
 #[derive(serde::Serialize)]
@@ -78,32 +66,64 @@ async fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
 }
 
 #[tauri::command]
-async fn get_launch_preferences(app: AppHandle) -> Result<LaunchPreferences, String> {
-    run_blocking(move || load_launch_preferences(&app)).await
+async fn get_launch_preferences(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+) -> Result<LaunchPreferences, String> {
+    let client = client.inner().clone();
+    run_blocking(move || load_launch_preferences(&app, &client)).await
 }
 
-fn load_launch_preferences(app: &AppHandle) -> Result<LaunchPreferences, String> {
+fn load_launch_preferences(app: &AppHandle, client: &Client) -> Result<LaunchPreferences, String> {
     Ok(LaunchPreferences {
         open_at_login: autostart::is_enabled(app)?,
-        connect_on_launch: desktop_runtime::preferences::load()?.connect_on_launch,
+        connect_on_launch: client.preferences()?.connect_on_launch,
     })
+}
+
+fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
+    let app = app.clone();
+    let client = client.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let preferences = client.preferences()?;
+            let launch = LaunchPreferences {
+                open_at_login: autostart::is_enabled(&app)?,
+                connect_on_launch: preferences.connect_on_launch,
+            };
+            Ok::<_, String>((preferences.appearance, launch))
+        })();
+        match result {
+            Ok((appearance, launch)) => {
+                let app_for_main_thread = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    apply_appearance(&app_for_main_thread, appearance);
+                    let _ = app_for_main_thread.emit("gateway://appearance", appearance);
+                    let _ = app_for_main_thread.emit("gateway://launch-preferences", launch);
+                });
+            }
+            Err(error) => client.report_error(error),
+        }
+    });
 }
 
 #[tauri::command]
 async fn set_launch_preference(
     app: AppHandle,
+    client: State<'_, Arc<Client>>,
     name: String,
     enabled: bool,
 ) -> Result<LaunchPreferences, String> {
+    let client = client.inner().clone();
     run_blocking(move || {
         match name.as_str() {
             "openAtLogin" => tray::set_open_at_login(&app, enabled)?,
-            "connectOnLaunch" => desktop_runtime::preferences::update(|preferences| {
-                preferences.connect_on_launch = enabled
-            })?,
+            "connectOnLaunch" => {
+                client.set_preference(Preference::ConnectOnLaunch(enabled))?;
+            }
             _ => return Err("Unknown startup preference".to_string()),
         }
-        let preferences = load_launch_preferences(&app)?;
+        let preferences = load_launch_preferences(&app, &client)?;
         let _ = app.emit("gateway://launch-preferences", &preferences);
         Ok(preferences)
     })
@@ -113,12 +133,12 @@ async fn set_launch_preference(
 const AUTOSTART_ARG: &str = "--autostart";
 
 #[tauri::command]
-async fn get_appearance() -> Result<desktop_runtime::preferences::Appearance, String> {
-    run_blocking(|| Ok(desktop_runtime::preferences::load()?.appearance)).await
+async fn get_appearance(client: State<'_, Arc<Client>>) -> Result<Appearance, String> {
+    let client = client.inner().clone();
+    run_blocking(move || Ok(client.preferences()?.appearance)).await
 }
 
-fn apply_appearance(app: &AppHandle, appearance: desktop_runtime::preferences::Appearance) {
-    use desktop_runtime::preferences::Appearance;
+fn apply_appearance(app: &AppHandle, appearance: Appearance) {
     app.set_theme(match appearance {
         Appearance::System => None,
         Appearance::Light => Some(tauri::Theme::Light),
@@ -129,10 +149,13 @@ fn apply_appearance(app: &AppHandle, appearance: desktop_runtime::preferences::A
 #[tauri::command]
 async fn set_appearance(
     app: AppHandle,
-    appearance: desktop_runtime::preferences::Appearance,
+    client: State<'_, Arc<Client>>,
+    appearance: Appearance,
 ) -> Result<(), String> {
+    let client = client.inner().clone();
     run_blocking(move || {
-        desktop_runtime::preferences::update(|preferences| preferences.appearance = appearance)
+        client.set_preference(Preference::Appearance(appearance))?;
+        Ok(())
     })
     .await?;
     apply_appearance(&app, appearance);
@@ -141,11 +164,9 @@ async fn set_appearance(
 }
 
 #[tauri::command]
-async fn get_gateway_state(
-    runtime: State<'_, Arc<DesktopRuntime>>,
-) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.state()).await
+async fn get_gateway_state(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.state()).await
 }
 
 #[tauri::command]
@@ -186,21 +207,31 @@ async fn export_diagnostics(
 
 #[tauri::command]
 async fn start_gateway(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     config: StartGatewayConfig,
 ) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.start(config)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.start(config)).await
+}
+
+#[tauri::command]
+async fn start_backend_service(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
+    let client = client.inner().clone();
+    run_blocking(move || {
+        Client::ensure_service()?;
+        client.state()
+    })
+    .await
 }
 
 #[tauri::command]
 async fn verify_configuration(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     profile: ConfidentialProfileInput,
     require_production_os: bool,
     key: Option<String>,
 ) -> Result<GatewayState, String> {
-    runtime
+    client
         .inner()
         .clone()
         .verify_configuration(profile, require_production_os, key)
@@ -209,51 +240,51 @@ async fn verify_configuration(
 
 #[tauri::command]
 async fn activate_profile(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     profile_id: String,
 ) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.activate_profile(profile_id)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.activate_profile(profile_id)).await
 }
 
 #[tauri::command]
 async fn delete_profile(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     profile_id: String,
 ) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.delete_profile(profile_id)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.delete_profile(profile_id)).await
 }
 
 #[tauri::command]
-async fn stop_gateway(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.stop()).await
+async fn stop_gateway(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.stop()).await
 }
 
 #[tauri::command]
-async fn clear_api_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.clear_api_key()).await
+async fn clear_api_key(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.clear_api_key()).await
 }
 
 #[tauri::command]
 async fn query_usage(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     query: UsageQuery,
 ) -> Result<UsagePage, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.query_usage(query)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.query_usage(query)).await
 }
 
 #[tauri::command]
 async fn get_usage_record(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     record_id: String,
 ) -> Result<RequestActivity, String> {
-    let runtime = runtime.inner().clone();
+    let client = client.inner().clone();
     run_blocking(move || {
-        runtime
+        client
             .usage_record(&record_id)?
             .ok_or_else(|| "Usage record not found".to_string())
     })
@@ -262,90 +293,88 @@ async fn get_usage_record(
 
 #[tauri::command]
 async fn export_usage_csv(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     query: UsageQuery,
     path: String,
 ) -> Result<usize, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_usage_csv(query, PathBuf::from(path))).await
+    let client = client.inner().clone();
+    run_blocking(move || client.export_usage_csv(query, PathBuf::from(path))).await
 }
 
 #[tauri::command]
-async fn clear_usage(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<u64, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.clear_usage()).await
+async fn clear_usage(client: State<'_, Arc<Client>>) -> Result<u64, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.clear_usage()).await
 }
 
 #[tauri::command]
-async fn get_client_key(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<String, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.client_key()).await
+async fn get_client_key(client: State<'_, Arc<Client>>) -> Result<String, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.client_key()).await
 }
 
 #[tauri::command]
 async fn rotate_client_key(
     app: AppHandle,
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
 ) -> Result<String, String> {
-    let runtime = runtime.inner().clone();
-    let result = run_blocking(move || runtime.rotate_client_key()).await;
+    let client = client.inner().clone();
+    let result = run_blocking(move || client.rotate_client_key()).await;
     let _ = app.emit("gateway://client-key-changed", result.is_ok());
     result
 }
 
 #[tauri::command]
 async fn save_local_api_config(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     config: LocalApiConfig,
 ) -> Result<GatewayState, String> {
-    runtime.inner().clone().save_local_api_config(config).await
+    client.inner().clone().save_local_api_config(config).await
 }
 
 #[tauri::command]
-async fn refresh_catalog(runtime: State<'_, Arc<DesktopRuntime>>) -> Result<GatewayState, String> {
-    runtime.inner().clone().refresh_catalog().await
+async fn refresh_catalog(client: State<'_, Arc<Client>>) -> Result<GatewayState, String> {
+    client.inner().clone().refresh_catalog().await
 }
 
 #[tauri::command]
 async fn list_agents(
     app: AppHandle,
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
 ) -> Result<Vec<AgentStatus>, String> {
-    let runtime = runtime.inner().clone();
-    let agents = run_blocking(move || runtime.list_agents()).await?;
+    let client = client.inner().clone();
+    let agents = run_blocking(move || client.list_agents()).await?;
     tray::sync_agents(&app, &agents);
     Ok(agents)
 }
 
 #[tauri::command]
 async fn preview_agent_connection(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     agent_id: String,
     connect: bool,
     options: ConnectOptions,
 ) -> Result<AgentPreview, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.preview_agent(agent_id, connect, options)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.preview_agent(agent_id, connect, options)).await
 }
 
 #[tauri::command]
 async fn apply_agent_connection(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
     agent_id: String,
     connect: bool,
     revision: String,
     options: ConnectOptions,
 ) -> Result<AgentStatus, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.apply_agent(agent_id, connect, revision, options)).await
+    let client = client.inner().clone();
+    run_blocking(move || client.apply_agent(agent_id, connect, revision, options)).await
 }
 
 #[tauri::command]
-async fn disconnect_all_agents(
-    runtime: State<'_, Arc<DesktopRuntime>>,
-) -> Result<Vec<AgentStatus>, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.disconnect_all_agents()).await
+async fn disconnect_all_agents(client: State<'_, Arc<Client>>) -> Result<Vec<AgentStatus>, String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.disconnect_all_agents()).await
 }
 
 #[tauri::command]
@@ -433,20 +462,23 @@ fn show_edit_menu(window: tauri::WebviewWindow, editable: bool) -> Result<(), St
 }
 
 #[tauri::command]
-fn open_native_dialog(
+async fn open_native_dialog(
     app: AppHandle,
     kind: String,
     repair: bool,
     record_id: Option<String>,
     profile_id: Option<String>,
 ) -> Result<(), String> {
-    native_dialog::open(
-        &app,
-        &kind,
-        repair,
-        record_id.as_deref(),
-        profile_id.as_deref(),
-    )
+    run_blocking(move || {
+        native_dialog::open(
+            &app,
+            &kind,
+            repair,
+            record_id.as_deref(),
+            profile_id.as_deref(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -459,12 +491,51 @@ fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
     native_dialog::close(&window)
 }
 
+async fn run_pag_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
+    let output = app
+        .shell()
+        .sidecar("pag")
+        .map_err(|_| "The bundled pag command is unavailable in this installation")?
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|_| "The pag command could not complete")?;
+    if !output.status.success() {
+        return Err("The pag command could not update command-line access".to_string());
+    }
+    if output.stdout.len() > 64 * 1024 {
+        return Err("The pag command returned an invalid response".to_string());
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| "The pag command returned an invalid response".to_string())
+}
+
+#[tauri::command]
+async fn get_cli_registration(app: AppHandle) -> Result<Registration, String> {
+    run_pag_cli(&app, vec!["cli", "status", "--json"]).await
+}
+
+#[tauri::command]
+async fn set_cli_registration(app: AppHandle, installed: bool) -> Result<Registration, String> {
+    if installed {
+        run_pag_cli(&app, vec!["cli", "install", "--json"]).await
+    } else {
+        run_pag_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
+    }
+}
+
+#[tauri::command]
+async fn stop_all_and_quit(app: AppHandle, client: State<'_, Arc<Client>>) -> Result<(), String> {
+    let client = client.inner().clone();
+    run_blocking(move || client.shutdown()).await?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
-    let launcher = Arc::new(TauriSidecarLauncher::default());
-    let launcher_for_setup = launcher.clone();
 
     let app =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -492,10 +563,10 @@ pub fn run() {
         )
         .manage(updates::PendingUpdate::default())
         .manage(updates::UpdateProgress::default())
-        .manage(ExitState::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
+            start_backend_service,
             get_gateway_state,
             read_profile_backup,
             import_profiles,
@@ -539,41 +610,36 @@ pub fn run() {
             list_agents,
             preview_agent_connection,
             apply_agent_connection,
-            disconnect_all_agents
+            disconnect_all_agents,
+            get_cli_registration,
+            set_cli_registration,
+            stop_all_and_quit
         ])
         .setup(move |app| {
             notifications::initialize(app.handle());
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             autostart::setup(app.handle())?;
-            if let Ok(preferences) = desktop_runtime::preferences::load() {
-                apply_appearance(app.handle(), preferences.appearance);
-            }
             if app.config().plugins.0.contains_key("updater") {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
-            launcher_for_setup.initialize(app.handle().clone())?;
-            let helper_path = std::env::current_exe()
-                .map_err(|error| format!("Cannot locate the app executable: {error}"))?
-                .parent()
-                .ok_or_else(|| "Cannot locate the app directory".to_string())?
-                .join(helper_binary_name());
-            let runtime = DesktopRuntime::launch(RuntimeOptions {
-                launcher: launcher_for_setup.clone(),
-                helper_path,
-                task_runtime: tauri::async_runtime::handle().inner().clone(),
-            })?;
-            app.manage(runtime.clone());
-            power::setup(app.handle(), &runtime);
+            let client = Client::attach(tauri::async_runtime::handle().inner().clone())?;
+            if let Ok(preferences) = client.preferences() {
+                apply_appearance(app.handle(), preferences.appearance);
+            }
+            app.manage(client.clone());
 
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "main window was not created".to_string())?;
             window.set_title(desktop_gateway::brand::PRODUCT_NAME)?;
             let window_for_events = window.clone();
+            let app_for_events = app.handle().clone();
+            let client_for_events = client.clone();
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Focused(true)) {
                     let _ = window_for_events.emit("gateway://agents-changed", ());
+                    refresh_preferences(&app_for_events, &client_for_events);
                 }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -581,15 +647,15 @@ pub fn run() {
                 }
             });
             if let Err(error) = tray::setup(app.handle()) {
-                runtime.report_error(format!("The system tray is unavailable: {error}"));
+                client.report_error(format!("The system tray is unavailable: {error}"));
             }
             if let Err(error) = menu::setup(app.handle()) {
-                runtime.report_error(format!("The application menu is unavailable: {error}"));
+                client.report_error(format!("The application menu is unavailable: {error}"));
             }
 
             let handle = app.handle().clone();
-            let mut states = runtime.subscribe();
-            let initial = runtime.state()?;
+            let mut states = client.subscribe();
+            let initial = states.borrow().clone();
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
             tauri::async_runtime::spawn(async move {
@@ -603,66 +669,14 @@ pub fn run() {
             if show_on_launch {
                 tray::show_window(app.handle());
             }
-            match desktop_runtime::preferences::load() {
-                Ok(preferences) if preferences.connect_on_launch => {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let result = runtime
-                            .state()
-                            .and_then(|state| runtime.clone().start(state.config));
-                        if let Err(error) = result {
-                            runtime.report_error(format!("Automatic connection failed: {error}"));
-                        }
-                    });
-                }
-                Err(error) => runtime.report_error(error),
-                _ => {}
-            }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
 
-    app.run(|app, event| match event {
-        tauri::RunEvent::Exit => power::shutdown(),
-        tauri::RunEvent::ExitRequested { api, code, .. } => {
-            // The updater already restores configurations before restart,
-            // and Tauri restart requests cannot be deferred.
-            if code == Some(tauri::RESTART_EXIT_CODE) {
-                return;
-            }
-            let exit = app.state::<ExitState>();
-            if exit.allowed.load(Ordering::Acquire) {
-                return;
-            }
-            if let Some(runtime) = app.try_state::<Arc<DesktopRuntime>>() {
-                api.prevent_exit();
-                if exit.pending.swap(true, Ordering::AcqRel) {
-                    return;
-                }
-                let app = app.clone();
-                let runtime = runtime.inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    let worker = runtime.clone();
-                    let result = run_blocking(move || worker.prepare_exit()).await;
-                    let exit = app.state::<ExitState>();
-                    match result {
-                        Ok(()) => {
-                            exit.allowed.store(true, Ordering::Release);
-                            app.exit(code.unwrap_or(0));
-                        }
-                        Err(error) => {
-                            exit.pending.store(false, Ordering::Release);
-                            runtime.report_error(format!(
-                                "Cannot quit until agent configurations are restored: {error}"
-                            ));
-                            tray::show_window(&app);
-                        }
-                    }
-                });
-            }
-        }
+    app.run(|_app, event| match event {
         #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => tray::show_window(app),
+        tauri::RunEvent::Reopen { .. } => tray::show_window(_app),
         _ => {}
     });
 }
