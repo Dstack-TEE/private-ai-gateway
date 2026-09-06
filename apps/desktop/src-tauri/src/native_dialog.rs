@@ -173,14 +173,17 @@ pub fn open(
         .state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
         .state()?;
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
+    let theme = main.theme().map_err(window_error)?;
     if spec.label == UPDATE_PROGRESS_LABEL {
         crate::updates::reset_progress(app);
     }
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
-                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};"
+                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};document.documentElement?.setAttribute('data-theme','{}');",
+                if theme == tauri::Theme::Dark { "dark" } else { "light" }
             ))
+            .background_color(if theme == tauri::Theme::Dark { tauri::webview::Color(10, 10, 10, 255) } else { tauri::webview::Color(255, 255, 255, 255) })
             .title(spec.title)
             .inner_size(spec.width, spec.height)
             .min_inner_size(spec.min_width, spec.min_height)

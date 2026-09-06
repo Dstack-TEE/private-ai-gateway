@@ -1,7 +1,12 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) { @slot; }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme]), :root:not([data-theme]) *) { @slot; }
+  }
+}
 
 @theme inline {
   --color-background: var(--background);
@@ -111,7 +116,8 @@
   --veil-color: color-mix(in srgb, var(--primary) 16%, var(--panel));
 }
 
-:root[data-theme="dark"] {
+:root {
+  @variant dark {
     color-scheme: dark;
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
@@ -143,6 +149,7 @@
     --ring: oklch(0.556 0 0);
     --sidebar: oklch(0.205 0 0);
     --popover: oklch(0.205 0 0);
+  }
 }
 
 @layer base {

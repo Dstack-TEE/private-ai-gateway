@@ -357,8 +357,14 @@ protocol is the service's own response, shown as such.
   `Rewritten by service`.
 - **Proxy limits.** Request bodies are buffered (32 MiB, the same limit the
   sidecar enforces, 60 s read timeout) only so the `model` can be checked
-  against the catalog; nothing else in the body is read, and responses
-  stream. At most 64 requests are in flight (`429`); upstream connect 5 s,
+  against the catalog. With `--verify-receipts` (always enabled by desktop),
+  the sidecar also buffers responses in memory up to 32 MiB and checks their
+  receipts before returning any bytes. Failed, missing or unavailable proofs
+  return HTTP 502 without the provider response body. SSE framing is preserved,
+  but tokens are delivered only after the entire response is verified. Neither
+  request nor response buffers are written to disk. Verification has a 600 s
+  upper bound; the desktop transport can time out earlier while waiting.
+  At most 64 requests are in flight (`429`); upstream connect 5 s,
   idle read 300 s (`504`). Standard hop-by-hop headers plus any named by
   `Connection`, `Proxy-Connection`, the agent credential, and the attribution
   tag are removed in both directions by both proxies. The helper endpoints

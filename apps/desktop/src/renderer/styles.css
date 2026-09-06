@@ -291,7 +291,9 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .sheet-heading h2 { color: var(--text); font-size: 17px; font-weight: 650; }
 .sheet-heading h2:focus { outline: none; box-shadow: none; }
 .profile-list { min-height: 0; margin-top: 14px; flex: 1 1 auto; overflow: auto; background: var(--panel); border: 1px solid var(--separator); border-radius: var(--radius); }
-.profile-list-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: center; border-bottom: 1px solid var(--separator); }
+.profile-list-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; border-bottom: 1px solid var(--separator); }
+.profile-list-row.is-active { background: var(--muted); }
+.profile-list-row.is-active .profile-select { background: transparent; }
 .profile-list-row:last-child { border-bottom: 0; }
 .profile-select { min-width: 0; }
 .profile-select > span:nth-child(2) { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
@@ -318,8 +320,10 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .field-note.is-saved { color: var(--success); }
 .usage-proof-heading > span:last-child { min-width: 0; display: grid; gap: 2px; }
 .usage-proof-heading small { color: var(--text-tertiary); font-size: 12px; }
-.proof-card { padding: 13px; }
-.proof-explanation { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--separator); }
+.proof-card { padding: 0; margin-top: 16px; display: flex; flex-direction: column; gap: 20px; }
+.proof-explanation { padding-top: 14px; border-top: 1px solid var(--separator); }
+.proof-card .evidence { font-size: 14px; row-gap: 18px; }
+.proof-card .privacy-verdict { flex-shrink: 0; }
 .proof-explanation h3 { font-size: 12px; font-weight: 600; }
 .proof-explanation p { margin-top: 6px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .proof-boundary { margin: 12px 0 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }

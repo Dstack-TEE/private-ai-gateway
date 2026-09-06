@@ -31,11 +31,15 @@ test("Local API examples safely embed the local client credential", async () => 
     for (const language of ["curl", "python", "javascript"] as const) {
       const code = localApiExample(language, endpoint, model, "test-local-client-key");
       expect(code).toContain("test-local-client-key");
-      const executable = language === "curl" ? "/bin/sh" : language === "python" ? "python3" : process.execPath;
-      const args = language === "javascript" ? ["--input-type=module", "-e", code] : ["-c", code];
-      await run(executable, args, { env: { ...process.env, PAG_API_KEY: "wrong-key" }, timeout: 5_000 });
+      if (language === "curl") await run("/bin/sh", ["-c", code], { timeout: 5_000 });
+      else {
+        expect(code).toContain("OpenAI");
+        expect(code).toContain("client.chat.completions.create");
+        if (language === "python") await run("python3", ["-c", "import ast,sys;ast.parse(sys.argv[1])", code]);
+        else expect(code).toContain('import OpenAI from "openai"');
+      }
     }
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(1);
     for (const call of calls) expect(call).toEqual({ url: "/v1/chat/completions", authorization: "Bearer test-local-client-key", body: { model, messages: [{ role: "user", content: "Hello" }] } });
   } finally {
     server.closeAllConnections();
@@ -47,7 +51,8 @@ test("Local API help opens examples with model selection and copy actions", asyn
   await page.goto("/?mock=ready");
   await page.getByRole("button", { name: "Local API examples", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Local API examples", exact: true });
-  await expect(dialog.locator("code")).toContainText("http://127.0.0.1:4180/v1/chat/completions");
+  await expect(dialog.locator("code")).toContainText("http://127.0.0.1:4180/v1");
+  await expect(dialog.getByText("Available", { exact: true })).toHaveCount(0);
   await expect(dialog.locator("code")).toContainText("sk-pag-");
   await dialog.getByRole("combobox", { name: "Model", exact: true }).selectOption("zai/glm-5.2");
   for (const language of ["cURL", "Python", "JavaScript"]) {
@@ -72,6 +77,8 @@ test("appearance defaults to system, persists and settings shortcut navigates", 
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   const theme = page.getByRole("combobox", { name: "Theme", exact: true });
   await expect(theme).toHaveValue("system");
+  const order = await page.getByRole("region", { name: "General", exact: true }).locator('[data-slot="item-title"]').allTextContents();
+  expect(order.indexOf("Theme")).toBe(order.indexOf("Connect on launch") + 1);
   await theme.selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
@@ -83,6 +90,14 @@ test("appearance defaults to system, persists and settings shortcut navigates", 
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await theme.selectOption("system");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("system dark styling is present before React initializes", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.route("**/*.js", (route) => route.abort());
+  await page.goto("/?mock=ready&native-dialog=profiles");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await expect(page.locator("body")).toHaveCSS("background-color", "oklch(0.145 0 0)");
 });
 
 test("window activation redetects an uninstalled connected agent", async ({ page }) => {
@@ -314,6 +329,15 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(dialog).toContainText(entry.text);
     await expect(page.locator("html")).not.toHaveAttribute("data-loading-frame-observed", "true");
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
+    if (entry.name === "Usage proof") {
+      const alignment = await dialog.evaluate((node) => {
+        const heading = node.querySelector(".sheet-heading")?.getBoundingClientRect();
+        const body = node.querySelector(".proof-card")?.getBoundingClientRect();
+        return [heading?.x, body?.x, heading?.right, body?.right];
+      });
+      expect(alignment[0]).toBe(alignment[1]);
+      expect(alignment[2]).toBe(alignment[3]);
+    }
     if (entry.name === "Usage proof" || entry.name === "Privacy verification") {
       const done = dialog.getByRole("button", { name: "Done", exact: true });
       await expect(done).toBeInViewport();

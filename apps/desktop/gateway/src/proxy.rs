@@ -780,7 +780,7 @@ async fn forward(
         streamed,
         receipt_id: receipt_id.clone(),
         verified: None,
-        detail: "Awaiting receipt verification".to_string(),
+        detail: String::new(),
         at: now_secs(),
         locally_constrained: None,
         rewritten: None,

@@ -399,7 +399,6 @@ function NativeLocalApiExampleWindow(): React.JSX.Element {
   return <main className="native-dialog-host"><LocalApiExamples
     api={desktopApi}
     endpoint={native.state.proxyUrl ?? localEndpoint(native.state.localApi)}
-    available={isProtected(native.state) && Boolean(native.state.proxyUrl) && !native.state.endpointError}
     models={native.state.catalog?.models ?? []}
     onCopy={(value) => desktopApi.copyText(value)} onClose={native.close}
   /></main>;
@@ -1064,7 +1063,7 @@ function App(): React.JSX.Element {
       )}
       {settingsTarget === "local-api-example" && <LocalApiExamples
         api={desktopApi}
-        endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} available={isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError}
+        endpoint={state.proxyUrl ?? localEndpoint(state.localApi)}
         models={models} onCopy={(value) => desktopApi.copyText(value)} onClose={() => setSettingsTarget(undefined)}
       />}
       {settingsTarget === "local-api" && (
@@ -2012,6 +2011,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
   const ReceiptIcon = !activity.leftDevice ? Ban : receiptVerified ? ShieldCheck : ShieldX;
   const failed = activity.leftDevice && (activity.status < 200 || activity.status >= 300);
   const deliveryUnconfirmed = activity.leftDevice
+    && activity.verified !== false
     && !activity.receiptId
     && (activity.status === 502 || activity.status === 504);
   const notes = [
@@ -2037,7 +2037,6 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       <dd>
         <StateLabel tone={outcome.tone} text={outcome.label} />
         {failed && <span className="dim"> HTTP {activity.status}</span>}
-        {activity.detail && <span className="dim"> · {activity.detail}</span>}
       </dd>
       <dt>Network</dt>
       <dd>
@@ -2049,12 +2048,13 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       </dd>
       <dt>Usage</dt>
       <dd>
-        {activity.inputTokens === undefined && activity.outputTokens === undefined
-          ? "Not reported"
-          : `${(activity.inputTokens ?? 0).toLocaleString()} input · ${(activity.outputTokens ?? 0).toLocaleString()} output`}
-        {(activity.cacheReadTokens !== undefined || activity.cacheWriteTokens !== undefined)
-          && <span className="dim"> · {(activity.cacheReadTokens ?? 0).toLocaleString()} cache read · {(activity.cacheWriteTokens ?? 0).toLocaleString()} cache write</span>}
-        {activity.costUsd !== undefined && <span className="dim"> · {currency(activity.costUsd)}</span>}
+        <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
+          <dt>Input tokens</dt><dd className="text-right">{activity.inputTokens?.toLocaleString() ?? "Not reported"}</dd>
+          <dt>Output tokens</dt><dd className="text-right">{activity.outputTokens?.toLocaleString() ?? "Not reported"}</dd>
+          {activity.cacheReadTokens !== undefined && <><dt>Cache read</dt><dd className="text-right">{activity.cacheReadTokens.toLocaleString()}</dd></>}
+          {activity.cacheWriteTokens !== undefined && <><dt>Cache write</dt><dd className="text-right">{activity.cacheWriteTokens.toLocaleString()}</dd></>}
+          {activity.costUsd !== undefined && <><dt>Cost</dt><dd className="text-right">{currency(activity.costUsd)}</dd></>}
+        </dl>
       </dd>
       {activity.receiptId && (
         <>
@@ -2069,6 +2069,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
+    {activity.detail && <section className="proof-explanation" aria-label="Verification details"><h3>Verification details</h3><p className="break-words whitespace-pre-wrap">{activity.detail}</p></section>}
     {activity.leftDevice && <section className="proof-explanation" aria-label="Proof scope">
       <h3>What the proof checks</h3>
       <p>The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.</p>
@@ -2129,9 +2130,9 @@ function SettingsView({
       {state.endpointError && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">{state.endpointError}</AlertDescription></Alert>}
 
       <SettingsSection title="General">
-          <AppearanceControl />
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
           <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
+          <AppearanceControl />
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
@@ -2284,7 +2285,6 @@ function ProfileListSheet({
               <ActionItem
                 type="button"
                 className="profile-select"
-                selected={active}
                 aria-pressed={active}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => void select(profile.id)}
@@ -2293,7 +2293,7 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <IconButton label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
+              <IconButton variant="ghost" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
             </div>
           );
         })}

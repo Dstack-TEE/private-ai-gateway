@@ -281,8 +281,8 @@ pub struct ServeArgs {
     pub json_events: bool,
     #[arg(
         long = "verify-receipts",
-        help = "Verify each POST response receipt after its response stream completes, using the \
-                forwarded request's bearer credential without retaining it."
+        help = "Buffer POST responses (up to 32 MiB) and verify receipts before delivery. \
+                Failed or unavailable proofs withhold the response. SSE is delivered only after verification."
     )]
     pub verify_receipts: bool,
     #[arg(

@@ -7,6 +7,15 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 
 ## Confirmed Corrections
 
+- Receipt enforcement: `aci serve --verify-receipts` now verifies before
+  response delivery. Actual HTTP tests cover valid receipts, missing receipts,
+  tampered JSON/SSE and receipt unavailability, checking withheld response bytes.
+  Earlier desktop betas audited receipts after streaming and cannot retrospectively
+  withdraw responses already delivered. Strict mode buffers in memory, not on disk.
+- Theme follows System before React mounts, and native dialog backing surfaces
+  use the parent window's effective appearance. Profiles select the entire row;
+  proof content shares the heading/footer inset and separates verbose reports.
+
 1. Periodic Agent reconciliation previously republished unchanged token sets and
    cancelled admitted requests. Identical sets now leave the credential epoch
    and cancellation gate untouched. Actual revocations still cancel delivery.
@@ -86,11 +95,13 @@ upgrade/restart still require platform acceptance.
 
 ## Verification
 
-- Renderer: 35 tests cover executable examples, appearance persistence, Settings
+- Renderer: 36 tests cover examples, pre-React system-dark styling, appearance persistence, Settings
   shortcuts and activation-triggered uninstall detection in addition to UI flows.
 - Gateway: 45 tests passed; one OS keyring integration test intentionally ignored.
 - Runtime: 19 tests passed, including exit retry and post-exit mutation rejection.
 - Release tooling: 4 tests passed.
+- ACI CLI: 49 passed, one live pin-mismatch test ignored. Strict receipt mode
+  rejects missing/tampered/unavailable proof before sending response bytes.
 - No provider secrets or production traffic were used for these checks.
 - The paused-delivery regression uses notifications, not timing guesses, to
   exercise a reconciliation between admission and upstream send.

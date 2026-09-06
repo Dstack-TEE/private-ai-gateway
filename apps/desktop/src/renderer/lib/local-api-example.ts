@@ -4,7 +4,7 @@ export function localApiExample(language: ExampleLanguage, endpoint: string, mod
   const url = new URL("/v1/chat/completions", endpoint);
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Invalid Local API endpoint");
   const payload = JSON.stringify({ model, messages: [{ role: "user", content: "Hello" }] }, null, 2);
-  const address = JSON.stringify(url.toString());
+  const baseUrl = JSON.stringify(new URL("/v1", endpoint).toString());
   if (language === "curl") {
     const quotedUrl = `'${url.toString().replaceAll("'", "'\\''")}'`;
     return [
@@ -16,6 +16,6 @@ export function localApiExample(language: ExampleLanguage, endpoint: string, mod
       "JSON",
     ].join("\n");
   }
-  if (language === "python") return `import json\nimport os\nfrom urllib.request import Request, urlopen\n\nbody = ${payload}\nrequest = Request(\n    ${address},\n    data=json.dumps(body).encode(),\n    headers={\n        "Authorization": ${apiKey ? JSON.stringify(`Bearer ${apiKey}`) : `f"Bearer {os.environ['PAG_API_KEY']}"`},\n        "Content-Type": "application/json",\n    },\n    method="POST",\n)\nwith urlopen(request, timeout=60) as response:\n    print(json.load(response))`;
-  return `// Node.js 18+\nconst apiKey = ${apiKey ? JSON.stringify(apiKey) : "process.env.PAG_API_KEY"};\nif (!apiKey) throw new Error("Set PAG_API_KEY to your local client key.");\n\nconst response = await fetch(${address}, {\n  method: "POST",\n  signal: AbortSignal.timeout(60_000),\n  headers: {\n    Authorization: \`Bearer \${apiKey}\`,\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify(${payload}),\n});\nif (!response.ok) throw new Error(\`HTTP \${response.status}\`);\nconsole.log(await response.json());`;
+  if (language === "python") return `from openai import OpenAI\n\nclient = OpenAI(\n    api_key=${JSON.stringify(apiKey ?? "LOCAL_API_KEY")},\n    base_url=${baseUrl},\n)\n\nresponse = client.chat.completions.create(\n    model=${JSON.stringify(model)},\n    messages=[{"role": "user", "content": "Hello"}],\n)\nprint(response.choices[0].message.content)`;
+  return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: ${baseUrl},\n  apiKey: ${JSON.stringify(apiKey ?? "LOCAL_API_KEY")},\n});\n\nconst response = await client.chat.completions.create(${payload});\nconsole.log(response.choices[0].message.content);`;
 }

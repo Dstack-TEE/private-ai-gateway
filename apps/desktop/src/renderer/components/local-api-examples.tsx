@@ -3,18 +3,17 @@ import { Check, Copy } from "lucide-react";
 import type { ModelSummary, DesktopApi } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
 import { Sheet, DismissSheetAction } from "./sheet";
-import { StateLabel } from "./state-label";
 import { IconButton } from "./controls";
 import { Field, FieldError, FieldLabel } from "./ui/field";
 import { NativeSelect } from "./ui/native-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamples({ endpoint, available, models, api, onCopy, onClose }: {
+export function LocalApiExamples({ endpoint, models, api, onCopy, onClose }: {
   api: Pick<DesktopApi, "getClientKey" | "onClientKeyChange">;
-  endpoint?: string; available: boolean; models: ModelSummary[];
+  endpoint?: string; models: ModelSummary[];
   onCopy(value: string): Promise<void>; onClose(): void;
 }) {
-  const [language, setLanguage] = useState<ExampleLanguage>("curl");
+  const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
   const [copied, setCopied] = useState<string>();
   const [copying, setCopying] = useState(false);
@@ -54,7 +53,7 @@ export function LocalApiExamples({ endpoint, available, models, api, onCopy, onC
   };
   return <Sheet title="Local API examples" className="local-api-examples-sheet" onClose={onClose}>
     <Field className="mt-4">
-      <div className="flex items-center justify-between gap-3"><FieldLabel htmlFor="example-model">Model</FieldLabel><StateLabel tone={available ? "success" : "neutral"} text={available ? "Available" : "Unavailable"} /></div>
+      <FieldLabel htmlFor="example-model">Model</FieldLabel>
       <NativeSelect id="example-model" className="w-full" value={model} disabled={models.length === 0} onChange={(event) => setSelection(event.target.value)}>
         {models.length === 0 && <option value="">No verified models</option>}
         {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name || entry.id}</option>)}
@@ -62,7 +61,7 @@ export function LocalApiExamples({ endpoint, available, models, api, onCopy, onC
     </Field>
     <Tabs value={language} className="mt-4 min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
       <div className="flex items-center justify-between gap-2">
-        <TabsList aria-label="Code language"><TabsTrigger value="curl">cURL</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="javascript">JavaScript</TabsTrigger></TabsList>
+        <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
         <IconButton label="Copy example" disabled={!code || copying} onClick={() => void copy()}>{copied === code && code ? <Check className="text-success" /> : <Copy />}</IconButton>
       </div>
       <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
