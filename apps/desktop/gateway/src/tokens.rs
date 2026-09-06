@@ -34,7 +34,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
         "/v1/models" => true,
         "/v1/responses" | "/v1/responses/compact" => matches!(agent, "codex" | "pi"),
         "/v1/messages" | "/v1/messages/count_tokens" => agent == "claude-code",
-        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes" | "openclaw"),
+        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes" | "openclaw" | "oh-my-pi"),
         _ => false,
     }
 }
@@ -465,6 +465,10 @@ mod tests {
         assert!(!agent_allows("openclaw", "/v1/responses"));
         assert!(!agent_allows("openclaw", "/v1/messages"));
         assert!(!agent_allows("openclaw", "/v1/responses/compact"));
+        assert!(agent_allows("oh-my-pi", "/v1/models"));
+        assert!(agent_allows("oh-my-pi", "/v1/chat/completions"));
+        assert!(!agent_allows("oh-my-pi", "/v1/responses"));
+        assert!(!agent_allows("oh-my-pi", "/v1/messages"));
         assert!(agent_allows("pi", "/v1/responses"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/messages"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));

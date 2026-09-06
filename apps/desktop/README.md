@@ -1,7 +1,8 @@
 # Private AI Gateway Desktop
 
 Cross-platform Tauri desktop app that turns the bundled `aci serve` verifier
-into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, and OpenClaw. One Rust
+into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
+Oh My Pi. One Rust
 runtime owns policy, persistence, credentials, usage, agent projection, and
 process lifecycle. A shared React renderer owns the dense product UI, while
 Tauri delegates windows, menus, tray integration, file dialogs, confirmation
@@ -459,9 +460,16 @@ require explicit manual recovery instead of guessing a restore target. New
 unmanaged same-name provider collisions are refused without exposing nested
 secrets in previews or ordinary connection records.
 
-Oh My Pi is not the Pi integration: it uses `omp` and separate
-`~/.omp/agent/models.yml` or `models.yaml` configuration. It is not yet managed
-by this app; no Pi connection claims to configure Oh My Pi.
+Oh My Pi is a separate integration: it detects `omp` and manages
+`~/.omp/agent/models.yml` or `models.yaml` with its own `oh-my-pi` token and
+connection record. YAML comments and unrelated providers are preserved. It uses
+Chat Completions; Pi keeps its independent Responses configuration. Select the
+provider/model in Oh My Pi and restart it after reconnecting, because command
+credentials can be cached by the CLI process. Named profiles and pending legacy
+JSON migration are refused rather than silently redirected or rewritten.
+Official Oh My Pi v18.1.12 was checked offline on Linux for generated configuration
+loading, helper success/failure and YAML file priority. Windows/macOS CLI shell
+execution and real inference are not claimed by those checks.
 
 | Agent | Config written | Credential reference |
 | --- | --- | --- |

@@ -19,6 +19,7 @@ export function agentName(id?: string): string {
     case "pi": return "Pi";
     case "hermes": return "Hermes Agent";
     case "openclaw": return "OpenClaw";
+    case "oh-my-pi": return "Oh My Pi";
     case "local-tools": return "Local API";
     default: return id ?? "Unknown client";
   }
