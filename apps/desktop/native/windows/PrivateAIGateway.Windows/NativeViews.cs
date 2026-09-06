@@ -21,7 +21,7 @@ internal static class NativeViews
     internal static INativePage CreatePage(string pageName, RuntimeStore store, MainWindow window)
     {
         App.Trace($"page:{pageName}:creating");
-        var page = pageName switch
+        INativePage page = pageName switch
         {
             "agents" => new AgentsPage(store),
             "usage" => new UsagePageView(store, window),

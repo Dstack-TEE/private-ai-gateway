@@ -225,6 +225,10 @@ a Linux amd64 DEB plus tar.gz. Each contains the GUI, shared runtime service,
 as release-ready only after its platform CI runner compiles, packages, launches,
 and runs the real runtime protocol smoke test.
 
+Linux profile credentials require a running Secret Service implementation such
+as GNOME Keyring. Installing the `libsecret` client library alone does not
+provide that daemon.
+
 Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
 covers the proxy (token scope, fail-closed session, revocation gate, and a
 relay check proving that each inference path carries method, path, query,

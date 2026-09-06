@@ -90,6 +90,10 @@ Brand assets are generated from `brand/<id>/brand.json` and copied into the
 native platform asset catalog at build time. Runtime assets are local; no image,
 font, script, or stylesheet is loaded from the network.
 
+On Linux, credential-backed profile flows require a running Secret Service
+implementation such as GNOME Keyring. `libsecret` is the client library and
+does not provide the Secret Service daemon itself.
+
 ## Parity Contract
 
 All four clients must expose the same product behavior:

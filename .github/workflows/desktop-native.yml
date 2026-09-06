@@ -57,6 +57,8 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTFLAGS: '-D warnings'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -81,30 +83,50 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Test native Linux client
+        working-directory: apps/desktop
+        run: cargo test --locked --manifest-path native/linux/Cargo.toml -- --test-threads=1
       - name: Package native Linux client
         working-directory: apps/desktop
         run: npm run dist:native:linux
       - name: Smoke runtime protocol
         working-directory: apps/desktop
         run: dbus-run-session -- node scripts/native-runtime-smoke.mjs release/native-linux/Private-AI-Gateway/private-ai-gateway-desktop-service
-      - name: Launch native Linux client
+      - name: Verify native Linux GUI runtime lifecycle
         working-directory: apps/desktop
         shell: bash
         run: |
           set -euo pipefail
-          dbus-run-session -- bash -c '
-            export GTK_A11Y=none
-            log="$RUNNER_TEMP/private-ai-gateway-linux.log"
-            xvfb-run -a release/native-linux/Private-AI-Gateway/private-ai-gateway --autostart >"$log" 2>&1 &
-            pid=$!
-            sleep 5
-            if ! kill -0 "$pid" 2>/dev/null; then
-              cat "$log"
-              wait "$pid"
-            fi
-            kill "$pid"
-            wait "$pid" || true
-          '
+          sandbox="$(mktemp -d "$RUNNER_TEMP/private-ai-gateway-linux-smoke.XXXXXX")"
+          trap 'rm -rf "$sandbox"' EXIT
+          export HOME="$sandbox/home"
+          export XDG_CONFIG_HOME="$sandbox/config"
+          export XDG_DATA_HOME="$sandbox/data"
+          export XDG_RUNTIME_DIR="$sandbox/runtime"
+          export PRIVATE_AI_GATEWAY_HOME="$sandbox/gateway-home"
+          export GTK_A11Y=none
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR" "$PRIVATE_AI_GATEWAY_HOME"
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          gui='release/native-linux/Private-AI-Gateway/private-ai-gateway'
+          healthy_log="$sandbox/healthy.log"
+          if ! dbus-run-session -- xvfb-run -a timeout --foreground 30s "$gui" --smoke-test >"$healthy_log" 2>&1; then
+            cat "$healthy_log"
+            exit 1
+          fi
+          grep -F 'SMOKE_TEST_OK' "$healthy_log"
+
+          missing_log="$sandbox/missing-runtime.log"
+          set +e
+          PRIVATE_AI_GATEWAY_RUNTIME="$sandbox/missing-runtime" \
+            dbus-run-session -- xvfb-run -a timeout --foreground 30s "$gui" --smoke-test >"$missing_log" 2>&1
+          missing_status=$?
+          set -e
+          if [[ "$missing_status" -ne 1 ]] || grep -Fq 'SMOKE_TEST_OK' "$missing_log"; then
+            cat "$missing_log"
+            echo "Expected missing runtime smoke to exit 1 without a success marker; got $missing_status" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v6
         with:
           name: private-ai-gateway-native-linux-${{ github.sha }}
