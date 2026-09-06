@@ -1,7 +1,7 @@
 # Private AI Gateway Desktop
 
 Cross-platform Tauri desktop app that turns the bundled `aci serve` verifier
-into a local gateway for Codex, Claude Code, OpenCode, Pi, and Hermes. One Rust
+into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, and OpenClaw. One Rust
 runtime owns policy, persistence, credentials, usage, agent projection, and
 process lifecycle. A shared React renderer owns the dense product UI, while
 Tauri delegates windows, menus, tray integration, file dialogs, confirmation
@@ -438,6 +438,30 @@ protocol is the service's own response, shown as such.
   catalog model (both protocols require `model`).
 
 ## Agents
+
+OpenClaw integration targets the native host's default configuration and its
+OpenAI Chat Completions provider contract. It adds a separate `openclaw` token
+and an executable SecretRef, not the upstream provider key. Unix installations
+stage a private user-owned helper; scans verify that it matches the bundled
+helper. Windows checks the helper's ACL without changing it. Configuration
+edits preserve JSON5 comments and unrelated fields. An explicit model selection
+changes only `agents.defaults.model.primary`; existing fallback lists stay intact.
+
+OpenClaw 2026.9.2 was checked offline with a real generated configuration and
+exec-secret audit. This is not real inference or a guarantee for older releases.
+Remote gateways, non-default profiles, ambiguous legacy paths, `$include`, and
+unsafe helper/configuration conflicts are refused rather than rewritten. WSL and
+remote hosts do not implicitly share this desktop's loopback endpoint or token.
+
+Connections now remember their absolute config path. Legacy records without
+that path, or containing potentially sensitive structured plaintext backups,
+require explicit manual recovery instead of guessing a restore target. New
+unmanaged same-name provider collisions are refused without exposing nested
+secrets in previews or ordinary connection records.
+
+Oh My Pi is not the Pi integration: it uses `omp` and separate
+`~/.omp/agent/models.yml` or `models.yaml` configuration. It is not yet managed
+by this app; no Pi connection claims to configure Oh My Pi.
 
 | Agent | Config written | Credential reference |
 | --- | --- | --- |
