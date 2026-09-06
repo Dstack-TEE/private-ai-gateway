@@ -2399,11 +2399,12 @@ function ProfileEditorSheet({
   return (
     <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
       {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
-      <form onSubmit={(event) => void submit(event)}>
+      <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll">
-        <FieldSet>
-        <FieldLegend variant="label">Provider</FieldLegend>
-        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
+        <FieldGroup>
+        <Field>
+        <FieldLabel id="profile-provider-label">Provider</FieldLabel>
+        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
               <ServiceLogo url={service.url} />
@@ -2417,8 +2418,7 @@ function ProfileEditorSheet({
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
           </ToggleGroupItem>
         </ToggleGroup>
-        </FieldSet>
-        <FieldGroup className="mt-6">
+        </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
           <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></FormField>
           <Field>

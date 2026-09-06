@@ -305,7 +305,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .profile-lock-note { margin-top: 8px; }
 .is-spinning { animation: control-spin 900ms linear infinite; }
 @keyframes control-spin { to { transform: rotate(360deg); } }
-.service-presets { width: 100%; margin-top: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.service-presets { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .service-preset { min-width: 0; text-align: left; }
 .service-preset .service-logo, .service-preset .service-custom-icon { width: 18px; height: 18px; }
 .service-preset strong { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1225,6 +1225,19 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await editor.getByRole("button", { name: "Phala" }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
   await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
+  const fieldSpacing = await editor.evaluate((element) => {
+    const gap = (labelSelector: string, controlSelector: string) => {
+      const label = element.querySelector(labelSelector)?.getBoundingClientRect();
+      const control = element.querySelector(controlSelector)?.getBoundingClientRect();
+      return label && control ? control.top - label.bottom : null;
+    };
+    return {
+      provider: gap("#profile-provider-label", ".service-presets"),
+      name: gap('label[for="profile-name"]', "#profile-name"),
+    };
+  });
+  expect(fieldSpacing.provider).not.toBeNull();
+  expect(fieldSpacing.provider).toBe(fieldSpacing.name);
   await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
   await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
