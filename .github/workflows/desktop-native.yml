@@ -130,6 +130,7 @@ jobs:
           cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
           cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --bin aci
+          cargo test --locked --test aci_cli
 
   package:
     needs: verify
