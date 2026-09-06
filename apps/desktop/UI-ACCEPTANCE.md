@@ -30,8 +30,12 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 ### UI Consistency Follow-up (2026-09-06)
 
 - Warning uses amber independently of destructive errors; primary uses Neutral.
-  Overview decoration retains the dstack brand accent, not the success token.
-- Live Verified opens Privacy Verification directly; no separate info button.
+  Overview decoration uses neutral primary; protection switches use success,
+  with warning taking precedence in development mode.
+- Live Verified is a small, right-aligned button opening Privacy Verification.
+- Forms use standard FieldSet/FieldSeparator and a shared footer divider.
+  Settings error alerts sit outside row groups to avoid double separators.
+  Local API option rows retain borders, and long endpoint values wrap.
 - Settings, profiles and usage share an Item-based action row with full-row hover.
   Provider logos are 18px; chart metrics use standard Tabs with visible selection.
 - Profile forms omit the credential-delete action and verification badge.
@@ -44,6 +48,10 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
   zero-filled dates and monthly aggregation for long ranges. Filters use local
   calendar-day boundaries, including Today. Production-CSP
   coverage checks rendered bars without allowing dynamic style tags.
+- Chart colors use a separate categorical palette and the complete model facet.
+  Other preserves totals beyond ten model series. Calendar ranges apply to
+  summaries, charts, cursor-paginated Table rows and CSV with an exclusive upper
+  date boundary. Table/Overview share outcomes, formatting and proof navigation.
 - About keeps version and update status/action on one row. Update confirmation
   is native; progress reuses the native child-window infrastructure and standard
   Progress content (Dialog in browser preview). A backend snapshot prevents lost
@@ -72,7 +80,7 @@ upgrade/restart still require platform acceptance.
 
 ## Verification
 
-- Renderer: 22 tests passed.
+- Renderer: 31 tests passed.
 - Gateway: 45 tests passed; one OS keyring integration test intentionally ignored.
 - Runtime: 18 tests passed.
 - Release tooling: 4 tests passed.
@@ -82,8 +90,9 @@ upgrade/restart still require platform acceptance.
 
 ## Release Boundaries
 
-- The official shadcn Luma components and approved dstack primary colors remain
-  unchanged. Product-specific layouts compose those primitives.
+- Controls retain shadcn Luma's Neutral primary palette; categorical chart
+  colors and semantic success/warning colors are independent. Product-specific
+  layouts compose those primitives.
 - Profile selection is a dialog workflow, not an inline menu/Select replacement.
 - Beta and stable have separate feeds. Draft artifacts do not imply a published
   feed; an unpublished channel is explicitly shown as such in the client.

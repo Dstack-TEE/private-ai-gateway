@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
+import { Separator } from "./ui/separator";
 
 type SheetProps = PropsWithChildren<{
   title: string;
@@ -49,9 +50,12 @@ export function Sheet({ title, label = title, description, className, headingCla
 }
 
 export function SheetActions({ leading, children }: PropsWithChildren<{ leading?: ReactNode }>): React.JSX.Element {
-  return <div className="sheet-actions">
-    {leading && <div className="sheet-actions-leading">{leading}</div>}
-    {children}
+  return <div className="sheet-footer">
+    <Separator />
+    <div className="sheet-actions">
+      {leading && <div className="sheet-actions-leading">{leading}</div>}
+      {children}
+    </div>
   </div>;
 }
 

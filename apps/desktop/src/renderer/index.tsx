@@ -45,7 +45,10 @@ import type { UpdateProgress } from "../shared/contracts";
 import { Button } from "./components/ui/button";
 import { ActionItem } from "./components/action-item";
 import type { UsageMetric } from "./components/usage-chart";
-import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
+import { StateLabel } from "./components/state-label";
+import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
+import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
+import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSet, FieldLegend, FieldSeparator } from "./components/ui/field";
 import { Badge } from "./components/ui/badge";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
@@ -76,6 +79,8 @@ import type {
 // `?mock=<scenario>` renders the window against canned state for screenshots.
 const query = new URLSearchParams(window.location.search);
 const UsageChart = lazy(() => import("./components/usage-chart").then((module) => ({ default: module.UsageChart })));
+const UsageDatePicker = lazy(() => import("./components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
+const UsageTable = lazy(() => import("./components/usage-table").then((module) => ({ default: module.UsageTable })));
 const previewMode = query.has("mock");
 const desktopApi: DesktopApi = previewMode ? mockApi(query.get("mock")) : liveApi;
 
@@ -203,7 +208,6 @@ function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" 
 type View = "overview" | "agents" | "usage" | "settings";
 type SettingsTarget = "confidential" | "privacy" | "local-api";
 
-type Tone = "success" | "warning" | "danger" | "neutral";
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "agents", label: "Agents", icon: Bot },
@@ -1466,7 +1470,7 @@ function StatusSurface({
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
         {liveVerified
-          ? <Button variant="outline" className="justify-self-start text-success" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Verified</Button>
+          ? <Button variant="outline" size="sm" className="text-success" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Verified</Button>
           : <div className="status-fact status-profile-state state-neutral"><ShieldX size={13} aria-hidden="true" /><span>{profileStatus}</span></div>}
       </div>
     </section>
@@ -1534,6 +1538,7 @@ function ProtectedControl({
       {!iconOnly && <span>Protected</span>}
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
+        tone="success"
         size={compact ? "default" : "lg"}
         checked={checked}
         label={label}
@@ -1639,7 +1644,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
 
 function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): void }): React.JSX.Element {
   const outcome = outcomeOf(activity);
-  const tokens = (activity.inputTokens ?? 0) + (activity.outputTokens ?? 0);
+  const tokens = usageTokens(activity);
   const timestamp = new Date(activity.at * 1_000);
   return (
     <ActionItem size="xs" className="usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
@@ -1648,7 +1653,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
         <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
         <code className="row-note">{activity.model ?? activity.path}</code>
       </span>
-      <span className="usage-amount"><strong>{tokens ? formatTokens(tokens) : "—"}</strong><small>tokens</small></span>
+      <span className="usage-amount"><strong>{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
       <time className="row-side" dateTime={timestamp.toISOString()} title={formatTimestamp(timestamp.getTime(), true)}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
     </ActionItem>
@@ -1776,24 +1781,6 @@ function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note" role="alert">{error}</span>}</span>;
 }
 
-/** Text plus a tone icon, so no state relies on colour alone. */
-function StateLabel({
-  tone,
-  icon: Icon,
-  text,
-}: {
-  tone: Tone;
-  icon?: typeof ShieldCheck;
-  text: string;
-}): React.JSX.Element {
-  return (
-    <Badge variant={tone === "danger" ? "destructive" : "outline"} className={tone === "success" ? "border-success/20 bg-success/10 text-success" : tone === "warning" ? "border-warning/20 bg-warning/10 text-warning" : undefined}>
-      {Icon ? <Icon size={13} aria-hidden="true" /> : <span data-slot="status-dot" className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />}
-      {text}
-    </Badge>
-  );
-}
-
 function UsageView({
   state,
   agents,
@@ -1809,7 +1796,8 @@ function UsageView({
 }): React.JSX.Element {
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
-  const [range, setRange] = useState("7d");
+  const [range, setRange] = useState<UsageDateSelection>({ preset: "7d" });
+  const [pageSize, setPageSize] = useState(20);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
   const [page, setPage] = useState<UsagePage>();
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
@@ -1818,7 +1806,8 @@ function UsageView({
   const focusAfterPage = useRef(false);
   const requestGeneration = useRef(0);
   const currentCursor = cursors[cursors.length - 1];
-  const since = usageSince(range);
+  const bounds = usageDateBounds(range);
+  const { since, until } = bounds;
 
   const load = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -1828,9 +1817,10 @@ function UsageView({
       const result = await desktopApi.queryUsage({
         agent: agent || undefined,
         model: model || undefined,
-        since: usageSince(range),
+        since,
+        until,
         cursor: currentCursor,
-        limit: 20,
+        limit: pageSize,
       });
       if (generation === requestGeneration.current) {
         setPage(result);
@@ -1849,7 +1839,7 @@ function UsageView({
         }
       }
     }
-  }, [agent, model, range, currentCursor]);
+  }, [agent, model, since, until, currentCursor, pageSize]);
 
   useEffect(() => { void load(); }, [load, state.usageRevision]);
   const resetPagination = () => {
@@ -1867,7 +1857,7 @@ function UsageView({
         ? "usage.csv"
         : await save({ title: "Export Usage", defaultPath: `private-ai-gateway-usage-${new Date().toISOString().slice(0, 10)}.csv`, filters: [{ name: "CSV", extensions: ["csv"] }] });
       if (!path) return;
-      const count = await desktopApi.exportUsageCsv({ agent: agent || undefined, model: model || undefined, since }, path);
+      const count = await desktopApi.exportUsageCsv({ agent: agent || undefined, model: model || undefined, since, until }, path);
       onNotice(`Exported ${count.toLocaleString()} usage ${count === 1 ? "record" : "records"}`);
     } catch (exportError) {
       setError(errorMessage(exportError));
@@ -1896,24 +1886,15 @@ function UsageView({
       <div className="usage-toolbar" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><NativeSelect id="usage-agent" value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></Field>
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{modelOptions.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
-        <fieldset className="filter-field time-filter">
-          <legend>Time</legend>
-          <ToggleGroup variant="outline" className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
-            {(["24h", "7d", "30d", "all"] as const).map((value) => (
-              <ToggleGroupItem
-                key={value}
-                value={value}
-              >
-                {{ "24h": "Today", "7d": "7 days", "30d": "30 days", all: "All" }[value]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-        </fieldset>
+        <FieldSet className="time-filter min-w-0 gap-0">
+          <FieldLegend variant="label" className="leading-snug">Time</FieldLegend>
+          <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => { setRange(next); resetPagination(); }} /></Suspense>
+        </FieldSet>
       </div>
       <UsageStats page={page} />
       <section className="group usage-over-time" aria-labelledby="usage-chart-title">
-        <h2 className="group-title" id="usage-chart-title">Usage over time <span>{rangeLabel(range)}</span></h2>
-        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageChart page={page} loading={loading} range={range} metric={metric} onMetric={setMetric} /></Suspense>
+        <h2 className="group-title" id="usage-chart-title">Usage over time <span>{usageDateLabel(range)}</span></h2>
+        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} /></Suspense>
       </section>
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
@@ -1924,16 +1905,14 @@ function UsageView({
             <IconButton label="Clear usage history" onClick={() => void clear()}><Trash2 size={16} /></IconButton>
           </span>
         </h2>
-        <div className="inset list" aria-busy={loading}>
-          {loading && !page && <EmptyState text="Loading usage history…" />}
-          {!loading && page?.items.length === 0 && <EmptyState text={page.summary.requests === 0 ? "No saved usage matches these filters." : "No records on this page."} />}
-          <ul className="list-items" aria-label="Usage history">
-            {page?.items.map((item) => (
-              <li key={item.id}><UsageRow activity={item} onOpen={() => onInspect(item)} /></li>
-            ))}
-          </ul>
-        </div>
+        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
         <div className="pagination">
+          <Field orientation="horizontal" className="w-auto">
+            <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
+            <NativeSelect id="usage-page-size" size="sm" value={pageSize} disabled={loading} onChange={(event) => { setPageSize(Number(event.target.value)); resetPagination(); }}>
+              {[20, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+            </NativeSelect>
+          </Field>
           <IconButton
             label="Previous usage page"
             disabled={loading || cursors.length === 1}
@@ -1945,7 +1924,7 @@ function UsageView({
           <span role="status" aria-live="polite">
             Page {cursors.length}
             {page && page.items.length > 0
-              ? ` · ${(cursors.length - 1) * 20 + 1}-${(cursors.length - 1) * 20 + page.items.length} of ${page.summary.requests}`
+              ? ` · ${(cursors.length - 1) * pageSize + 1}-${(cursors.length - 1) * pageSize + page.items.length} of ${page.summary.requests}`
               : ""}
           </span>
           <IconButton
@@ -2092,11 +2071,12 @@ function SettingsView({
     <div className="page-body settings-page">
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
+      {state.endpointError && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">{state.endpointError}</AlertDescription></Alert>}
+
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
           <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
-          {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
 
@@ -2366,6 +2346,7 @@ function ProfileEditorSheet({
     <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" dismissible={!saving} onClose={onClose}>
       {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form onSubmit={(event) => void submit(event)}>
+        <div className="sheet-scroll">
         <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Confidential AI provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
@@ -2388,8 +2369,9 @@ function ProfileEditorSheet({
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
             <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
           </Field>
-          <FieldError>{error}</FieldError>
         </FieldGroup>
+        </div>
+        <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
@@ -2466,18 +2448,26 @@ function LocalApiSheet({
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-6">
           <FieldGroup>
+          <FieldSet>
+          <FieldLegend variant="label">Connection</FieldLegend>
+          <FieldGroup>
           <FormField id="local-listen-address" label="Listen address" description="Address used by the local gateway.">
               <Input id="local-listen-address" aria-describedby="local-listen-address-note" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
             <datalist id="listen-addresses"><option value="127.0.0.1" /><option value="::1" /><option value="0.0.0.0" /></datalist>
           </FormField>
-          <SettingsToggle label="Allow network access" description="Permit a non-loopback listen address. Keep this off for local agents." checked={draft.allowNetworkAccess} disabled={frozen || saving} onToggle={() => update("allowNetworkAccess", !draft.allowNetworkAccess)} />
-          {draft.allowNetworkAccess && <p className="row-warning">Other devices on the network may reach this gateway. Only use this on a trusted network.</p>}
+          <div className="space-y-3">
+            <SettingsToggle variant="outline" label="Allow network access" description="Permit a non-loopback listen address. Keep this off for local agents." checked={draft.allowNetworkAccess} disabled={frozen || saving} onToggle={() => update("allowNetworkAccess", !draft.allowNetworkAccess)} />
+            {draft.allowNetworkAccess && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">Other devices on the network may reach this gateway. Only use this on a trusted network.</AlertDescription></Alert>}
+          </div>
           <FormField id="local-port" label="Port" description="1024–65535">
             <Input id="local-port" aria-describedby="local-port-note" type="number" min="1024" max="65535" value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
           </FormField>
           <FormField id="local-client-host" label="Client host" description="Optional hostname shown to clients.">
             <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
           </FormField>
+          </FieldGroup>
+          </FieldSet>
+          <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
               <Input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
@@ -2488,18 +2478,24 @@ function LocalApiSheet({
             </div>
             <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>
           </Field>
+          <FieldSeparator />
+          <FieldSet>
+          <FieldLegend variant="label">Client endpoints</FieldLegend>
+          <SettingsList>
           <Item>
-            <ItemContent><ItemTitle>OpenAI-style endpoint</ItemTitle><ItemDescription>{openAi || "Invalid settings"}</ItemDescription></ItemContent>
+            <ItemContent className="min-w-0"><ItemTitle>OpenAI-style endpoint</ItemTitle><ItemDescription className="line-clamp-none break-all">{openAi || "Invalid settings"}</ItemDescription></ItemContent>
             <ItemActions><IconButton label="Copy OpenAI-style endpoint" disabled={!openAi} onClick={() => void onCopy("OpenAI-style endpoint", openAi)}>{copied === "OpenAI-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
           </Item>
           <Item>
-            <ItemContent><ItemTitle>Anthropic-style endpoint</ItemTitle><ItemDescription>{endpoint || "Invalid settings"}</ItemDescription></ItemContent>
+            <ItemContent className="min-w-0"><ItemTitle>Anthropic-style endpoint</ItemTitle><ItemDescription className="line-clamp-none break-all">{endpoint || "Invalid settings"}</ItemDescription></ItemContent>
             <ItemActions><IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
           </Item>
+          </SettingsList>
+          </FieldSet>
           </FieldGroup>
           {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
-          {(error || externalError) && <p className="sheet-text error" role="alert">{error ?? externalError}</p>}
         </div>
+        <FieldError className="mt-3">{error ?? externalError}</FieldError>
         <SheetActions leading={
           <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => setDraft({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 })}>Use default</Button>
         }>
@@ -2663,38 +2659,6 @@ function presentation(state: GatewayState): {
   }
 }
 
-/** The plain-language outcome of one request. */
-function outcomeOf(activity: RequestActivity): { label: string; tone: Tone; icon: typeof ShieldCheck } {
-  if (!activity.leftDevice) {
-    return { label: "Blocked locally", tone: "neutral", icon: Ban };
-  }
-  if (activity.verified === false) {
-    return { label: "Proof failed", tone: "danger", icon: TriangleAlert };
-  }
-  if (activity.status < 200 || activity.status >= 300) {
-    return { label: "Upstream failed", tone: "danger", icon: TriangleAlert };
-  }
-  if (activity.verified === true) {
-    return { label: "Protected", tone: "success", icon: ShieldCheck };
-  }
-  if (activity.receiptId) {
-    return { label: "Proof pending", tone: "warning", icon: LoaderCircle };
-  }
-  return { label: "Proof unavailable", tone: "warning", icon: ShieldX };
-}
-
-function agentName(id?: string): string {
-  switch (id) {
-    case "codex": return "Codex";
-    case "claude-code": return "Claude Code";
-    case "opencode": return "OpenCode";
-    case "pi": return "Pi";
-    case "hermes": return "Hermes Agent";
-    case "local-tools": return "Local API";
-    default: return id ?? "Unknown client";
-  }
-}
-
 function displayAgentName(agent: Pick<AgentStatus, "id" | "name">): string {
   return agent.id === "hermes" ? "Hermes Agent" : agent.name;
 }
@@ -2706,35 +2670,6 @@ function sortAgents(agents: AgentStatus[]): AgentStatus[] {
     const rightIndex = order.indexOf(right.id);
     return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex);
   });
-}
-
-function usageSince(range: string): number | undefined {
-  const days = range === "24h" ? 1 : range === "7d" ? 7 : range === "30d" ? 30 : 0;
-  if (!days) return undefined;
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - days + 1);
-  return Math.floor(start.getTime() / 1000);
-}
-
-function rangeLabel(range: string): string {
-  switch (range) {
-    case "24h": return "Today";
-    case "7d": return "Last 7 days";
-    case "30d": return "Last 30 days";
-    default: return "All time";
-  }
-}
-
-function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1)}K`;
-  return tokens.toLocaleString();
-}
-
-function currency(value: number): string {
-  const digits = value > 0 && value < 0.01 ? 4 : 2;
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 }
 
 function maskClientKey(key: string): string {

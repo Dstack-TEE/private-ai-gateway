@@ -625,6 +625,18 @@ mod tests {
         let store = UsageStore::open(path.clone()).unwrap();
         store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
         store.upsert(&item("b2", 20, "pi", "model-b")).unwrap();
+        let dated = store
+            .page(&UsageQuery {
+                since: Some(10),
+                until: Some(20),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(dated.items.len(), 1);
+        assert_eq!(dated.items[0].id, "a1");
+        assert_eq!(dated.summary.requests, 1);
+        assert_eq!(dated.model_series.len(), 1);
+        assert_eq!(dated.model_series[0].model.as_deref(), Some("model-a"));
         assert_eq!(
             store.get("a1").unwrap().unwrap().model.as_deref(),
             Some("model-a")

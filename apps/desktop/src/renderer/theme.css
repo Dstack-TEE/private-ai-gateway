@@ -37,7 +37,7 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-/* Neutral controls, independent semantic state colors and a dstack brand accent. */
+/* Neutral controls and backgrounds with independent semantic state colors. */
 :root {
   color-scheme: light;
   font-family: var(--font-sans);
@@ -47,7 +47,6 @@
   --card: oklch(1 0 0);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
-  --brand-accent: #c6eb3d;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -68,11 +67,16 @@
   --popover: oklch(1 0 0);
   --popover-foreground: var(--foreground);
 
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --chart-1: var(--color-blue-500);
+  --chart-2: var(--color-emerald-500);
+  --chart-3: var(--color-amber-500);
+  --chart-4: var(--color-violet-500);
+  --chart-5: var(--color-rose-500);
+  --chart-6: var(--color-cyan-500);
+  --chart-7: var(--color-lime-500);
+  --chart-8: var(--color-orange-500);
+  --chart-9: var(--color-pink-500);
+  --chart-10: var(--color-indigo-500);
 
   /* Existing page names alias standard theme tokens, not a second palette. */
   --font-title: 17px;
@@ -104,7 +108,7 @@
   --neutral: var(--muted-foreground);
   --neutral-bg: var(--muted);
   --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
-  --veil-color: color-mix(in srgb, var(--brand-accent) 16%, var(--panel));
+  --veil-color: color-mix(in srgb, var(--primary) 16%, var(--panel));
 }
 
 @media (prefers-color-scheme: dark) {
@@ -118,6 +122,16 @@
     --warning: var(--color-amber-400);
     --success: var(--color-green-400);
     --success-foreground: var(--color-green-950);
+    --chart-1: var(--color-blue-400);
+    --chart-2: var(--color-emerald-400);
+    --chart-3: var(--color-amber-400);
+    --chart-4: var(--color-violet-400);
+    --chart-5: var(--color-rose-400);
+    --chart-6: var(--color-cyan-400);
+    --chart-7: var(--color-lime-400);
+    --chart-8: var(--color-orange-400);
+    --chart-9: var(--color-pink-400);
+    --chart-10: var(--color-indigo-400);
     --secondary: oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.269 0 0);
@@ -139,6 +153,7 @@
 }
 
 /* Development mode uses the warning token without changing geometry. */
+[data-slot="switch"].is-success { --primary: var(--success); --primary-foreground: var(--success-foreground); }
 [data-slot="switch"].is-development { --primary: var(--warning); }
 @media (prefers-reduced-motion: reduce) {
   [data-slot="button"], [data-slot="switch"], [data-slot="switch-thumb"] { transition: none; }

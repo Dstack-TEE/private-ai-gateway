@@ -15,6 +15,7 @@ type SwitchControlProps = {
   checked: boolean;
   disabled?: boolean;
   developmentMode?: boolean;
+  tone?: "default" | "success";
   size?: "sm" | "default" | "lg";
   title?: string;
   "aria-describedby"?: string;
@@ -22,6 +23,6 @@ type SwitchControlProps = {
   onToggle(): void;
 };
 
-export function SwitchControl({ label, developmentMode = false, onToggle, title, ...props }: SwitchControlProps): React.JSX.Element {
-  return <Switch className={developmentMode ? "is-development" : undefined} aria-label={label} title={title ?? label} onCheckedChange={onToggle} {...props} />;
+export function SwitchControl({ label, developmentMode = false, tone = "default", onToggle, title, ...props }: SwitchControlProps): React.JSX.Element {
+  return <Switch className={developmentMode ? "is-development" : tone === "success" ? "is-success" : undefined} aria-label={label} title={title ?? label} onCheckedChange={onToggle} {...props} />;
 }

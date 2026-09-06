@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { modelChartData } from "../src/renderer/components/usage-chart";
+import { usageDateBounds } from "../src/renderer/lib/usage-dates";
 
 type Page = import("@playwright/test").Page;
 
@@ -34,11 +35,55 @@ test("model chart aggregation preserves totals and uses monthly buckets for long
   for (const [metric, total] of [["tokens", 300], ["cost", 3], ["requests", 2]] as const) {
     const result = modelChartData({ series, modelSeries }, "all", metric);
     expect(result.monthly).toBe(true);
-    expect(result.series.map((entry) => entry.label)).toEqual(["model-a", "model-b"]);
+    expect(result.series.map((entry) => entry.label).sort()).toEqual(["model-a", "model-b"]);
     const sum = result.rows.reduce((sum, row) => sum + result.series.reduce((sum, entry) => sum + Number(row[entry.key] ?? 0), 0), 0);
     expect(sum).toBe(total);
     expect(result.rows.at(-1)?.period).toBe(new Date().toISOString().slice(0, 7));
   }
+});
+
+test("model colors survive filtering and Other preserves all three metrics", () => {
+  const day = "2026-09-02";
+  const modelSeries = Array.from({ length: 12 }, (_, index) => ({ day, model: `model-${index}`, requests: 1, tokens: index + 1, costUsd: index + 1 }));
+  const models = modelSeries.map((point) => point.model);
+  const series = [{ day, requests: 12, inputTokens: 78, outputTokens: 0, tokens: 78, costUsd: 78 }];
+  const bounds = usageDateBounds({ preset: "custom", from: new Date(2026, 8, 2), to: new Date(2026, 8, 4) });
+  expect(bounds.since).toBe(new Date(2026, 8, 2).getTime() / 1000);
+  expect(bounds.until).toBe(new Date(2026, 8, 5).getTime() / 1000);
+  for (const metric of ["requests", "tokens", "cost"] as const) {
+    const chart = modelChartData({ models, series, modelSeries }, "custom", metric, bounds);
+    expect(chart.rows.map((row) => row.period)).toEqual(["2026-09-02", "2026-09-03", "2026-09-04"]);
+    expect(chart.series).toHaveLength(11);
+    expect(chart.series.at(-1)?.label).toBe("Other");
+    expect(chart.rows.reduce((sum, row) => sum + chart.series.reduce((total, entry) => total + Number(row[entry.key]), 0), 0)).toBe(metric === "requests" ? 12 : 78);
+    const filtered = modelChartData({ models, series, modelSeries: modelSeries.filter((point) => point.model === "model-11") }, "custom", metric, bounds);
+    expect(filtered.series[0]?.color).toBe(chart.series.find((entry) => entry.label === "model-11")?.color);
+  }
+});
+
+test("custom date ranges apply atomically to chart, table and export", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-09-06T12:00:00"));
+  await page.goto("/?mock=ready");
+  await nav(page, "Usage").click();
+  const dateButton = page.getByRole("button", { name: /^Date range:/ });
+  await dateButton.click();
+  await page.locator('[data-day="9/2/2026"]').click();
+  await page.getByRole("dialog", { name: "Choose date range" }).getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dateButton).toHaveAccessibleName("Date range: Last 7 days");
+  await dateButton.click();
+  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("all");
+  await dateButton.click();
+  await page.locator('[data-day="9/2/2026"]').click();
+  await page.locator('[data-day="9/4/2026"]').click();
+  await page.getByRole("dialog", { name: "Choose date range" }).getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(dateButton).toHaveAccessibleName("Date range: Sep 2, 2026 - Sep 4, 2026");
+  const table = page.getByRole("table", { name: "Usage history", exact: true });
+  await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody th")).toHaveText(["2026-09-02", "2026-09-03", "2026-09-04"]);
+  const timestamps = await table.locator("time").evaluateAll((nodes) => nodes.map((node) => Date.parse(node.getAttribute("datetime") ?? "")));
+  expect(timestamps.length).toBeGreaterThan(0);
+  expect(timestamps.every((time) => time >= new Date(2026, 8, 2).getTime() && time < new Date(2026, 8, 5).getTime())).toBe(true);
+  await page.getByRole("button", { name: "Export usage as CSV" }).click();
+  await expect(page.locator('.sr-only[role="status"]')).toContainText(`Exported ${timestamps.length} usage records`);
 });
 
 test("public preview frames the Tauri renderer as a macOS window and exposes the tray contract", async ({ page }) => {
@@ -212,7 +257,7 @@ test("stale profile editors are dismissible and configuration verification canno
 test("usage query failures do not display stale totals and clearing preserves the selected filter", async ({ page }) => {
   await page.goto("/?mock=usage-query-error");
   await nav(page, "Usage").click();
-  const history = page.getByRole("list", { name: "Usage history" });
+  const history = page.getByRole("table", { name: "Usage history", exact: true });
   await expect(history.getByRole("button").first()).toBeVisible();
   const model = page.getByRole("combobox", { name: "Model", exact: true });
   const selected = await model.locator("option").nth(1).getAttribute("value");
@@ -417,6 +462,19 @@ test("overview shows four agents, four current-session records, truthful copy su
   }
   await expect(localSheet.getByRole("button", { name: "Copy OpenAI-style endpoint" })).toBeVisible();
   await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
+  const networkToggle = localSheet.getByRole("switch", { name: "Allow network access" });
+  await expect(networkToggle.locator('xpath=ancestor::*[@data-slot="item"][1]')).toHaveAttribute("data-variant", "outline");
+  const clientEndpoints = localSheet.getByRole("group", { name: "Client endpoints", exact: true });
+  await expect(clientEndpoints.locator('[data-slot="item-group"]')).toHaveCSS("border-top-width", "1px");
+  await expect(clientEndpoints.locator('[data-slot="separator"]')).toHaveCount(1);
+  await expect(localSheet.locator('[data-slot="field-separator"]')).toHaveCount(2);
+  await expect(localSheet.locator('.sheet-footer > [data-slot="separator"]')).toHaveCSS("height", "1px");
+  await networkToggle.click();
+  await expect(localSheet.getByRole("alert")).toContainText("trusted network");
+  await networkToggle.click();
+  await localSheet.getByLabel("Client host", { exact: true }).fill(`${"a".repeat(50)}.${"b".repeat(50)}.example.com`);
+  expect(await clientEndpoints.locator('[data-slot="item"]').evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
+  await localSheet.getByLabel("Client host", { exact: true }).fill("");
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeEnabled();
   await expect(localSheet).toContainText("Saving briefly restarts protection");
@@ -500,6 +558,8 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(page.locator(".status-local .status-fact").filter({ hasText: "1 agent connected" })).toHaveCSS("color", success);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
+    await expect(page.locator(".tracks-right")).toHaveCSS("color", await themeColor(page, "--primary"));
     await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "128px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
     await nav(page, "Agents").click();
@@ -508,7 +568,11 @@ test("success colors, list separators, control sizes and About alignment are con
     expect(await separators.count()).toBe((await installed.locator(".agent-block").count()) - 1);
     await expect(installed.locator('[data-slot="badge"]', { hasText: /^Connected$/ }).first()).toHaveCSS("color", success);
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("width", "44px");
+    await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
+    await nav(page, "Usage").click();
+    await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     await nav(page, "Settings").click();
+    await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     const general = page.getByRole("region", { name: "General", exact: true });
     await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
     await expect(general.locator('[data-slot="separator"]').first()).toHaveCSS("height", "1px");
@@ -587,10 +651,17 @@ test("model stacks render under production-style CSP without dynamic style tags"
   const chart = page.locator('[data-slot="chart"]');
   await expect(chart.locator("style")).toHaveCount(0);
   await expect.poll(() => chart.locator(".recharts-rectangle").evaluateAll((nodes) => nodes.filter((node) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.height > 0; }).length)).toBeGreaterThan(0);
+  expect(await chart.locator(".recharts-rectangle").evaluateAll((nodes) => new Set(nodes.map((node) => getComputedStyle(node).fill)).size)).toBeGreaterThan(1);
   const headers = await page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("thead th").allTextContents();
   expect(headers).toContain("openai/gpt-oss-20b");
   expect(headers).not.toContain("Input");
   expect(headers).not.toContain("Output");
+  await page.getByRole("button", { name: /^Date range:/ }).click();
+  const picker = page.getByRole("dialog", { name: "Choose date range" });
+  await expect(picker.locator('[data-slot="calendar"]')).toBeVisible();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("table", { name: "Usage history", exact: true }).getByRole("button", { name: "Token details", exact: true }).first().click();
+  await expect(page.getByRole("dialog", { name: "Token details", exact: true })).toBeVisible();
 });
 
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
@@ -654,14 +725,16 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   );
   expect(new Set(chartDays).size).toBe(7);
 
-  await page.getByRole("button", { name: "Today", exact: true }).click();
+  await page.getByRole("button", { name: /^Date range:/ }).click();
+  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("24h");
   await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody tr")).toHaveCount(1);
   await expect.poll(async () => page.locator('.usage-history time').evaluateAll((times) => times.length > 0 && times.every((time) => {
     const midnight = new Date();
     midnight.setHours(0, 0, 0, 0);
     return new Date(time.getAttribute("datetime") ?? "").getTime() >= midnight.getTime();
   }))).toBe(true);
-  await page.getByRole("button", { name: "7 days", exact: true }).click();
+  await page.getByRole("button", { name: /^Date range:/ }).click();
+  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("7d");
 
   const metric = page.getByRole("tablist", { name: "Chart metric" });
   await metric.getByRole("tab", { name: "Tokens", exact: true }).focus();
@@ -672,8 +745,16 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await page.keyboard.press("Space");
   await expect(metric.getByRole("tab", { name: "Cost", exact: true })).toHaveAttribute("aria-selected", "true");
 
-  const history = page.locator('ul[aria-label="Usage history"]');
-  await expect(history.getByRole("button")).toHaveCount(20);
+  const history = page.getByRole("table", { name: "Usage history", exact: true });
+  await expect(history.locator("tbody tr")).toHaveCount(20);
+  await expect(history.getByRole("columnheader")).toHaveText(["Time", "Agent", "Model", "Tokens", "Cost", "Result"]);
+  await history.getByRole("button", { name: "Token details", exact: true }).first().click();
+  await expect(page.getByRole("dialog", { name: "Token details", exact: true })).toContainText("Cache read");
+  await page.keyboard.press("Escape");
+  await page.getByRole("combobox", { name: "Rows per page" }).selectOption("50");
+  await expect(history.locator("tbody tr")).not.toHaveCount(20);
+  await expect(page.getByRole("button", { name: "Next usage page" })).toBeDisabled();
+  await page.getByRole("combobox", { name: "Rows per page" }).selectOption("20");
   await page.getByRole("button", { name: "Next usage page" }).click();
   await expect(page.getByRole("heading", { name: "Usage history" })).toBeFocused();
   await expect(page.locator(".pagination").getByText(/^Page 2/)).toBeVisible();
@@ -707,7 +788,7 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
     await dialog.dismiss();
   });
   await page.getByRole("button", { name: "Clear usage history" }).click();
-  await expect(history.getByRole("button")).toHaveCount(20);
+  await expect(history.locator("tbody tr")).toHaveCount(20);
 
   page.once("dialog", async (dialog) => {
     expect(dialog.type()).toBe("confirm");
@@ -775,12 +856,16 @@ test("overview presents local availability and the active profile without sessio
     const icons = facts.map((fact) => fact.firstElementChild?.getBoundingClientRect().width);
     const left = node.querySelector(".status-local .status-heading")?.getBoundingClientRect();
     const right = node.querySelector(".status-remote .status-heading")?.getBoundingClientRect();
-    return { text, icons, heights: facts.map((fact) => fact.getBoundingClientRect().height), headings: [left?.y, right?.y] };
+    const verified = node.querySelector('[aria-label="Privacy verification"]')?.getBoundingClientRect();
+    const profile = node.querySelector(".status-profile")?.getBoundingClientRect();
+    return { text, icons, heights: facts.map((fact) => fact.getBoundingClientRect().height), headings: [left?.y, right?.y], verifiedHeight: verified?.height, buttonRightEdges: [verified?.right, profile?.right] };
   });
   expect(alignment.text[0]).toBe(alignment.text[1]);
   expect(alignment.icons).toEqual([14, 14]);
   expect(alignment.heights).toEqual([18, 18]);
   expect(alignment.headings[0]).toBe(alignment.headings[1]);
+  expect(alignment.verifiedHeight).toBe(32);
+  expect(alignment.buttonRightEdges[0]).toBe(alignment.buttonRightEdges[1]);
   await status.getByRole("button", { name: "Privacy verification", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
   await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();
@@ -1022,6 +1107,11 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
   await expect(page.getByText(/Address already in use/i)).toBeVisible();
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeDisabled();
+  await nav(page, "Settings").click();
+  const general = page.getByRole("region", { name: "General", exact: true });
+  await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
+  await expect(general.locator(".row-warning")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText("Address already in use");
 });
 
 test("responsive, zoomed, dark, high-contrast, and reduced-motion layouts stay bounded and readable", async ({ page }) => {

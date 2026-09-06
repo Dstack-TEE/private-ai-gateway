@@ -21,8 +21,9 @@ operating system's native dialogs directly.
 The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
 Tailwind CSS 4, Lucide, and the official Neutral light/dark primary palette.
 Success uses green-700/green-400, warnings use amber-700/amber-400, and errors
-use the destructive token. The dstack brand accent (`#c6eb3d`) is reserved for
-the Overview background, independently of the neutral primary controls.
+use the destructive token. Overview decoration uses the neutral primary palette.
+Protection switches use success when enabled, with warning taking precedence in
+development mode; preference and agent switches retain the default theme.
 `src/renderer/theme.css` defines the palette and aliases for existing page layouts.
 `styles.css` owns product layout, not a second button/switch implementation.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
@@ -52,6 +53,9 @@ Shared product compositions live one layer above `components/ui`:
 - `settings.tsx`: grouped settings, navigation rows, toggles and labeled fields.
 
 Forms use the official Field components without bordered outer input containers.
+Local API sections use FieldSet/FieldSeparator; standalone option rows use Item
+outline, while endpoint previews share one bordered group and a Separator.
+SheetActions provides one shared footer divider, and long endpoint values wrap.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection is a page-content action.
 Use the default switch size except for the Overview main switch; do not retain legacy CSS aliases for removed radii.
@@ -68,12 +72,20 @@ share the same Item-based clickable row. Lists use explicit Separator components
 
 Usage charts use shadcn Chart and Recharts, loaded only on the Usage page.
 SQLite supplies per-day/per-model aggregates using the full filter scope,
-independently of pagination. Each model has its own stacked series; input/output
-are not separate stacks. Empty dates are filled and ranges over 90 days are
+independently of pagination. The ten largest models by tokens have individual
+stacks; additional models are combined as Other without dropping usage. Colors
+come from the complete model facet so filtering does not recolor a model.
+Input/output are not separate stacks. Empty dates are filled and ranges over 90 days are
 aggregated monthly without dropping totals. Chart configuration contains labels
 only; Bar colors reference static theme variables to avoid dynamic style tags
-under the production CSP. Chart metric views use Tabs; filter options use
-outlined ToggleGroup controls.
+under the production CSP. Chart metric views use Tabs. Date filtering uses the
+official Calendar/Popover with local-day boundaries, presets and an explicit
+Apply/Cancel flow. Query, summary, chart and CSV share the same date bounds.
+Usage details use shadcn Table with TanStack Table v9 manual cursor pagination
+(20/50/100 rows), the shared outcome/number presentation, and token-detail popovers.
+Rows open the same proof dialog as Overview; no page-local sorting or unmeasured
+latency/throughput fields are exposed. Calendar, table and chart load lazily.
+The generated Calendar forwards its day-button ref to preserve keyboard focus.
 
 Profile saves continue to verify the endpoint/key before persisting or
 reconnecting. No separate verified-configuration badge or credential-delete

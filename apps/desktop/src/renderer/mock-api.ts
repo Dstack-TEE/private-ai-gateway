@@ -316,6 +316,12 @@ export function mockApi(name: string | null): DesktopApi {
   // pending timer a no-op instead of completing the wrong run.
   let verifyRun = 0;
   let history = [...USAGE_HISTORY];
+  const filteredHistory = (query: UsageQuery) => history.filter((item) =>
+    (!query.agent || item.agent === query.agent)
+    && (!query.model || item.model === query.model)
+    && (!query.sessionId || item.sessionId === query.sessionId)
+    && (query.since === undefined || item.at >= query.since)
+    && (query.until === undefined || item.at < query.until));
   let clientKey = "sk-pag-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
   const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved ?? Boolean(profile.verifiedAt)).map((profile) => profile.id));
   const publish = () => {
@@ -508,12 +514,7 @@ export function mockApi(name: string | null): DesktopApi {
     },
     queryUsage: async (query: UsageQuery) => {
       if (name === "usage-query-error" && query.model) throw new Error("Usage database temporarily unavailable");
-      const filtered = history.filter((item) =>
-        (!query.agent || item.agent === query.agent)
-        && (!query.model || item.model === query.model)
-        && (!query.sessionId || item.sessionId === query.sessionId)
-        && (!query.since || item.at >= query.since)
-        && (!query.until || item.at < query.until));
+      const filtered = filteredHistory(query);
       const offset = query.cursor ? Number(query.cursor.split(":")[0]) : 0;
       const limit = query.limit ?? 20;
       const items = filtered.slice(offset, offset + limit);
@@ -564,7 +565,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (!record) throw new Error("Usage record not found");
       return record;
     },
-    exportUsageCsv: async () => history.length,
+    exportUsageCsv: async (query) => filteredHistory(query).length,
     clearUsage: async () => {
       const count = history.length;
       history = [];
