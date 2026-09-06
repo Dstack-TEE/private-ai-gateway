@@ -439,13 +439,17 @@ fn execute(cli: &Cli) -> Result<(), String> {
                 json!({"deleted": client.clear_usage()?})
             }
         },
-        Action::Settings { command } => match command {
-            Settings::Show => {
-                json!({"preferences": client.preferences()?, "localApi": client.state()?.local_api})
-            }
-            Settings::Set { key, value: input } => {
-                confirm(cli, "Change gateway settings?")?;
-                match key.as_str() {
+        Action::Settings { command } => {
+            match command {
+                Settings::Show => {
+                    json!({"preferences": client.preferences()?, "localApi": client.state()?.local_api})
+                }
+                Settings::Set { key, value: input } => {
+                    confirm(cli, "Change gateway settings?")?;
+                    match key.as_str() {
+                    "notifications" => value(client.set_preference(Preference::Notifications(
+                        serde_json::from_str(input).map_err(|_| "Expected notification settings as a JSON object with boolean values")?
+                    ))?)?,
                     "connectOnLaunch" => value(
                         client.set_preference(Preference::ConnectOnLaunch(parse_bool(input)?))?,
                     )?,
@@ -484,8 +488,9 @@ fn execute(cli: &Cli) -> Result<(), String> {
                         client.request(Command::SaveLocalApi(config))?
                     }
                 }
+                }
             }
-        },
+        }
         Action::Token { command } => match command {
             Token::Rotate => {
                 confirm(

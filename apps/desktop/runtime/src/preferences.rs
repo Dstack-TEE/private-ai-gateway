@@ -49,7 +49,7 @@ pub fn load() -> Result<Preferences, String> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct NotificationPreferences {
     pub enabled: bool,
     pub gateway: bool,

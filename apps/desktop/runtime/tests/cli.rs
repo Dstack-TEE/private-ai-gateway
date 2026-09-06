@@ -117,6 +117,16 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         backend.run(&["settings", "show"])["preferences"]["appearance"],
         "dark"
     );
+    backend.run(&[
+        "settings",
+        "set",
+        "notifications",
+        r#"{"enabled":false}"#,
+        "--yes",
+    ]);
+    let settings = backend.run(&["settings", "show"]);
+    assert_eq!(settings["preferences"]["notifications"]["enabled"], false);
+    assert_eq!(settings["preferences"]["appearance"], "dark");
     assert_eq!(backend.run(&["profiles", "list"]), serde_json::json!([]));
     let rejected = backend
         .command(&["usage", "clear", "--json"])

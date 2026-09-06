@@ -373,6 +373,7 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::Preferences => value(preferences::load()?),
             Command::SetPreference(change) => {
                 preferences::update(|saved| match change {
+                    Preference::Notifications(config) => saved.notifications = config,
                     Preference::ConnectOnLaunch(enabled) => saved.connect_on_launch = enabled,
                     Preference::Appearance(appearance) => saved.appearance = appearance,
                     Preference::UpdateChannel(channel) => saved.update_channel = Some(channel),

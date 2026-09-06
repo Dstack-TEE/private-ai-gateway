@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::{
     contracts::*,
-    preferences::{Appearance, UpdateChannel},
+    preferences::{Appearance, NotificationPreferences, UpdateChannel},
     usage::UsageQuery,
 };
 
@@ -104,6 +104,7 @@ pub enum Command {
     deny_unknown_fields
 )]
 pub enum Preference {
+    Notifications(NotificationPreferences),
     ConnectOnLaunch(bool),
     Appearance(Appearance),
     UpdateChannel(UpdateChannel),

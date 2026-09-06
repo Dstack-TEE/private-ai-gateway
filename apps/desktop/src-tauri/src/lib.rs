@@ -85,6 +85,7 @@ fn refresh_preferences(app: &AppHandle, client: &Arc<Client>) {
     let app = app.clone();
     let client = client.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        notifications::initialize(&app);
         let result = (|| {
             let preferences = client.preferences()?;
             let launch = LaunchPreferences {
@@ -616,7 +617,6 @@ pub fn run() {
             stop_all_and_quit
         ])
         .setup(move |app| {
-            notifications::initialize(app.handle());
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             autostart::setup(app.handle())?;
             if app.config().plugins.0.contains_key("updater") {
@@ -628,6 +628,7 @@ pub fn run() {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());
+            notifications::initialize(app.handle());
 
             let window = app
                 .get_webview_window("main")
