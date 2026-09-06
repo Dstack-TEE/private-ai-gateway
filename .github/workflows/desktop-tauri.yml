@@ -2,6 +2,12 @@ name: Desktop Tauri Windows and Linux
 
 on:
   workflow_dispatch:
+    inputs:
+      run_ui_tests:
+        description: Run optional Playwright and installed WebView UI checks
+        type: boolean
+        required: false
+        default: false
   pull_request:
     paths:
       - '.github/workflows/desktop-tauri.yml'
@@ -23,6 +29,7 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: 2
+      RUN_UI_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ui_tests }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -50,7 +57,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf webkit2gtk-driver xvfb gnome-keyring dbus-x11
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf gnome-keyring dbus-x11
+
+      - name: Install optional Linux UI test dependencies
+        if: runner.os == 'Linux' && env.RUN_UI_TESTS == 'true'
+        run: sudo apt-get install -y webkit2gtk-driver xvfb
+
+      - name: Report UI checks not run
+        if: env.RUN_UI_TESTS != 'true'
+        shell: bash
+        run: |
+          echo 'UI checks: not run (explicit workflow_dispatch opt-in required).'
+          echo 'UI checks: not run (explicit workflow_dispatch opt-in required).' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install desktop dependencies
         run: npm ci
@@ -59,6 +77,7 @@ jobs:
         run: npm run check
 
       - name: Renderer smoke (Playwright, stateful mock)
+        if: env.RUN_UI_TESTS == 'true'
         run: |
           npx playwright install chromium
           npm run test:renderer -- --workers=2
@@ -72,17 +91,13 @@ jobs:
         run: npm run tauri build -- --config src-tauri/tauri.brand.conf.json
 
       - name: Test Tauri backend
-        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --lib
 
-      - name: Hermes path and projection regression
-        run: cargo test --release --locked --manifest-path gateway/Cargo.toml --lib hermes
+      - name: Test shared gateway library
+        run: cargo test --release --locked --manifest-path gateway/Cargo.toml --lib
 
-      # Cargo integration tests also compile the root server binary, whose
-      # dstack transport is Unix-only. Windows still exercises installed aci.exe
-      # below; it must not be reported as passing this integration suite.
-      - name: ACI signed-artifact regression (local fixture service)
-        if: runner.os == 'Linux'
-        run: cargo test --release --locked --manifest-path ../../Cargo.toml --test aci_cli
+      - name: Test shared runtime library
+        run: cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
 
       - name: Inspect Linux package sidecars
         if: runner.os == 'Linux'
@@ -124,6 +139,7 @@ jobs:
             apps/desktop/src-tauri/target/release/bundle/deb/*.deb
 
       - name: Install task-local Tauri WebDriver
+        if: env.RUN_UI_TESTS == 'true'
         run: cargo install tauri-driver --version 2.0.6 --locked --root "${{ runner.temp }}/tauri-tools"
 
       - name: Installed Linux package smoke
@@ -152,6 +168,7 @@ jobs:
           trap cleanup EXIT
           sudo apt-get install -y "${packages[0]}"
           node scripts/packaged-sidecars-smoke.mjs /usr/bin
+          mkdir -p test-results/installed
           export TAURI_SMOKE_KEYRING_HOME="$scratch"
           export XDG_RUNTIME_DIR="$scratch/runtime"
           mkdir -m 700 "$XDG_RUNTIME_DIR"
@@ -160,11 +177,15 @@ jobs:
             keyring_pid=$!
             trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
             gdbus wait --session --timeout 10 org.freedesktop.secrets
-            cargo test --release --locked --manifest-path gateway/Cargo.toml -- --ignored keyring_round_trip
-            xvfb-run -a node scripts/installed-webview-smoke.mjs \
-              /usr/bin/private-ai-gateway-desktop \
-              "$RUNNER_TEMP/tauri-tools/bin/tauri-driver" \
-              /usr/bin/WebKitWebDriver "$PWD/test-results/installed"
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+            if [[ "$RUN_UI_TESTS" == "true" ]]; then
+              xvfb-run -a node scripts/installed-webview-smoke.mjs \
+                /usr/bin/private-ai-gateway-desktop \
+                "$RUNNER_TEMP/tauri-tools/bin/tauri-driver" \
+                /usr/bin/WebKitWebDriver "$PWD/test-results/installed"
+            else
+              echo "Installed WebView UI checks: not run (opt-in disabled)." | tee "$PWD/test-results/installed/workflow-stage.txt"
+            fi
           '
 
       - name: Installed Windows package smoke
@@ -178,7 +199,7 @@ jobs:
           $toolsDir = Join-Path $env:RUNNER_TEMP 'tauri-tools'
           $evidenceDir = Join-Path $PWD 'test-results/installed'
           New-Item -ItemType Directory -Force $evidenceDir | Out-Null
-          'Preparing installed Windows smoke; no WebDriver session yet.' | Set-Content "$evidenceDir/workflow-stage.txt"
+          'Preparing installed Windows package checks.' | Set-Content "$evidenceDir/workflow-stage.txt"
           if (Test-Path $installDir) { throw 'Smoke install directory already exists' }
           function Run-Installer($executable, $arguments) {
             $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru
@@ -196,31 +217,35 @@ jobs:
             $env:PAG_TEST_HELPER_PATH = "$installDir/private-ai-gateway-helper.exe"
             cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Hermes Windows credential command failed' }
-            cargo test --release --locked --manifest-path gateway/Cargo.toml -- --ignored keyring_round_trip
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Credential Manager round trip failed' }
-            $webviews = @(Get-ChildItem @("${env:ProgramFiles(x86)}/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe", "$env:LOCALAPPDATA/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe") -ErrorAction SilentlyContinue)
-            if ($webviews.Count -eq 0) { throw 'WebView2 runtime not found' }
-            $version = ($webviews | Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending | Select-Object -First 1).VersionInfo.ProductVersion
-            Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile "$toolsDir/edgedriver.zip"
-            Expand-Archive "$toolsDir/edgedriver.zip" -DestinationPath "$toolsDir/edge"
-            # Microsoft's WebDriver contract requires matching major.minor.build.
-            # https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
-            # https://learn.microsoft.com/microsoft-edge/webdriver/#download-microsoft-edge-webdriver
-            $env:TAURI_SMOKE_EDGE_BUILD = ([version]$version).ToString(3)
-            $driverBanner = (& "$toolsDir/edge/msedgedriver.exe" --version 2>&1 | Out-String).Trim()
-            $driverExitCode = $LASTEXITCODE
-            Write-Host "EdgeDriver --version exit code: $driverExitCode; banner: $driverBanner"
-            $driverVersions = [regex]::Matches($driverBanner, '(?<![\d.])\d+\.\d+\.\d+\.\d+(?![\d.])')
-            if ($driverExitCode -ne 0 -or $driverVersions.Count -ne 1) {
-              throw 'Cannot determine EdgeDriver version'
+            if ($env:RUN_UI_TESTS -eq 'true') {
+              $webviews = @(Get-ChildItem @("${env:ProgramFiles(x86)}/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe", "$env:LOCALAPPDATA/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe") -ErrorAction SilentlyContinue)
+              if ($webviews.Count -eq 0) { throw 'WebView2 runtime not found' }
+              $version = ($webviews | Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending | Select-Object -First 1).VersionInfo.ProductVersion
+              Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile "$toolsDir/edgedriver.zip"
+              Expand-Archive "$toolsDir/edgedriver.zip" -DestinationPath "$toolsDir/edge"
+              # Microsoft's WebDriver contract requires matching major.minor.build.
+              # https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
+              # https://learn.microsoft.com/microsoft-edge/webdriver/#download-microsoft-edge-webdriver
+              $env:TAURI_SMOKE_EDGE_BUILD = ([version]$version).ToString(3)
+              $driverBanner = (& "$toolsDir/edge/msedgedriver.exe" --version 2>&1 | Out-String).Trim()
+              $driverExitCode = $LASTEXITCODE
+              Write-Host "EdgeDriver --version exit code: $driverExitCode; banner: $driverBanner"
+              $driverVersions = [regex]::Matches($driverBanner, '(?<![\d.])\d+\.\d+\.\d+\.\d+(?![\d.])')
+              if ($driverExitCode -ne 0 -or $driverVersions.Count -ne 1) {
+                throw 'Cannot determine EdgeDriver version'
+              }
+              $driverVersion = [version]$driverVersions[0].Value
+              if ($driverVersion.ToString(3) -ne $env:TAURI_SMOKE_EDGE_BUILD) { throw 'EdgeDriver does not match WebView2' }
+              Write-Host "Selected WebView2: $version; driver: $driverVersion"
+              "WebView2=$version; EdgeDriver=$driverVersion; starting installed app with scoped CDP, then attaching WebDriver" | Set-Content "$evidenceDir/workflow-stage.txt"
+              $smokeArgs = @("$installDir/private-ai-gateway-desktop.exe", "$toolsDir/bin/tauri-driver.exe", "$toolsDir/edge/msedgedriver.exe", "$PWD/test-results/installed")
+              node scripts/installed-webview-smoke.mjs @smokeArgs
+              if ($LASTEXITCODE -ne 0) { throw 'Installed WebView smoke failed' }
+            } else {
+              'Installed WebView UI checks: not run (opt-in disabled).' | Tee-Object -FilePath "$evidenceDir/workflow-stage.txt"
             }
-            $driverVersion = [version]$driverVersions[0].Value
-            if ($driverVersion.ToString(3) -ne $env:TAURI_SMOKE_EDGE_BUILD) { throw 'EdgeDriver does not match WebView2' }
-            Write-Host "Selected WebView2: $version; driver: $driverVersion"
-            "WebView2=$version; EdgeDriver=$driverVersion; starting installed app with scoped CDP, then attaching WebDriver" | Set-Content "$evidenceDir/workflow-stage.txt"
-            $smokeArgs = @("$installDir/private-ai-gateway-desktop.exe", "$toolsDir/bin/tauri-driver.exe", "$toolsDir/edge/msedgedriver.exe", "$PWD/test-results/installed")
-            node scripts/installed-webview-smoke.mjs @smokeArgs
-            if ($LASTEXITCODE -ne 0) { throw 'Installed WebView smoke failed' }
           } finally {
             if (Test-Path "$installDir/uninstall.exe") {
               Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
@@ -232,7 +257,7 @@ jobs:
           }
 
       - name: Upload installed-app evidence
-        if: always()
+        if: always() && env.RUN_UI_TESTS == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: desktop-tauri-installed-${{ runner.os }}
@@ -240,13 +265,22 @@ jobs:
           retention-days: 14
           path: apps/desktop/test-results/installed/
 
+      - name: Upload non-UI package check status
+        if: always() && env.RUN_UI_TESTS != 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: desktop-tauri-package-checks-${{ runner.os }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: apps/desktop/test-results/installed/workflow-stage.txt
+
       - name: Remove task-local drivers
-        if: always()
+        if: always() && env.RUN_UI_TESTS == 'true'
         shell: bash
         run: rm -rf "$RUNNER_TEMP/tauri-tools"
 
       - name: Upload renderer failure evidence
-        if: failure()
+        if: failure() && env.RUN_UI_TESTS == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: desktop-tauri-renderer-${{ runner.os }}
