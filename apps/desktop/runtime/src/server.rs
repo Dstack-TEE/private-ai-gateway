@@ -114,6 +114,8 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                     std::io::ErrorKind::PermissionDenied
                         | std::io::ErrorKind::ConnectionAborted
                         | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
                 ) => {}
             Err(_) => return Err("The management listener failed".into()),
         }
