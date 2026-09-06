@@ -21,6 +21,8 @@ use std::{
 
 use std::process::Command;
 
+mod openclaw;
+
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,8 +41,11 @@ pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_GATEWAY_HOME";
 pub use crate::brand::APP_IDENTIFIER;
 const STORE_FILE: &str = "agent-connections.json";
 const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
-const HELPER_MISSING: &str = "The credential helper is missing from this installation, so \
+const HELPER_MISSING: &str =
+    "The credential helper is missing or invalid in this installation, so \
                               agents cannot be connected";
+const RESTORE_PATH_MISSING: &str = "This legacy connection has no recorded absolute config path. \
+    Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
 
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {
@@ -111,15 +116,17 @@ pub enum Agent {
     OpenCode,
     Pi,
     Hermes,
+    OpenClaw,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 5] = [
+    pub const ALL: [Agent; 6] = [
         Agent::Codex,
         Agent::ClaudeCode,
         Agent::OpenCode,
         Agent::Pi,
         Agent::Hermes,
+        Agent::OpenClaw,
     ];
 
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -136,6 +143,7 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::Hermes => "hermes",
+            Agent::OpenClaw => "openclaw",
         }
     }
 
@@ -146,6 +154,7 @@ impl Agent {
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "Pi",
             Agent::Hermes => "Hermes",
+            Agent::OpenClaw => "OpenClaw",
         }
     }
 
@@ -157,6 +166,7 @@ impl Agent {
             Agent::OpenCode => &["opencode"],
             Agent::Pi => &["pi"],
             Agent::Hermes => &["hermes"],
+            Agent::OpenClaw => &["openclaw"],
         }
     }
 
@@ -165,6 +175,7 @@ impl Agent {
             Agent::Codex => Format::Toml,
             Agent::ClaudeCode | Agent::OpenCode | Agent::Pi => Format::Json,
             Agent::Hermes => Format::Yaml,
+            Agent::OpenClaw => Format::Json5,
         }
     }
 
@@ -173,6 +184,7 @@ impl Agent {
     fn config_path(self, home: &Path, tool_env: bool) -> PathBuf {
         let override_dir = |name: &str| tool_env.then(|| env_path(name)).flatten();
         match self {
+            Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("config.toml"),
@@ -186,18 +198,20 @@ impl Agent {
                     .join("opencode.json")
             }),
             Agent::Pi => override_dir("PI_CODING_AGENT_DIR")
+                .map(|path| match path.strip_prefix("~") {
+                    Ok(suffix) => home.join(suffix),
+                    Err(_) => path,
+                })
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
-                .unwrap_or_else(|| {
-                    if cfg!(windows) {
-                        override_dir("LOCALAPPDATA")
-                            .unwrap_or_else(|| home.join("AppData").join("Local"))
-                            .join("hermes")
-                    } else {
-                        home.join(".hermes")
-                    }
+                .and_then(|path| {
+                    path.to_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
                 })
+                .unwrap_or_else(|| hermes_native_dir(home, tool_env))
                 .join("config.yaml"),
         }
     }
@@ -209,6 +223,7 @@ impl Agent {
                     since are left in place. The agent's local token is revoked.";
         }
         match self {
+            Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local gateway token. Restart OpenClaw after applying.",
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
@@ -220,19 +235,40 @@ impl Agent {
                  service and a file-backed machine-local token. Restart OpenCode after applying."
             }
             Agent::ClaudeCode => {
+                if cfg!(windows) {
+                    return "Claude Code uses apiKeyHelper with a local token. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
+                }
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
                  and discover models from the verified service. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
-                 used through the gateway."
+                 used through the gateway. Anthropic does not officially support non-Claude models."
             }
             Agent::Pi => {
                 "Pi will load an app-owned provider catalog generated from the verified service. Choose a model in Pi after applying. Restart Pi after applying."
             }
             Agent::Hermes => {
-                "Hermes will discover models from the local gateway and authenticate with a machine-local token command. Start a new Hermes session after applying."
+                "Hermes uses a machine-local token command. Start a new session without --api-key or --base-url overrides; existing native credentials and fallbacks are never erased."
             }
         }
+    }
+}
+
+fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
+    if cfg!(windows) {
+        tool_env
+            .then(|| env_path("LOCALAPPDATA"))
+            .flatten()
+            .and_then(|path| {
+                path.to_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| home.join("AppData").join("Local"))
+            .join("hermes")
+    } else {
+        home.join(".hermes")
     }
 }
 
@@ -268,6 +304,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     }
     let base = inputs.endpoint.trim_end_matches('/');
     Ok(match agent {
+        Agent::OpenClaw => openclaw::fields(inputs)?,
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_gateway"),
@@ -395,15 +432,15 @@ fn opencode_provider(catalog: &Catalog, base: &str, token_path: &Path) -> serde_
                 "name".to_string(),
                 serde_json::Value::String(model.display_name().to_string()),
             );
-            if model.remote.context_length.is_some() || model.remote.max_output_length.is_some() {
-                let mut limit = serde_json::Map::new();
-                if let Some(value) = model.remote.context_length {
-                    limit.insert("context".to_string(), serde_json::Value::from(value));
-                }
-                if let Some(value) = model.remote.max_output_length {
-                    limit.insert("output".to_string(), serde_json::Value::from(value));
-                }
-                config.insert("limit".to_string(), serde_json::Value::Object(limit));
+            if let (Some(context), Some(output)) =
+                (model.remote.context_length, model.remote.max_output_length)
+            {
+                config.insert(
+                    "limit".to_string(),
+                    serde_json::json!({
+                        "context": context, "output": output,
+                    }),
+                );
             }
             (model.id().to_string(), serde_json::Value::Object(config))
         })
@@ -693,9 +730,8 @@ fn owned(path: &[&str]) -> Vec<String> {
     path.iter().map(|key| key.to_string()).collect()
 }
 
-/// The `apiKeyHelper` command line. Claude Code hands it to a POSIX `sh` on
-/// every platform (Git's sh on Windows), so the path is quoted uniformly
-/// with `shlex`.
+/// POSIX command syntax. The quoting test validates `sh`, not the Windows
+/// Claude CLI's choice of shell; that compatibility remains unverified.
 fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
     let path = exe
         .to_str()
@@ -756,6 +792,7 @@ fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
             credential_helper_command(exe, agent).ok(),
         ),
         Agent::OpenCode => return false,
+        Agent::OpenClaw => return false, // Validated with the token path by Projector.
     };
     // Only inspect the helper-bearing field we recorded, not provider metadata.
     record.fields.iter().any(|field| {
@@ -798,6 +835,8 @@ fn is_sensitive(path: &[String]) -> bool {
 /// What a connection wrote, kept so a disconnect can restore exactly that.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Connection {
+    #[serde(default)]
+    config_path: Option<PathBuf>,
     fields: Vec<OwnedField>,
     /// User intent survives protection sessions; suspended links own no config.
     #[serde(default)]
@@ -813,6 +852,26 @@ struct Connection {
     /// and config are all cleaned up, so a retry is idempotent.
     #[serde(default)]
     cleanup_pending: bool,
+}
+
+impl Connection {
+    fn validate_recovery(&self) -> Result<(), String> {
+        if self
+            .fields
+            .iter()
+            .any(|field| matches!(field.previous, Some(Previous::Plain(ConfigValue::Json(_)))))
+        {
+            return Err("This legacy connection contains a structured plaintext backup. Access is disabled; secure manual recovery is required and the existing record is retained".to_string());
+        }
+        Ok(())
+    }
+
+    fn restore_path(&self) -> Result<&Path, String> {
+        self.config_path
+            .as_deref()
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| RESTORE_PATH_MISSING.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -904,6 +963,37 @@ impl Projector {
 
     fn codex_catalog_path(&self) -> PathBuf {
         self.data_dir.join(CODEX_CATALOG_FILE)
+    }
+
+    fn action_path(
+        &self,
+        agent: Agent,
+        record: Option<&Connection>,
+        connect: bool,
+    ) -> Result<PathBuf, String> {
+        if !connect {
+            if let Some(record) = record.filter(|record| !record.fields.is_empty()) {
+                record.validate_recovery()?;
+                return record.restore_path().map(Path::to_path_buf);
+            }
+        }
+        let configured = agent.config_path(&self.home, self.tool_env);
+        if !configured.is_absolute() {
+            return Err("Set the agent config location to an absolute path; desktop and CLI working directories may differ".to_string());
+        }
+        let current = std::path::absolute(configured)
+            .map_err(|_| "Cannot resolve an absolute agent config path".to_string())?;
+        if current.to_str().is_none() {
+            return Err("The agent config path must be valid Unicode".to_string());
+        }
+        if let Some(record) = record.filter(|record| !record.fields.is_empty()) {
+            record.validate_recovery()?;
+            let previous = record.restore_path()?;
+            if previous != current {
+                return Err("The agent config location changed. Disconnect to restore the recorded file before connecting at the new location".to_string());
+            }
+        }
+        Ok(current)
     }
 
     /// Keep Codex's startup metadata in sync with the verified service
@@ -1009,20 +1099,40 @@ impl Projector {
         if connect {
             self.require_helper()?;
         }
-        let (text, read_error) = self.config_text(agent);
+        let path = self.action_path(agent, store.get(agent.id()), connect);
+        let (text, read_error) = self.config_text_at(agent, &path);
         if connect {
             if let Some(error) = read_error.clone() {
                 return Err(error);
             }
         }
+        let mut restore_problem = path.as_ref().err().cloned();
         let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
+            _ if !connect && path.is_err() => Edit {
+                changes: Vec::new(),
+                record: None,
+                pending_secrets: Vec::new(),
+                consumed_secrets: Vec::new(),
+            },
             Ok(_) if connect && catalog.is_none() => Edit {
                 changes: Vec::new(),
                 record: None,
                 pending_secrets: Vec::new(),
                 consumed_secrets: Vec::new(),
             },
-            Ok(mut doc) => self.edit(agent, connect, &mut doc, &store, catalog, options)?,
+            Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
+                Ok(edit) => edit,
+                Err(error) if !connect && store.contains_key(agent.id()) => {
+                    restore_problem = Some(error);
+                    Edit {
+                        changes: Vec::new(),
+                        record: None,
+                        pending_secrets: Vec::new(),
+                        consumed_secrets: Vec::new(),
+                    }
+                }
+                Err(error) => return Err(error),
+            },
             // A broken config does not prevent revocation. Applying the
             // disconnect keeps its restoration journal until repair succeeds.
             Err(_) if !connect => {
@@ -1042,8 +1152,19 @@ impl Projector {
             agent: self.status(agent, &store, catalog),
             connect,
             changes: edit.changes,
-            note: agent.note(connect).to_string(),
-            revision: revision(text.as_deref(), store.get(agent.id()), catalog, options),
+            note: restore_problem.map_or_else(
+                || agent.note(connect).to_string(),
+                |reason| {
+                    format!("Access will be revoked before restoration is attempted. {reason}")
+                },
+            ),
+            revision: revision(
+                path.as_deref().ok(),
+                text.as_deref(),
+                store.get(agent.id()),
+                catalog,
+                options,
+            ),
         })
     }
 
@@ -1059,20 +1180,29 @@ impl Projector {
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()?;
             let mut store = self.load_store()?;
-            let (text, read_error) = self.config_text(agent);
-            if revision(text.as_deref(), store.get(agent.id()), catalog, options) != revision_seen {
+            let path = self.action_path(agent, store.get(agent.id()), connect);
+            let (text, read_error) = self.config_text_at(agent, &path);
+            if revision(
+                path.as_deref().ok(),
+                text.as_deref(),
+                store.get(agent.id()),
+                catalog,
+                options,
+            ) != revision_seen
+            {
                 return Err(format!(
                     "The {} config changed since the preview; review the changes again",
                     agent.name()
                 ));
             }
             if connect {
+                let path = path?;
                 if let Some(error) = read_error {
                     return Err(error);
                 }
                 if catalog.is_some() {
                     self.require_helper()?;
-                    self.connect(agent, &mut store, text, catalog, options)?;
+                    self.connect(agent, &mut store, text, &path, catalog, options)?;
                 } else {
                     if store.contains_key(agent.id()) {
                         self.suspend(agent, &mut store)?;
@@ -1080,6 +1210,7 @@ impl Projector {
                     store.insert(
                         agent.id().to_string(),
                         Connection {
+                            config_path: Some(path),
                             suspended: true,
                             options: options.clone(),
                             ..Connection::default()
@@ -1158,7 +1289,7 @@ impl Projector {
                         && !status.authorized
                     {
                         if let Some(record) = store.get_mut(agent.id()) {
-                            record.attention = Some("Configuration changed outside the app; reconnect to apply it again".to_string());
+                            record.attention = status.attention.clone().or_else(|| Some("Configuration changed outside the app; reconnect to apply it again".to_string()));
                         }
                     }
                     self.suspend(agent, &mut store)
@@ -1166,7 +1297,8 @@ impl Projector {
                     self.suspend(agent, &mut store).and_then(|()| {
                         self.require_helper()?;
                         let text = self.read_config(agent)?;
-                        self.connect(agent, &mut store, text, catalog, &record.options)
+                        let path = self.action_path(agent, store.get(agent.id()), true)?;
+                        self.connect(agent, &mut store, text, &path, catalog, &record.options)
                     })
                 } else {
                     Ok(())
@@ -1197,8 +1329,20 @@ impl Projector {
             .get(agent.id())
             .cloned()
             .ok_or("Missing agent restore record")?;
-        let text = self.read_config(agent)?;
-        let mut doc = self.parse_config(agent, text.as_deref())?;
+        record.validate_recovery()?;
+        if record.fields.is_empty() {
+            return Ok(());
+        }
+        let path = record.restore_path()?;
+        let text = self.read_config_at(agent, path)?;
+        let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
+            .map_err(|reason| {
+                format!(
+                    "Cannot restore {} at {}: {reason}",
+                    agent.name(),
+                    path.display()
+                )
+            })?;
         let default_model = record
             .options
             .default_model
@@ -1224,12 +1368,8 @@ impl Projector {
             }
         };
         if !edit.changes.is_empty() {
-            write_atomic(
-                &agent.config_path(&self.home, self.tool_env),
-                &doc.render()?,
-                Some(text.as_deref()),
-            )
-            .map_err(|error| format!("Cannot restore {}: {error}", agent.name()))?;
+            write_atomic(path, &doc.render()?, Some(text.as_deref()))
+                .map_err(|error| format!("Cannot restore {}: {error}", agent.name()))?;
         }
         for entry in &edit.consumed_secrets {
             self.secrets.delete(entry)?;
@@ -1248,6 +1388,7 @@ impl Projector {
         agent: Agent,
         store: &mut Store,
         text: Option<String>,
+        path: &Path,
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
     ) -> Result<(), String> {
@@ -1270,12 +1411,12 @@ impl Projector {
             ));
         }
         let mut doc = self.parse_config(agent, text.as_deref())?;
+        let edit = self.edit(agent, true, &mut doc, store, catalog, &options)?;
         if agent == Agent::Codex {
             self.sync_codex_catalog(
                 catalog.ok_or_else(|| "The verified model list is not available".to_string())?,
             )?;
         }
-        let edit = self.edit(agent, true, &mut doc, store, catalog, &options)?;
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), String> {
             // A fresh token on every new connection; a leftover file from an
@@ -1294,13 +1435,13 @@ impl Projector {
                 guard.delete_secrets.push(secret.entry.clone());
             }
             if !edit.changes.is_empty() {
-                let path = agent.config_path(&self.home, self.tool_env);
-                write_atomic(&path, &doc.render()?, Some(text.as_deref())).map_err(|error| {
+                write_atomic(path, &doc.render()?, Some(text.as_deref())).map_err(|error| {
                     format!("Cannot write the {} config: {error}", agent.name())
                 })?;
-                guard.config = Some((path, text.clone()));
+                guard.config = Some((path.to_path_buf(), text.clone()));
             }
             if let Some(mut record) = edit.record {
+                record.config_path = Some(path.to_path_buf());
                 record.options = options.clone();
                 store.insert(agent.id().to_string(), record);
             }
@@ -1368,7 +1509,9 @@ impl Projector {
     /// Connecting references the bundled helper; an installation without it
     /// cannot issue agent credentials.
     fn require_helper(&self) -> Result<(), String> {
-        if self.helper_exe.exists() {
+        if fs::metadata(&self.helper_exe)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
             Ok(())
         } else {
             Err(HELPER_MISSING.to_string())
@@ -1397,6 +1540,13 @@ impl Projector {
                 agent.name()
             ));
         }
+        if agent == Agent::OpenClaw {
+            openclaw::validate_host(&self.home, self.tool_env)?;
+            openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))?;
+            openclaw::validate_config(doc, store.get(agent.id()))?;
+            openclaw::validate_selection(doc, options)?;
+        }
+        self.validate_native_config(agent, doc, store.get(agent.id()), options, catalog)?;
         let codex_catalog_path = self.codex_catalog_path();
         let inputs = Inputs {
             endpoint: &self.endpoint,
@@ -1412,6 +1562,88 @@ impl Projector {
             self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))?;
         }
         Ok(edit)
+    }
+
+    fn validate_native_config(
+        &self,
+        agent: Agent,
+        doc: &ConfigDoc,
+        prior: Option<&Connection>,
+        options: &ConnectOptions,
+        catalog: Option<&Catalog>,
+    ) -> Result<(), String> {
+        match agent {
+            Agent::Codex if doc.contains(&["model_providers", "private_ai_gateway", "aws"]) => {
+                Err("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string())
+            }
+            Agent::Pi => {
+                let path = Agent::Pi.config_path(&self.home, self.tool_env).with_file_name("auth.json");
+                let auth = read_auth_document(&path)?;
+                if auth.get("private-ai-gateway").is_some() {
+                    return Err("Pi has a stored credential for private-ai-gateway that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string());
+                }
+                Ok(())
+            }
+            Agent::Hermes => {
+                let scope = &["providers", "private-ai-gateway"];
+                if doc.contains(scope) {
+                    let owned = prior.is_some_and(|record| {
+                        let fields: Vec<_> = record.fields.iter().filter(|field| field.path.starts_with(&owned(scope))).collect();
+                        !fields.is_empty() && fields.iter().all(|field| doc.get_value(&refs(&field.path)) == field.value)
+                    });
+                    if !owned {
+                        return Err("The Hermes private-ai-gateway provider already exists outside this connection; it will not be overwritten".to_string());
+                    }
+                }
+                if doc.contains(&["providers", "private-ai-gateway", "enabled"])
+                    && doc.get_value(&["providers", "private-ai-gateway", "enabled"]) != Some(ConfigValue::Bool(true)) {
+                    return Err("The Hermes gateway provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string());
+                }
+                if doc.contains(&["providers", "private-ai-gateway", "api_mode"])
+                    && doc.get_str(&["providers", "private-ai-gateway", "api_mode"]).as_deref() != Some("chat_completions") {
+                    return Err("Hermes api_mode overrides the gateway's chat_completions transport; resolve that conflict in Hermes".to_string());
+                }
+                for key in ["api_key", "key_env", "api_key_env"] {
+                    if doc.contains(&["providers", "private-ai-gateway", key]) || doc.contains(&["model", key]) {
+                        return Err("Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes".to_string());
+                    }
+                }
+                if doc.contains(&["fallback_model"]) {
+                    return Err("Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string());
+                }
+                let existing = doc.get_str(&["model", "default"]);
+                let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    .or(existing.as_deref());
+                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none())) {
+                    return Err("Choose a verified default model for Hermes; the existing default cannot be used for this connection".to_string());
+                }
+                let path = Agent::Hermes.config_path(&self.home, self.tool_env);
+                let directory = path.parent().ok_or("Invalid Hermes config directory")?;
+                let native = hermes_native_dir(&self.home, self.tool_env);
+                let resolved = directory.canonicalize().unwrap_or_else(|_| directory.to_path_buf());
+                let resolved_native = native.canonicalize().unwrap_or_else(|_| native.clone());
+                let root = if resolved.starts_with(&resolved_native) { native }
+                    else if directory.parent().and_then(Path::file_name).is_some_and(|name| name == "profiles") {
+                        directory.parent().and_then(Path::parent).ok_or("Invalid Hermes profile directory")?.to_path_buf()
+                    } else { directory.to_path_buf() };
+                // Hermes falls back to the root auth store for named profiles.
+                let name = doc.get_str(&["providers", "private-ai-gateway", "name"])
+                    .unwrap_or_else(|| PRODUCT_NAME.to_string());
+                for path in [directory.join("auth.json"), root.join("auth.json")] {
+                    let auth = read_auth_document(&path)?;
+                    if let Some(pool) = auth.get("credential_pool") {
+                        let pool = pool.as_object().ok_or("Cannot verify Hermes credential_pool; resolve its shape in Hermes")?;
+                        for key in ["private-ai-gateway".to_string(), format!("custom:{}", name.trim().to_lowercase().replace(' ', "-"))] {
+                            if pool.get(&key).is_some_and(|entries| entries.as_array().is_none_or(|entries| !entries.is_empty())) {
+                                return Err("Hermes has a gateway credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string());
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// OpenCode v1.18.29 deep-merges these process-level sources in order.
@@ -1486,6 +1718,22 @@ impl Projector {
                 merge_opencode_config(&mut merged, layer);
             }
         }
+        if merged.get("disabled_providers").is_some_and(|values| {
+            values.as_array().is_none_or(|values| {
+                values
+                    .iter()
+                    .any(|value| !value.is_string() || value.as_str() == Some("private-ai-gateway"))
+            })
+        }) || merged.get("enabled_providers").is_some_and(|values| {
+            values.as_array().is_none_or(|values| {
+                values.iter().any(|value| !value.is_string())
+                    || !values
+                        .iter()
+                        .any(|value| value.as_str() == Some("private-ai-gateway"))
+            })
+        }) {
+            return Err("OpenCode's enabled_providers/disabled_providers exclude the gateway or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
+        }
         for pointer in ["/provider/private-ai-gateway", "/model"] {
             if pointer == "/model" && !owns_model {
                 continue;
@@ -1517,12 +1765,36 @@ impl Projector {
             attention: None,
             error: None,
         };
-        if !self.helper_exe.exists() {
-            status.error = Some(HELPER_MISSING.to_string());
+        if agent == Agent::OpenClaw && !installed && record.is_none() {
+            return status;
+        }
+        if let Err(error) = self.require_helper() {
+            status.error = Some(error.clone());
+            if agent == Agent::OpenClaw {
+                status.attention = Some(error);
+                return status;
+            }
+        }
+        if agent == Agent::OpenClaw && (installed || record.is_some()) {
+            let valid = openclaw::validate_host(&self.home, self.tool_env).and_then(|()| {
+                openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
+            });
+            if let Err(attention) = valid {
+                status.attention = Some(attention);
+                return status;
+            }
+        }
+        let current_path = self.action_path(agent, record, true);
+        if let Err(attention) = &current_path {
+            if let Some(path) = record.and_then(|record| record.config_path.as_ref()) {
+                status.config_path = path.display().to_string();
+            }
+            status.attention = Some(attention.clone());
+            return status;
         }
         // A broken config is reported, never hidden behind "not connected";
         // the record, the attention line, and Disconnect all stay available.
-        let (text, read_error) = self.config_text(agent);
+        let (text, read_error) = self.config_text_at(agent, &current_path);
         let doc = match read_error {
             Some(error) => {
                 status.error = Some(error);
@@ -1612,13 +1884,47 @@ impl Projector {
                 }
             }
         }
+        if status.authorized {
+            if let Some(doc) = &doc {
+                if let Err(attention) =
+                    self.validate_native_config(agent, doc, Some(record), &record.options, catalog)
+                {
+                    status.connected = false;
+                    status.authorized = false;
+                    status.attention = Some(attention);
+                }
+            }
+        }
+        if agent == Agent::OpenClaw && status.authorized {
+            let result = doc
+                .as_ref()
+                .ok_or_else(|| "OpenClaw config is unavailable".to_string())
+                .and_then(|doc| openclaw::validate_config(doc, Some(record)));
+            let stale =
+                openclaw::stale_helper(record, &self.helper_exe, &self.tokens.path(agent.id()));
+            if result.is_err() || stale {
+                status.connected = false;
+                status.authorized = false;
+                status.attention = Some(result.err().unwrap_or_else(|| {
+                    "The OpenClaw helper changed; Disconnect then Connect again".to_string()
+                }));
+            }
+        }
         status
     }
 
     /// Lenient read for flows that must survive a broken config (status,
     /// revisions, disconnect): the error is carried, never thrown.
-    fn config_text(&self, agent: Agent) -> (Option<String>, Option<String>) {
-        match self.read_config(agent) {
+    fn config_text_at(
+        &self,
+        agent: Agent,
+        path: &Result<PathBuf, String>,
+    ) -> (Option<String>, Option<String>) {
+        match path
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|path| self.read_config_at(agent, path))
+        {
             Ok(text) => (text, None),
             Err(error) => (None, Some(error)),
         }
@@ -1626,7 +1932,11 @@ impl Projector {
 
     /// The config text, or `None` when the file does not exist yet.
     fn read_config(&self, agent: Agent) -> Result<Option<String>, String> {
-        match fs::read_to_string(agent.config_path(&self.home, self.tool_env)) {
+        self.read_config_at(agent, &self.action_path(agent, None, true)?)
+    }
+
+    fn read_config_at(&self, agent: Agent, path: &Path) -> Result<Option<String>, String> {
+        match fs::read_to_string(path) {
             Ok(text) => Ok(Some(text)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("Cannot read the {} config: {error}", agent.name())),
@@ -1669,6 +1979,9 @@ impl Projector {
     }
 
     fn save_store(&self, store: &Store) -> Result<(), String> {
+        for record in store.values() {
+            record.validate_recovery()?;
+        }
         let text = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
         tokens::create_private_dir(&self.data_dir)
             .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
@@ -1682,6 +1995,32 @@ struct Rollback {
     revoke_token: bool,
     delete_secrets: Vec<String>,
     config: Option<(PathBuf, Option<String>)>,
+}
+
+fn read_auth_document(path: &Path) -> Result<serde_json::Value, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(_) => {
+            return Err(format!(
+                "Cannot inspect native credential conflicts at {}; the file is unreadable",
+                path.display()
+            ))
+        }
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        format!(
+            "Cannot inspect native credential conflicts at {}; invalid JSON",
+            path.display()
+        )
+    })?;
+    if !value.is_object() {
+        return Err(format!(
+            "Cannot inspect native credential conflicts at {}; expected an object",
+            path.display()
+        ));
+    }
+    Ok(value)
 }
 
 // OpenCode uses remeda mergeDeep: objects merge recursively; other values replace.
@@ -1702,6 +2041,7 @@ fn merge_opencode_config(target: &mut serde_json::Value, source: serde_json::Val
 /// compared only, never logged or shown, since the text may contain
 /// credentials.
 fn revision(
+    path: Option<&Path>,
     text: Option<&str>,
     record: Option<&Connection>,
     catalog: Option<&Catalog>,
@@ -1712,6 +2052,7 @@ fn revision(
         hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
     };
+    part(path.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
     part(text.unwrap_or_default().as_bytes());
     part(
         serde_json::to_string(&record)
@@ -1769,6 +2110,14 @@ fn project(
                 .iter()
                 .find(|owned| owned.path == field.path && current == owned.value)
         });
+        // App-owned structured providers must never absorb an unmanaged object:
+        // it may contain nested credentials that a field-name check cannot see.
+        if matches!(field.value, Some(ConfigValue::Json(_)))
+            && doc.contains(&path)
+            && still_ours.is_none()
+        {
+            return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));
+        }
         let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
             None => match current
@@ -1790,7 +2139,7 @@ fn project(
         if current != field.value {
             match &field.value {
                 Some(value) => doc.set_value(&path, value)?,
-                None => doc.remove(&path),
+                None => doc.remove(&path)?,
             }
             changes.push(if sensitive {
                 ConfigChange {
@@ -1834,6 +2183,35 @@ fn restore(
     record: &Connection,
     secrets: &dyn SecretStore,
 ) -> Result<Edit, String> {
+    record.validate_recovery()?;
+    let routing_unchanged = record
+        .fields
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.path.last().map(String::as_str),
+                Some(
+                    "apiKeyHelper"
+                        | "ANTHROPIC_BASE_URL"
+                        | "base_url"
+                        | "baseURL"
+                        | "command"
+                        | "args"
+                        | "model_provider"
+                )
+            )
+        })
+        .all(|field| doc.get_value(&refs(&field.path)) == field.value);
+    if !routing_unchanged
+        && record.fields.iter().any(|field| {
+            is_sensitive(&field.path)
+                && field.value.is_none()
+                && field.previous.is_some()
+                && doc.get_value(&refs(&field.path)).is_none()
+        })
+    {
+        return Err("Credential restoration is ambiguous after routing or helper edits. Access is disabled; the recovery record and parked credentials are retained".to_string());
+    }
     let mut changes = Vec::new();
     let mut consumed_secrets = Vec::new();
     for field in &record.fields {
@@ -1862,7 +2240,7 @@ fn restore(
         };
         match &restored {
             Some(value) => doc.set_value(&path, value)?,
-            None => doc.remove(&path),
+            None => doc.remove(&path)?,
         }
         changes.push(if sensitive {
             ConfigChange {
@@ -1934,6 +2312,7 @@ fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
         }),
         Agent::Pi => None,
         Agent::Hermes => doc.get_str(&["model", "default"]),
+        Agent::OpenClaw => openclaw::selected_model(doc),
     }
 }
 
@@ -2202,10 +2581,26 @@ mod tests {
             .join("Private AI Gateway.app")
             .join(helper_binary_name());
         write(&helper, "#!/bin/sh\n");
+        let data_dir = if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join(APP_IDENTIFIER)
+        } else {
+            home.join(APP_IDENTIFIER)
+        };
+        let staged = data_dir.join("helpers").join(helper_binary_name());
+        write(&staged, "#!/bin/sh\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&helper, &staged] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
         let secrets = Arc::new(MemoryStore::default());
         let projector = Projector::at(
             home.clone(),
-            home.join("state"),
+            data_dir,
             helper,
             ENDPOINT,
             false,
@@ -2227,6 +2622,40 @@ mod tests {
         ConnectOptions {
             default_model: Some("openai/gpt-oss-20b".to_string()),
         }
+    }
+
+    #[test]
+    fn openclaw_same_path_empty_helper_deauthorizes_but_does_not_block_disconnect() {
+        let mut sandbox = sandbox("openclaw-empty-helper");
+        let agent = Agent::OpenClaw;
+        let options = claude_options();
+        let catalog = catalog();
+        sandbox.projector.helper_exe = sandbox
+            .projector
+            .data_dir
+            .join("helpers")
+            .join(helper_binary_name());
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        fs::write(&sandbox.projector.helper_exe, "").unwrap();
+        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+        let status = statuses
+            .iter()
+            .find(|status| status.id == "openclaw")
+            .unwrap();
+        assert!(status.recorded && !status.connected && !status.authorized && tokens.is_empty());
+        assert!(sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .is_err());
+        disconnect(&sandbox, agent);
+        assert!(sandbox.projector.load_store().unwrap().is_empty());
     }
 
     #[test]
@@ -2293,6 +2722,18 @@ mod tests {
             write(&sandbox.projector.helper_exe, "helper");
             if agent == Agent::OpenCode {
                 assert_scan(&sandbox, true, None);
+            } else if agent == Agent::OpenClaw {
+                assert_scan(
+                    &sandbox,
+                    false,
+                    Some(if cfg!(unix) {
+                        "differs"
+                    } else {
+                        "helper changed"
+                    }),
+                );
+                sandbox.projector.helper_exe = current;
+                assert_scan(&sandbox, true, None);
             } else {
                 assert_scan(&sandbox, false, Some("Disconnect, then Connect"));
                 sandbox.projector.helper_exe = current;
@@ -2307,6 +2748,7 @@ mod tests {
                 Agent::OpenCode => &["model"][..],
                 Agent::Pi => &["providers", "private-ai-gateway", "apiKey"][..],
                 Agent::Hermes => &["providers", "private-ai-gateway", "key_cmd"][..],
+                Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
             };
             config.set_str(field, "external-edit").unwrap();
             write(&path, &config.render().unwrap());
@@ -2885,6 +3327,364 @@ mod tests {
     }
 
     #[test]
+    fn credential_restore_revokes_before_refusing_a_changed_route() {
+        let sandbox = sandbox("secret-route-ownership");
+        let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+        write(
+            &path,
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-test-parked"}}"#,
+        );
+        connect(&sandbox);
+        let projection = fs::read_to_string(&path).unwrap();
+        let mut edited = doc(&sandbox, Agent::ClaudeCode);
+        edited
+            .set_str(&["env", "ANTHROPIC_BASE_URL"], "http://127.0.0.1:1")
+            .unwrap();
+        write(&path, &edited.render().unwrap());
+        let before = fs::read(&path).unwrap();
+        let options = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(Agent::ClaudeCode, false, None, &options)
+            .unwrap();
+        assert!(preview.changes.is_empty());
+        assert!(preview.note.contains("ambiguous"));
+        assert!(!serde_json::to_string(&preview)
+            .unwrap()
+            .contains("sk-test-parked"));
+        assert!(sandbox
+            .projector
+            .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+            .is_err());
+        assert!(sandbox
+            .projector
+            .tokens
+            .read("claude-code")
+            .unwrap()
+            .is_none());
+        assert!(sandbox.secrets.holds("sk-test-parked"));
+        assert!(sandbox
+            .projector
+            .load_store()
+            .unwrap()
+            .contains_key("claude-code"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        write(&path, &projection);
+        disconnect(&sandbox, Agent::ClaudeCode);
+        assert_eq!(
+            doc(&sandbox, Agent::ClaudeCode)
+                .get_str(&["env", "ANTHROPIC_AUTH_TOKEN"])
+                .as_deref(),
+            Some("sk-test-parked")
+        );
+    }
+
+    #[test]
+    fn recorded_paths_restore_original_files_after_location_changes() {
+        for agent in [Agent::ClaudeCode, Agent::OpenCode] {
+            let mut sandbox = sandbox(&format!("recorded-path-{}", agent.id()));
+            let catalog = catalog();
+            let options = claude_options();
+            let path = agent.config_path(&sandbox.home, false);
+            let original = if agent == Agent::ClaudeCode {
+                r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-test-original"},"model":"user-model"}"#
+            } else {
+                r#"{"model":"other/user-model","provider":{"other":{"name":"User provider"}}}"#
+            };
+            write(&path, original);
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
+            assert_eq!(
+                sandbox.projector.load_store().unwrap()[agent.id()]
+                    .config_path
+                    .as_deref(),
+                Some(path.as_path())
+            );
+            let projected = fs::read_to_string(&path).unwrap();
+            sandbox.projector.home = sandbox.home.join("different-profile");
+            let foreign = agent.config_path(&sandbox.projector.home, false);
+            write(&foreign, &projected);
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let status = statuses
+                .iter()
+                .find(|status| status.id == agent.id())
+                .unwrap();
+            assert!(
+                status.recorded && !status.connected && !status.authorized && tokens.is_empty()
+            );
+            assert!(status
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("location changed"));
+            assert!(sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .is_err());
+            fs::remove_file(&sandbox.projector.helper_exe).unwrap();
+            disconnect(&sandbox, agent);
+            assert_eq!(fs::read_to_string(foreign).unwrap(), projected);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(path).unwrap())
+                    .unwrap(),
+                serde_json::from_str::<serde_json::Value>(original).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_recovery_never_guesses_paths_or_displays_structured_secrets() {
+        for structured in [false, true] {
+            let sandbox = sandbox(if structured {
+                "legacy-structured"
+            } else {
+                "legacy-path"
+            });
+            connect(&sandbox);
+            let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+            let before = fs::read(&path).unwrap();
+            let mut store = sandbox.projector.load_store().unwrap();
+            let record = store.get_mut("claude-code").unwrap();
+            record.config_path = None;
+            if structured {
+                record.fields[0].previous = Some(Previous::Plain(ConfigValue::Json(
+                    json!({"apiKey":"sk-test-hidden"}),
+                )));
+            }
+            write(
+                &sandbox.projector.store_path(),
+                &serde_json::to_string(&store).unwrap(),
+            );
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            assert!(!statuses[1].authorized && tokens.is_empty());
+            let options = ConnectOptions::default();
+            let preview = sandbox
+                .projector
+                .preview(Agent::ClaudeCode, false, None, &options)
+                .unwrap();
+            assert!(preview.changes.is_empty());
+            assert!(!serde_json::to_string(&preview)
+                .unwrap()
+                .contains("sk-test-hidden"));
+            assert!(sandbox
+                .projector
+                .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
+                .is_err());
+            assert!(sandbox
+                .projector
+                .tokens
+                .read("claude-code")
+                .unwrap()
+                .is_none());
+            assert!(sandbox
+                .projector
+                .load_store()
+                .unwrap()
+                .contains_key("claude-code"));
+            assert_eq!(fs::read(path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn unmanaged_provider_objects_are_not_captured_as_plain_backups() {
+        for agent in [Agent::OpenCode, Agent::Pi] {
+            for value in [
+                json!(null),
+                json!({"apiKey":"sk-test-hidden","options":{"headers":{"Authorization":"sk-test-hidden"}}}),
+            ] {
+                let sandbox = sandbox(&format!("namespace-{}", agent.id()));
+                let path = agent.config_path(&sandbox.home, false);
+                let key = if agent == Agent::OpenCode {
+                    "provider"
+                } else {
+                    "providers"
+                };
+                let text = json!({key:{"private-ai-gateway":value}}).to_string();
+                write(&path, &text);
+                let error = sandbox
+                    .projector
+                    .preview(agent, true, Some(&catalog()), &claude_options())
+                    .unwrap_err();
+                assert!(!error.contains("sk-test-hidden"));
+                assert_eq!(fs::read_to_string(&path).unwrap(), text);
+                assert!(!sandbox.projector.store_path().exists());
+                assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
+        for (agent, case) in [
+            (Agent::Codex, "aws"),
+            (Agent::Pi, "stored-key"),
+            (Agent::OpenCode, "disabled"),
+            (Agent::OpenCode, "allowlist"),
+            (Agent::Hermes, "api_mode"),
+            (Agent::Hermes, "disabled"),
+            (Agent::Hermes, "explicit-key"),
+            (Agent::Hermes, "pool"),
+            (Agent::Hermes, "fallback"),
+        ] {
+            let sandbox = sandbox(&format!("conflict-{}-{case}", agent.id()));
+            let catalog = catalog();
+            let options = claude_options();
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            let path = agent.config_path(&sandbox.home, false);
+            let auth_path = path.with_file_name("auth.json");
+            let mut edited = doc(&sandbox, agent);
+            match (agent, case) {
+                (Agent::Codex, _) => edited
+                    .set_str(
+                        &["model_providers", "private_ai_gateway", "aws", "region"],
+                        "test-region",
+                    )
+                    .unwrap(),
+                (Agent::Pi, _) => write(
+                    &auth_path,
+                    r#"{"private-ai-gateway":{"type":"api_key","key":"sk-test-hidden"}}"#,
+                ),
+                (Agent::OpenCode, "disabled") => edited
+                    .set_value(
+                        &["disabled_providers"],
+                        &ConfigValue::List(vec!["private-ai-gateway".into()]),
+                    )
+                    .unwrap(),
+                (Agent::OpenCode, _) => edited
+                    .set_value(
+                        &["enabled_providers"],
+                        &ConfigValue::List(vec!["other".into()]),
+                    )
+                    .unwrap(),
+                (Agent::Hermes, "api_mode") => edited
+                    .set_str(
+                        &["providers", "private-ai-gateway", "api_mode"],
+                        "codex_responses",
+                    )
+                    .unwrap(),
+                (Agent::Hermes, "disabled") => edited
+                    .set_value(
+                        &["providers", "private-ai-gateway", "enabled"],
+                        &ConfigValue::Bool(false),
+                    )
+                    .unwrap(),
+                (Agent::Hermes, "explicit-key") => edited
+                    .set_str(&["model", "api_key"], "sk-test-hidden")
+                    .unwrap(),
+                (Agent::Hermes, "pool") => write(
+                    &auth_path,
+                    r#"{"credential_pool":{"private-ai-gateway":[{"access_token":"sk-test-hidden"}]}}"#,
+                ),
+                (Agent::Hermes, _) => edited
+                    .set_str(&["fallback_model", "provider"], "other")
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            write(&path, &edited.render().unwrap());
+            let config_before = fs::read(&path).unwrap();
+            let auth_before = fs::read(&auth_path).ok();
+            let record_before = fs::read(sandbox.projector.store_path()).unwrap();
+            let token_path = sandbox.projector.tokens.path(agent.id());
+            let token_before = fs::read(&token_path).unwrap();
+            let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+            let status = statuses
+                .iter()
+                .find(|status| status.id == agent.id())
+                .unwrap();
+            assert!(
+                status.recorded && !status.authorized && !status.connected && tokens.is_empty(),
+                "{agent:?}/{case}"
+            );
+            assert!(!status
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("sk-test-hidden"));
+            assert!(sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .is_err());
+            assert!(sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .is_err());
+            assert_eq!(fs::read(&path).unwrap(), config_before);
+            assert_eq!(fs::read(&auth_path).ok(), auth_before);
+            assert_eq!(
+                fs::read(sandbox.projector.store_path()).unwrap(),
+                record_before
+            );
+            assert_eq!(fs::read(&token_path).unwrap(), token_before);
+            disconnect(&sandbox, agent);
+            assert_eq!(fs::read(&auth_path).ok(), auth_before);
+        }
+    }
+
+    #[test]
+    fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
+        let catalog = Catalog::from_remote(
+            &json!({"data":[
+                {"id":"context-only","context_length":123},
+                {"id":"output-only","max_output_length":45},
+                {"id":"complete","context_length":123,"max_output_length":45}
+            ]}),
+            1,
+        )
+        .unwrap();
+        let provider = opencode_provider(&catalog, ENDPOINT, Path::new("token"));
+        assert!(provider["models"]["context-only"].get("limit").is_none());
+        assert!(provider["models"]["output-only"].get("limit").is_none());
+        assert_eq!(
+            provider["models"]["complete"]["limit"],
+            json!({"context":123,"output":45})
+        );
+        let sandbox = sandbox("hermes-default-conflict");
+        let path = Agent::Hermes.config_path(&sandbox.home, false);
+        write(&path, "model:\n  default: unrelated-model\n");
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::Hermes,
+                true,
+                Some(&catalog),
+                &ConnectOptions::default()
+            )
+            .is_err());
+        assert!(sandbox
+            .projector
+            .preview(
+                Agent::Hermes,
+                true,
+                Some(&catalog),
+                &ConnectOptions {
+                    default_model: Some("complete".into())
+                }
+            )
+            .is_ok());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "model:\n  default: unrelated-model\n"
+        );
+    }
+
+    #[test]
     fn codex_and_opencode_use_official_custom_provider_configs() {
         let sandbox = sandbox("providers");
         let catalog = catalog();
@@ -3160,6 +3960,7 @@ mod tests {
         }
         disconnect(&sandbox, Agent::Pi);
 
+        let options = claude_options();
         let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
         write(&path, "# keep this comment\ntheme: dark\n");
         let preview = sandbox
@@ -3192,14 +3993,18 @@ mod tests {
         assert!(!restored.contains("private-ai-gateway"));
 
         let fresh = self::sandbox("fresh-hermes");
-        let preview = fresh
+        assert!(fresh
             .projector
             .preview(
                 Agent::Hermes,
                 true,
                 Some(&catalog),
-                &ConnectOptions::default(),
+                &ConnectOptions::default()
             )
+            .is_err());
+        let preview = fresh
+            .projector
+            .preview(Agent::Hermes, true, Some(&catalog), &options)
             .unwrap();
         fresh
             .projector
@@ -3208,7 +4013,7 @@ mod tests {
                 true,
                 &preview.revision,
                 Some(&catalog),
-                &ConnectOptions::default(),
+                &options,
             )
             .unwrap();
         let hermes = doc(&fresh, Agent::Hermes);
@@ -3550,6 +4355,7 @@ mod tests {
         store.insert(
             "codex".into(),
             Connection {
+                config_path: Some(codex.clone()),
                 fields: vec![OwnedField {
                     path: owned(&["model_provider"]),
                     value: Some(ConfigValue::Str("private_ai_gateway".into())),
@@ -3692,11 +4498,8 @@ mod tests {
         assert!(sandbox.projector.scan(None).unwrap().1.is_empty());
     }
 
-    /// The apiKeyHelper command is parsed by a POSIX `sh` on every platform,
-    /// so quoting is uniform `shlex`: paths with spaces, `$`, backticks, and
-    /// single and double quotes round-trip exactly. The `shlex::split`
-    /// contract holds everywhere; where an `sh` exists (Unix, Git Bash on
-    /// CI) the same command line is round-tripped through `sh -c` too.
+    /// POSIX quoting round-trips through shlex and, where available, sh.
+    /// This does not prove which shell the Windows Claude CLI selects.
     #[test]
     fn helper_command_quotes_hostile_paths_for_the_shell() {
         for hostile in [
@@ -3797,7 +4600,7 @@ mod tests {
                 .unwrap();
             // Make the record unsaveable: the tombstone write fails after the
             // token file is already gone.
-            let data_dir = sandbox.home.join("state");
+            let data_dir = sandbox.projector.data_dir.clone();
             fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o500)).unwrap();
             let result = if all {
                 sandbox.projector.disconnect_all().map(|_| ())

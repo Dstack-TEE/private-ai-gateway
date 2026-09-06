@@ -3479,6 +3479,7 @@ dependencies = [
  "futures-util",
  "jsonc-parser",
  "keyring",
+ "libc",
  "rand",
  "reqwest 0.12.28",
  "serde",

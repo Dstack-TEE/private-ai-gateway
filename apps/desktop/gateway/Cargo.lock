@@ -1216,6 +1216,7 @@ dependencies = [
  "futures-util",
  "jsonc-parser",
  "keyring",
+ "libc",
  "rand",
  "reqwest",
  "serde",
