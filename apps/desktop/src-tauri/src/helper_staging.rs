@@ -1,11 +1,12 @@
-//! AppImage mount paths disappear at exit; agent commands need a durable helper.
+//! A durable, current-user-owned helper for AppImage launches and OpenClaw.
 
 use std::fs::{self, File};
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
+    let uid = rustix::process::getuid().as_raw();
     let mut source = File::open(bundled)?;
     let metadata = source.metadata()?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.permissions().mode() & 0o111 == 0 {
@@ -18,10 +19,10 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     let directory = app_data.join("helpers");
     desktop_gateway::tokens::create_private_dir(&directory)?;
     let metadata = fs::symlink_metadata(&directory)?;
-    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the helper directory must be a private directory, not a symlink",
+            "the helper directory must be private, owned by the current user, and not a symlink",
         ));
     }
     let destination = directory.join(desktop_gateway::agents::helper_binary_name());
@@ -40,6 +41,12 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     // One same-filesystem temporary file, removed on failure by RAII. Rename
     // also lets an already-running helper finish using the previous inode.
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    if temporary.as_file().metadata()?.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the staged helper must be owned by the current user",
+        ));
+    }
     io::copy(&mut source, temporary.as_file_mut())?;
     temporary
         .as_file()
@@ -89,6 +96,10 @@ mod tests {
         assert_eq!(Command::new(&stable).output().unwrap().stdout, b"second");
         for path in [&stable, stable.parent().unwrap()] {
             assert_eq!(
+                fs::metadata(path).unwrap().uid(),
+                rustix::process::getuid().as_raw()
+            );
+            assert_eq!(
                 fs::metadata(path).unwrap().permissions().mode() & 0o777,
                 0o700
             );
@@ -133,5 +144,60 @@ mod tests {
         fs::remove_file(stable).unwrap();
         fs::set_permissions(data.join("helpers"), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(stage(&source, &data).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires root in a disposable Unix container to exercise distinct file owners"]
+    fn stages_root_owned_source_but_refuses_root_owned_directory() {
+        use std::os::unix::{fs::chown, process::CommandExt};
+
+        const CHILD_ROOT: &str = "HELPER_STAGING_OWNERSHIP_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let source = root
+                .join("mount")
+                .join(desktop_gateway::agents::helper_binary_name());
+            assert_eq!(fs::metadata(&source).unwrap().uid(), 0);
+            let stable = stage(&source, &root.join("user-data")).unwrap();
+            assert_eq!(
+                fs::metadata(stable).unwrap().uid(),
+                rustix::process::getuid().as_raw()
+            );
+            let error = stage(&source, &root.join("root-data")).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains("owned by the current user"));
+            return;
+        }
+
+        assert_eq!(rustix::process::getuid().as_raw(), 0);
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        bundled(root.path(), "mount", "root-owned");
+        let user_data = root.path().join("user-data");
+        fs::create_dir(&user_data).unwrap();
+        chown(&user_data, Some(65534), Some(65534)).unwrap();
+        let root_directory = root.path().join("root-data").join("helpers");
+        desktop_gateway::tokens::create_private_dir(&root_directory).unwrap();
+        fs::set_permissions(
+            root_directory.parent().unwrap(),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "stages_root_owned_source_but_refuses_root_owned_directory",
+            ])
+            .env(CHILD_ROOT, root.path())
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read_dir(root_directory).unwrap().count(), 0);
     }
 }

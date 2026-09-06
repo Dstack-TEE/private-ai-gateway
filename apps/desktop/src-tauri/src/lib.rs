@@ -1,5 +1,5 @@
 mod autostart;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod helper_staging;
 mod menu;
 mod native_dialog;
@@ -511,14 +511,26 @@ pub fn run() {
                 .parent()
                 .ok_or_else(|| "Cannot locate the app directory".to_string())?
                 .join(helper_binary_name());
-            #[cfg(target_os = "linux")]
-            let helper_path = if app.env().appimage.is_some() {
-                helper_staging::stage(&helper_path, &desktop_gateway::agents::app_data_dir()?)
-                    .map_err(|error| {
-                        format!("Cannot stage the AppImage credential helper: {error}")
-                    })?
-            } else {
-                helper_path
+            #[cfg(unix)]
+            let helper_path = {
+                #[cfg(target_os = "linux")]
+                let required = app.env().appimage.is_some();
+                #[cfg(not(target_os = "linux"))]
+                let required = false;
+                let staged = desktop_gateway::agents::app_data_dir().and_then(|directory| {
+                    helper_staging::stage(&helper_path, &directory)
+                        .map_err(|error| format!("Cannot stage the credential helper: {error}"))
+                });
+                match staged {
+                    Ok(path) if required => path,
+                    Ok(_) => helper_path,
+                    Err(error) if required => return Err(error.into()),
+                    Err(error) => {
+                        // OpenClaw independently validates the staged copy before use.
+                        eprintln!("{error}");
+                        helper_path
+                    }
+                }
             };
             let runtime = DesktopRuntime::launch(RuntimeOptions {
                 launcher: launcher_for_setup.clone(),
