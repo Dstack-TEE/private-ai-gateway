@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateProgress, UpdateChannel } from "../shared/contracts";
 import { Button } from "./components/ui/button";
-import { ChoiceSelect } from "./components/choice-select";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./components/ui/dialog";
@@ -130,13 +130,13 @@ export function UpdateProgressMeter({ progress }: { progress?: UpdateProgress })
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
   return <Item>
     <ItemContent>
-      <ItemTitle><FieldLabel htmlFor="update-channel">Update channel</FieldLabel></ItemTitle>
+      <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Pre-release builds" : "Stable releases"}</ItemDescription>
     </ItemContent>
     <ItemActions>
-      <ChoiceSelect className="w-36" id="update-channel" label="Update channel" describedBy="update-channel-note" value={updates.channel ?? ""} disabled={!updates.channel || Boolean(updates.busy)} onChange={(value) => {
+      <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="update-channel-label" aria-describedby="update-channel-note" value={updates.channel ? [updates.channel] : []} disabled={!updates.channel || Boolean(updates.busy)} onValueChange={([value]) => {
         if (value === "stable" || value === "beta") void updates.changeChannel(value);
-      }} options={[...(!updates.channel ? [{ value: "", label: "Loading", disabled: true }] : []), { value: "stable", label: "Stable" }, { value: "beta", label: "Beta" }]} />
+      }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
   </Item>;
 }

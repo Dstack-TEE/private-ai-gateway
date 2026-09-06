@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useState, type PropsWithChildren 
 import type { Appearance, DesktopApi } from "../../shared/contracts";
 import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { FieldLabel, FieldError } from "./ui/field";
-import { ChoiceSelect } from "./choice-select";
+import { Monitor, Sun, Moon } from "lucide-react";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
 const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, error: "", change: (_value: Appearance) => {} });
 
@@ -40,9 +41,9 @@ export function useAppearance() { return useContext(AppearanceContext).value; }
 
 export function AppearanceControl() {
   const appearance = useContext(AppearanceContext);
-  return <Item><ItemContent><ItemTitle><FieldLabel htmlFor="appearance">Theme</FieldLabel></ItemTitle><FieldError>{appearance.error}</FieldError></ItemContent><ItemActions>
-    <ChoiceSelect id="appearance" label="Theme" value={appearance.value} disabled={appearance.busy} onChange={(value) => {
+  return <Item><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle><FieldError>{appearance.error}</FieldError></ItemContent><ItemActions>
+    <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance.value]} disabled={appearance.busy} onValueChange={([value]) => {
       if (value === "system" || value === "light" || value === "dark") appearance.change(value);
-    }} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
+    }}>{([["system", "System", Monitor], ["light", "Light", Sun], ["dark", "Dark", Moon]] as const).map(([value, label, Icon]) => <ToggleGroupItem key={value} value={value} aria-label={label} title={label}><Icon className="size-4" /></ToggleGroupItem>)}</ToggleGroup>
   </ItemActions></Item>;
 }

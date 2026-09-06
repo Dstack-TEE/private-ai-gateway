@@ -24,7 +24,16 @@ function useNotificationSettings(api: DesktopApi) {
   const change = async (key: keyof NotificationPreferences, enabled: boolean) => {
     if (!data || busy) return;
     setBusy(true); setError(undefined); generation.current++;
-    try { await api.saveNotificationSettings({ ...data.preferences, [key]: enabled }); await refresh(); }
+    try {
+      await api.saveNotificationSettings({ ...data.preferences, [key]: enabled });
+      let permissionFailed = false;
+      if (key === "enabled" && enabled && data.permission === "notDetermined") {
+        try { await api.requestNotificationPermission(); }
+        catch { permissionFailed = true; }
+      }
+      await refresh();
+      if (permissionFailed) setError("Notifications are enabled in this app, but system permission could not be requested.");
+    }
     catch { setError("Could not save notification settings."); }
     finally { setBusy(false); }
   };
@@ -51,10 +60,9 @@ export function useNotifications() {
   return value;
 }
 
-export function NotificationPermissionNotice({ detailed = false }: { detailed?: boolean }) {
+function NotificationPermissionNotice() {
   const { data, busy, permissionAction } = useNotifications();
   if (!data || !data.preferences.enabled || data.permission === "granted") return null;
-  if (!detailed && (data.permission === "unknown" || data.permission === "unsupported")) return null;
   const supported = data.permission !== "unsupported";
   return <Alert className="border-warning/30 bg-warning/10">
     <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-warning">
@@ -68,7 +76,7 @@ export function NotificationsSheet({ onClose }: { onClose(): void }) {
   const { data, error, busy, change, refresh } = useNotifications();
   return <Sheet title="Notifications" className="notifications-sheet" dismissible={!busy} onClose={onClose}>
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto py-4">
-      <NotificationPermissionNotice detailed />
+      <NotificationPermissionNotice />
       {error && <Alert variant="destructive"><AlertDescription>{error}<Button variant="outline" size="sm" onClick={() => void refresh()}>Retry</Button></AlertDescription></Alert>}
       {data && <>
         <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => void change("enabled", !data.preferences.enabled)} /></SettingsList>

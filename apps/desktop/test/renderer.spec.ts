@@ -135,11 +135,18 @@ test("Notifications defaults on, preserves category choices and reports permissi
   await expect(toggle).toBeEnabled();
   await expect(sheet.getByRole("alert")).toContainText("Could not save notification settings.");
   await page.goto("/?mock=notifications-denied");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await nav(page, "Settings").click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.getByRole("button", { name: "Notifications", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Notifications are disabled in system settings.");
   await page.getByRole("button", { name: "System Settings", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-notification-settings-opened", "true");
   await page.goto("/?mock=notifications-prompt&native-dialog=notifications");
-  await sheet.getByRole("button", { name: "Allow Notifications", exact: true }).click();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
   await expect(sheet.getByRole("alert")).toHaveCount(0);
 });
 
@@ -149,20 +156,20 @@ test("appearance defaults to system, persists and settings shortcut navigates", 
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
-  const theme = page.getByRole("combobox", { name: "Theme", exact: true });
-  await expect(theme.locator('[data-slot="select-value"]')).toHaveText("System");
+  const theme = page.getByRole("group", { name: "Theme", exact: true });
+  await expect(theme.getByRole("button", { name: "System" })).toHaveAttribute("aria-pressed", "true");
   const order = await page.getByRole("region", { name: "General", exact: true }).locator('[data-slot="item-title"]').allTextContents();
-  expect(order.indexOf("Theme")).toBe(order.indexOf("Connect on launch") + 1);
-  await choose(page, theme, "Light");
+  expect(order.indexOf("Theme")).toBe(order.indexOf("Protect on launch") + 1);
+  await theme.getByRole("button", { name: "Light" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await page.keyboard.press("Control+,");
-  await choose(page, theme, "Dark");
+  await theme.getByRole("button", { name: "Dark" }).click();
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await choose(page, theme, "System");
+  await theme.getByRole("button", { name: "System" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
@@ -882,15 +889,15 @@ test("updates are discovered on launch and installation requires confirmation", 
   await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveAttribute("data-slot", "item");
   await expect(about.getByRole("combobox", { name: "Update channel" })).toHaveCount(0);
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
-  const channel = page.locator(".settings-advanced").getByRole("combobox", { name: "Update channel" });
-  await expect(channel.locator('[data-slot="select-value"]')).toHaveText("Stable");
-  await choose(page, channel, "Beta");
+  const channel = page.locator(".settings-advanced").getByRole("group", { name: "Update channel" });
+  await expect(channel.getByRole("button", { name: "Stable" })).toHaveAttribute("aria-pressed", "true");
+  await channel.getByRole("button", { name: "Beta" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Version 0.3.0-beta.1 is available" })).toBeVisible();
   await nav(page, "Overview").click();
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
-  await expect(channel.locator('[data-slot="select-value"]')).toHaveText("Beta");
-  await choose(page, channel, "Stable");
+  await expect(channel.getByRole("button", { name: "Beta" })).toHaveAttribute("aria-pressed", "true");
+  await channel.getByRole("button", { name: "Stable" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
 });
 
@@ -926,7 +933,10 @@ test("success colors, list separators, control sizes and About alignment are con
     await nav(page, "Settings").click();
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     const general = page.getByRole("region", { name: "General", exact: true });
-    await expect(general.locator('[data-slot="separator"]')).toHaveCount(5);
+    await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
+    const generalRows = general.locator('[data-slot="item-group"] > [data-slot="item"]');
+    expect(await generalRows.evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height))).toEqual([52, 52, 52, 52]);
+    await expect(general.locator('[data-slot="item-group"]')).toHaveCSS("row-gap", "0px");
     await expect(general.locator('[data-slot="item-group"]')).toHaveCSS("background-color", await themeColor(page, "--card"));
     await expect(general.locator('[data-slot="item-group"]')).toHaveCSS("padding", "0px");
     await expect(general.locator('[data-slot="separator"]').first()).toHaveCSS("height", "1px");
@@ -1039,7 +1049,7 @@ test("settings keep the installed version visible without manual update controls
     await expect(about.getByRole("combobox")).toHaveCount(0);
     await page.getByRole("button", { name: "Advanced", exact: true }).click();
     const advanced = page.locator(".settings-advanced");
-    await expect(advanced.getByRole("combobox", { name: "Update channel" })).toBeVisible();
+    await expect(advanced.getByRole("group", { name: "Update channel" })).toBeVisible();
     const padding = await advanced.locator('[data-slot="item"]').first().evaluate((item) => getComputedStyle(item).paddingLeft);
     expect(Number.parseFloat(padding)).toBeGreaterThanOrEqual(12);
   }
@@ -1329,17 +1339,18 @@ test("startup preferences and saved agent links are independent of protection", 
   await expect(codex.getByRole("switch", { name: "Disconnect Codex" })).toBeChecked();
   await nav(page, "Settings").click();
   const startup = page.getByRole("region", { name: "General" });
-  await expect(startup.getByRole("button", { name: "Profiles", exact: true })).toBeVisible();
-  await expect(startup.getByRole("button", { name: "Local API settings", exact: true })).toBeVisible();
+  const connections = page.getByRole("region", { name: "Connections" });
+  await expect(connections.getByRole("button", { name: "Profiles", exact: true })).toBeVisible();
+  await expect(connections.getByRole("button", { name: "Local API settings", exact: true })).toBeVisible();
   const about = page.getByRole("region", { name: "About" });
   await expect(about.getByRole("button", { name: "Documentation" })).toBeVisible();
   await expect(about.getByRole("button", { name: "GitHub" })).toBeVisible();
   await expect(startup.getByRole("switch", { name: "Open at Login" })).not.toBeChecked();
-  await expect(startup.getByRole("switch", { name: "Connect on launch" })).not.toBeChecked();
+  await expect(startup.getByRole("switch", { name: "Protect on launch" })).not.toBeChecked();
   await startup.getByRole("switch", { name: "Open at Login" }).click();
-  await startup.getByRole("switch", { name: "Connect on launch" }).click();
+  await startup.getByRole("switch", { name: "Protect on launch" }).click();
   await expect(startup.getByRole("switch", { name: "Open at Login" })).toBeChecked();
-  await expect(startup.getByRole("switch", { name: "Connect on launch" })).toBeChecked();
+  await expect(startup.getByRole("switch", { name: "Protect on launch" })).toBeChecked();
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
 });
 
@@ -1482,7 +1493,7 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeDisabled();
   await nav(page, "Settings").click();
   const general = page.getByRole("region", { name: "General", exact: true });
-  await expect(general.locator('[data-slot="separator"]')).toHaveCount(5);
+  await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
   await expect(general.locator(".row-warning")).toHaveCount(0);
   await expect(page.getByRole("alert")).toContainText("Address already in use");
 });

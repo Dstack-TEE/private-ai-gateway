@@ -413,8 +413,8 @@ fn open_native_dialog(
 }
 
 #[tauri::command]
-fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
-    native_dialog::ready(&window)
+async fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    native_dialog::ready(&window).await
 }
 
 #[tauri::command]

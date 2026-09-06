@@ -61,8 +61,10 @@ is read when the example sheet opens and embedded in its copyable snippets; copi
 snippets are sensitive. Key changes invalidate the displayed code. Provider keys
 are never used in examples.
 
-Fixed choices use Luma Select, including date presets and calendar month/year
-navigation; listen addresses use Combobox for discovery and manual entry.
+Longer choice lists use Luma Select, including date presets and calendar
+month/year navigation; listen addresses use Combobox. Theme uses an icon
+ToggleGroup and the update channel uses a two-option ToggleGroup. General
+settings rows are 52px with no inter-row gap; descriptive rows grow naturally.
 ChoiceSelect shares composition and portal ownership, not a replacement menu
 implementation. Menus inside HTML dialogs portal into their owning dialog.
 Form scroll regions own horizontal padding so the standard 3px focus ring is
@@ -76,18 +78,23 @@ choices are never reset on launch. Delivery uses the official Tauri notification
 plugin from Rust, independent of renderer lifecycle. Each category is limited
 to one notification per minute, and foreground faults are not replayed on hide.
 Notification text never includes credentials, prompts, endpoints or profile names.
-Authorization is checked on launch and focus: macOS uses UNUserNotificationCenter
-settings and Windows uses ToastNotifier.Setting. Denied permission produces a
-system-settings prompt; macOS not-determined status offers the native permission
-request. Linux has no portable per-app authorization query, so the dialog reports
+Authorization is checked on launch and focus, but permission warnings appear
+only in Notifications. macOS uses UNUserNotificationCenter settings and Windows
+uses ToastNotifier.Setting. Enabling the master switch automatically requests
+undetermined permission; denied permission offers system settings instead.
+Linux has no portable per-app authorization query, so the dialog reports
 that limitation without claiming permission is granted. Focus modes may still
 suppress delivery. Installed packages must be tested on each OS; tray state,
 update badges and inline errors remain available without notification delivery.
 
 Native dialogs wait for content, font readiness and image decoding before the
 presentation handshake. Example dialogs also wait for their local key read.
-AppKit lays out and displays the sheet content before beginning the sheet
-animation. No sleep is used to delay normal presentation, and no hidden window
+On macOS a public WKWebView snapshot with afterScreenUpdates waits for WebKit's
+pending visual updates before the sheet animation. The snapshot is transient,
+never saved or substituted for the live view. Snapshot failure closes the pending
+window and reports an actionable error. This is separate from React resource
+readiness and still needs macOS first-frame acceptance testing.
+No sleep is used to delay normal presentation, and no hidden window
 pool retains credentials. A 20-second failed-handshake deadline cleans up an
 unpresented window and reports the failure in the main window. Browser checks
 cover readiness ordering; compositor behavior still requires macOS acceptance.
@@ -245,7 +252,7 @@ keeps its journal for retry and prevents a normal quit from silently discarding 
 Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
 
 Settings exposes **Open at Login** (the operating system's login item, also
-available in the tray) and **Connect on launch** (off by default). Automatic
+available in the tray) and **Protect on launch** (off by default). Automatic
 connection verifies the selected profile before applying any agent config.
 
 Local API settings can be saved during protection. The runtime serializes this

@@ -7,7 +7,7 @@ import { Separator } from "./ui/separator";
 import { ActionItem } from "./action-item";
 
 export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
-  return <ItemGroup className="gap-0 overflow-hidden rounded-2xl border bg-card text-card-foreground">
+  return <ItemGroup className="gap-0 has-data-[size=sm]:gap-0 has-data-[size=xs]:gap-0 overflow-hidden rounded-2xl border bg-card text-card-foreground [&>[data-slot=item]]:min-h-13 [&>[data-slot=item]]:border-0 [&>[data-slot=item]]:py-2.5">
     {Children.toArray(children).map((child, index) => <Fragment key={isValidElement(child) ? child.key : index}>{index > 0 && <Separator />}{child}</Fragment>)}
   </ItemGroup>;
 }
@@ -28,7 +28,7 @@ export function SettingsLink({ title, description, external = false, ...props }:
   const Icon = external ? ExternalLink : ChevronRight;
   return <ActionItem {...props}>
     <ItemContent><ItemTitle>{title}</ItemTitle>{description && <ItemDescription>{description}</ItemDescription>}</ItemContent>
-    <ItemActions><Icon aria-hidden="true" /></ItemActions>
+    <ItemActions><Icon className="size-4 text-muted-foreground" aria-hidden="true" /></ItemActions>
   </ActionItem>;
 }
 

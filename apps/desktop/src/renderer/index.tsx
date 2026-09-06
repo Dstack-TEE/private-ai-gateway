@@ -50,7 +50,7 @@ import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
-import { NotificationsProvider, NotificationsSheet, NotificationPermissionNotice, useNotifications } from "./components/notifications";
+import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
 import { installNativeInteractions } from "./lib/native-interactions";
 import { prepareDialogPresentation } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
@@ -988,7 +988,6 @@ function App(): React.JSX.Element {
           onToggle={toggleGateway}
         />
         <div className="content" id={`page-${view}`} key={view}>
-        <NotificationPermissionNotice />
         {view === "overview" && (
           <Overview
             pendingAgentChanges={pendingAgentChanges}
@@ -2143,9 +2142,11 @@ function SettingsView({
 
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
-          <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
+          <SettingsToggle label="Protect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           <AppearanceControl />
           <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />
+      </SettingsSection>
+      <SettingsSection title="Connections">
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
