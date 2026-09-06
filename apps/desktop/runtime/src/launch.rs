@@ -306,7 +306,7 @@ fn remaining_windows_millis(started: Instant, timeout: Duration) -> u32 {
     if remaining.is_zero() {
         0
     } else {
-        remaining.as_millis().max(1).min(MAX_FINITE_WAIT) as u32
+        remaining.as_millis().clamp(1, MAX_FINITE_WAIT) as u32
     }
 }
 

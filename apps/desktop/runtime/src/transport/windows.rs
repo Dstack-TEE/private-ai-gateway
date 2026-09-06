@@ -279,7 +279,7 @@ pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
 struct PendingPipe {
     handle: Option<OwnedHandle>,
     _event: OwnedHandle,
-    overlapped: OVERLAPPED,
+    overlapped: Box<OVERLAPPED>,
     pending: bool,
 }
 
@@ -290,7 +290,7 @@ unsafe impl Send for PendingPipe {}
 impl PendingPipe {
     fn new(endpoint: &Path, first_instance: bool) -> io::Result<Self> {
         let security = SecurityDescriptor::current_user()?;
-        let mut attributes = SECURITY_ATTRIBUTES {
+        let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: security.as_ptr(),
             bInheritHandle: FALSE,
@@ -309,7 +309,7 @@ impl PendingPipe {
                 PIPE_BUFFER_SIZE,
                 PIPE_BUFFER_SIZE,
                 0,
-                &mut attributes,
+                &attributes,
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -323,10 +323,13 @@ impl PendingPipe {
         }
         // SAFETY: CreateEventW returned a unique owned kernel handle.
         let event = unsafe { OwnedHandle::from_raw_handle(event_raw.cast()) };
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = event_raw;
+        // Windows retains this address until the asynchronous connect completes.
+        let mut overlapped = Box::new(OVERLAPPED {
+            hEvent: event_raw,
+            ..Default::default()
+        });
 
-        let connected = unsafe { ConnectNamedPipe(raw, &mut overlapped) } != FALSE;
+        let connected = unsafe { ConnectNamedPipe(raw, &mut *overlapped) } != FALSE;
         let pending = if connected {
             false
         } else {
@@ -353,7 +356,7 @@ impl PendingPipe {
         let complete = unsafe {
             GetOverlappedResultEx(
                 self.handle(),
-                &self.overlapped,
+                &*self.overlapped,
                 &mut transferred,
                 timeout,
                 FALSE,
@@ -364,7 +367,7 @@ impl PendingPipe {
             return Ok(());
         }
         let error = unsafe { GetLastError() };
-        if nonblocking && error == ERROR_IO_INCOMPLETE {
+        if nonblocking && matches!(error, ERROR_IO_INCOMPLETE | WAIT_TIMEOUT) {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
         self.pending = false;
@@ -386,9 +389,9 @@ impl PendingPipe {
         }
         let handle = self.handle();
         unsafe {
-            CancelIoEx(handle, &self.overlapped);
+            CancelIoEx(handle, &*self.overlapped);
             let mut transferred = 0;
-            GetOverlappedResult(handle, &self.overlapped, &mut transferred, TRUE);
+            GetOverlappedResult(handle, &*self.overlapped, &mut transferred, TRUE);
         }
         self.pending = false;
     }
@@ -411,8 +414,10 @@ fn overlapped_io(
     }
     // SAFETY: CreateEventW returned a unique owned kernel handle.
     let event = unsafe { OwnedHandle::from_raw_handle(event_raw.cast()) };
-    let mut overlapped = OVERLAPPED::default();
-    overlapped.hEvent = event_raw;
+    let mut overlapped = OVERLAPPED {
+        hEvent: event_raw,
+        ..Default::default()
+    };
     let mut transferred = 0;
 
     if start(&mut overlapped, &mut transferred) != FALSE {
