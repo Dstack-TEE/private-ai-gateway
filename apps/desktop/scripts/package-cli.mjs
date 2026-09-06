@@ -145,7 +145,9 @@ function parseArguments(arguments_) {
 
 function createArchive(platform, parent, directory, output) {
   if (platform === "windows") {
-    execFileSync("tar", ["-a", "-c", "-f", output, "-C", parent, directory], { stdio: "inherit" });
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error("SystemRoot is required for the native Windows archive tool");
+    execFileSync(path.join(systemRoot, "System32", "tar.exe"), ["-a", "-c", "-f", output, "-C", parent, directory], { stdio: "inherit" });
   } else {
     execFileSync("tar", ["-c", "-z", "-f", output, "-C", parent, directory], { stdio: "inherit" });
   }

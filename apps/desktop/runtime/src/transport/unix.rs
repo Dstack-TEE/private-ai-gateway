@@ -35,6 +35,8 @@ impl Listener {
 
     pub fn accept(&self) -> io::Result<Stream> {
         let (stream, _) = self.inner.accept()?;
+        // BSD sockets may inherit O_NONBLOCK from the listener; frame I/O uses deadlines.
+        stream.set_nonblocking(false)?;
         authenticate_peer(&stream)?;
         Ok(Stream { inner: stream })
     }

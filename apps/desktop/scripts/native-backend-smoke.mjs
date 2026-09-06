@@ -19,22 +19,27 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "pag"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
 
 function start(name) {
-  const child = spawn(path.join(binaries, name), [], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(path.join(binaries, name), [], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  child.diagnostic = "";
   child.stdout.resume();
-  child.stderr.resume();
+  child.stderr.on("data", (bytes) => { child.diagnostic = (child.diagnostic + bytes.toString()).slice(-8_192); });
   children.push(child);
   return child;
 }
 
 async function stop(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
+  const signal = (name) => {
+    try { process.kill(-child.pid, name); } catch (error) { if (error.code !== "ESRCH") throw error; }
+  };
+  signal("SIGTERM");
   for (let count = 0; count < 100; count++) {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) break;
     await delay(50);
   }
-  child.kill("SIGKILL");
-  await new Promise((resolve) => child.once("exit", resolve));
+  signal("SIGKILL");
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise((resolve) => child.once("exit", resolve));
+  }
 }
 
 try {
@@ -58,13 +63,13 @@ try {
   const instance = state.backend.instanceId;
   let ui = start("private-ai-gateway-desktop");
   let windows = "";
-  for (let count = 0; count < 50; count++) {
-    assert.equal(ui.exitCode, null, "UI exited before creating a window");
+  for (let count = 0; count < 150; count++) {
+    assert.equal(ui.exitCode, null, `UI exited before creating a window: ${ui.diagnostic}`);
     windows = (await exec("xwininfo", ["-root", "-tree"], { env, timeout: 5_000 })).stdout;
     if (windows.includes("Private AI Gateway")) break;
     await delay(100);
   }
-  assert.match(windows, /Private AI Gateway/);
+  assert.match(windows, /Private AI Gateway/, ui.diagnostic);
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
   ui = start("private-ai-gateway-desktop");
@@ -79,5 +84,5 @@ try {
   console.log("Native window/process smoke passed: UI termination, same-backend reattachment, CLI mutation, explicit service shutdown");
 } finally {
   for (const child of children.reverse()) await stop(child);
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

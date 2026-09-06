@@ -357,7 +357,8 @@ jobs:
           scratch="$(mktemp -d "$RUNNER_TEMP/cli-archive.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           if [[ '${{ matrix.cli_platform }}' == windows ]]; then
-            tar -x -f "release/${base}.zip" -C "$scratch"
+            native_tar="$(cygpath -u "$WINDIR")/System32/tar.exe"
+            "$native_tar" -x -f "release/${base}.zip" -C "$scratch"
           else
             tar -x -z -f "release/${base}.tar.gz" -C "$scratch"
           fi

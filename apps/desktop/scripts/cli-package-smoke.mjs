@@ -40,6 +40,7 @@ const env = {
 let ownedBackend;
 
 const runJson = async (arguments_, timeout = 20_000) => {
+  console.log(`CLI lifecycle: ${arguments_.join(" ")}`);
   const { stdout } = await execute(pag, ["--json", ...arguments_], {
     cwd: directory,
     env,
