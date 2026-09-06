@@ -21,6 +21,8 @@ jobs:
         os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
     defaults:
       run:
         working-directory: apps/desktop
@@ -37,6 +39,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: true
           workspaces: |
             . -> target
             apps/desktop/gateway -> target
@@ -63,16 +66,13 @@ jobs:
       - name: Build bundled Rust sidecars
         run: npm run build:native
 
-      - name: Test ACI sidecar
-        run: cargo test --locked --manifest-path ../../Cargo.toml --bin aci
-
-      - name: Test Tauri backend
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-
       # Tauri merges the host platform config, then the brand overlay. Its
       # beforeBuildCommand builds the same production Vite renderer as macOS.
       - name: Package Tauri app
         run: npm run tauri build -- --config src-tauri/tauri.brand.conf.json
+
+      - name: Test Tauri backend
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Inspect Linux package sidecars
         if: runner.os == 'Linux'

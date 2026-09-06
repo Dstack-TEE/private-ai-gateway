@@ -2,8 +2,8 @@
 
 The React/Tauri desktop app turns the bundled `aci serve` verifier into a local
 gateway for Codex, Claude Code, OpenCode, Pi, and Hermes on macOS, Windows, and
-Linux. One React renderer and Rust runtime own the UI, policy, persistence,
-credentials, usage, agent projection, and process lifecycle. Preexisting
+Linux. One shared React renderer handles the UI; the Rust runtime owns policy,
+persistence, credentials, usage, agent projection, and process lifecycle. Preexisting
 experimental platform clients under `native/` are separate from this package.
 
 > Every request goes to a hardware-verified private AI service, and every
