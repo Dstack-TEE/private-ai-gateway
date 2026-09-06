@@ -2,11 +2,16 @@ import { expect, test } from "@playwright/test";
 import { modelChartData } from "../src/renderer/components/usage-chart";
 import { usageDateBounds } from "../src/renderer/lib/usage-dates";
 import { localApiExample } from "../src/renderer/lib/local-api-example";
+import { localAddressKind } from "../src/renderer/components/listen-address";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 type Page = import("@playwright/test").Page;
+async function choose(page: Page, control: import("@playwright/test").Locator, label: string) {
+  await control.click();
+  await page.getByRole("option", { name: label, exact: true }).click();
+}
 
 test("Local API examples safely embed the local client credential", async () => {
   const calls: { url?: string; authorization?: string; body: unknown }[] = [];
@@ -54,7 +59,7 @@ test("Local API help opens examples with model selection and copy actions", asyn
   await expect(dialog.locator("code")).toContainText("http://127.0.0.1:4180/v1");
   await expect(dialog.getByText("Available", { exact: true })).toHaveCount(0);
   await expect(dialog.locator("code")).toContainText("sk-pag-");
-  await dialog.getByRole("combobox", { name: "Model", exact: true }).selectOption("zai/glm-5.2");
+  await choose(page, dialog.getByRole("combobox", { name: "Model", exact: true }), "Z.ai: GLM 5.2");
   for (const language of ["cURL", "Python", "JavaScript"]) {
     await dialog.getByRole("tab", { name: language, exact: true }).click();
     await expect(dialog.locator("code")).toContainText("zai/glm-5.2");
@@ -110,20 +115,56 @@ test("appearance defaults to system, persists and settings shortcut navigates", 
   await page.keyboard.press("Meta+,");
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   const theme = page.getByRole("combobox", { name: "Theme", exact: true });
-  await expect(theme).toHaveValue("system");
+  await expect(theme.locator('[data-slot="select-value"]')).toHaveText("System");
   const order = await page.getByRole("region", { name: "General", exact: true }).locator('[data-slot="item-title"]').allTextContents();
   expect(order.indexOf("Theme")).toBe(order.indexOf("Connect on launch") + 1);
-  await theme.selectOption("light");
+  await choose(page, theme, "Light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await page.keyboard.press("Control+,");
-  await theme.selectOption("dark");
+  await choose(page, theme, "Dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await theme.selectOption("system");
+  await choose(page, theme, "System");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("calendar month and year menus use Select without changing range semantics", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await nav(page, "Usage").click();
+  await page.getByRole("button", { name: "Date range: Last 7 days", exact: true }).click();
+  const year = page.getByRole("combobox", { name: "Choose the Year", exact: true }).first();
+  await choose(page, year, "2024");
+  const month = page.getByRole("combobox", { name: "Choose the Month", exact: true }).first();
+  await choose(page, month, "Jan");
+  await expect(page.getByRole("button", { name: /Monday, January 1st, 2024/ })).toBeVisible();
+  await expect(page.locator("select:visible")).toHaveCount(0);
+  await month.click();
+  await expect(page.locator('[data-slot="select-content"][data-open]')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(month).toBeFocused();
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+});
+
+test("form focus rings have space on all four sides of their scroll viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 560, height: 680 });
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.goto("/?mock=ready&native-dialog=local-api");
+    for (const id of ["local-listen-address", "local-port", "local-client-host", "local-client-key"]) {
+      const control = page.locator(`#${id}`);
+      await control.focus();
+      const clearances = await control.evaluate((element) => {
+        const ring = (element.closest('[data-slot="input-group"]') ?? element).getBoundingClientRect();
+        const scroll = element.closest(".sheet-scroll")?.getBoundingClientRect();
+        if (!scroll) throw new Error("Missing scroll viewport");
+        return [ring.left - scroll.left, scroll.right - ring.right, ring.top - scroll.top, scroll.bottom - ring.bottom];
+      });
+      expect(Math.min(...clearances), `${id} in ${colorScheme}`).toBeGreaterThanOrEqual(3);
+    }
+  }
 });
 
 test("system dark styling is present before React initializes", async ({ page }) => {
@@ -212,7 +253,7 @@ test("custom date ranges apply atomically to chart, table and export", async ({ 
   await page.getByRole("dialog", { name: "Choose date range" }).getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(dateButton).toHaveAccessibleName("Date range: Last 7 days");
   await dateButton.click();
-  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("all");
+  await choose(page, page.getByRole("combobox", { name: "Quick date range" }), "All time");
   await dateButton.click();
   await page.locator('[data-day="9/2/2026"]').click();
   await page.locator('[data-day="9/4/2026"]').click();
@@ -467,24 +508,58 @@ test("usage query failures do not display stale totals and clearing preserves th
   const history = page.getByRole("table", { name: "Usage history", exact: true });
   await expect(history.getByRole("button").first()).toBeVisible();
   const model = page.getByRole("combobox", { name: "Model", exact: true });
-  const selected = await model.locator("option").nth(1).getAttribute("value");
-  expect(selected).toBeTruthy();
-  await model.selectOption(selected ?? "");
+  await model.click();
+  const selected = await page.getByRole("option").nth(1).innerText();
+  await page.getByRole("option").nth(1).click();
   await expect(page.getByRole("alert")).toHaveText("Usage database temporarily unavailable");
   await expect(history.getByRole("button")).toHaveCount(0);
   await expect(page.locator(".usage-stats strong")).toHaveText(["—", "—", "—", "—"]);
-  await expect(model).toHaveValue(selected ?? "");
+  await expect(model.locator('[data-slot="select-value"]')).toHaveText(selected);
   await expect(page.getByText("Usage data unavailable.")).toBeVisible();
 
   await page.goto("/?mock=ready");
   await nav(page, "Usage").click();
-  await model.selectOption(selected ?? "");
+  await choose(page, model, selected);
   await expect(history.getByRole("button").first()).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Clear usage history" }).click();
   await expect(history.getByRole("button")).toHaveCount(0);
-  await expect(model).toHaveValue(selected ?? "");
+  await expect(model.locator('[data-slot="select-value"]')).toHaveText(selected);
   await expect(page.locator(".usage-stats strong").first()).toHaveText("0");
+});
+
+test("network listeners show discovered addresses and require explicit save consent", async ({ page }) => {
+  for (const address of ["127.0.0.1", "127.3.2.1", "::1", "0:0:0:0:0:0:0:1"]) expect(localAddressKind(address)).toBe("loopback");
+  expect(localAddressKind("0:0:0:0:0:0:0:0")).toBe("unspecified");
+  expect(localAddressKind("not an address")).toBeUndefined();
+  await page.setViewportSize({ width: 560, height: 680 });
+  await page.goto("/?mock=ready&native-dialog=local-api");
+  const sheet = page.getByRole("dialog", { name: "Local API settings" });
+  const input = sheet.getByRole("combobox", { name: "Listen address" });
+  await expect(input).toBeFocused();
+  const gutter = await input.evaluate((element) => {
+    const field = element.closest('[data-slot="input-group"]')?.getBoundingClientRect();
+    const scroll = element.closest(".sheet-scroll")?.getBoundingClientRect();
+    if (!field || !scroll) throw new Error("Missing scroll geometry");
+    return Math.min(field.left - scroll.left, scroll.right - field.right, field.top - scroll.top);
+  });
+  expect(gutter).toBeGreaterThanOrEqual(3);
+  await sheet.getByRole("button", { name: "Choose listen address" }).click();
+  await page.getByRole("option", { name: "192.168.1.20 en0" }).click();
+  await expect(input).toHaveValue("192.168.1.20");
+  await expect(sheet.getByRole("alert")).toContainText("unencrypted HTTP");
+  page.once("dialog", (dialog) => { expect(dialog.message()).toContain("192.168.1.20"); void dialog.dismiss(); });
+  await sheet.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.accept());
+  await sheet.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+
+  await page.goto("/?mock=network-scan-error&native-dialog=local-api");
+  await expect(page.getByRole("status")).toContainText("Network interfaces unavailable");
+  await page.getByRole("combobox", { name: "Listen address" }).fill("0:0:0:0:0:0:0:0");
+  await expect(page.getByLabel("Client host", { exact: true })).toHaveAttribute("required", "");
 });
 
 test("rotating the client key requires an explicit native confirmation", async ({ page }) => {
@@ -492,8 +567,22 @@ test("rotating the client key requires an explicit native confirmation", async (
   const key = page.getByLabel("Client key", { exact: true });
   await expect(key).not.toHaveValue("");
   await expect(page.locator(".sheet-card")).toHaveCount(0);
-  await expect(key).toHaveCSS("height", "36px");
-  await expect(key).toHaveCSS("border-radius", "24px");
+  const keyGroup = page.locator('[data-slot="input-group"]', { has: key });
+  await expect(keyGroup).toHaveCSS("height", "36px");
+  await expect(keyGroup).toHaveCSS("border-radius", "32px");
+  await expect(keyGroup.getByRole("button")).toHaveCount(3);
+  await keyGroup.getByRole("button", { name: "Reveal client key" }).click();
+  await expect(key).toHaveAttribute("type", "text");
+  await keyGroup.getByRole("button", { name: "Hide client key" }).click();
+  await expect(key).toHaveAttribute("type", "password");
+  const listen = await page.getByLabel("Listen address", { exact: true }).boundingBox();
+  const port = await page.getByLabel("Port", { exact: true }).boundingBox();
+  expect(listen?.y).toBe(port?.y);
+  await expect(page.getByRole("switch", { name: "Allow network access" })).toHaveCount(0);
+  await page.getByLabel("Listen address", { exact: true }).fill("192.168.1.20");
+  await expect(page.getByText(/The local API uses unencrypted HTTP/)).toBeVisible();
+  await page.getByLabel("Listen address", { exact: true }).fill("127.0.0.1");
+  await page.keyboard.press("Escape");
   const original = await key.inputValue();
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "Rotate key" }).click();
@@ -664,18 +753,18 @@ test("overview shows four agents, four current-session records, truthful copy su
   await localApi.getByRole("button", { name: "Local API settings" }).click();
   const localSheet = page.getByRole("dialog", { name: "Local API settings" });
   await expect(localSheet).toBeVisible();
-  for (const label of ["Listen address", "Allow network access", "Port", "Client host", "Client key"]) {
+  for (const label of ["Listen address", "Port", "Client host", "Client key"]) {
     await expect(localSheet.getByText(label, { exact: true }).first()).toBeVisible();
   }
   await expect(localSheet.getByRole("button", { name: /Copy .*endpoint/ })).toHaveCount(0);
-  const networkToggle = localSheet.getByRole("switch", { name: "Allow network access" });
-  await expect(networkToggle.locator('xpath=ancestor::*[@data-slot="item"][1]')).toHaveAttribute("data-variant", "outline");
   await expect(localSheet.getByRole("group", { name: "Client endpoints", exact: true })).toHaveCount(0);
   await expect(localSheet.locator('[data-slot="field-separator"]')).toHaveCount(1);
   await expect(localSheet.locator('.sheet-footer > [data-slot="separator"]')).toHaveCSS("height", "1px");
-  await networkToggle.click();
+  await localSheet.getByLabel("Listen address", { exact: true }).fill("192.168.1.20");
+  await page.keyboard.press("Escape");
   await expect(localSheet.getByRole("alert")).toContainText("trusted network");
-  await networkToggle.click();
+  await localSheet.getByLabel("Listen address", { exact: true }).fill("127.0.0.1");
+  await page.keyboard.press("Escape");
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeEnabled();
   await expect(localSheet).toContainText("Saving briefly restarts protection");
@@ -736,14 +825,14 @@ test("updates are discovered on launch and installation requires confirmation", 
   await expect(about.getByRole("combobox", { name: "Update channel" })).toHaveCount(0);
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
   const channel = page.locator(".settings-advanced").getByRole("combobox", { name: "Update channel" });
-  await expect(channel).toHaveValue("stable");
-  await channel.selectOption("beta");
+  await expect(channel.locator('[data-slot="select-value"]')).toHaveText("Stable");
+  await choose(page, channel, "Beta");
   await expect(page.getByRole("status").filter({ hasText: "Version 0.3.0-beta.1 is available" })).toBeVisible();
   await nav(page, "Overview").click();
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
-  await expect(channel).toHaveValue("beta");
-  await channel.selectOption("stable");
+  await expect(channel.locator('[data-slot="select-value"]')).toHaveText("Beta");
+  await choose(page, channel, "Stable");
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
 });
 
@@ -763,7 +852,9 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(page.locator(".tracks-right")).toHaveCSS("color", await themeColor(page, "--primary"));
     await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "128px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
+    const agentLabelBefore = await nav(page, "Agents").locator("span").evaluate((element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect().width; });
     await nav(page, "Agents").click();
+    expect(await nav(page, "Agents").locator("span").evaluate((element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect().width; })).toBe(agentLabelBefore);
     const installed = page.getByRole("region", { name: /^Installed/ });
     const separators = installed.locator('[data-slot="separator"]:visible');
     expect(await separators.count()).toBe((await installed.locator(".agent-block").count()) - 1);
@@ -910,7 +1001,7 @@ test("local copy hover follows the grouped row shape and profiles open their dia
     return { height: button.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, clipped: getComputedStyle(group).overflow, radius: getComputedStyle(group).borderRadius };
   });
   expect(Math.abs(shape.height - shape.rowHeight)).toBeLessThanOrEqual(1);
-  expect(shape.clipped).toBe("hidden");
+  expect(shape.clipped).toBe("visible");
   expect(Number.parseFloat(shape.radius)).toBeGreaterThan(0);
   const profile = page.getByRole("button", { name: "Profiles: RedPill" });
   await expect(profile).toHaveAttribute("aria-haspopup", "dialog");
@@ -934,7 +1025,7 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   expect(new Set(chartDays).size).toBe(7);
 
   await page.getByRole("button", { name: /^Date range:/ }).click();
-  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("24h");
+  await choose(page, page.getByRole("combobox", { name: "Quick date range" }), "Today");
   await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody tr")).toHaveCount(1);
   await expect.poll(async () => page.locator('.usage-history time').evaluateAll((times) => times.length > 0 && times.every((time) => {
     const midnight = new Date();
@@ -942,7 +1033,7 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
     return new Date(time.getAttribute("datetime") ?? "").getTime() >= midnight.getTime();
   }))).toBe(true);
   await page.getByRole("button", { name: /^Date range:/ }).click();
-  await page.getByRole("combobox", { name: "Quick date range" }).selectOption("7d");
+  await choose(page, page.getByRole("combobox", { name: "Quick date range" }), "Last 7 days");
 
   const metric = page.getByRole("tablist", { name: "Chart metric" });
   await metric.getByRole("tab", { name: "Tokens", exact: true }).focus();
@@ -959,10 +1050,10 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await history.getByRole("button", { name: "Token details", exact: true }).first().click();
   await expect(page.getByRole("dialog", { name: "Token details", exact: true })).toContainText("Cache read");
   await page.keyboard.press("Escape");
-  await page.getByRole("combobox", { name: "Rows per page" }).selectOption("50");
+  await choose(page, page.getByRole("combobox", { name: "Rows per page" }), "50");
   await expect(history.locator("tbody tr")).not.toHaveCount(20);
   await expect(page.getByRole("button", { name: "Next usage page" })).toBeDisabled();
-  await page.getByRole("combobox", { name: "Rows per page" }).selectOption("20");
+  await choose(page, page.getByRole("combobox", { name: "Rows per page" }), "20");
   await page.getByRole("button", { name: "Next usage page" }).click();
   await expect(page.getByRole("heading", { name: "Usage history" })).toBeFocused();
   await expect(page.locator(".pagination").getByText(/^Page 2/)).toBeVisible();
@@ -975,9 +1066,9 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await uncertainProof.getByRole("button", { name: "Done" }).click();
 
   const agentFilter = page.getByRole("combobox", { name: "Agent", exact: true });
-  await agentFilter.selectOption("hermes");
+  await choose(page, agentFilter, "Hermes Agent");
   await expect(history.getByRole("button").first()).toContainText("Hermes");
-  await agentFilter.selectOption("");
+  await choose(page, agentFilter, "All agents");
   const blocked = history.getByRole("button", { name: /Blocked locally/ }).first();
   await blocked.click();
   const blockedProof = page.getByRole("dialog", { name: "Usage proof" });
@@ -1046,7 +1137,7 @@ test("overview presents local availability and the active profile without sessio
   const status = page.getByLabel("Protection status");
   await expect(status.getByText("Local API available", { exact: true })).toBeVisible();
   await expect(status.getByText("1 agent connected", { exact: true })).toBeVisible();
-  await expect(status.getByText("Confidential AI", { exact: true })).toBeVisible();
+  await expect(status.getByText("AI service", { exact: true })).toBeVisible();
   const localHeader = page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) });
   const badgeOffset = await localHeader.evaluate((header) => {
     const title = header.querySelector("h2")?.getBoundingClientRect();

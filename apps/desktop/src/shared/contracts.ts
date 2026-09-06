@@ -271,6 +271,7 @@ export interface DesktopApi {
   getClientKey(): Promise<string>;
   rotateClientKey(): Promise<string>;
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
+  listListenAddresses(): Promise<{ address: string; name: string }[]>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the main window to show a section. */

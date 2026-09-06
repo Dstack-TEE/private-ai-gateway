@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type PropsWithChildren 
 import type { Appearance, DesktopApi } from "../../shared/contracts";
 import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { FieldLabel, FieldError } from "./ui/field";
-import { NativeSelect } from "./ui/native-select";
+import { ChoiceSelect } from "./choice-select";
 
 const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, error: "", change: (_value: Appearance) => {} });
 
@@ -41,9 +41,8 @@ export function useAppearance() { return useContext(AppearanceContext).value; }
 export function AppearanceControl() {
   const appearance = useContext(AppearanceContext);
   return <Item><ItemContent><ItemTitle><FieldLabel htmlFor="appearance">Theme</FieldLabel></ItemTitle><FieldError>{appearance.error}</FieldError></ItemContent><ItemActions>
-    <NativeSelect id="appearance" value={appearance.value} disabled={appearance.busy} onChange={(event) => {
-      const value = event.target.value;
+    <ChoiceSelect id="appearance" label="Theme" value={appearance.value} disabled={appearance.busy} onChange={(value) => {
       if (value === "system" || value === "light" || value === "dark") appearance.change(value);
-    }}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></NativeSelect>
+    }} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
   </ItemActions></Item>;
 }

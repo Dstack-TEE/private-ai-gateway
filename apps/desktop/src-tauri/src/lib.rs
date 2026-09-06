@@ -47,6 +47,34 @@ struct ExitState {
     allowed: AtomicBool,
 }
 
+#[derive(serde::Serialize)]
+struct ListenAddress {
+    address: String,
+    name: String,
+}
+
+#[tauri::command]
+async fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
+    run_blocking(|| {
+        let interfaces = if_addrs::get_if_addrs()
+            .map_err(|_| "Could not read network interfaces. Enter an IP address manually.".to_string())?;
+        let mut addresses: Vec<_> = interfaces
+            .into_iter()
+            .filter(|interface| interface.is_oper_up())
+            // Link-local IPv6 needs a scope ID, which the listener does not support.
+            .filter(|interface| !matches!(interface.ip(), std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()))
+            .map(|interface| ListenAddress {
+                address: interface.ip().to_string(),
+                name: interface.name,
+            })
+            .collect();
+        addresses.sort_by(|a, b| a.address.cmp(&b.address).then(a.name.cmp(&b.name)));
+        addresses.dedup_by(|a, b| a.address == b.address);
+        Ok(addresses)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn get_launch_preferences(app: AppHandle) -> Result<LaunchPreferences, String> {
     run_blocking(move || load_launch_preferences(&app)).await
@@ -459,6 +487,7 @@ pub fn run() {
             get_client_key,
             rotate_client_key,
             save_local_api_config,
+            list_listen_addresses,
             refresh_catalog,
             list_agents,
             preview_agent_connection,

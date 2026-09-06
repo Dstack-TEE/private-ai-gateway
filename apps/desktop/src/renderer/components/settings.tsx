@@ -7,7 +7,7 @@ import { Separator } from "./ui/separator";
 import { ActionItem } from "./action-item";
 
 export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
-  return <ItemGroup className="gap-0 overflow-hidden rounded-2xl border">
+  return <ItemGroup className="gap-0 rounded-2xl border p-1">
     {Children.toArray(children).map((child, index) => <Fragment key={isValidElement(child) ? child.key : index}>{index > 0 && <Separator />}{child}</Fragment>)}
   </ItemGroup>;
 }

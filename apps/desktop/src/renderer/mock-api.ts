@@ -385,7 +385,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (name === "local-save-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-local-save", () => resolve(), { once: true }));
       if (config.port < 1024 || config.port > 65535) throw new Error("Port must be between 1024 and 65535");
       if (!config.allowNetworkAccess && !["127.0.0.1", "::1"].includes(config.listenAddress)) {
-        throw new Error("Turn on Allow network access before listening outside this Mac");
+        throw new Error("Network listening requires explicit confirmation");
       }
       const host = config.clientHost?.trim() || config.listenAddress;
       const wrapped = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -480,7 +480,7 @@ export function mockApi(name: string | null): DesktopApi {
     activateProfile: async (profileId) => {
       const reconnect = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
       const profile = state.profiles.find((entry) => entry.id === profileId);
-      if (!profile) throw new Error("Confidential AI profile not found");
+      if (!profile) throw new Error("AI service profile not found");
       state = {
         ...state,
         config: { ...state.config, remoteUrl: profile.remoteUrl },
@@ -523,6 +523,10 @@ export function mockApi(name: string | null): DesktopApi {
       };
       publish();
       return state;
+    },
+    listListenAddresses: async () => {
+      if (name === "network-scan-error") throw new Error("Could not read network interfaces. Enter an IP address manually.");
+      return [{ address: "127.0.0.1", name: "lo" }, { address: "192.168.1.20", name: "en0" }];
     },
     queryUsage: async (query: UsageQuery) => {
       if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));

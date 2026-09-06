@@ -5,7 +5,7 @@ import { localApiExample, type ExampleLanguage } from "../lib/local-api-example"
 import { Sheet, DismissSheetAction } from "./sheet";
 import { IconButton } from "./controls";
 import { Field, FieldError, FieldLabel } from "./ui/field";
-import { NativeSelect } from "./ui/native-select";
+import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
 export function LocalApiExamples({ endpoint, models, api, onCopy, onClose }: {
@@ -54,10 +54,8 @@ export function LocalApiExamples({ endpoint, models, api, onCopy, onClose }: {
   return <Sheet title="Local API examples" className="local-api-examples-sheet" onClose={onClose}>
     <Field className="mt-4">
       <FieldLabel htmlFor="example-model">Model</FieldLabel>
-      <NativeSelect id="example-model" className="w-full" value={model} disabled={models.length === 0} onChange={(event) => setSelection(event.target.value)}>
-        {models.length === 0 && <option value="">No verified models</option>}
-        {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name || entry.id}</option>)}
-      </NativeSelect>
+      <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}
+        options={models.length ? models.map((entry) => ({ value: entry.id, label: entry.name || entry.id })) : [{ value: "", label: "No verified models" }]} />
     </Field>
     <Tabs value={language} className="mt-4 min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
       <div className="flex items-center justify-between gap-2">

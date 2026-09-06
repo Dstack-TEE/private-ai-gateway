@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import type { DesktopApi, UpdateInfo, UpdateProgress, UpdateChannel } from "../shared/contracts";
 import { Button } from "./components/ui/button";
-import { NativeSelect } from "./components/ui/native-select";
+import { ChoiceSelect } from "./components/choice-select";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./components/ui/dialog";
@@ -134,14 +134,9 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Pre-release builds" : "Stable releases"}</ItemDescription>
     </ItemContent>
     <ItemActions>
-      <NativeSelect className="w-36" id="update-channel" aria-describedby="update-channel-note" value={updates.channel ?? ""} disabled={!updates.channel || Boolean(updates.busy)} onChange={(event) => {
-        const value = event.target.value;
+      <ChoiceSelect className="w-36" id="update-channel" label="Update channel" describedBy="update-channel-note" value={updates.channel ?? ""} disabled={!updates.channel || Boolean(updates.busy)} onChange={(value) => {
         if (value === "stable" || value === "beta") void updates.changeChannel(value);
-      }}>
-        {!updates.channel && <option value="" disabled>Loading</option>}
-        <option value="stable">Stable</option>
-        <option value="beta">Beta</option>
-      </NativeSelect>
+      }} options={[...(!updates.channel ? [{ value: "", label: "Loading", disabled: true }] : []), { value: "stable", label: "Stable" }, { value: "beta", label: "Beta" }]} />
     </ItemActions>
   </Item>;
 }

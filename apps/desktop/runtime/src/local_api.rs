@@ -55,7 +55,7 @@ pub fn resolve(mut config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
         return Err("Port must be between 1024 and 65535".to_string());
     }
     if !config.allow_network_access && !address.is_loopback() {
-        return Err("Turn on Allow network access before listening outside this Mac".to_string());
+        return Err("Network listening requires explicit confirmation".to_string());
     }
     config.client_host = normalize_client_host(config.client_host.as_deref())?;
     if address.is_unspecified() && config.client_host.is_none() {
@@ -125,7 +125,7 @@ mod tests {
         config.listen_address = "0.0.0.0".to_string();
         assert!(resolve(config.clone())
             .unwrap_err()
-            .contains("Allow network access"));
+            .contains("explicit confirmation"));
         config.allow_network_access = true;
         assert!(resolve(config.clone()).unwrap_err().contains("Client host"));
         config.client_host = Some("gateway.local".to_string());

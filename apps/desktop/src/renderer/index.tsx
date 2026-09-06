@@ -48,6 +48,7 @@ import { ActionItem } from "./components/action-item";
 import { UsageChart, type UsageMetric } from "./components/usage-chart";
 import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
+import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { installNativeInteractions } from "./lib/native-interactions";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
@@ -61,10 +62,11 @@ import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./co
 import { Separator } from "./components/ui/separator";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
+import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "./components/ui/input-group";
 import { IconButton, SwitchControl } from "./components/controls";
 import { Sheet, SheetActions, DismissSheetAction } from "./components/sheet";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle, FormField } from "./components/settings";
-import { NativeSelect } from "./components/ui/native-select";
+import { ChoiceSelect } from "./components/choice-select";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
   AgentStatus,
@@ -818,7 +820,7 @@ function App(): React.JSX.Element {
     setActionError(undefined);
     try {
       setState(await desktopApi.deleteProfile(profileId));
-      setNotice({ id: Date.now(), text: "Confidential AI profile deleted" });
+      setNotice({ id: Date.now(), text: "AI service profile deleted" });
       return undefined;
     } catch (error) {
       const message = errorMessage(error);
@@ -1168,6 +1170,7 @@ function Sidebar({
           const Icon = entry.icon;
           return (
             <SidebarMenuItem key={entry.id}><SidebarMenuButton
+              className="font-medium"
               size="default"
               isActive={view === entry.id}
               id={`nav-${entry.id}`}
@@ -1518,7 +1521,7 @@ function StatusSurface({
       </div>
 
       <div className="status-segment status-remote">
-        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
+        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>AI service</span></div>
         <Button variant="outline" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
@@ -1935,8 +1938,8 @@ function UsageView({
     <div className="usage-page">
       {(problem || error) && <Alert variant="destructive"><AlertDescription>{problem ?? error}</AlertDescription></Alert>}
       <div className="usage-toolbar" role="group" aria-label="Usage filters">
-        <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><NativeSelect id="usage-agent" value={agent} onChange={(event) => { setAgent(event.target.value); resetPagination(); }}><option value="">All agents</option>{agentOptions.map((entry) => <option key={entry} value={entry}>{agentName(entry)}</option>)}</NativeSelect></Field>
-        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{modelOptions.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
+        <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => { setAgent(value); resetPagination(); }} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
+        <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => { setModel(value); resetPagination(); }} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
         <FieldSet className="time-filter min-w-0 gap-0">
           <FieldLegend variant="label" className="leading-snug">Time</FieldLegend>
           <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => { setRange(next); resetPagination(); }} /></Suspense>
@@ -1960,9 +1963,7 @@ function UsageView({
         <div className="pagination">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
-            <NativeSelect id="usage-page-size" size="sm" value={pageSize} disabled={loading} onChange={(event) => { setPageSize(Number(event.target.value)); resetPagination(); }}>
-              {[20, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
-            </NativeSelect>
+            <ChoiceSelect id="usage-page-size" label="Rows per page" size="sm" value={String(pageSize)} disabled={loading} onChange={(value) => { setPageSize(Number(value)); resetPagination(); }} options={[20, 50, 100].map((size) => ({ value: String(size), label: String(size) }))} />
           </Field>
           <IconButton
             label="Previous usage page"
@@ -2268,7 +2269,7 @@ function ProfileListSheet({
           {activeProfile ? `“${activeProfile.name}” cannot start protection until it is verified with an available credential.` : "Choose a verified profile before starting protection."}
         </p>
       )}
-      <div className="profile-list" role="list" aria-label="Confidential AI profiles">
+      <div className="profile-list" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
@@ -2290,7 +2291,7 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <IconButton variant="ghost" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
+              <Button type="button" variant="outline" size="icon-sm" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></Button>
             </div>
           );
         })}
@@ -2397,10 +2398,10 @@ function ProfileEditorSheet({
     onComplete();
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet form-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
       {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
-        <div className="sheet-scroll">
+        <div className="sheet-scroll py-1">
         <FieldGroup>
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
@@ -2468,6 +2469,8 @@ function LocalApiSheet({
   onClose(): void;
 }): React.JSX.Element {
   const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
+  const addressKind = localAddressKind(draft.listenAddress);
+  const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
@@ -2493,44 +2496,54 @@ function LocalApiSheet({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
-    const message = await onSave(draft);
-    setSaving(false);
-    setError(message);
-    if (!message) onClose();
+    setError(undefined);
+    try {
+      if (!addressKind) {
+        setError("Enter a valid IPv4 or IPv6 listen address.");
+        return;
+      }
+      if (networkAccess && !await desktopApi.confirm({
+        title: "Allow network access?",
+        message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
+        confirmLabel: "Allow and Save",
+      })) return;
+      const message = await onSave({ ...draft, allowNetworkAccess: networkAccess });
+      setError(message);
+      if (!message) onClose();
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setSaving(false);
+    }
   };
   return (
-    <Sheet title="Local API settings" className="local-api-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title="Local API settings" className="local-api-sheet form-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
-        <div className="sheet-scroll py-6">
+        <div className="sheet-scroll py-4">
           <FieldGroup>
-          <FieldSet>
-          <FieldLegend variant="label">Connection</FieldLegend>
-          <FieldGroup>
-          <FormField id="local-listen-address" label="Listen address" description="Address used by the local gateway.">
-              <Input id="local-listen-address" aria-describedby="local-listen-address-note" list="listen-addresses" value={draft.listenAddress} disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("listenAddress", event.target.value)} />
-            <datalist id="listen-addresses"><option value="127.0.0.1" /><option value="::1" /><option value="0.0.0.0" /></datalist>
+          <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-start gap-4">
+          <FormField id="local-listen-address" label="Listen address">
+            <ListenAddress api={desktopApi} value={draft.listenAddress} disabled={frozen || saving} onChange={(value) => update("listenAddress", value)} />
           </FormField>
-          <div className="space-y-3">
-            <SettingsToggle variant="outline" label="Allow network access" description="Permit a non-loopback listen address. Keep this off for local agents." checked={draft.allowNetworkAccess} disabled={frozen || saving} onToggle={() => update("allowNetworkAccess", !draft.allowNetworkAccess)} />
-            {draft.allowNetworkAccess && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">Other devices on the network may reach this gateway. Only use this on a trusted network.</AlertDescription></Alert>}
+          <FormField id="local-port" label="Port">
+            <Input id="local-port" title="1024–65535" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
+          </FormField>
           </div>
-          <FormField id="local-port" label="Port" description="1024–65535">
-            <Input id="local-port" aria-describedby="local-port-note" type="number" min="1024" max="65535" value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
+          {networkAccess && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">The local API uses unencrypted HTTP. Other devices need the client key. Use only a trusted network; never expose this port to the internet.</AlertDescription></Alert>}
+          <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
+            <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} required={addressKind === "unspecified"} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
           </FormField>
-          <FormField id="local-client-host" label="Client host" description="Optional hostname shown to clients.">
-            <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
-          </FormField>
-          </FieldGroup>
-          </FieldSet>
           <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
-              <Input id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
-            <div className="flex flex-wrap items-center gap-2">
-              <IconButton label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
-              <IconButton label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
-              <Button type="button" variant="outline" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw size={15} />Rotate key</Button>
-            </div>
+            <InputGroup>
+              <InputGroupInput id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} title={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton>
+                <InputGroupButton size="icon-xs" aria-label="Copy client key" title="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton>
+                <InputGroupButton size="icon-xs" aria-label="Rotate key" title="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
             <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>
           </Field>
           </FieldGroup>

@@ -72,6 +72,7 @@ export const desktopApi: DesktopApi = {
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState> {
     return invoke("save_local_api_config", { config });
   },
+  listListenAddresses: () => invoke("list_listen_addresses"),
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");
   },

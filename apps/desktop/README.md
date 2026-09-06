@@ -52,14 +52,22 @@ Shared product compositions live one layer above `components/ui`:
   rather than adding a second library focus trap over the platform sheet.
 - `settings.tsx`: grouped settings, navigation rows, toggles and labeled fields.
 
-Forms use the official Field components without bordered outer input containers.
-Local API sections use FieldSet/FieldSeparator; standalone option rows use Item
-outline. Client endpoint previews are omitted from Settings; the Overview help
+Forms use the official Field components. Local API fields use FieldGroup and
+FieldSeparator, with the Luma InputGroup for inline key actions; standalone
+option rows use Item outline. Client endpoint previews are omitted from Settings; the Overview help
 button opens a native examples sheet with cURL, Python and JavaScript tabs.
 Examples use the configured endpoint and discovered models. The local client key
 is read when the example sheet opens and embedded in its copyable snippets; copied
 snippets are sensitive. Key changes invalidate the displayed code. Provider keys
 are never used in examples.
+
+Fixed choices use Luma Select, including date presets and calendar month/year
+navigation; listen addresses use Combobox for discovery and manual entry.
+ChoiceSelect shares composition and portal ownership, not a replacement menu
+implementation. Menus inside HTML dialogs portal into their owning dialog.
+Form scroll regions own horizontal padding so the standard 3px focus ring is
+not clipped. Bordered lists have a 4px inner gutter; purposeful image clipping
+and actual scroll viewports remain intact.
 SheetActions provides one shared footer divider.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
@@ -287,6 +295,16 @@ protocol is the service's own response, shown as such.
   single-instance plugin only focuses the window; the lock decides).
 - **Local endpoint** defaults to loopback-only `http://127.0.0.1:4180`. The
   app claims the configured address and port before agent settings are applied.
+  The address Combobox lists active interfaces using `if-addrs` and accepts
+  manual input; scope-dependent IPv6 link-local addresses are not suggested.
+  Non-loopback addresses display a warning and require native confirmation
+  on Save. The persisted permission remains enforced by the Rust resolver.
+  The local HTTP listener is unencrypted and must not be exposed to the
+  internet. Client host changes advertised URLs, not the bind address.
+- **AI service** names the remote endpoint in the UI. The protocol calls it an
+  [ACI service](../../spec/aci.md), which can serve inference directly or act
+  as an aggregator. This label is not a verification verdict; the current
+  verification state is displayed separately.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity
@@ -318,7 +336,7 @@ protocol is the service's own response, shown as such.
   (`private-ai-gateway-helper --agent-token <agent>`). OpenCode reads the
   token file through its `{file:...}` reference; Pi and Hermes use their
   supported command-backed provider credential mechanisms.
-- **Confidential AI profile credentials** and any credential a connection
+- **AI service profile credentials** and any credential a connection
   takes over live only in the OS credential store (`keyring` 4). Each profile
   has its own credential entry; the profile JSON stores only its name,
   provider, endpoint, authentication kind, credential-presence metadata, and
@@ -332,7 +350,7 @@ protocol is the service's own response, shown as such.
   (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
   when read; config writes hold a cross-process file lock from the revision
   check to the final rename.
-- **Confidential AI profiles** are verified before they are saved. A profile
+- **AI service profiles** are verified before they are saved. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
   A fresh install starts without a profile and opens New Profile as soon as the
   initial state loads; every profile can be deleted, including the last one.
