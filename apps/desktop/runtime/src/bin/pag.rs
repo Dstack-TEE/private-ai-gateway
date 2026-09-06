@@ -295,13 +295,25 @@ fn execute(cli: &Cli) -> Result<(), String> {
         Action::Start { profile, timeout } => {
             Client::ensure_service()?;
             if let Some(profile) = profile {
-                client.activate_profile(profile.clone())?;
+                if client.state()?.active_profile_id != *profile {
+                    client.activate_profile(profile.clone())?;
+                }
             }
             let state = client.state()?;
+            if profile
+                .as_ref()
+                .is_some_and(|profile| profile != &state.active_profile_id)
+            {
+                return Err("Profile selection was changed by another client.".into());
+            }
             if state.status == "verified" && !state.configuration_verification {
                 value(state)?
             } else {
-                let started = client.start(state.config)?;
+                let started = if state.status == "verifying" && !state.configuration_verification {
+                    state
+                } else {
+                    client.start(state.config)?
+                };
                 let deadline = Instant::now() + Duration::from_secs(*timeout);
                 loop {
                     let state = client.state()?;
