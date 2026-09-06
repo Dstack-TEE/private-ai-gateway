@@ -179,7 +179,7 @@ async fn read_profile_backup(
 
 #[tauri::command]
 async fn import_profiles(
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    runtime: State<'_, Arc<Client>>,
     backup: desktop_runtime::maintenance::ProfileBackup,
 ) -> Result<desktop_runtime::maintenance::ImportResult, String> {
     let runtime = runtime.inner().clone();
@@ -187,23 +187,15 @@ async fn import_profiles(
 }
 
 #[tauri::command]
-async fn export_profiles(
-    runtime: State<'_, Arc<DesktopRuntime>>,
-    path: PathBuf,
-) -> Result<(), String> {
+async fn export_profiles(runtime: State<'_, Arc<Client>>, path: PathBuf) -> Result<(), String> {
     let runtime = runtime.inner().clone();
     run_blocking(move || runtime.export_profiles(path)).await
 }
 
 #[tauri::command]
-async fn export_diagnostics(
-    app: AppHandle,
-    runtime: State<'_, Arc<DesktopRuntime>>,
-    path: PathBuf,
-) -> Result<(), String> {
-    let version = app.package_info().version.to_string();
+async fn export_diagnostics(runtime: State<'_, Arc<Client>>, path: PathBuf) -> Result<(), String> {
     let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_diagnostics(path, &version)).await
+    run_blocking(move || runtime.export_diagnostics(path)).await
 }
 
 #[tauri::command]

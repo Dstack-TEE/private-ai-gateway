@@ -66,6 +66,13 @@ pub enum Command {
         profile_id: String,
     },
     ClearApiKey,
+    ImportProfiles(crate::maintenance::ProfileBackup),
+    ExportProfiles {
+        path: String,
+    },
+    ExportDiagnostics {
+        path: String,
+    },
     Usage(UsageQuery),
     UsageRecord {
         record_id: String,

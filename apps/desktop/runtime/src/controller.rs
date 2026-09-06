@@ -589,6 +589,7 @@ impl DesktopRuntime {
         if self.exiting.load(Ordering::Acquire) {
             return Ok(());
         }
+        self.recovery.cancel();
         self.stop_inner()?;
         self.endpoint.stop().await?;
         self.exiting.store(true, Ordering::Release);

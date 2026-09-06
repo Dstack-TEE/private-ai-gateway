@@ -80,6 +80,10 @@ enum Action {
         command: App,
     },
     Doctor,
+    Diagnostics {
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -128,6 +132,13 @@ enum Provider {
 #[derive(Subcommand)]
 enum Profiles {
     List,
+    Import {
+        file: PathBuf,
+    },
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+    },
     Add {
         #[arg(long)]
         id: String,
@@ -342,6 +353,20 @@ fn execute(cli: &Cli) -> Result<(), String> {
         Action::Profiles { command } => {
             match command {
                 Profiles::List => value(client.state()?.profiles)?,
+                Profiles::Import { file } => {
+                    let backup = desktop_runtime::maintenance::ProfileBackup::read(file)?;
+                    confirm(
+                        cli,
+                        "Import these unverified profile configurations without credentials?",
+                    )?;
+                    Client::ensure_service()?;
+                    value(client.import_profiles(backup)?)?
+                }
+                Profiles::Export { output } => {
+                    let path = new_export_path(output)?;
+                    client.export_profiles(path.clone())?;
+                    json!({"exported": path})
+                }
                 Profiles::Use { id } => {
                     confirm(cli, "Switch the active profile?")?;
                     value(client.activate_profile(id.clone())?)?
@@ -388,8 +413,12 @@ fn execute(cli: &Cli) -> Result<(), String> {
                         .into_iter()
                         .find(|profile| profile.id == *id)
                         .ok_or("Profile not found")?;
-                    let key = if *key_stdin {
-                        Some(read_key(true)?)
+                    let key = if *key_stdin
+                        || !profile
+                            .credential_saved
+                            .unwrap_or(profile.verified_at.is_some())
+                    {
+                        Some(read_key(*key_stdin)?)
                     } else {
                         None
                     };
@@ -534,6 +563,11 @@ fn execute(cli: &Cli) -> Result<(), String> {
         Action::Doctor => {
             json!({"version": desktop_runtime::protocol::BUILD_VERSION, "backendRunning": client.is_running()?, "cli": desktop_runtime::cli_install::status()?, "backendExecutable": desktop_runtime::launch::service_executable()?, "endpoint": desktop_runtime::transport::endpoint_path().map_err(|_| "Cannot resolve management endpoint")?, "credentialPolicy": "OS credential store; no plaintext fallback"})
         }
+        Action::Diagnostics { output } => {
+            let path = new_export_path(output)?;
+            client.export_diagnostics(path.clone())?;
+            json!({"exported": path})
+        }
         Action::App { command: App::Open } => {
             let backend = desktop_runtime::launch::service_executable()?;
             let app =
@@ -561,6 +595,14 @@ fn execute(cli: &Cli) -> Result<(), String> {
         }
     };
     output(&result, cli.json)
+}
+
+fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
+    let path = std::path::absolute(path).map_err(|_| "Cannot resolve export path")?;
+    if path.exists() {
+        return Err("Export target already exists; choose a new path.".into());
+    }
+    Ok(path)
 }
 
 fn query(filter: &Filter) -> UsageQuery {

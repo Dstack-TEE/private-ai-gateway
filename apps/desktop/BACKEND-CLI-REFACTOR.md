@@ -28,6 +28,8 @@ pag service stop --yes
 pag profiles add --id work --name Work --url https://tee.redpill.ai --provider redpill
 pag profiles verify work
 pag profiles list
+pag profiles import profiles.json --yes
+pag profiles export --output profiles.json
 pag profiles use work --yes
 pag agents list
 pag agents connect codex --model MODEL --dry-run
@@ -43,6 +45,7 @@ pag cli status --json
 pag cli install
 pag app open
 pag doctor
+pag diagnostics --output diagnostics.json
 ```
 
 `--help` lists the complete command and option set. Credentials use a hidden

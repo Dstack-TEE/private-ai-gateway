@@ -132,6 +132,22 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     assert_eq!(state["gateway"]["clientKeyRevision"], 1);
     assert_eq!(state["gateway"]["clientKeyAvailable"], true);
     assert_eq!(backend.run(&["profiles", "list"]), serde_json::json!([]));
+    let backup = backend.directory.path().join("profiles.json");
+    fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
+    assert_eq!(
+        backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"])["imported"],
+        1
+    );
+    let exported = backend.directory.path().join("exported.json");
+    backend.run(&["profiles", "export", "--output", exported.to_str().unwrap()]);
+    let text = fs::read_to_string(exported).unwrap();
+    assert!(!text.contains("credential"));
+    assert!(!text.contains("verified"));
+    let diagnostics = backend.directory.path().join("diagnostics.json");
+    backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
+    let report: Value = serde_json::from_str(&fs::read_to_string(diagnostics).unwrap()).unwrap();
+    assert_eq!(report["profiles"]["count"], 1);
+    assert_eq!(report["gateway"]["status"], "stopped");
     let rejected = backend
         .command(&["usage", "clear", "--json"])
         .stdin(Stdio::null())

@@ -208,6 +208,22 @@ impl Client {
     pub fn clear_api_key(&self) -> Result<GatewayState, String> {
         self.request(Command::ClearApiKey)
     }
+    pub fn import_profiles(
+        &self,
+        backup: crate::maintenance::ProfileBackup,
+    ) -> Result<crate::maintenance::ImportResult, String> {
+        self.request(Command::ImportProfiles(backup))
+    }
+    pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
+        self.request(Command::ExportProfiles {
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
+    pub fn export_diagnostics(&self, path: PathBuf) -> Result<(), String> {
+        self.request(Command::ExportDiagnostics {
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
     pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
         self.request(Command::Usage(query))
     }

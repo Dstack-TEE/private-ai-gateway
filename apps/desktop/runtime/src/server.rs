@@ -343,6 +343,23 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::ActivateProfile { profile_id } => value(runtime.activate_profile(profile_id)?),
             Command::DeleteProfile { profile_id } => value(runtime.delete_profile(profile_id)?),
             Command::ClearApiKey => value(runtime.clear_api_key()?),
+            Command::ImportProfiles(backup) => value(runtime.import_profiles(backup)?),
+            Command::ExportProfiles { path } => {
+                let path = std::path::PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err("Export path must be absolute".into());
+                }
+                runtime.export_profiles(path)?;
+                value(())
+            }
+            Command::ExportDiagnostics { path } => {
+                let path = std::path::PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err("Export path must be absolute".into());
+                }
+                runtime.export_diagnostics(path, protocol::BUILD_VERSION)?;
+                value(())
+            }
             Command::Usage(query) => value(runtime.query_usage(query)?),
             Command::UsageRecord { record_id } => value(runtime.usage_record(&record_id)?),
             Command::ExportUsage { query, path } => {
