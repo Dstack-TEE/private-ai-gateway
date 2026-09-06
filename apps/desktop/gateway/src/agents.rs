@@ -1304,6 +1304,26 @@ impl Projector {
                 }
             }
         }
+        #[cfg(windows)]
+        if agent == Agent::Pi && status.connected && !record.disabled && !record.cleanup_pending {
+            if let Ok(command) = helper_command(&self.helper_exe, "pi") {
+                let legacy = format!("!{command}");
+                let legacy_record = record.fields.iter().any(|field| {
+                    field.path == owned(&["providers", "private-ai-gateway"])
+                        && matches!(&field.value, Some(ConfigValue::Json(provider))
+                            if provider.get("apiKey").and_then(serde_json::Value::as_str) == Some(legacy.as_str()))
+                });
+                if legacy_record {
+                    status.connected = false;
+                    status.authorized = false;
+                    status.attention = Some(
+                        "This Pi connection uses the old Windows credential command. Disconnect, \
+                         then Connect again to update it."
+                            .to_string(),
+                    );
+                }
+            }
+        }
         status
     }
 
@@ -2222,6 +2242,79 @@ mod tests {
         assert!(pi_status.connected && pi_status.authorized);
         let pi_token = sandbox.projector.tokens.read("pi").unwrap().unwrap();
         assert_eq!(tokens.agent_for(&pi_token), Some("pi"));
+        #[cfg(windows)]
+        {
+            let config_path = Agent::Pi.config_path(&sandbox.home, sandbox.projector.tool_env);
+            let mut legacy = provider.clone();
+            legacy["apiKey"] = json!(format!(
+                "!{}",
+                helper_command(&sandbox.projector.helper_exe, "pi").unwrap()
+            ));
+            let value = ConfigValue::Json(legacy);
+            let mut config = doc(&sandbox, Agent::Pi);
+            config
+                .set_value(&["providers", "private-ai-gateway"], &value)
+                .unwrap();
+            write(&config_path, &config.render().unwrap());
+            let mut store = sandbox.projector.load_store().unwrap();
+            store
+                .get_mut("pi")
+                .unwrap()
+                .fields
+                .iter_mut()
+                .find(|field| field.path == owned(&["providers", "private-ai-gateway"]))
+                .unwrap()
+                .value = Some(value);
+            sandbox.projector.save_store(&store).unwrap();
+            let config_before = fs::read(&config_path).unwrap();
+            let record_before = fs::read(sandbox.projector.store_path()).unwrap();
+            let token_before = fs::read(sandbox.projector.tokens.path("pi")).unwrap();
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let pi = statuses.iter().find(|status| status.id == "pi").unwrap();
+            assert!(pi.recorded && !pi.connected && !pi.authorized);
+            assert!(pi
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("Disconnect, then Connect"));
+            assert_eq!(tokens.agent_for(&pi_token), None);
+            assert_eq!(fs::read(&config_path).unwrap(), config_before);
+            assert_eq!(
+                fs::read(sandbox.projector.store_path()).unwrap(),
+                record_before
+            );
+            assert_eq!(
+                fs::read(sandbox.projector.tokens.path("pi")).unwrap(),
+                token_before
+            );
+
+            config
+                .set_str(
+                    &["providers", "private-ai-gateway", "apiKey"],
+                    "!user-command",
+                )
+                .unwrap();
+            write(&config_path, &config.render().unwrap());
+            let edited = fs::read(&config_path).unwrap();
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let pi = statuses.iter().find(|status| status.id == "pi").unwrap();
+            assert!(pi.recorded && !pi.connected && !pi.authorized);
+            assert!(pi
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("no longer matches"));
+            assert_eq!(tokens.agent_for(&pi_token), None);
+            assert_eq!(fs::read(&config_path).unwrap(), edited);
+            assert_eq!(
+                fs::read(sandbox.projector.store_path()).unwrap(),
+                record_before
+            );
+            assert_eq!(
+                fs::read(sandbox.projector.tokens.path("pi")).unwrap(),
+                token_before
+            );
+        }
         disconnect(&sandbox, Agent::Pi);
 
         let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
