@@ -129,7 +129,27 @@ protocol is the service's own response, shown as such.
 | Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, gateway model discovery, `apiKeyHelper`; optional `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
 | OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
 | Pi | `~/.pi/agent/models.json`: an app-owned Responses provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
-| Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
+| Hermes | Platform Hermes home, `config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
+
+Hermes honors `HERMES_HOME` first. Otherwise Windows uses
+`%LOCALAPPDATA%\hermes` (falling back to `%USERPROFILE%\AppData\Local\hermes`),
+while macOS/Linux use `~/.hermes`. Windows install detection also checks
+`<Hermes home>/bin`, as used by the official native Windows installer.
+`PRIVATE_AI_GATEWAY_HOME` disables external agent path overrides so smoke tests
+stay inside their temporary home. These paths follow
+[Hermes 9a84bee](https://github.com/NousResearch/hermes-agent/blob/9a84bee265daad14340a80d7585928cd8ea1f9eb/hermes_constants.py#L45).
+
+Windows Hermes [`key_cmd`](https://github.com/NousResearch/hermes-agent/blob/9a84bee265daad14340a80d7585928cd8ea1f9eb/agent/command_token_source.py#L36)
+uses Python `shell=True` (normally `cmd.exe`). Its
+projection uses Windows PowerShell `-EncodedCommand` so paths containing spaces
+or shell metacharacters reach the helper unchanged; helper failures remain
+failures. The installed-package test runs this generated command through
+Python's actual shell contract, including a special-character path and missing
+token/executable cases. A passing command test is not proof of successful
+verified inference or a complete Hermes connection workflow.
+Pi's Windows credential commands use its own Bash discovery with a system-shell
+fallback; not every Windows shell configuration has been validated. Neither
+contract should be inferred from Claude Code's Git `sh` behavior.
 
 The verified catalog is the only model source. Codex requires a selected
 verified default because it does not discover this custom provider's model

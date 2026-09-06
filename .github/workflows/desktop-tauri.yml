@@ -74,6 +74,9 @@ jobs:
       - name: Test Tauri backend
         run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
 
+      - name: Hermes path and projection regression
+        run: cargo test --release --locked --manifest-path gateway/Cargo.toml --lib hermes
+
       # Cargo integration tests also compile the root server binary, whose
       # dstack transport is Unix-only. Windows still exercises installed aci.exe
       # below; it must not be reported as passing this integration suite.
@@ -187,6 +190,9 @@ jobs:
             Run-Installer $installers[0].FullName "/S /D=$installDir"
             node scripts/packaged-sidecars-smoke.mjs $installDir
             if ($LASTEXITCODE -ne 0) { throw 'Installed sidecar smoke failed' }
+            $env:PAG_TEST_HELPER_PATH = "$installDir/private-ai-gateway-helper.exe"
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Hermes Windows credential command failed' }
             cargo test --release --locked --manifest-path gateway/Cargo.toml -- --ignored keyring_round_trip
             if ($LASTEXITCODE -ne 0) { throw 'Credential Manager round trip failed' }
             $webviews = @(Get-ChildItem @("${env:ProgramFiles(x86)}/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe", "$env:LOCALAPPDATA/Microsoft/EdgeWebView/Application/*/msedgewebview2.exe") -ErrorAction SilentlyContinue)

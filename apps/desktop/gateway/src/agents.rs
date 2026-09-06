@@ -189,7 +189,15 @@ impl Agent {
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
-                .unwrap_or_else(|| home.join(".hermes"))
+                .unwrap_or_else(|| {
+                    if cfg!(windows) {
+                        override_dir("LOCALAPPDATA")
+                            .unwrap_or_else(|| home.join("AppData").join("Local"))
+                            .join("hermes")
+                    } else {
+                        home.join(".hermes")
+                    }
+                })
                 .join("config.yaml"),
         }
     }
@@ -353,7 +361,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
                     &["providers", provider, "key_cmd"],
-                    helper_command(inputs.helper_exe, "hermes")?,
+                    hermes_helper_command(inputs.helper_exe)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
             ];
@@ -678,6 +686,39 @@ fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
     Ok(format!("{quoted} --agent-token {agent}"))
 }
 
+#[cfg(not(windows))]
+fn hermes_helper_command(exe: &Path) -> Result<String, String> {
+    helper_command(exe, "hermes")
+}
+
+#[cfg(windows)]
+fn hermes_helper_command(exe: &Path) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let path = exe
+        .to_str()
+        .ok_or_else(|| "The app path is not valid Unicode".to_string())?;
+    if path.contains('\0') {
+        return Err("The app path contains a null character".to_string());
+    }
+    // Hermes uses Python shell=True (cmd.exe). Encoding the PowerShell command
+    // and its path data keeps shell metacharacters and Unicode quote characters
+    // out of both parsers. No execution-policy override is needed.
+    let encoded_path = STANDARD.encode(
+        path.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let command = format!(
+        "$ErrorActionPreference = 'Stop'; & ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded_path}'))) --agent-token hermes; exit $LASTEXITCODE"
+    );
+    let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    Ok(format!(
+        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+        STANDARD.encode(bytes)
+    ))
+}
+
 /// Credential-bearing keys: their values never reach previews, manifests,
 /// or logs.
 fn is_sensitive(path: &[String]) -> bool {
@@ -762,13 +803,15 @@ impl Projector {
         endpoint: &str,
         secrets: Arc<dyn SecretStore>,
     ) -> Result<Self, String> {
-        let home = env_path(HOME_OVERRIDE_ENV).map_or_else(home_dir, Ok)?;
+        let home_override = env_path(HOME_OVERRIDE_ENV);
+        let tool_env = home_override.is_none();
+        let home = home_override.map_or_else(home_dir, Ok)?;
         Ok(Self::at(
             home,
             app_data_dir()?,
             helper_exe,
             endpoint,
-            true,
+            tool_env,
             secrets,
         ))
     }
@@ -1601,7 +1644,12 @@ fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
 }
 
 fn find_cli(agent: Agent, home: &Path, tool_env: bool) -> Option<PathBuf> {
-    let paths = cli_paths(home, tool_env);
+    let mut paths = cli_paths(home, tool_env);
+    if cfg!(windows) && agent == Agent::Hermes {
+        if let Some(directory) = agent.config_path(home, tool_env).parent() {
+            paths.push(directory.join("bin"));
+        }
+    }
     find_cli_in_paths(agent, &paths)
 }
 
@@ -1855,6 +1903,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
+        const CASE_ENV: &str = "PAG_TEST_HERMES_PATH_CASE";
+        const ROOT_ENV: &str = "PAG_TEST_HERMES_PATH_ROOT";
+        if let Ok(case) = env::var(CASE_ENV) {
+            let root = PathBuf::from(env::var_os(ROOT_ENV).unwrap());
+            let home = root.join(if case == "isolated" {
+                "isolated"
+            } else {
+                "user"
+            });
+            let default = if cfg!(windows) {
+                home.join("AppData").join("Local").join("hermes")
+            } else {
+                home.join(".hermes")
+            };
+            let expected = match case.as_str() {
+                "override" => root.join("custom-profile"),
+                "local-appdata" if cfg!(windows) => root.join("local-data").join("hermes"),
+                _ => default,
+            };
+            let projector = Projector::new(
+                root.join(helper_binary_name()),
+                ENDPOINT,
+                Arc::new(MemoryStore::default()),
+            )
+            .unwrap();
+            assert_eq!(projector.home, home);
+            assert_eq!(
+                Agent::Hermes.config_path(&projector.home, projector.tool_env),
+                expected.join("config.yaml")
+            );
+            if case == "isolated" {
+                assert!(!projector.tool_env);
+                assert_eq!(projector.data_dir, home.join(".private-ai-gateway"));
+                for agent in Agent::ALL {
+                    assert!(agent
+                        .config_path(&projector.home, projector.tool_env)
+                        .starts_with(&home));
+                }
+            }
+            if cfg!(windows) {
+                let executable = expected.join("bin").join("hermes.exe");
+                write(&executable, "launcher fixture");
+                assert_eq!(
+                    find_cli(Agent::Hermes, &projector.home, projector.tool_env),
+                    Some(executable)
+                );
+            }
+            return;
+        }
+
+        // Process-local environment avoids races with the other agent tests.
+        let root = tempfile::tempdir().unwrap();
+        for case in ["default", "local-appdata", "override", "isolated"] {
+            let mut command = Command::new(env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "agents::tests::hermes_paths_follow_platform_overrides_and_isolate_test_home",
+                ])
+                .env(CASE_ENV, case)
+                .env(ROOT_ENV, root.path())
+                .env("HOME", root.path().join("user"))
+                .env("USERPROFILE", root.path().join("user"))
+                .env("APPDATA", root.path().join("roaming"))
+                .env("XDG_DATA_HOME", root.path().join("data"))
+                .env("PATH", "")
+                .env_remove(HOME_OVERRIDE_ENV)
+                .env_remove("HERMES_HOME")
+                .env_remove("LOCALAPPDATA");
+            if case != "default" {
+                command.env("LOCALAPPDATA", root.path().join("local-data"));
+            }
+            if matches!(case, "override" | "isolated") {
+                command.env("HERMES_HOME", root.path().join("custom-profile"));
+            }
+            if case == "isolated" {
+                command
+                    .env(HOME_OVERRIDE_ENV, root.path().join("isolated"))
+                    .env("CODEX_HOME", root.path().join("outside-codex"));
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_output_resolves_the_discovered_shebang_runtime() {
@@ -2064,7 +2199,7 @@ mod tests {
             .contains("--agent-token pi"));
         disconnect(&sandbox, Agent::Pi);
 
-        let path = sandbox.home.join(".hermes").join("config.yaml");
+        let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
         write(&path, "# keep this comment\ntheme: dark\n");
         let preview = sandbox
             .projector
@@ -2122,9 +2257,77 @@ mod tests {
                 .as_deref(),
             Some("chat_completions")
         );
-        assert!(hermes
-            .get_str(&["providers", "private-ai-gateway", "key_cmd"])
-            .is_some_and(|command| command.contains("--agent-token hermes")));
+        assert_eq!(
+            hermes.get_str(&["providers", "private-ai-gateway", "key_cmd"]),
+            Some(hermes_helper_command(&fresh.projector.helper_exe).unwrap())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed helper and Python on a disposable Windows runner"]
+    fn hermes_windows_installed_command_round_trip() {
+        let installed = PathBuf::from(env::var_os("PAG_TEST_HELPER_PATH").unwrap());
+        assert!(installed.is_absolute() && installed.is_file());
+        assert!(installed.to_str().unwrap().contains(' '));
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join(".private-ai-gateway");
+        let tokens = TokenFiles::new(&data);
+        let hostile = home
+            .path()
+            .join("quote'\u{2019}; Write-Output injected; # %PAG_CMD_PROBE% ! ^ & (meta)")
+            .join(helper_binary_name());
+        fs::create_dir_all(hostile.parent().unwrap()).unwrap();
+        fs::copy(&installed, &hostile).unwrap();
+        for executable in [&installed, &hostile] {
+            let token = tokens.ensure("hermes").unwrap();
+            let fields = fields(
+                Agent::Hermes,
+                &Inputs {
+                    endpoint: ENDPOINT,
+                    helper_exe: executable,
+                    token_path: &tokens.path("hermes"),
+                    codex_catalog_path: &data.join(CODEX_CATALOG_FILE),
+                    catalog: Some(&catalog()),
+                    options: &ConnectOptions::default(),
+                },
+            )
+            .unwrap();
+            let command = fields
+                .into_iter()
+                .find(|field| field.path == owned(&["providers", "private-ai-gateway", "key_cmd"]))
+                .and_then(|field| match field.value {
+                    Some(ConfigValue::Str(command)) => Some(command),
+                    _ => None,
+                })
+                .unwrap();
+            let run = || {
+                Command::new("python")
+                    .args([
+                        "-c",
+                        "import subprocess,sys; p=subprocess.run(sys.argv[1],shell=True,capture_output=True,text=True,timeout=15); sys.stdout.write(p.stdout); sys.stderr.write(p.stderr); sys.exit(p.returncode)",
+                        &command,
+                    ])
+                    .env(HOME_OVERRIDE_ENV, home.path())
+                    .env("PAG_CMD_PROBE", "expanded-by-shell")
+                    .output()
+                    .unwrap()
+            };
+            let output = run();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), token);
+            fs::remove_file(tokens.path("hermes")).unwrap();
+            let output = run();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            if executable == &hostile {
+                fs::remove_file(executable).unwrap();
+                let output = run();
+                assert!(!output.status.success());
+                assert!(output.stdout.is_empty());
+            }
+        }
+        assert!(hermes_helper_command(Path::new("bad\0path")).is_err());
     }
 
     #[test]
