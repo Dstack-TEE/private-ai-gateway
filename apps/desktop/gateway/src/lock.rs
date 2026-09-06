@@ -8,11 +8,11 @@
 
 use std::{fs, io, path::Path};
 
-use fd_lock::{RwLock, RwLockWriteGuard};
+use fd_lock::RwLock;
 
 use crate::tokens::create_private_dir;
 
-fn open(dir: &Path, name: &str) -> io::Result<RwLock<fs::File>> {
+fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
     let file = fs::OpenOptions::new()
         .create(true)
@@ -20,23 +20,22 @@ fn open(dir: &Path, name: &str) -> io::Result<RwLock<fs::File>> {
         .read(true)
         .write(true)
         .open(dir.join(name))?;
-    Ok(RwLock::new(file))
+    Ok(file)
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
 pub struct InstanceLock {
-    _guard: RwLockWriteGuard<'static, fs::File>,
+    _file: fs::File,
 }
 
 /// Try to become the primary instance; `None` when another process holds it.
-/// The lock file handle is intentionally leaked so the guard can live as long
-/// as the process.
+/// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
-    let lock: &'static mut RwLock<fs::File> = Box::leak(Box::new(open(data_dir, "instance.lock")?));
-    match lock.try_write() {
-        Ok(guard) => Ok(Some(InstanceLock { _guard: guard })),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(error),
+    let file = open(data_dir, "instance.lock")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(InstanceLock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -45,8 +44,10 @@ pub fn with_apply_lock<T>(
     data_dir: &Path,
     f: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut lock = open(data_dir, "apply.lock")
-        .map_err(|error| format!("Cannot open the agent config lock: {error}"))?;
+    let mut lock = RwLock::new(
+        open(data_dir, "apply.lock")
+            .map_err(|error| format!("Cannot open the agent config lock: {error}"))?,
+    );
     let _guard = lock
         .write()
         .map_err(|error| format!("Cannot take the agent config lock: {error}"))?;
@@ -59,15 +60,29 @@ mod tests {
 
     #[test]
     fn instance_lock_is_exclusive_across_handles() {
-        let dir = std::env::temp_dir().join(format!("pag-lock-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let first = instance(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let first = instance(dir.path()).unwrap();
         assert!(first.is_some());
         // A second independent handle (as a second process would open) loses.
-        assert!(instance(&dir).unwrap().is_none());
+        assert!(instance(dir.path()).unwrap().is_none());
         drop(first);
-        assert!(instance(&dir).unwrap().is_some());
-        let _ = fs::remove_dir_all(&dir);
+        assert!(instance(dir.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn instance_lock_excludes_legacy_fd_lock_in_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut legacy = RwLock::new(open(dir.path(), "instance.lock").unwrap());
+        let guard = legacy.try_write().unwrap();
+        assert!(instance(dir.path()).unwrap().is_none());
+        drop(guard);
+        let current = instance(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            legacy.try_write().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(current);
+        assert!(legacy.try_write().is_ok());
     }
 
     #[test]

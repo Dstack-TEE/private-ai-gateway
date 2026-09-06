@@ -202,6 +202,11 @@ impl DesktopRuntime {
         if !options.helper_path.is_absolute() {
             return Err("The credential helper path must be absolute".to_string());
         }
+        // Establish ownership before settings migration, storage, or listeners.
+        let data_dir = app_data_dir()?;
+        let instance = lock::instance(&data_dir)
+            .map_err(|error| format!("Cannot take the instance lock: {error}"))?
+            .ok_or_else(|| "Another Private AI Gateway instance is already running".to_string())?;
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
         let (mut settings, mut settings_error, migrated_legacy) = match service_config::load() {
             Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),
@@ -235,22 +240,9 @@ impl DesktopRuntime {
                 Some(error),
             ),
         };
-        let data_dir = app_data_dir()?;
-        let (instance, listener, launch_error) = match lock::instance(&data_dir) {
-            Ok(Some(instance)) => match proxy::bind_std(local.bind) {
-                Ok(listener) => (Some(instance), Some(listener), None),
-                Err(error) => (Some(instance), None, Some(error)),
-            },
-            Ok(None) => (
-                None,
-                None,
-                Some("Another Private AI Gateway instance is already running".to_string()),
-            ),
-            Err(error) => (
-                None,
-                None,
-                Some(format!("Cannot take the instance lock: {error}")),
-            ),
+        let (listener, launch_error) = match proxy::bind_std(local.bind) {
+            Ok(listener) => (Some(listener), None),
+            Err(error) => (None, Some(error)),
         };
         let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
         let proxy = ProxyState::new(proxy_events_tx)?;
@@ -299,7 +291,7 @@ impl DesktopRuntime {
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
             helper_path: options.helper_path,
-            instance,
+            instance: Some(instance),
         });
 
         match (listener, launch_error) {
@@ -1347,6 +1339,64 @@ mod tests {
             String,
         > {
             Err("No sidecar in this listener test".to_string())
+        }
+    }
+
+    #[test]
+    fn launch_requires_instance_ownership_before_initialization() {
+        const CASE_ENV: &str = "PAG_TEST_INSTANCE_OWNERSHIP";
+        if let Ok(case) = std::env::var(CASE_ENV) {
+            let executor = tokio::runtime::Runtime::new().unwrap();
+            let result = DesktopRuntime::launch(RuntimeOptions {
+                launcher: Arc::new(NoSidecar),
+                helper_path: app_data_dir().unwrap().join("helper"),
+                task_runtime: executor.handle().clone(),
+            });
+            let error = result
+                .err()
+                .expect("Launch must refuse an unavailable lock");
+            match case.as_str() {
+                "held" => assert_eq!(
+                    error,
+                    "Another Private AI Gateway instance is already running"
+                ),
+                "invalid" => assert!(error.starts_with("Cannot take the instance lock:")),
+                _ => panic!("Unknown instance ownership test case"),
+            }
+            return;
+        }
+
+        for case in ["held", "invalid"] {
+            let home = tempfile::tempdir().unwrap();
+            let data = home.path().join(".private-ai-gateway");
+            std::fs::create_dir(&data).unwrap();
+            let _owner = if case == "held" {
+                Some(lock::instance(&data).unwrap().unwrap())
+            } else {
+                std::fs::create_dir(data.join("instance.lock")).unwrap();
+                None
+            };
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::launch_requires_instance_ownership_before_initialization",
+                    "--nocapture",
+                ])
+                .env(CASE_ENV, case)
+                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let entries: Vec<_> = std::fs::read_dir(&data)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(entries, vec![std::ffi::OsString::from("instance.lock")]);
         }
     }
 
