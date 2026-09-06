@@ -19,7 +19,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
             WINDOW_SUBMENU_ID,
         },
-        Emitter,
+        Emitter, Manager,
     };
 
     let about = AboutMetadata {
@@ -76,7 +76,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::minimize(app, None)?,
             &PredefinedMenuItem::maximize(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &MenuItem::with_id(
+                app,
+                "close-window",
+                "Close Window",
+                true,
+                Some("CmdOrCtrl+W"),
+            )?,
         ],
     )?;
     let documentation =
@@ -94,6 +100,18 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         &[&application, &edit, &view, &window, &help],
     )?)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
+        "close-window" => {
+            if let Some(window) = app
+                .webview_windows()
+                .into_values()
+                .find(|window| window.is_focused().unwrap_or(false))
+            {
+                if let Err(error) = crate::native_dialog::request_close(&window) {
+                    app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                        .report_error(error);
+                }
+            }
+        }
         "settings" => {
             crate::tray::show_window(app);
             let _ = app.emit(NAVIGATE_EVENT, "settings");

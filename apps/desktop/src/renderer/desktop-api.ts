@@ -29,6 +29,7 @@ export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
 delete window.__GATEWAY_INITIAL_STATE__;
 
 export const desktopApi: DesktopApi = {
+  showEditMenu: (editable) => invoke("show_edit_menu", { editable }),
   getAppearance: () => invoke("get_appearance"),
   setAppearance: (appearance) => invoke("set_appearance", { appearance }),
   onAppearanceChange: (listener) => subscribe("gateway://appearance", listener),
@@ -102,6 +103,7 @@ export const desktopApi: DesktopApi = {
     return invoke("close_native_dialog");
   },
   nativeDialogReady: () => invoke("native_dialog_ready"),
+  onNativeCloseRequest: (listener) => subscribe("gateway://dialog-close-requested", listener),
   openAboutLink(target: "documentation" | "github"): Promise<void> {
     return invoke("open_about_link", { target });
   },

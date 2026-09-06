@@ -335,6 +335,7 @@ export function mockApi(name: string | null): DesktopApi {
   let updateAttempts = 0;
   let keyRotations = 0;
   return {
+    showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
     getAppearance: async () => {
       const value = localStorage.getItem("pag-preview-appearance");
       return value === "light" || value === "dark" ? value : "system";
@@ -381,6 +382,7 @@ export function mockApi(name: string | null): DesktopApi {
       return clientKey;
     },
     saveLocalApiConfig: async (config) => {
+      if (name === "local-save-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-local-save", () => resolve(), { once: true }));
       if (config.port < 1024 || config.port > 65535) throw new Error("Port must be between 1024 and 65535");
       if (!config.allowNetworkAccess && !["127.0.0.1", "::1"].includes(config.listenAddress)) {
         throw new Error("Turn on Allow network access before listening outside this Mac");
@@ -403,6 +405,10 @@ export function mockApi(name: string | null): DesktopApi {
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => undefined,
+    onNativeCloseRequest: (listener) => {
+      window.addEventListener("mock:native-close", listener);
+      return () => window.removeEventListener("mock:native-close", listener);
+    },
     openAboutLink: async () => undefined,
     onAgentsChange: () => () => undefined,
     openAgentWebsite: async () => undefined,
@@ -519,6 +525,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     queryUsage: async (query: UsageQuery) => {
+      if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));
       if (name === "usage-query-error" && query.model) throw new Error("Usage database temporarily unavailable");
       const filtered = filteredHistory(query);
       const offset = query.cursor ? Number(query.cursor.split(":")[0]) : 0;

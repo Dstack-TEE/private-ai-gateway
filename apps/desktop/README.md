@@ -106,6 +106,24 @@ an appearance event. Cmd+, opens Settings on macOS through the native app menu;
 Ctrl+, is also handled by the renderer. Native editing shortcuts retain their
 platform roles. Active modal sheets keep their focus rather than being discarded.
 
+Main window position, size and maximized state are persisted by the official
+`tauri-plugin-window-state`; transient dialogs, visibility and decorations are
+excluded. The plugin checks saved positions against connected monitors and leaves
+placement to the OS when the saved monitor is unavailable.
+
+Native close requests and Cmd/Ctrl+W go through the topmost dialog's existing
+dismissal guard before destruction. Saving and update installation cannot be
+bypassed by an OS close button. Cmd+. uses the same cancel guard. Form dialogs
+focus the first enabled editable field; reading dialogs focus their heading.
+Closing a nested editor restores focus to its trigger. The fixed desktop sidebar
+opts out of shadcn's collapse shortcut; Cmd/Ctrl+B is left untouched.
+
+All renderer windows suppress the WebView navigation context menu and reload
+shortcuts (Cmd/Ctrl+R and F5). Text fields and selected text open a Tauri native
+editing menu; read-only fields omit Cut/Paste. Undo/Redo menu roles are macOS-only,
+as documented by Tauri. Normal text-editing shortcuts remain unchanged. File drops
+cannot navigate the embedded browser away from the application.
+
 Blocking Tauri commands use the shared `run_blocking` boundary for filesystem,
 SQLite, credential, agent and startup-preference work. Native window presentation
 stays on the platform thread. Exit restoration runs in the background and prevents

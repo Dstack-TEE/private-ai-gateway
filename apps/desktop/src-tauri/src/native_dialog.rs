@@ -198,41 +198,48 @@ pub fn open(
         None => builder.center(),
     };
     #[cfg(target_os = "macos")]
-    {
-        builder
-            .closable(false)
-            .hidden_title(true)
-            .title_bar_style(tauri::TitleBarStyle::Overlay)
-            .build()
-            .map_err(window_error)?;
-        Ok(())
-    }
+    let window = builder
+        .closable(false)
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .build()
+        .map_err(window_error)?;
     #[cfg(not(target_os = "macos"))]
-    {
-        let window = builder
-            .parent(&main)
-            .map_err(window_error)?
-            .build()
-            .map_err(window_error)?;
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                if let Err(error) = main.set_enabled(true).and_then(|_| main.set_focus()) {
-                    eprintln!("Cannot restore the dialog parent: {error}");
-                }
+    let window = builder
+        .parent(&main)
+        .map_err(window_error)?
+        .build()
+        .map_err(window_error)?;
+    let dialog = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            if let Err(error) = request_close(&dialog) {
+                eprintln!("Cannot request dialog close: {error}");
             }
-        });
-        if spec.label == UPDATE_PROGRESS_LABEL {
-            let app = app.clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    if !crate::updates::can_close_progress(&app) {
-                        api.prevent_close();
-                    }
-                }
-            });
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Err(error) = main.set_enabled(true).and_then(|_| main.set_focus()) {
+                eprintln!("Cannot restore the dialog parent: {error}");
+            }
+        }
+    });
+    Ok(())
+}
+
+pub fn request_close(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if !DIALOG_LABELS.contains(&window.label()) {
+        return window.close().map_err(window_error);
     }
+    if window.label() == PROFILES_LABEL {
+        if let Some(child) = window.app_handle().get_webview_window(PROFILE_EDITOR_LABEL) {
+            return focus_if_visible(&child);
+        }
+    }
+    window
+        .emit("gateway://dialog-close-requested", ())
+        .map_err(window_error)
 }
 
 pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
@@ -271,6 +278,12 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == PROFILES_LABEL {
+        if let Some(child) = window.app_handle().get_webview_window(PROFILE_EDITOR_LABEL) {
+            focus_if_visible(&child)?;
+            return Err("Close the profile editor first".to_string());
+        }
+    }
     if window.label() == UPDATE_PROGRESS_LABEL
         && !crate::updates::can_close_progress(window.app_handle())
     {
@@ -285,7 +298,7 @@ pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        window.close().map_err(window_error)
+        window.destroy().map_err(window_error)
     }
 }
 
@@ -326,7 +339,7 @@ mod macos {
             if let Some(parent) = sheet.sheetParent() {
                 parent.endSheet(&sheet);
             }
-            window.close().map_err(window_error)
+            window.destroy().map_err(window_error)
         })
     }
 

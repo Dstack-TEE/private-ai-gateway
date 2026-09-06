@@ -45,10 +45,12 @@ import { UpdateControl, UpdateChannelControl, UpdateProgressDialog, UpdateProgre
 import type { UpdateProgress } from "../shared/contracts";
 import { Button } from "./components/ui/button";
 import { ActionItem } from "./components/action-item";
-import type { UsageMetric } from "./components/usage-chart";
+import { UsageChart, type UsageMetric } from "./components/usage-chart";
 import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
+import { installNativeInteractions } from "./lib/native-interactions";
+import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSet, FieldLegend, FieldSeparator } from "./components/ui/field";
@@ -81,7 +83,6 @@ import type {
 
 // `?mock=<scenario>` renders the window against canned state for screenshots.
 const query = new URLSearchParams(window.location.search);
-const UsageChart = lazy(() => import("./components/usage-chart").then((module) => ({ default: module.UsageChart })));
 const UsageDatePicker = lazy(() => import("./components/usage-date-picker").then((module) => ({ default: module.UsageDatePicker })));
 const UsageTable = lazy(() => import("./components/usage-table").then((module) => ({ default: module.UsageTable })));
 const previewMode = query.has("mock");
@@ -314,6 +315,7 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
 function NativeUpdateProgressWindow(): React.JSX.Element {
   const [progress, setProgress] = useState<UpdateProgress>();
   const native = useNativeGatewayWindow("Software Update", Boolean(progress));
+  useDialogClose(native.close, Boolean(progress?.error), !native.closed);
   useEffect(() => desktopApi.onUpdateProgress(setProgress), []);
   if (native.closed) return <main aria-label="Software update closed" />;
   return <main className="native-dialog-host p-6 flex flex-col gap-4" aria-labelledby="update-title">
@@ -326,12 +328,7 @@ function NativeUpdateProgressWindow(): React.JSX.Element {
 }
 
 function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element | null {
-  useEffect(() => {
-    if (!error) return;
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } };
-    window.addEventListener("keydown", escape);
-    return () => window.removeEventListener("keydown", escape);
-  }, [error, onClose]);
+  useDialogClose(onClose, Boolean(error), Boolean(error));
   // The native window remains hidden until content or an actionable error is ready.
   if (!error) return null;
   return (
@@ -1164,7 +1161,7 @@ function Sidebar({
         <BrandMark className="brand-mark" />
         <span>{brand.productName}</span>
       </div>
-      <SidebarProvider className="min-h-0 flex-col">
+      <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
       <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>
         <SidebarMenu>
         {VIEWS.map((entry) => {
@@ -1948,7 +1945,7 @@ function UsageView({
       <UsageStats page={page} />
       <section className="group usage-over-time" aria-labelledby="usage-chart-title">
         <h2 className="group-title" id="usage-chart-title">Usage over time <span>{usageDateLabel(range)}</span></h2>
-        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} /></Suspense>
+        <UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} />
       </section>
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
@@ -2263,7 +2260,7 @@ function ProfileListSheet({
     onClose();
   };
   return (
-    <Sheet title="Profiles" className="profiles-sheet" onClose={onClose}>
+    <Sheet title="Profiles" className="profiles-sheet" dismissible={!workingProfileId} onClose={onClose}>
       <p className="sheet-text">Choose the verified service and credential used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner sheet-banner profile-availability">
@@ -2303,7 +2300,7 @@ function ProfileListSheet({
       <SheetActions leading={
         <Button type="button" variant="outline" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
       }>
-        <Button type="button" variant="outline" onClick={onClose}>Done</Button>
+        <Button type="button" variant="outline" disabled={Boolean(workingProfileId)} onClick={onClose}>Done</Button>
       </SheetActions>
     </Sheet>
   );
@@ -2332,7 +2329,6 @@ function ProfileEditorSheet({
 }): React.JSX.Element {
   const frozen = busy;
   const isNew = !profile;
-  const [nameEdited, setNameEdited] = useState(Boolean(profile));
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => ({
     id: profile?.id ?? `profile-${crypto.randomUUID()}`,
     name: profile?.name ?? "Phala",
@@ -2357,7 +2353,9 @@ function ProfileEditorSheet({
     setDraft((current) => ({
       ...current,
       provider: next,
-      name: nameEdited ? current.name : preset?.name ?? "Custom",
+      name: current.name === (SERVICE_PRESETS.find((service) => service.id === current.provider)?.name ?? "Custom")
+        ? preset?.name ?? "Custom"
+        : current.name,
       remoteUrl: preset?.url ?? (servicePreset(current.remoteUrl) ? "" : current.remoteUrl),
     }));
     setApiKeyDraft("");
@@ -2399,11 +2397,13 @@ function ProfileEditorSheet({
     onComplete();
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" dismissible={!saving} onClose={onClose}>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
       {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll">
-        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Confidential AI provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
+        <FieldSet>
+        <FieldLegend variant="label">Provider</FieldLegend>
+        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
               <ServiceLogo url={service.url} />
@@ -2417,8 +2417,9 @@ function ProfileEditorSheet({
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
           </ToggleGroupItem>
         </ToggleGroup>
+        </FieldSet>
         <FieldGroup className="mt-6">
-          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => { setNameEdited(true); setDraft((current) => ({ ...current, name: event.target.value })); }} disabled={frozen || saving} autoComplete="off" /></FormField>
+          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
           <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></FormField>
           <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
@@ -2498,7 +2499,7 @@ function LocalApiSheet({
     if (!message) onClose();
   };
   return (
-    <Sheet title="Local API settings" className="local-api-sheet" dismissible={!saving} onClose={onClose}>
+    <Sheet title="Local API settings" className="local-api-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-6">
           <FieldGroup>
@@ -2795,5 +2796,7 @@ function WindowContent(): React.JSX.Element {
 }
 
 export function Renderer(): React.JSX.Element {
-  return <AppearanceProvider api={desktopApi}><WindowContent /></AppearanceProvider>;
+  const [interactionError, setInteractionError] = useState("");
+  useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
+  return <AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
 }

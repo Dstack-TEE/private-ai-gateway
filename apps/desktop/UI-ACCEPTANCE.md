@@ -95,7 +95,9 @@ upgrade/restart still require platform acceptance.
 
 ## Verification
 
-- Renderer: 36 tests cover examples, pre-React system-dark styling, appearance persistence, Settings
+- Renderer: 39 tests cover native close-request dispatch and save guards, nested
+  focus return, fixed-sidebar shortcuts, native editing-menu dispatch, browser-navigation suppression,
+  examples, pre-React system-dark styling, appearance persistence, Settings
   shortcuts and activation-triggered uninstall detection in addition to UI flows.
 - Gateway: 45 tests passed; one OS keyring integration test intentionally ignored.
 - Runtime: 19 tests passed, including exit retry and post-exit mutation rejection.
@@ -119,3 +121,7 @@ upgrade/restart still require platform acceptance.
 - macOS signing/notarization of an earlier build is not acceptance of subsequent
   UI or runtime edits. New native builds and human inspection remain necessary.
 - The browser tray is a limited preview, not evidence for native menu behavior.
+- Window persistence uses the official window-state plugin for main-window
+  position/size/maximization only. Monitor-detachment restoration, actual OS close
+  events and VoiceOver still need macOS/Windows platform acceptance; browser
+  dispatch tests verify the shared content guard, not the native event delivery.

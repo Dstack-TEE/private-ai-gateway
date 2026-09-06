@@ -334,6 +334,42 @@ async fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn show_edit_menu(window: tauri::WebviewWindow, editable: bool) -> Result<(), String> {
+    use tauri::menu::{Menu, PredefinedMenuItem};
+    let app = window.app_handle();
+    let menu = Menu::new(app).map_err(|_| "Cannot create editing menu")?;
+    #[cfg(target_os = "macos")]
+    if editable {
+        menu.append_items(&[
+            &PredefinedMenuItem::undo(app, None).map_err(|_| "Cannot create Undo action")?,
+            &PredefinedMenuItem::redo(app, None).map_err(|_| "Cannot create Redo action")?,
+            &PredefinedMenuItem::separator(app).map_err(|_| "Cannot create menu separator")?,
+        ])
+        .map_err(|_| "Cannot build editing menu")?;
+    }
+    if editable {
+        menu.append(&PredefinedMenuItem::cut(app, None).map_err(|_| "Cannot create Cut action")?)
+            .map_err(|_| "Cannot build editing menu")?;
+    }
+    menu.append(&PredefinedMenuItem::copy(app, None).map_err(|_| "Cannot create Copy action")?)
+        .map_err(|_| "Cannot build editing menu")?;
+    if editable {
+        menu.append(
+            &PredefinedMenuItem::paste(app, None).map_err(|_| "Cannot create Paste action")?,
+        )
+        .map_err(|_| "Cannot build editing menu")?;
+    }
+    menu.append(
+        &PredefinedMenuItem::select_all(app, None)
+            .map_err(|_| "Cannot create Select All action")?,
+    )
+    .map_err(|_| "Cannot build editing menu")?;
+    window
+        .popup_menu(&menu)
+        .map_err(|_| "Cannot open editing menu".to_string())
+}
+
+#[tauri::command]
 fn open_native_dialog(
     app: AppHandle,
     kind: String,
@@ -379,6 +415,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| label == "main")
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .manage(updates::PendingUpdate::default())
         .manage(updates::UpdateProgress::default())
         .manage(ExitState::default())
@@ -399,6 +445,7 @@ pub fn run() {
             delete_profile,
             stop_gateway,
             copy_text,
+            show_edit_menu,
             open_native_dialog,
             native_dialog_ready,
             open_agent_website,

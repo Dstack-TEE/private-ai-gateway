@@ -69,6 +69,40 @@ test("Local API help opens examples with model selection and copy actions", asyn
 const nav = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name });
 
+test("desktop suppresses browser reload menus and preserves native editing actions", async ({ page }) => {
+  await page.addInitScript(() => window.addEventListener("mock:edit-menu", (event) => {
+    if (event instanceof CustomEvent) document.documentElement.dataset.editMenu = JSON.stringify(event.detail);
+  }));
+  for (const path of ["/?mock=ready", "/?mock=ready&native-dialog=local-api"]) {
+    await page.goto(path);
+    await expect(page.getByRole("heading").first()).toBeVisible();
+    const prevented = await page.evaluate(() => {
+      const context = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+      document.body.dispatchEvent(context);
+      const reloadKeys = [
+        { key: "F5" }, { key: "r", metaKey: true },
+        { key: "r", ctrlKey: true }, { key: "R", metaKey: true, shiftKey: true },
+      ].map((init) => {
+        const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+      const copy = new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(copy);
+      const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() });
+      drop.dataTransfer?.items.add(new File(["test"], "test.html", { type: "text/html" }));
+      window.dispatchEvent(drop);
+      return { context: context.defaultPrevented, reloadKeys, copy: copy.defaultPrevented, drop: drop.defaultPrevented };
+    });
+    expect(prevented).toEqual({ context: true, reloadKeys: [true, true, true, true], copy: false, drop: true });
+    await expect(page.locator("html")).not.toHaveAttribute("data-edit-menu");
+  }
+  await page.getByLabel("Listen address", { exact: true }).click({ button: "right" });
+  await expect(page.locator("html")).toHaveAttribute("data-edit-menu", '{"editable":true}');
+  await page.getByLabel("Client key", { exact: true }).click({ button: "right" });
+  await expect(page.locator("html")).toHaveAttribute("data-edit-menu", '{"editable":false}');
+});
+
 test("appearance defaults to system, persists and settings shortcut navigates", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/?mock=ready");
@@ -252,9 +286,22 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   const frameCenter = frameBox!.x + frameBox!.width / 2;
   const dialogCenter = dialogBox!.x + dialogBox!.width / 2;
   expect(Math.abs(frameCenter - dialogCenter)).toBeLessThanOrEqual(2);
-  await expect(settingsDialog).toBeFocused();
+  await expect(settingsDialog.getByRole("heading", { name: "Profiles", exact: true })).toBeFocused();
   await expect(settingsDialog).toHaveCSS("outline-style", "none");
 
+});
+
+test("Usage chart preserves its layout while the initial query is pending", async ({ page }) => {
+  await page.goto("/?mock=usage-query-pending");
+  await nav(page, "Usage").click();
+  const chart = page.locator(".usage-chart");
+  await expect(chart).toHaveAttribute("aria-busy", "true");
+  await expect(chart.getByRole("tab", { name: "Tokens", exact: true })).toBeVisible();
+  const before = await chart.boundingBox();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-usage-query")));
+  await expect(chart).toHaveAttribute("aria-busy", "false");
+  await expect(chart.locator(".recharts-surface")).toBeVisible();
+  expect(await chart.boundingBox()).toEqual(before);
 });
 
 test("Profiles keeps its list underneath the profile editor", async ({ page }) => {
@@ -272,8 +319,43 @@ test("Profiles keeps its list underneath the profile editor", async ({ page }) =
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
   await expect(page.locator("dialog[open]")).toHaveCount(2);
-  await editor.getByRole("button", { name: "Cancel" }).click();
+  await expect(editor.getByRole("textbox", { name: "Profile name" })).toBeFocused();
+  await page.keyboard.press("Meta+w");
+  await expect(editor).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "Profiles" })).toBeVisible();
+  await expect(profiles.getByRole("button", { name: "Edit RedPill" })).toBeFocused();
+});
+
+test("native close requests and keyboard close respect a pending save", async ({ page }) => {
+  await page.goto("/?mock=local-save-pending&native-dialog=local-api");
+  const sheet = page.getByRole("dialog", { name: "Local API settings" });
+  await expect(sheet.getByLabel("Listen address", { exact: true })).toBeFocused();
+  await sheet.getByLabel("Port", { exact: true }).fill("4181");
+  await sheet.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(sheet.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:native-close")));
+  await page.keyboard.press("Meta+w");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Meta+.");
+  await expect(sheet).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-local-save")));
+  await expect(sheet).toHaveCount(0);
+
+  await page.goto("/?mock=ready&native-dialog=privacy");
+  await expect(page.getByRole("heading", { name: "Privacy verification" })).toBeFocused();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:native-close")));
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("fixed sidebar does not consume Cmd+B or Ctrl+B", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await expect(nav(page, "Overview")).toBeVisible();
+  const prevented = await page.evaluate(() => ["metaKey", "ctrlKey"].map((modifier) => {
+    const event = new KeyboardEvent("keydown", { key: "b", [modifier]: true, cancelable: true, bubbles: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }));
+  expect(prevented).toEqual([false, false]);
 });
 
 test("complex dialogs render as native child-window surfaces", async ({ page }) => {
@@ -329,6 +411,9 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(dialog).toContainText(entry.text);
     await expect(page.locator("html")).not.toHaveAttribute("data-loading-frame-observed", "true");
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
+    if (entry.name === "New profile") await expect(dialog.getByRole("textbox", { name: "Profile name" })).toBeFocused();
+    else if (entry.name === "Local API settings") await expect(dialog.getByLabel("Listen address", { exact: true })).toBeFocused();
+    else await expect(dialog.getByRole("heading").first()).toBeFocused();
     if (entry.name === "Usage proof") {
       const alignment = await dialog.evaluate((node) => {
         const heading = node.querySelector(".sheet-heading")?.getBoundingClientRect();
@@ -1138,12 +1223,15 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(editor.getByLabel("Service endpoint")).toBeDisabled();
 
   await editor.getByRole("button", { name: "Phala" }).click();
+  await expect(editor.getByText("Provider", { exact: true })).toBeVisible();
+  await expect(editor.getByLabel("Profile name")).toHaveValue("Phala");
   await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://inference.phala.com");
   await expect(editor.getByLabel("Phala AI API key")).toBeVisible();
   await expect(editor.getByText("A key is required for a new provider or endpoint.")).toBeVisible();
   await expect(editor.getByRole("button", { name: "Verify and Save" })).toBeDisabled();
 
   await editor.getByRole("button", { name: "Custom" }).click();
+  await expect(editor.getByLabel("Profile name")).toHaveValue("Custom");
   await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
   await editor.getByLabel("Service endpoint").fill("https://private.example.com");
   await expect(editor.getByLabel("API key")).toBeVisible();

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState, type PropsWithChildren, type ReactNo
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
+import { useDialogClose } from "./dialog-close";
 
 type SheetProps = PropsWithChildren<{
   title: string;
@@ -10,11 +11,13 @@ type SheetProps = PropsWithChildren<{
   className?: string;
   headingClassName?: string;
   dismissible?: boolean;
+  initialFocus?: "heading" | "field";
   onClose(): void;
 }>;
 
 /** Shared content surface for browser modals and native child-window webviews. */
-export function Sheet({ title, label = title, description, className, headingClassName, dismissible = true, onClose, children }: SheetProps): React.JSX.Element {
+export function Sheet({ title, label = title, description, className, headingClassName, dismissible = true, initialFocus = "heading", onClose, children }: SheetProps): React.JSX.Element {
+  useDialogClose(onClose, dismissible);
   const dialog = useRef<HTMLDialogElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -26,7 +29,8 @@ export function Sheet({ title, label = title, description, className, headingCla
     const node = dialog.current;
     if (!node) return;
     node.showModal();
-    node.focus();
+    const field = initialFocus === "field" ? node.querySelector<HTMLElement>('input:not(:disabled):not([readonly]):not([type=hidden]), textarea:not(:disabled):not([readonly]), select:not(:disabled)') : null;
+    (field ?? node.querySelector<HTMLElement>("h2") ?? node).focus({ preventScroll: true });
     const close = () => closeRef.current();
     const cancel = (event: Event) => {
       if (!dismissibleRef.current) event.preventDefault();
@@ -39,11 +43,11 @@ export function Sheet({ title, label = title, description, className, headingCla
       // The opener can be re-enabled by the same commit that removes the sheet.
       window.setTimeout(() => opener?.focus(), 0);
     };
-  }, [opener]);
+  }, [opener, initialFocus]);
 
   return <dialog ref={dialog} tabIndex={-1} className={cn("sheet", className)} aria-label={label}>
     <div className={cn("sheet-heading", headingClassName)}>
-      <span><h2>{title}</h2>{description && <small>{description}</small>}</span>
+      <span><h2 tabIndex={-1}>{title}</h2>{description && <small>{description}</small>}</span>
     </div>
     {children}
   </dialog>;

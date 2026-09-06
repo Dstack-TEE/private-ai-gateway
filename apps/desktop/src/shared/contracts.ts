@@ -254,6 +254,7 @@ export interface LaunchPreferences {
 }
 
 export interface DesktopApi {
+  showEditMenu(editable: boolean): Promise<void>;
   getAppearance(): Promise<Appearance>;
   setAppearance(appearance: Appearance): Promise<void>;
   onAppearanceChange(listener: (appearance: Appearance) => void): () => void;
@@ -280,6 +281,7 @@ export interface DesktopApi {
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
+  onNativeCloseRequest(listener: () => void): () => void;
   closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */
   openAboutLink(target: "documentation" | "github"): Promise<void>;
