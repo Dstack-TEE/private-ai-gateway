@@ -3422,6 +3422,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 name = "private-ai-gateway-desktop"
 version = "0.1.0"
 dependencies = [
+ "auto-launch 0.5.0",
  "auto-launch 0.6.0",
  "objc2",
  "objc2-app-kit",

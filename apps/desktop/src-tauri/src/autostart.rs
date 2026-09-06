@@ -9,6 +9,8 @@ mod platform {
     use std::path::Path;
 
     use auto_launch::{AutoLaunch, AutoLaunchBuilder};
+    #[cfg(target_os = "windows")]
+    use auto_launch_windows as auto_launch;
     use tauri::{AppHandle, Manager};
 
     pub struct ManagerState(AutoLaunch);
@@ -53,8 +55,6 @@ mod platform {
             .set_args(&[crate::AUTOSTART_ARG]);
         #[cfg(target_os = "linux")]
         builder.set_linux_launch_mode(auto_launch::LinuxLaunchMode::XdgAutostart);
-        #[cfg(target_os = "windows")]
-        builder.set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser);
         builder.build()
     }
 
