@@ -281,7 +281,10 @@ runners. `tauri-driver` uses the installed release app with the real React
 bundle and WebView bridge, without test hooks or weakened verification. The
 smoke covers startup, agent discovery, unverified-connect rejection, empty
 restore/export, local client-token rotation, endpoint settings and restart
-persistence. All app and agent files use a temporary `PRIVATE_AI_GATEWAY_HOME`.
+persistence. Gateway and agent configuration files use a temporary
+`PRIVATE_AI_GATEWAY_HOME`. Linux XDG data/config/cache/state directories are
+created privately for the smoke; Windows native profile environment variables
+remain intact on the disposable runner so WebView2 uses a valid OS profile.
 The existing credential-store round trip runs against Windows Credential
 Manager or a temporary Linux Secret Service session. The installed helper is
 checked with synthetic local token files, not provider credentials.

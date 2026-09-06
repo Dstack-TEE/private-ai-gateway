@@ -194,6 +194,16 @@ jobs:
             $version = ($webviews | Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending | Select-Object -First 1).VersionInfo.ProductVersion
             Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile "$toolsDir/edgedriver.zip"
             Expand-Archive "$toolsDir/edgedriver.zip" -DestinationPath "$toolsDir/edge"
+            # Microsoft's WebDriver contract requires matching major.minor.build.
+            # https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
+            # https://learn.microsoft.com/microsoft-edge/webdriver/#download-microsoft-edge-webdriver
+            $env:TAURI_SMOKE_EDGE_BUILD = ([version]$version).ToString(3)
+            $driverVersion = & "$toolsDir/edge/msedgedriver.exe" --version
+            if ($LASTEXITCODE -ne 0 -or $driverVersion -notmatch '^MSEdgeDriver (\d+\.\d+\.\d+)\.') {
+              throw 'Cannot determine EdgeDriver version'
+            }
+            if ($Matches[1] -ne $env:TAURI_SMOKE_EDGE_BUILD) { throw 'EdgeDriver does not match WebView2' }
+            Write-Host "Selected WebView2: $version; driver: $driverVersion"
             $smokeArgs = @("$installDir/private-ai-gateway-desktop.exe", "$toolsDir/bin/tauri-driver.exe", "$toolsDir/edge/msedgedriver.exe", "$PWD/test-results/installed")
             node scripts/installed-webview-smoke.mjs @smokeArgs
             if ($LASTEXITCODE -ne 0) { throw 'Installed WebView smoke failed' }
