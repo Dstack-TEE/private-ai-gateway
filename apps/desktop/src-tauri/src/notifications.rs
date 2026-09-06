@@ -132,8 +132,8 @@ impl Observer {
                 && config.enabled
                 && allowed[index]
                 && changed[index]
-                && !self.last_alert[index]
-                    .is_some_and(|last| now.duration_since(last) < Duration::from_secs(60))
+                && self.last_alert[index]
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60))
             {
                 self.last_alert[index] = Some(now);
                 result.push(messages[index]);
