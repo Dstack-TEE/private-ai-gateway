@@ -3,5 +3,5 @@ mod runtime_client;
 mod tray;
 
 fn main() {
-    app::run();
+    std::process::exit(app::run());
 }

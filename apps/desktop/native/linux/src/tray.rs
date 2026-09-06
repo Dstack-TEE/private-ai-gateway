@@ -7,13 +7,16 @@ pub enum TrayCommand {
     Toggle,
     Open,
     Settings,
+    RestartRuntime,
     OpenAtLogin,
     Quit,
+    Availability(bool),
 }
 
 pub struct GatewayTray {
     pub running: bool,
     pub protected: bool,
+    pub runtime_connected: bool,
     pub status: String,
     pub open_at_login: bool,
     pub icon_path: String,
@@ -44,7 +47,7 @@ impl ksni::Tray for GatewayTray {
         use ksni::menu::{CheckmarkItem, StandardItem};
         vec![
             CheckmarkItem {
-                label: "Protected".into(),
+                label: "Protection".into(),
                 checked: self.running,
                 activate: Box::new(|tray: &mut GatewayTray| {
                     let _ = tray.commands.send(TrayCommand::Toggle);
@@ -55,6 +58,15 @@ impl ksni::Tray for GatewayTray {
             StandardItem {
                 label: self.status.clone(),
                 enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Restart Runtime".into(),
+                visible: !self.runtime_connected,
+                activate: Box::new(|tray: &mut GatewayTray| {
+                    let _ = tray.commands.send(TrayCommand::RestartRuntime);
+                }),
                 ..Default::default()
             }
             .into(),
@@ -96,20 +108,30 @@ impl ksni::Tray for GatewayTray {
             .into(),
         ]
     }
+
+    fn watcher_online(&self) {
+        let _ = self.commands.send(TrayCommand::Availability(true));
+    }
+
+    fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
+        let _ = self.commands.send(TrayCommand::Availability(false));
+        true
+    }
 }
 
-pub fn spawn(commands: Sender<TrayCommand>) -> Option<Handle<GatewayTray>> {
-    GatewayTray {
+pub fn spawn(commands: Sender<TrayCommand>) -> Result<Handle<GatewayTray>, String> {
+    let tray = GatewayTray {
         running: false,
         protected: false,
+        runtime_connected: false,
         status: "Not protected".into(),
         open_at_login: open_at_login(),
         icon_path: asset_dir().to_string_lossy().into_owned(),
         commands,
     }
-    .assume_sni_available(true)
     .spawn()
-    .ok()
+    .map_err(|error| format!("System tray is unavailable: {error}"))?;
+    Ok(tray)
 }
 
 pub fn set_open_at_login(enabled: bool) -> Result<(), String> {

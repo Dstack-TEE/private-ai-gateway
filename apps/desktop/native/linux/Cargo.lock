@@ -1687,6 +1687,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "libc",
  "private-ai-gateway-desktop-gateway",
  "private-ai-gateway-desktop-runtime",
  "serde",
