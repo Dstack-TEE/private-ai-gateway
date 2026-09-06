@@ -66,8 +66,9 @@ navigation; listen addresses use Combobox for discovery and manual entry.
 ChoiceSelect shares composition and portal ownership, not a replacement menu
 implementation. Menus inside HTML dialogs portal into their owning dialog.
 Form scroll regions own horizontal padding so the standard 3px focus ring is
-not clipped. Bordered lists have a 4px inner gutter; purposeful image clipping
-and actual scroll viewports remain intact.
+not clipped. Continuous bordered lists keep edge-to-edge hover backgrounds
+and use an inset focus ring on full-row actions. Image clipping and actual
+scroll viewports remain intact.
 SheetActions provides one shared footer divider.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
@@ -506,7 +507,12 @@ usage, persistent-history filters and cursor pagination, CSV/clear flows,
 proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
 media, 200% zoom, and
-940/720/540/320 widths. CI runs it before all three platform packages.
+940/720/540/320 widths. UI checks require the explicit `run_ui_tests` manual
+workflow input and are disabled on ordinary PR builds. TypeScript, release
+manifest tests, and Rust checks still run. Windows package jobs also execute
+the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
+ACI and helper without opening the app, then uninstall the package; temporary
+credential-store fixtures are separate from real provider credentials.
 
 ## Packaging
 

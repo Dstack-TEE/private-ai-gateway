@@ -1001,7 +1001,7 @@ test("local copy hover follows the grouped row shape and profiles open their dia
     return { height: button.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, clipped: getComputedStyle(group).overflow, radius: getComputedStyle(group).borderRadius };
   });
   expect(Math.abs(shape.height - shape.rowHeight)).toBeLessThanOrEqual(1);
-  expect(shape.clipped).toBe("visible");
+  expect(shape.clipped).toBe("hidden");
   expect(Number.parseFloat(shape.radius)).toBeGreaterThan(0);
   const profile = page.getByRole("button", { name: "Profiles: RedPill" });
   await expect(profile).toHaveAttribute("aria-haspopup", "dialog");

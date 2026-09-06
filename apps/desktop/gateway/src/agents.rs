@@ -189,7 +189,15 @@ impl Agent {
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
-                .unwrap_or_else(|| home.join(".hermes"))
+                .unwrap_or_else(|| {
+                    if cfg!(windows) {
+                        override_dir("LOCALAPPDATA")
+                            .unwrap_or_else(|| home.join("AppData").join("Local"))
+                            .join("hermes")
+                    } else {
+                        home.join(".hermes")
+                    }
+                })
                 .join("config.yaml"),
         }
     }
@@ -353,7 +361,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
                     &["providers", provider, "key_cmd"],
-                    helper_command(inputs.helper_exe, "hermes")?,
+                    credential_helper_command(inputs.helper_exe, Agent::Hermes)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
             ];
@@ -461,7 +469,7 @@ fn pi_provider(
     Ok(serde_json::json!({
         "baseUrl": format!("{base}/v1"),
         "api": "openai-responses",
-        "apiKey": format!("!{}", helper_command(helper_exe, "pi")?),
+        "apiKey": format!("!{}", credential_helper_command(helper_exe, Agent::Pi)?),
         "models": models,
     }))
 }
@@ -678,6 +686,39 @@ fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
     Ok(format!("{quoted} --agent-token {agent}"))
 }
 
+#[cfg(not(windows))]
+fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String> {
+    helper_command(exe, agent.id())
+}
+
+#[cfg(windows)]
+fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let path = exe
+        .to_str()
+        .ok_or_else(|| "The app path is not valid Unicode".to_string())?;
+    if path.contains('\0') {
+        return Err("The app path contains a null character".to_string());
+    }
+    // Hermes uses cmd.exe; Pi tries Bash then falls back to cmd.exe. Only the
+    // fixed switches and base64 reach either shell; the helper path stays data.
+    let encoded_path = STANDARD.encode(
+        path.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let command = format!(
+        "$ErrorActionPreference = 'Stop'; & ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded_path}'))) --agent-token {}; exit $LASTEXITCODE",
+        agent.id()
+    );
+    let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    Ok(format!(
+        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+        STANDARD.encode(bytes)
+    ))
+}
+
 /// Credential-bearing keys: their values never reach previews, manifests,
 /// or logs.
 fn is_sensitive(path: &[String]) -> bool {
@@ -769,13 +810,15 @@ impl Projector {
         endpoint: &str,
         secrets: Arc<dyn SecretStore>,
     ) -> Result<Self, String> {
-        let home = env_path(HOME_OVERRIDE_ENV).map_or_else(home_dir, Ok)?;
+        let home_override = env_path(HOME_OVERRIDE_ENV);
+        let tool_env = home_override.is_none();
+        let home = home_override.map_or_else(home_dir, Ok)?;
         Ok(Self::at(
             home,
             app_data_dir()?,
             helper_exe,
             endpoint,
-            true,
+            tool_env,
             secrets,
         ))
     }
@@ -1402,6 +1445,26 @@ impl Projector {
                 }
             }
         }
+        #[cfg(windows)]
+        if agent == Agent::Pi && status.connected && !record.disabled && !record.cleanup_pending {
+            if let Ok(command) = helper_command(&self.helper_exe, "pi") {
+                let legacy = format!("!{command}");
+                let legacy_record = record.fields.iter().any(|field| {
+                    field.path == owned(&["providers", "private-ai-gateway"])
+                        && matches!(&field.value, Some(ConfigValue::Json(provider))
+                            if provider.get("apiKey").and_then(serde_json::Value::as_str) == Some(legacy.as_str()))
+                });
+                if legacy_record {
+                    status.connected = false;
+                    status.authorized = false;
+                    status.attention = Some(
+                        "This Pi connection uses the old Windows credential command. Disconnect, \
+                         then Connect again to update it."
+                            .to_string(),
+                    );
+                }
+            }
+        }
         status
     }
 
@@ -1744,7 +1807,12 @@ fn cli_paths(home: &Path, tool_env: bool) -> Vec<PathBuf> {
 }
 
 fn find_cli(agent: Agent, home: &Path, tool_env: bool) -> Option<PathBuf> {
-    let paths = cli_paths(home, tool_env);
+    let mut paths = cli_paths(home, tool_env);
+    if cfg!(windows) && agent == Agent::Hermes {
+        if let Some(directory) = agent.config_path(home, tool_env).parent() {
+            paths.push(directory.join("bin"));
+        }
+    }
     find_cli_in_paths(agent, &paths)
 }
 
@@ -1838,6 +1906,10 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 fn home_dir() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    if let Some(home) = env_path("USERPROFILE") {
+        return Ok(home);
+    }
     env_path("HOME")
         .or_else(|| env_path("USERPROFILE"))
         .ok_or_else(|| "Cannot determine the home directory".to_string())
@@ -2017,6 +2089,169 @@ mod tests {
         let _ = fs::remove_dir_all(root);
         assert!(output.status.success());
         assert_eq!(output.stdout, b"bundled-catalog");
+    }
+
+    #[test]
+    fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
+        const CASE_ENV: &str = "PAG_TEST_HERMES_PATH_CASE";
+        const ROOT_ENV: &str = "PAG_TEST_HERMES_PATH_ROOT";
+        if let Ok(case) = env::var(CASE_ENV) {
+            let root = PathBuf::from(env::var_os(ROOT_ENV).unwrap());
+            let home = root.join(if case == "isolated" {
+                "isolated"
+            } else {
+                "user"
+            });
+            let default = if cfg!(windows) {
+                home.join("AppData").join("Local").join("hermes")
+            } else {
+                home.join(".hermes")
+            };
+            let expected = match case.as_str() {
+                "override" => root.join("custom-profile"),
+                "local-appdata" if cfg!(windows) => root.join("local-data").join("hermes"),
+                _ => default,
+            };
+            let projector = Projector::new(
+                root.join(helper_binary_name()),
+                ENDPOINT,
+                Arc::new(MemoryStore::default()),
+            )
+            .unwrap();
+            assert_eq!(projector.home, home);
+            assert_eq!(
+                Agent::Hermes.config_path(&projector.home, projector.tool_env),
+                expected.join("config.yaml")
+            );
+            if case == "isolated" {
+                assert!(!projector.tool_env);
+                assert_eq!(projector.data_dir, home.join(".private-ai-gateway"));
+                for agent in Agent::ALL {
+                    assert!(agent
+                        .config_path(&projector.home, projector.tool_env)
+                        .starts_with(&home));
+                }
+            }
+            if cfg!(windows) {
+                let executable = expected.join("bin").join("hermes.exe");
+                write(&executable, "launcher fixture");
+                assert_eq!(
+                    find_cli(Agent::Hermes, &projector.home, projector.tool_env),
+                    Some(executable)
+                );
+            }
+            return;
+        }
+
+        // Process-local environment avoids races with the other agent tests.
+        let root = tempfile::tempdir().unwrap();
+        for case in [
+            "default",
+            "local-appdata",
+            "override",
+            "isolated",
+            "native-home",
+        ] {
+            let mut command = Command::new(env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "agents::tests::hermes_paths_follow_platform_overrides_and_isolate_test_home",
+                ])
+                .env(CASE_ENV, case)
+                .env(ROOT_ENV, root.path())
+                .env("HOME", root.path().join("user"))
+                .env("USERPROFILE", root.path().join("user"))
+                .env("APPDATA", root.path().join("roaming"))
+                .env("XDG_DATA_HOME", root.path().join("data"))
+                .env("PATH", "")
+                .env_remove(HOME_OVERRIDE_ENV)
+                .env_remove("HERMES_HOME")
+                .env_remove("LOCALAPPDATA");
+            if matches!(case, "local-appdata" | "override" | "isolated") {
+                command.env("LOCALAPPDATA", root.path().join("local-data"));
+            }
+            if matches!(case, "override" | "isolated") {
+                command.env("HERMES_HOME", root.path().join("custom-profile"));
+            }
+            if case == "isolated" {
+                command
+                    .env(HOME_OVERRIDE_ENV, root.path().join("isolated"))
+                    .env("CODEX_HOME", root.path().join("outside-codex"));
+            }
+            if cfg!(windows) && case == "native-home" {
+                command.env("HOME", root.path().join("git-home"));
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed helper and Python on a disposable Windows runner"]
+    fn hermes_windows_installed_command_round_trip() {
+        let installed = PathBuf::from(env::var_os("PAG_TEST_HELPER_PATH").unwrap());
+        assert!(installed.is_absolute() && installed.is_file());
+        assert!(installed.to_str().unwrap().contains(' '));
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join(".private-ai-gateway");
+        let tokens = TokenFiles::new(&data);
+        let hostile = home
+            .path()
+            .join("quote'\u{2019}; Write-Output injected; # %PAG_CMD_PROBE% ! ^ & (meta)")
+            .join(helper_binary_name());
+        fs::create_dir_all(hostile.parent().unwrap()).unwrap();
+        fs::copy(&installed, &hostile).unwrap();
+        for executable in [&installed, &hostile] {
+            let token = tokens.ensure("hermes").unwrap();
+            let fields = fields(
+                Agent::Hermes,
+                &Inputs {
+                    endpoint: ENDPOINT,
+                    helper_exe: executable,
+                    token_path: &tokens.path("hermes"),
+                    codex_catalog_path: &data.join(CODEX_CATALOG_FILE),
+                    catalog: Some(&catalog()),
+                    options: &ConnectOptions::default(),
+                },
+            )
+            .unwrap();
+            let command = fields
+                .into_iter()
+                .find(|field| field.path == owned(&["providers", "private-ai-gateway", "key_cmd"]))
+                .and_then(|field| match field.value {
+                    Some(ConfigValue::Str(command)) => Some(command),
+                    _ => None,
+                })
+                .unwrap();
+            let run = || {
+                Command::new("python")
+                    .args([
+                        "-c",
+                        "import subprocess,sys; p=subprocess.run(sys.argv[1],shell=True,capture_output=True,text=True,timeout=15); sys.stdout.write(p.stdout); sys.stderr.write(p.stderr); sys.exit(p.returncode)",
+                        &command,
+                    ])
+                    .env(HOME_OVERRIDE_ENV, home.path())
+                    .env("PAG_CMD_PROBE", "expanded-by-shell")
+                    .output()
+                    .unwrap()
+            };
+            let output = run();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), token);
+            fs::remove_file(tokens.path("hermes")).unwrap();
+            let output = run();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            if executable == &hostile {
+                fs::remove_file(executable).unwrap();
+                let output = run();
+                assert!(!output.status.success());
+                assert!(output.stdout.is_empty());
+            }
+        }
+        assert!(credential_helper_command(Path::new("bad\0path"), Agent::Hermes).is_err());
     }
 
     fn connect(sandbox: &Sandbox) -> AgentStatus {
@@ -2338,13 +2573,90 @@ mod tests {
         };
         assert_eq!(provider["models"].as_array().unwrap().len(), 2);
         assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
-        assert!(provider["apiKey"]
-            .as_str()
-            .unwrap()
-            .contains("--agent-token pi"));
+        assert_eq!(
+            provider["apiKey"],
+            format!(
+                "!{}",
+                credential_helper_command(&sandbox.projector.helper_exe, Agent::Pi).unwrap()
+            )
+        );
+        #[cfg(windows)]
+        {
+            let pi_token = sandbox.projector.tokens.read("pi").unwrap().unwrap();
+            let config_path = Agent::Pi.config_path(&sandbox.home, sandbox.projector.tool_env);
+            let mut legacy = provider.clone();
+            legacy["apiKey"] = json!(format!(
+                "!{}",
+                helper_command(&sandbox.projector.helper_exe, "pi").unwrap()
+            ));
+            let value = ConfigValue::Json(legacy);
+            let mut config = doc(&sandbox, Agent::Pi);
+            config
+                .set_value(&["providers", "private-ai-gateway"], &value)
+                .unwrap();
+            write(&config_path, &config.render().unwrap());
+            let mut store = sandbox.projector.load_store().unwrap();
+            store
+                .get_mut("pi")
+                .unwrap()
+                .fields
+                .iter_mut()
+                .find(|field| field.path == owned(&["providers", "private-ai-gateway"]))
+                .unwrap()
+                .value = Some(value);
+            sandbox.projector.save_store(&store).unwrap();
+            let config_before = fs::read(&config_path).unwrap();
+            let record_before = fs::read(sandbox.projector.store_path()).unwrap();
+            let token_before = fs::read(sandbox.projector.tokens.path("pi")).unwrap();
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let pi = statuses.iter().find(|status| status.id == "pi").unwrap();
+            assert!(pi.recorded && !pi.connected && !pi.authorized);
+            assert!(pi
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("Disconnect, then Connect"));
+            assert_eq!(tokens.agent_for(&pi_token), None);
+            assert_eq!(fs::read(&config_path).unwrap(), config_before);
+            assert_eq!(
+                fs::read(sandbox.projector.store_path()).unwrap(),
+                record_before
+            );
+            assert_eq!(
+                fs::read(sandbox.projector.tokens.path("pi")).unwrap(),
+                token_before
+            );
+
+            config
+                .set_str(
+                    &["providers", "private-ai-gateway", "apiKey"],
+                    "!user-command",
+                )
+                .unwrap();
+            write(&config_path, &config.render().unwrap());
+            let edited = fs::read(&config_path).unwrap();
+            let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+            let pi = statuses.iter().find(|status| status.id == "pi").unwrap();
+            assert!(pi.recorded && !pi.connected && !pi.authorized);
+            assert!(pi
+                .attention
+                .as_deref()
+                .unwrap()
+                .contains("no longer matches"));
+            assert_eq!(tokens.agent_for(&pi_token), None);
+            assert_eq!(fs::read(&config_path).unwrap(), edited);
+            assert_eq!(
+                fs::read(sandbox.projector.store_path()).unwrap(),
+                record_before
+            );
+            assert_eq!(
+                fs::read(sandbox.projector.tokens.path("pi")).unwrap(),
+                token_before
+            );
+        }
         disconnect(&sandbox, Agent::Pi);
 
-        let path = sandbox.home.join(".hermes").join("config.yaml");
+        let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
         write(&path, "# keep this comment\ntheme: dark\n");
         let preview = sandbox
             .projector
@@ -2402,9 +2714,10 @@ mod tests {
                 .as_deref(),
             Some("chat_completions")
         );
-        assert!(hermes
-            .get_str(&["providers", "private-ai-gateway", "key_cmd"])
-            .is_some_and(|command| command.contains("--agent-token hermes")));
+        assert_eq!(
+            hermes.get_str(&["providers", "private-ai-gateway", "key_cmd"]),
+            Some(credential_helper_command(&fresh.projector.helper_exe, Agent::Hermes).unwrap())
+        );
     }
 
     #[test]
@@ -2907,6 +3220,50 @@ mod tests {
                 Err(error) => panic!("cannot run sh: {error}"),
             }
         }
+        #[cfg(windows)]
+        {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            // Pi's Bash and cmd.exe fallback see only fixed switches and a
+            // base64 word. Neither shell interprets the Windows helper path.
+            let hostile = Path::new(r"C:\Users\O'Brien %USERPROFILE% ! &\helper.exe");
+            let provider = pi_provider(&catalog(), ENDPOINT, hostile).unwrap();
+            let command = provider["apiKey"]
+                .as_str()
+                .unwrap()
+                .strip_prefix('!')
+                .unwrap();
+            let words: Vec<_> = command.split_ascii_whitespace().collect();
+            assert_eq!(words.len(), 5);
+            assert_eq!(
+                &words[..4],
+                &[
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand"
+                ]
+            );
+            assert_eq!(shlex::split(command).unwrap(), words);
+            let bytes = STANDARD.decode(words[4]).unwrap();
+            let script = String::from_utf16(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let encoded_path = STANDARD.encode(
+                hostile
+                    .to_str()
+                    .unwrap()
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            assert!(script.contains(&format!("FromBase64String('{encoded_path}')")));
+            assert!(script.ends_with("--agent-token pi; exit $LASTEXITCODE"));
+        }
     }
 
     /// Deleting the token file is the revocation itself: even when the very
@@ -3097,7 +3454,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(sidecar_listener, sidecar).await.unwrap() });
 
         let (sender, _events) = tokio::sync::mpsc::channel(8);
-        let state = ProxyState::new(sender);
+        let state = ProxyState::new(sender).unwrap();
         state.set_api_key(Some("sk-live".into()));
         state.publish(Session {
             generation: 1,

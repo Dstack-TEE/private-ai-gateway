@@ -7,7 +7,6 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, Wry,
 };
-use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
@@ -40,7 +39,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .enabled(false)
         .build(app)?;
     let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
-        .checked(app.autolaunch().is_enabled().unwrap_or(false))
+        .checked(crate::autostart::is_enabled(app).unwrap_or(false))
         .build(app)?;
     let endpoint = MenuItemBuilder::with_id("copy-endpoint", "Copy Local API Endpoint")
         .enabled(false)
@@ -340,12 +339,8 @@ fn sync_autostart(app: &AppHandle) {
 }
 
 pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    if enabled {
-        app.autolaunch().enable()
-    } else {
-        app.autolaunch().disable()
-    }
-    .map_err(|error| format!("Open at Login could not be changed: {error}"))?;
+    crate::autostart::set_enabled(app, enabled)
+        .map_err(|error| format!("Open at Login could not be changed: {error}"))?;
     if let Some(menu) = app.try_state::<TrayMenu>() {
         let _ = menu.autostart.set_checked(enabled);
     }
