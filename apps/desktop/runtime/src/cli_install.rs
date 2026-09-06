@@ -493,8 +493,8 @@ mod platform {
             .iter()
             .any(|entry| same_path_text(entry, &directory));
         Ok(Registration {
-            executable: executable.clone(),
-            command_path,
+            executable: PathBuf::from(path_text(&executable)?),
+            command_path: PathBuf::from(path_text(&command_path)?),
             installed,
             on_path: installed && resolves_from_process_path(&executable),
         })
@@ -761,8 +761,13 @@ mod platform {
     }
 
     fn path_text(path: &Path) -> Result<String, String> {
-        let value = path_text_lossy(path);
-        let value = value.strip_prefix(r"\\?\").unwrap_or(&value).to_string();
+        let value = path
+            .to_str()
+            .ok_or("The pag executable path is not valid Unicode")?;
+        let value = match value.strip_prefix(r"\\?\UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => value.strip_prefix(r"\\?\").unwrap_or(value).to_string(),
+        };
         if value.contains(';') {
             return Err("The pag executable directory cannot contain a semicolon".to_string());
         }
@@ -807,13 +812,21 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
-        use super::{normalize_path_text, path_entries};
+        use super::{normalize_path_text, path_entries, path_text};
 
         #[test]
         fn path_entries_are_compared_without_case_or_separator_noise() {
             assert_eq!(
                 normalize_path_text(r#""C:/Users/Alice/PAG/""#),
                 normalize_path_text(r"c:\users\alice\pag")
+            );
+            assert_eq!(
+                path_text(std::path::Path::new(r"\\?\D:\Tools\pag.exe")).unwrap(),
+                r"D:\Tools\pag.exe"
+            );
+            assert_eq!(
+                path_text(std::path::Path::new(r"\\?\UNC\server\tools\pag.exe")).unwrap(),
+                r"\\server\tools\pag.exe"
             );
         }
 
