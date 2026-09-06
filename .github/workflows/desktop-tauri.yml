@@ -99,6 +99,12 @@ jobs:
       - name: Test shared runtime library
         run: cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
 
+      # This integration target also compiles the Unix-only root server.
+      # Windows exercises the installed ACI executable below instead.
+      - name: ACI signed-artifact regression (local fixture service)
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked --manifest-path ../../Cargo.toml --test aci_cli
+
       - name: Inspect Linux package sidecars
         if: runner.os == 'Linux'
         shell: bash
