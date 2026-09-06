@@ -1,0 +1,123 @@
+name: Desktop Tauri Windows and Linux
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-tauri.yml'
+      - 'apps/desktop/**'
+      - 'src/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/gateway -> target
+            apps/desktop/runtime -> target
+            apps/desktop/src-tauri -> target
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Check shared React renderer
+        run: npm run check
+
+      - name: Renderer smoke (Playwright, stateful mock)
+        run: |
+          npx playwright install chromium
+          npm run test:renderer -- --workers=2
+
+      - name: Build bundled Rust sidecars
+        run: npm run build:native
+
+      - name: Test ACI sidecar
+        run: cargo test --locked --manifest-path ../../Cargo.toml --bin aci
+
+      - name: Test Tauri backend
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      # Tauri merges the host platform config, then the brand overlay. Its
+      # beforeBuildCommand builds the same production Vite renderer as macOS.
+      - name: Package Tauri app
+        run: npm run tauri build -- --config src-tauri/tauri.brand.conf.json
+
+      - name: Inspect Linux package sidecars
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$(mktemp -d)"
+          trap 'rm -rf "$package_dir"' EXIT
+          packages=(src-tauri/target/release/bundle/deb/*.deb)
+          test "${#packages[@]}" -eq 1
+          dpkg-deb --extract "${packages[0]}" "$package_dir"
+          for binary in private-ai-gateway-desktop aci private-ai-gateway-helper; do
+            test -x "$package_dir/usr/bin/$binary"
+          done
+          "$package_dir/usr/bin/aci" --help
+
+      - name: Inspect Windows sidecars and installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($binary in @('private-ai-gateway-desktop', 'aci', 'private-ai-gateway-helper')) {
+            if (!(Test-Path "src-tauri/target/release/$binary.exe")) {
+              throw "Missing executable: $binary"
+            }
+          }
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -ne 1) { throw 'Expected one NSIS installer' }
+          & src-tauri/target/release/aci.exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'ACI sidecar failed to launch' }
+
+      - name: Upload Tauri package
+        uses: actions/upload-artifact@v6
+        with:
+          name: private-ai-gateway-tauri-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+
+      - name: Upload renderer failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: desktop-tauri-renderer-${{ runner.os }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: apps/desktop/playwright-artifacts/
