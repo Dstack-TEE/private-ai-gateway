@@ -3,7 +3,6 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, Wry,
 };
-use tauri_plugin_autostart::ManagerExt;
 
 use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
 use desktop_runtime::{contracts::GatewayState, controller::DesktopRuntime};
@@ -24,7 +23,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .enabled(false)
         .build(app)?;
     let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
-        .checked(app.autolaunch().is_enabled().unwrap_or(false))
+        .checked(crate::autostart::is_enabled(app).unwrap_or(false))
         .build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&toggle)
@@ -86,11 +85,7 @@ fn toggle_or_open_settings(app: &AppHandle) {
 fn sync_autostart(app: &AppHandle) {
     let menu = app.state::<TrayMenu>();
     let checked = menu.autostart.is_checked().unwrap_or(false);
-    let result = if checked {
-        app.autolaunch().enable()
-    } else {
-        app.autolaunch().disable()
-    };
+    let result = crate::autostart::set_enabled(app, checked);
     if let Err(error) = result {
         let _ = menu.autostart.set_checked(!checked);
         app.state::<std::sync::Arc<DesktopRuntime>>()

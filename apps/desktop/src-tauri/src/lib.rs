@@ -1,3 +1,4 @@
+mod autostart;
 mod menu;
 mod runtime_adapter;
 mod tray;
@@ -178,14 +179,16 @@ pub fn run() {
     let launcher = Arc::new(TauriSidecarLauncher::default());
     let launcher_for_setup = launcher.clone();
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let app =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_window(app);
-        }))
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![AUTOSTART_ARG]),
-        ))
+        }));
+    #[cfg(target_os = "macos")]
+    let app = app.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![AUTOSTART_ARG]),
+    ));
+    let app = app
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -213,6 +216,8 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            autostart::setup(app.handle())?;
             launcher_for_setup.initialize(app.handle().clone())?;
             let helper_path = std::env::current_exe()
                 .map_err(|error| format!("Cannot locate the app executable: {error}"))?
