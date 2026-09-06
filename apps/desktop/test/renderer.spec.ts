@@ -415,7 +415,16 @@ test("overview shows four agents, four current-session records, truthful copy su
 
 test("updates are discovered on launch and installation requires confirmation", async ({ page }) => {
   await page.goto("/?mock=update-available");
-  await page.getByRole("button", { name: "Update available", exact: true }).click();
+  const updateBadge = page.getByRole("button", { name: "Update available", exact: true });
+  await expect(updateBadge).toHaveAttribute("data-slot", "badge");
+  const bottomGap = await updateBadge.evaluate((badge) => {
+    const sidebar = badge.closest("aside");
+    if (!sidebar) throw new Error("Update badge must be inside the sidebar");
+    return sidebar.getBoundingClientRect().bottom - badge.getBoundingClientRect().bottom;
+  });
+  expect(bottomGap).toBeGreaterThanOrEqual(10);
+  expect(bottomGap).toBeLessThanOrEqual(16);
+  await updateBadge.click();
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("connected agent configurations will be restored");

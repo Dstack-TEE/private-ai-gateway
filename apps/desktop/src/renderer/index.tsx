@@ -1104,8 +1104,12 @@ function Sidebar({
         })}
         </SidebarMenu>
       </nav>
-      {updateAvailable && <SidebarMenu><SidebarMenuItem><SidebarMenuButton size="lg" onClick={() => onChange("settings", true)}><Download aria-hidden="true" /><span>Update available</span></SidebarMenuButton></SidebarMenuItem></SidebarMenu>}
       </SidebarProvider>
+      {updateAvailable && <div className="mt-auto px-2 pt-4">
+        <Badge render={<button type="button" />} aria-label="Update available" title="Update available" onClick={() => onChange("settings", true)}>
+          <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
+        </Badge>
+      </div>}
     </aside>
   );
 }
