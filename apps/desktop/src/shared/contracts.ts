@@ -19,6 +19,7 @@ export type UpdateChannel = "beta" | "stable";
 export interface UpdateProgress {
   downloaded: number;
   total?: number | null;
+  error?: string | null;
 }
 
 export interface VerificationCheck {
@@ -122,6 +123,7 @@ export interface UsagePage {
   nextCursor?: string;
   summary: UsageSummary;
   series: UsagePoint[];
+  modelSeries: { day: string; model: string | null; requests: number; tokens: number; costUsd: number }[];
   agents: string[];
   models: string[];
 }
@@ -272,7 +274,7 @@ export interface DesktopApi {
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
+  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */

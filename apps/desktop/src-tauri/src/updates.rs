@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use desktop_runtime::controller::DesktopRuntime;
 use desktop_runtime::preferences::{self, UpdateChannel};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
@@ -55,11 +55,44 @@ pub struct UpdateInfo {
     channel_published: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DownloadProgress {
+pub struct DownloadProgress {
     downloaded: u64,
     total: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct UpdateProgress(std::sync::Mutex<DownloadProgress>);
+
+#[tauri::command]
+pub fn get_update_progress(
+    progress: State<'_, UpdateProgress>,
+) -> Result<DownloadProgress, String> {
+    progress
+        .0
+        .lock()
+        .map(|value| value.clone())
+        .map_err(|_| "Update progress is unavailable".to_string())
+}
+
+pub fn can_close_progress(app: &AppHandle) -> bool {
+    app.state::<UpdateProgress>()
+        .0
+        .lock()
+        .is_ok_and(|value| value.error.is_some())
+}
+
+pub fn reset_progress(app: &AppHandle) {
+    publish_progress(app, DownloadProgress::default());
+}
+
+fn publish_progress(app: &AppHandle, progress: DownloadProgress) {
+    if let Ok(mut current) = app.state::<UpdateProgress>().0.lock() {
+        *current = progress.clone();
+        let _ = app.emit("gateway://update-progress", progress);
+    }
 }
 
 #[tauri::command]
@@ -139,6 +172,24 @@ pub async fn install_update(
     pending: State<'_, PendingUpdate>,
     runtime: State<'_, Arc<DesktopRuntime>>,
 ) -> Result<(), String> {
+    let result = install(app.clone(), pending, runtime).await;
+    if let Err(error) = &result {
+        publish_progress(
+            &app,
+            DownloadProgress {
+                error: Some(error.clone()),
+                ..Default::default()
+            },
+        );
+    }
+    result
+}
+
+async fn install(
+    app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+    runtime: State<'_, Arc<DesktopRuntime>>,
+) -> Result<(), String> {
     let mut pending = pending
         .0
         .try_lock()
@@ -150,7 +201,7 @@ pub async fn install_update(
     // The official plugin verifies the archive signature before returning these bytes.
     let bytes = update.download(|chunk, total| {
         downloaded = downloaded.saturating_add(chunk as u64);
-        let _ = app.emit_to("main", "gateway://update-progress", DownloadProgress { downloaded, total });
+        publish_progress(&app, DownloadProgress { downloaded, total, error: None });
     }, || {}).await.map_err(|_| "The update could not be downloaded or its signature could not be verified. Check for updates to retry.")?;
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {

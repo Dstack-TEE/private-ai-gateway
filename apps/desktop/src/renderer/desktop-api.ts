@@ -15,6 +15,7 @@ import type {
   StartGatewayConfig,
   UsagePage,
   UsageQuery,
+  UpdateProgress,
 } from "../shared/contracts";
 
 declare global {
@@ -33,7 +34,25 @@ export const desktopApi: DesktopApi = {
   setUpdateChannel: (channel) => invoke("set_update_channel", { channel }),
   checkUpdate: () => invoke("check_update"),
   installUpdate: () => invoke("install_update"),
-  onUpdateProgress: (listener) => subscribe("gateway://update-progress", listener),
+  onUpdateProgress: (listener) => {
+    let disposed = false;
+    let received = false;
+    let unlisten: (() => void) | undefined;
+    // Subscribe before reading the snapshot, without letting a late snapshot
+    // overwrite a newer download event.
+    void listen<UpdateProgress>("gateway://update-progress", (event) => {
+      received = true;
+      if (!disposed) listener(event.payload);
+    }).then(async (stop) => {
+      if (disposed) { stop(); return; }
+      unlisten = stop;
+      const snapshot = await invoke<UpdateProgress>("get_update_progress");
+      if (!disposed && !received) listener(snapshot);
+    }).catch(() => {
+      if (!disposed) listener({ downloaded: 0, error: "Update progress is unavailable. The update may still be running." });
+    });
+    return () => { disposed = true; unlisten?.(); };
+  },
   getLaunchPreferences: () => invoke("get_launch_preferences"),
   setLaunchPreference: (name, enabled) => invoke("set_launch_preference", { name, enabled }),
   onLaunchPreferencesChange: (listener) => subscribe("gateway://launch-preferences", listener),

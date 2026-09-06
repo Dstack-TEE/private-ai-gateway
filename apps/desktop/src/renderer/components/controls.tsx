@@ -18,6 +18,7 @@ type SwitchControlProps = {
   size?: "sm" | "default" | "lg";
   title?: string;
   "aria-describedby"?: string;
+  "aria-busy"?: boolean;
   onToggle(): void;
 };
 

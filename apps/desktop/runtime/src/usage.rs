@@ -51,8 +51,19 @@ pub struct UsagePage {
     pub next_cursor: Option<String>,
     pub summary: UsageSummary,
     pub series: Vec<UsagePoint>,
+    pub model_series: Vec<UsageModelPoint>,
     pub agents: Vec<String>,
     pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageModelPoint {
+    pub day: String,
+    pub model: Option<String>,
+    pub requests: u64,
+    pub tokens: u64,
+    pub cost_usd: f64,
 }
 
 pub struct UsageStore {
@@ -182,6 +193,7 @@ impl UsageStore {
 
         let summary = summary(&connection, &summary_where, &summary_bindings)?;
         let series = series(&connection, &summary_where, &summary_bindings)?;
+        let model_series = model_series(&connection, &summary_where, &summary_bindings)?;
         let agents = facet(&connection, "agent")?;
         let models = facet(&connection, "model")?;
         Ok(UsagePage {
@@ -189,6 +201,7 @@ impl UsageStore {
             next_cursor,
             summary,
             series,
+            model_series,
             agents,
             models,
         })
@@ -459,6 +472,33 @@ fn series(
     rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
 }
 
+fn model_series(
+    connection: &Connection,
+    where_sql: &str,
+    bindings: &[SqlValue],
+) -> Result<Vec<UsageModelPoint>, String> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT strftime('%Y-%m-%d', at, 'unixepoch', 'localtime') AS day, model,
+                count(*), coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
+                coalesce(sum(cost_usd), 0)
+         FROM usage_records {where_sql} GROUP BY day, model ORDER BY day, model"
+        ))
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(bindings.iter()), |row| {
+            Ok(UsageModelPoint {
+                day: row.get(0)?,
+                model: row.get(1)?,
+                requests: row.get(2)?,
+                tokens: row.get(3)?,
+                cost_usd: row.get(4)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+}
+
 fn facet(connection: &Connection, column: &str) -> Result<Vec<String>, String> {
     let mut statement = connection
         .prepare(&format!(
@@ -621,6 +661,31 @@ mod tests {
         assert!(first.next_cursor.is_some());
         assert_eq!(first.summary.requests, 2);
         assert_eq!(first.summary.input_tokens, 200);
+        assert_eq!(first.model_series.len(), 2);
+        assert_eq!(
+            first
+                .model_series
+                .iter()
+                .map(|point| point.requests)
+                .sum::<u64>(),
+            first.summary.requests
+        );
+        assert_eq!(
+            first
+                .model_series
+                .iter()
+                .map(|point| point.tokens)
+                .sum::<u64>(),
+            first.summary.input_tokens + first.summary.output_tokens
+        );
+        assert_eq!(
+            first
+                .model_series
+                .iter()
+                .map(|point| point.cost_usd)
+                .sum::<f64>(),
+            first.summary.cost_usd
+        );
         assert!(!first.models.iter().any(|model| model == "catalog-only"));
         let second = store
             .page(&UsageQuery {

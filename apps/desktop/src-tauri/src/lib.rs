@@ -295,12 +295,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(updates::PendingUpdate::default())
+        .manage(updates::UpdateProgress::default())
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
             updates::check_update,
             updates::get_update_channel,
             updates::set_update_channel,
             updates::install_update,
+            updates::get_update_progress,
             get_launch_preferences,
             set_launch_preference,
             start_gateway,

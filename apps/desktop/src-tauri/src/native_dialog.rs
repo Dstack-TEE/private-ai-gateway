@@ -7,7 +7,9 @@ const LOCAL_API_LABEL: &str = "local-api";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
-const DIALOG_LABELS: [&str; 5] = [
+const UPDATE_PROGRESS_LABEL: &str = "update-progress";
+const DIALOG_LABELS: [&str; 6] = [
+    UPDATE_PROGRESS_LABEL,
     PROFILES_LABEL,
     PROFILE_EDITOR_LABEL,
     PRIVACY_LABEL,
@@ -36,6 +38,15 @@ pub fn open(
         return Err("Invalid profile identifier".to_string());
     }
     let spec = match kind {
+        "update-progress" => DialogSpec {
+            label: UPDATE_PROGRESS_LABEL,
+            title: "Software Update",
+            width: 480.0,
+            height: 240.0,
+            min_width: 480.0,
+            min_height: 240.0,
+            query: "index.html?native-dialog=update-progress".to_string(),
+        },
         "profile-editor" => DialogSpec {
             label: PROFILE_EDITOR_LABEL,
             title: if profile_id.is_some() {
@@ -112,11 +123,19 @@ pub fn open(
         *label != spec.label && !(spec.label == PROFILE_EDITOR_LABEL && *label == PROFILES_LABEL)
     }) {
         if let Some(window) = app.get_webview_window(label) {
+            if spec.label == UPDATE_PROGRESS_LABEL {
+                focus_if_visible(&window)?;
+                return Err("Close the open dialog before installing an update".to_string());
+            }
             return focus_if_visible(&window);
         }
     }
 
     if let Some(window) = app.get_webview_window(spec.label) {
+        if spec.label == UPDATE_PROGRESS_LABEL {
+            focus_if_visible(&window)?;
+            return Err("An update dialog is already open".to_string());
+        }
         if spec.label == PROFILES_LABEL && repair {
             window
                 .emit(PROFILE_REPAIR_EVENT, ())
@@ -144,6 +163,9 @@ pub fn open(
         .state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
         .state()?;
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
+    if spec.label == UPDATE_PROGRESS_LABEL {
+        crate::updates::reset_progress(app);
+    }
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
@@ -186,6 +208,16 @@ pub fn open(
                 }
             }
         });
+        if spec.label == UPDATE_PROGRESS_LABEL {
+            let app = app.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if !crate::updates::can_close_progress(&app) {
+                        api.prevent_close();
+                    }
+                }
+            });
+        }
         Ok(())
     }
 }
@@ -226,6 +258,11 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == UPDATE_PROGRESS_LABEL
+        && !crate::updates::can_close_progress(window.app_handle())
+    {
+        return Err("Wait for the update to finish".to_string());
+    }
     if !DIALOG_LABELS.contains(&window.label()) {
         return Err("Only native dialog windows can close themselves".to_string());
     }

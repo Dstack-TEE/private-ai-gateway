@@ -5,14 +5,18 @@ import { Button } from "./components/ui/button";
 import { NativeSelect } from "./components/ui/native-select";
 import { FieldLabel } from "./components/ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./components/ui/dialog";
+import { Progress } from "./components/ui/progress";
 
-export function useUpdates(api: DesktopApi) {
+export function useUpdates(api: DesktopApi, native = false) {
   const [info, setInfo] = useState<UpdateInfo>();
   const [currentVersion, setCurrentVersion] = useState<string>();
   const [busy, setBusy] = useState<"checking" | "installing" | "changing">();
   const [channel, setChannel] = useState<UpdateChannel>();
   const [error, setError] = useState<string>();
   const [progress, setProgress] = useState<UpdateProgress>();
+  const [installDialogOpen, setInstallDialogOpen] = useState(false);
+  const [installError, setInstallError] = useState<string>();
   const mounted = useRef(false);
   const inFlight = useRef(false);
   const lastCheck = useRef(0);
@@ -86,11 +90,15 @@ export function useUpdates(api: DesktopApi) {
     setBusy("installing");
     try {
       if (!await api.confirm({ title: "Install update?", message: "Protection will stop and connected agent configurations will be restored before the app restarts. In-flight requests may be interrupted.", confirmLabel: "Install and Restart" })) return;
+      setInstallError(undefined);
       setProgress(undefined);
+      if (native) await api.openNativeDialog("update-progress");
+      else setInstallDialogOpen(true);
       await api.installUpdate();
     } catch {
       if (mounted.current) {
         setError("Update installation failed. A new check will run automatically.");
+        setInstallError("The update could not be installed. Close this dialog and try again later.");
         setInfo((current) => current ? { ...current, version: null } : current);
       }
     } finally {
@@ -98,7 +106,25 @@ export function useUpdates(api: DesktopApi) {
       if (mounted.current) setBusy(undefined);
     }
   };
-  return { info, currentVersion, busy, error, progress, channel, changeChannel, install };
+  return { info, currentVersion, busy, error, progress, channel, changeChannel, install, installDialogOpen, installError, closeInstallDialog: () => setInstallDialogOpen(false) };
+}
+
+export function UpdateProgressDialog({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
+  return <Dialog open={updates.installDialogOpen} onOpenChange={(open, details) => {
+    if (!open && !updates.installError) { details.cancel(); return; }
+    if (!open) updates.closeInstallDialog();
+  }}>
+    <DialogContent showCloseButton={Boolean(updates.installError)}>
+      <DialogHeader><DialogTitle>{updates.installError ? "Update failed" : "Installing update"}</DialogTitle><DialogDescription>{updates.installError ?? "The app will restart when installation completes."}</DialogDescription></DialogHeader>
+      {!updates.installError && <UpdateProgressMeter progress={updates.progress} />}
+      {updates.installError && <DialogFooter><Button variant="outline" onClick={updates.closeInstallDialog}>Done</Button></DialogFooter>}
+    </DialogContent>
+  </Dialog>;
+}
+
+export function UpdateProgressMeter({ progress }: { progress?: UpdateProgress }): React.JSX.Element {
+  const percent = progress?.total ? Math.min(100, Math.floor(progress.downloaded / progress.total * 100)) : null;
+  return <><Progress value={percent} aria-label="Update progress" /><p className="text-sm text-muted-foreground" role="status">{percent === 100 ? "Verifying and installing…" : percent === null ? "Preparing download…" : `Downloading ${percent}%`}</p></>;
 }
 
 export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof useUpdates> }): React.JSX.Element {
@@ -132,10 +158,10 @@ export function UpdateControl({ updates, productName }: { updates: ReturnType<ty
     <ItemContent>
       <ItemTitle>{productName}</ItemTitle>
     </ItemContent>
-    <ItemActions className="ml-auto max-w-full flex-col items-end text-right">
+    <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
       <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
-      <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>
-      {info?.version && <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button>}
+      {info?.version ? <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
+      {info?.version && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
   </Item>;
 }

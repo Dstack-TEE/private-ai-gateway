@@ -27,6 +27,33 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 
 ## Workflow Coverage
 
+### UI Consistency Follow-up (2026-09-06)
+
+- Warning uses amber independently of destructive errors; primary uses Neutral.
+  Overview decoration retains the dstack brand accent, not the success token.
+- Live Verified opens Privacy Verification directly; no separate info button.
+- Settings, profiles and usage share an Item-based action row with full-row hover.
+  Provider logos are 18px; chart metrics use standard Tabs with visible selection.
+- Profile forms omit the credential-delete action and verification badge.
+  Verify and Save remains intentional: invalid replacement credentials must not
+  overwrite a working profile or trigger an unverified reconnection.
+- Agent refresh reports the detected count; connection mutations show optimistic
+  state and progress without disabling unrelated agents. Restore all is locked
+  during a connection mutation. Model-sync filler text is removed.
+- Usage uses shadcn Chart/Recharts stacks per model, with full-filter SQL totals,
+  zero-filled dates and monthly aggregation for long ranges. Filters use local
+  calendar-day boundaries, including Today. Production-CSP
+  coverage checks rendered bars without allowing dynamic style tags.
+- About keeps version and update status/action on one row. Update confirmation
+  is native; progress reuses the native child-window infrastructure and standard
+  Progress content (Dialog in browser preview). A backend snapshot prevents lost
+  progress/errors during window startup. Active installation cannot be closed.
+
+Renderer checks do not certify native window behavior. Linux desktop build
+dependencies are installed and native validation uses the project's Rust 1.89
+toolchain. macOS sheet presentation, Windows/Linux close handling, and signed
+upgrade/restart still require platform acceptance.
+
 | Workflow | Automated evidence | Remaining acceptance |
 | --- | --- | --- |
 | First launch | No-profile opens New Profile; first provider preset, validation and failed-save behavior | Real credential permission prompts |

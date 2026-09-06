@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   BatteryMedium,
   Bot,
@@ -13,7 +13,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  Info,
   Laptop,
   LayoutGrid,
   LoaderCircle,
@@ -41,8 +40,11 @@ import redpillServiceIcon from "./assets/service-redpill.png";
 import { desktopApi as liveApi, initialGatewayState } from "./desktop-api";
 import { brand } from "./generated/brand";
 import { mockApi } from "./mock-api";
-import { UpdateControl, UpdateChannelControl, useUpdates } from "./updates";
+import { UpdateControl, UpdateChannelControl, UpdateProgressDialog, UpdateProgressMeter, useUpdates } from "./updates";
+import type { UpdateProgress } from "../shared/contracts";
 import { Button } from "./components/ui/button";
+import { ActionItem } from "./components/action-item";
+import type { UsageMetric } from "./components/usage-chart";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./components/ui/field";
 import { Badge } from "./components/ui/badge";
 import { Alert, AlertDescription } from "./components/ui/alert";
@@ -73,6 +75,7 @@ import type {
 
 // `?mock=<scenario>` renders the window against canned state for screenshots.
 const query = new URLSearchParams(window.location.search);
+const UsageChart = lazy(() => import("./components/usage-chart").then((module) => ({ default: module.UsageChart })));
 const previewMode = query.has("mock");
 const desktopApi: DesktopApi = previewMode ? mockApi(query.get("mock")) : liveApi;
 
@@ -199,7 +202,7 @@ function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" 
 
 type View = "overview" | "agents" | "usage" | "settings";
 type SettingsTarget = "confidential" | "privacy" | "local-api";
-type UsageMetric = "tokens" | "cost" | "requests";
+
 type Tone = "success" | "warning" | "danger" | "neutral";
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
@@ -300,6 +303,20 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   return { state, setState, loaded, loadError, closed, close };
 }
 
+function NativeUpdateProgressWindow(): React.JSX.Element {
+  const [progress, setProgress] = useState<UpdateProgress>();
+  const native = useNativeGatewayWindow("Software Update", Boolean(progress));
+  useEffect(() => desktopApi.onUpdateProgress(setProgress), []);
+  if (native.closed) return <main aria-label="Software update closed" />;
+  return <main className="native-dialog-host p-6 flex flex-col gap-4" aria-labelledby="update-title">
+    <h2 id="update-title" className="text-lg font-semibold">{progress?.error ? "Update failed" : "Installing update"}</h2>
+    <p className="text-sm text-muted-foreground" role={progress?.error ? "alert" : undefined}>{progress?.error ?? "The app will restart when installation completes."}</p>
+    {!progress?.error && <UpdateProgressMeter progress={progress} />}
+    {native.loadError && <p role="alert" className="text-sm text-destructive">{native.loadError}</p>}
+    {progress?.error && <div className="mt-auto flex justify-end"><Button variant="outline" onClick={native.close}>Done</Button></div>}
+  </main>;
+}
+
 function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element | null {
   useEffect(() => {
     if (!error) return;
@@ -347,7 +364,6 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
     profile={editingProfile}
     onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
-    onClearKey={() => run(() => desktopApi.clearApiKey())}
     onComplete={native.close} onDeleted={native.close} onClose={native.close}
   /></main>;
   return (
@@ -362,7 +378,6 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
         onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
         onActivate={(profileId) => run(() => desktopApi.activateProfile(profileId))}
         onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
-        onClearKey={() => run(() => desktopApi.clearApiKey())}
         onClose={native.close}
       />
     </main>
@@ -497,7 +512,7 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
 }
 
 function App(): React.JSX.Element {
-  const updates = useUpdates(desktopApi);
+  const updates = useUpdates(desktopApi, !previewMode);
   const [view, setView] = useState<View>("overview");
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
@@ -512,8 +527,10 @@ function App(): React.JSX.Element {
   const [clientKey, setClientKey] = useState("");
   const [clientKeyVisible, setClientKeyVisible] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [agentBusy, setAgentBusy] = useState<string>();
+  const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
+  const agentOperations = useRef(new Set<string>());
   const [refreshingAgents, setRefreshingAgents] = useState(false);
+  const [agentScanResult, setAgentScanResult] = useState<string>();
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string }>();
@@ -661,15 +678,21 @@ function App(): React.JSX.Element {
     try {
       const next = await desktopApi.listAgents();
       if (scan === agentScan.current) setAgents(next);
+      return next;
     } catch (error) {
       if (scan === agentScan.current) setActionError(errorMessage(error));
     }
   }, []);
 
   const refreshAgents = async () => {
+    if (refreshingAgents) return;
     setRefreshingAgents(true);
+    setAgentScanResult(undefined);
+    setActionError(undefined);
     try {
-      await loadAgents();
+      const detected = await loadAgents();
+      const message = detected ? `${detected.filter((agent) => agent.installed).length} installed agents detected` : "Agent detection failed";
+      setAgentScanResult(message);
     } finally {
       setRefreshingAgents(false);
     }
@@ -764,19 +787,6 @@ function App(): React.JSX.Element {
     }
   };
 
-  const clearActiveProfileCredential = async (): Promise<string | undefined> => {
-    setActionError(undefined);
-    try {
-      setState(await desktopApi.clearApiKey());
-      setNotice({ id: Date.now(), text: "Profile credential deleted" });
-      return undefined;
-    } catch (error) {
-      const message = errorMessage(error);
-      setActionError(message);
-      return message;
-    }
-  };
-
   const rotateClientKey = async () => {
     setActionError(undefined);
     try {
@@ -817,20 +827,24 @@ function App(): React.JSX.Element {
   };
 
   const applyAgent = async (agent: AgentStatus, connect: boolean) => {
+    if (agentOperations.current.has(agent.id)) return;
+    agentOperations.current.add(agent.id);
     const options = connect && agent.id === "codex"
       ? { defaultModel: models[0]?.id }
       : {};
-    setAgentBusy(agent.id);
+    setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
     setActionError(undefined);
     try {
       const preview = await desktopApi.previewAgent(agent.id, connect, options);
-      await desktopApi.applyAgent(agent.id, connect, preview.revision, options);
+      const changed = await desktopApi.applyAgent(agent.id, connect, preview.revision, options);
+      setAgents((current) => current.map((entry) => entry.id === changed.id ? changed : entry));
       await loadAgents();
       setNotice({ id: Date.now(), text: `${displayAgentName(agent)} ${connect ? "connected" : "disconnected"}` });
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
-      setAgentBusy(undefined);
+      agentOperations.current.delete(agent.id);
+      setPendingAgentChanges((current) => { const next = { ...current }; delete next[agent.id]; return next; });
     }
   };
 
@@ -863,7 +877,7 @@ function App(): React.JSX.Element {
 
   const anyRecorded = agents.some((agent) => agent.recorded);
   const problem = actionError ?? clientKeyError ?? state.error;
-  const locked = Boolean(agentBusy) || applying;
+  const locked = applying;
   const focusPageHeading = (next: View) => {
     window.requestAnimationFrame(() => document.getElementById(`page-title-${next}`)?.focus());
   };
@@ -907,6 +921,7 @@ function App(): React.JSX.Element {
         <div className="content" id={`page-${view}`} key={view}>
         {view === "overview" && (
           <Overview
+            pendingAgentChanges={pendingAgentChanges}
             state={state}
             agents={agents}
             busy={busy}
@@ -932,6 +947,8 @@ function App(): React.JSX.Element {
         )}
         {view === "agents" && (
           <AgentsView
+            pendingAgentChanges={pendingAgentChanges}
+            scanResult={agentScanResult}
             refreshing={refreshingAgents}
             onRefresh={() => void refreshAgents()}
             agents={agents}
@@ -957,7 +974,7 @@ function App(): React.JSX.Element {
             running={running}
             allowDevelopmentOs={allowDevelopmentOs}
             anyRecorded={anyRecorded}
-            locked={locked}
+            locked={locked || Object.keys(pendingAgentChanges).length > 0}
             problem={problem}
             onPolicy={setAllowDevelopmentOs}
             onRestoreAll={() => void restoreAll()}
@@ -980,7 +997,6 @@ function App(): React.JSX.Element {
           onVerify={verifyConfiguration}
           onActivate={activateProfile}
           onDelete={deleteProfile}
-          onClearKey={clearActiveProfileCredential}
           onClose={() => {
             setProfileEditorId(undefined);
             setSettingsTarget(undefined);
@@ -1010,6 +1026,7 @@ function App(): React.JSX.Element {
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {notice?.text}
       </div>
+      <UpdateProgressDialog updates={updates} />
     </main>
   );
 
@@ -1242,6 +1259,7 @@ function PageHeader({
 }
 
 function Overview({
+  pendingAgentChanges,
   state,
   agents,
   busy,
@@ -1264,6 +1282,7 @@ function Overview({
   onSelect,
   onInspect,
 }: {
+  pendingAgentChanges: Record<string, boolean>;
   state: GatewayState;
   agents: AgentStatus[];
   busy: boolean;
@@ -1328,6 +1347,7 @@ function Overview({
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
               <AgentRow
+                pendingConnection={pendingAgentChanges[agent.id]}
                 key={agent.id}
                 agent={agent}
                 compact
@@ -1445,11 +1465,9 @@ function StatusSurface({
           <span>{activeProfile?.name ?? "Setup provider"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        <div className={`status-fact status-profile-state ${liveVerified ? "state-success" : "state-neutral"}`}>
-          {liveVerified ? <ShieldCheck size={13} aria-hidden="true" /> : <ShieldX size={13} aria-hidden="true" />}
-          <span>{profileStatus}</span>
-          {liveVerified && <IconButton label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info size={14} aria-hidden="true" /></IconButton>}
-        </div>
+        {liveVerified
+          ? <Button variant="outline" className="justify-self-start text-success" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Verified</Button>
+          : <div className="status-fact status-profile-state state-neutral"><ShieldX size={13} aria-hidden="true" /><span>{profileStatus}</span></div>}
       </div>
     </section>
   );
@@ -1624,7 +1642,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
   const tokens = (activity.inputTokens ?? 0) + (activity.outputTokens ?? 0);
   const timestamp = new Date(activity.at * 1_000);
   return (
-    <Button variant="ghost" className="row list-row usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
+    <ActionItem size="xs" className="usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
       <span className="row-main">
         <span className="row-title">{agentName(activity.agent)}</span>
         <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
@@ -1633,7 +1651,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
       <span className="usage-amount"><strong>{tokens ? formatTokens(tokens) : "—"}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
       <time className="row-side" dateTime={timestamp.toISOString()} title={formatTimestamp(timestamp.getTime(), true)}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
-    </Button>
+    </ActionItem>
   );
 }
 
@@ -1647,6 +1665,8 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
 }
 
 function AgentsView({
+  pendingAgentChanges,
+  scanResult,
   refreshing,
   onRefresh,
   agents,
@@ -1654,6 +1674,8 @@ function AgentsView({
   problem,
   onSelect,
 }: {
+  pendingAgentChanges: Record<string, boolean>;
+  scanResult?: string;
   refreshing: boolean;
   onRefresh(): void;
   agents: AgentStatus[];
@@ -1667,7 +1689,7 @@ function AgentsView({
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
       <div className="page-toolbar">
         <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
-        <IconButton label="Detect installed agents" disabled={refreshing} onClick={onRefresh}><RefreshCw className={refreshing ? "is-spinning" : undefined} aria-hidden="true" /></IconButton>
+        <div className="flex items-center gap-2"><span className="text-sm text-muted-foreground" role="status">{refreshing ? "Detecting…" : scanResult}</span><IconButton label="Detect installed agents" disabled={refreshing} onClick={onRefresh}><RefreshCw className={refreshing ? "is-spinning" : undefined} aria-hidden="true" /></IconButton></div>
       </div>
       <section className="group" aria-labelledby="agents-title">
         <h2 className="group-title" id="agents-title">Installed <span>{connected} connected</span></h2>
@@ -1675,6 +1697,7 @@ function AgentsView({
           {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
           {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
             <AgentRow
+              pendingConnection={pendingAgentChanges[agent.id]}
               key={agent.id}
               agent={agent}
               disabled={locked}
@@ -1689,24 +1712,27 @@ function AgentsView({
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
         ))}</div>
       </section>}
-      <p className="page-footnote">Available models sync automatically from the verified service.</p>
     </div>
   );
 }
 
 function AgentRow({
+  pendingConnection,
   agent,
   disabled,
   compact = false,
   onSelect,
 }: {
+  pendingConnection?: boolean;
   agent: AgentStatus;
   disabled: boolean;
   compact?: boolean;
   onSelect(connect: boolean): void;
 }): React.JSX.Element {
   const name = displayAgentName(agent);
-  const presence = !agent.installed
+  const presence = pendingConnection !== undefined
+    ? { label: pendingConnection ? "Connecting…" : "Disconnecting…", tone: "neutral" as Tone, icon: undefined }
+    : !agent.installed
     ? { label: "Not installed", tone: "neutral" as Tone, icon: undefined }
     : agent.attention
       ? { label: "Needs attention", tone: "warning" as Tone, icon: TriangleAlert }
@@ -1715,7 +1741,7 @@ function AgentRow({
         : agent.connected
           ? { label: "Connected", tone: "success" as Tone, icon: undefined }
           : { label: "Not connected", tone: "neutral" as Tone, icon: undefined };
-  const disconnecting = agent.recorded;
+  const disconnecting = pendingConnection ?? agent.recorded;
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
@@ -1732,9 +1758,10 @@ function AgentRow({
       <ItemActions>
       {agent.installed ? <SwitchControl
         checked={disconnecting}
+        aria-busy={pendingConnection !== undefined}
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
-        onToggle={() => onSelect(!disconnecting)}
+        onToggle={() => { if (pendingConnection === undefined) onSelect(!disconnecting); }}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
     </Item><Separator className="last:hidden" /></>
@@ -1760,7 +1787,7 @@ function StateLabel({
   text: string;
 }): React.JSX.Element {
   return (
-    <Badge variant={tone === "danger" || tone === "warning" ? "destructive" : "outline"} className={tone === "success" ? "border-success/20 bg-success/10 text-success" : undefined}>
+    <Badge variant={tone === "danger" ? "destructive" : "outline"} className={tone === "success" ? "border-success/20 bg-success/10 text-success" : tone === "warning" ? "border-warning/20 bg-warning/10 text-warning" : undefined}>
       {Icon ? <Icon size={13} aria-hidden="true" /> : <span data-slot="status-dot" className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />}
       {text}
     </Badge>
@@ -1871,7 +1898,7 @@ function UsageView({
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><NativeSelect id="usage-model" value={model} onChange={(event) => { setModel(event.target.value); resetPagination(); }}><option value="">All models</option>{modelOptions.map((entry) => <option key={entry} value={entry}>{entry}</option>)}</NativeSelect></Field>
         <fieldset className="filter-field time-filter">
           <legend>Time</legend>
-          <ToggleGroup className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
+          <ToggleGroup variant="outline" className="segmented-control" spacing={0} value={[range]} aria-label="Usage time range" onValueChange={([value]) => { if (value) { setRange(value); resetPagination(); } }}>
             {(["24h", "7d", "30d", "all"] as const).map((value) => (
               <ToggleGroupItem
                 key={value}
@@ -1886,7 +1913,7 @@ function UsageView({
       <UsageStats page={page} />
       <section className="group usage-over-time" aria-labelledby="usage-chart-title">
         <h2 className="group-title" id="usage-chart-title">Usage over time <span>{rangeLabel(range)}</span></h2>
-        <UsageChart page={page} loading={loading} range={range} metric={metric} onMetric={setMetric} />
+        <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageChart page={page} loading={loading} range={range} metric={metric} onMetric={setMetric} /></Suspense>
       </section>
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
@@ -1943,101 +1970,6 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const protectedRate = forwarded ? (summary?.protected ?? 0) / forwarded : 0;
   const failedOrRejected = (summary?.blockedLocally ?? 0) + (summary?.failedProof ?? 0);
   return <div className="usage-stats"><div><span>Requests</span><strong>{summary ? summary.requests.toLocaleString() : "—"}</strong><small>{summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"}</small></div><div><span>Tokens</span><strong>{summary ? formatTokens(totalTokens) : "—"}</strong><small>{summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"}</small></div><div><span>Cost</span><strong>{summary ? currency(summary.costUsd) : "—"}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary ? `${summary.protected} of ${forwarded} answers` : "—"}</small></div></div>;
-}
-
-function UsageChart({
-  page,
-  loading,
-  range,
-  metric,
-  onMetric,
-}: {
-  page?: UsagePage;
-  loading: boolean;
-  range: string;
-  metric: UsageMetric;
-  onMetric(metric: UsageMetric): void;
-}): React.JSX.Element {
-  if (!page) return <figure className="usage-chart" aria-busy={loading}><EmptyState text={loading ? "Loading usage…" : "Usage data unavailable."} /></figure>;
-  const series = completeDailySeries(page?.series ?? [], range).slice(-30);
-  const value = (point: UsagePage["series"][number]) => metric === "tokens" ? point.tokens : metric === "cost" ? point.costUsd : point.requests;
-  const peak = Math.max(1, ...series.map(value));
-  const labelIndexes = chartLabelIndexes(series.length);
-  return (
-    <figure className="usage-chart" aria-label={`${metric} usage by day`}>
-      <div className="chart-toolbar">
-        <ToggleGroup className="segmented-control chart-metric" spacing={0} value={[metric]} aria-label="Chart metric" onValueChange={([value]) => { if (value === "tokens" || value === "cost" || value === "requests") onMetric(value); }}>
-          {(["tokens", "cost", "requests"] as const).map((entry) => (
-            <ToggleGroupItem key={entry} value={entry}>
-              {{ tokens: "Tokens", cost: "Cost", requests: "Requests" }[entry]}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-        {metric === "tokens" && <span className="chart-legend"><i className="input" />Input <i className="output" />Output</span>}
-      </div>
-      <div className="chart-bars" aria-hidden="true">
-        {series.map((point, index) => (
-          <div key={point.day} className="chart-column" title={`${point.day}: ${point.tokens.toLocaleString()} tokens, ${point.requests} requests, ${currency(point.costUsd)}`}>
-            <span className={`chart-stack${value(point) === 0 ? " is-empty" : ""}`} style={{ height: `${value(point) / peak * 100}%` }}>
-              {metric === "tokens" ? (
-                <><i className="output" style={{ flexGrow: point.outputTokens }} /><i className="input" style={{ flexGrow: point.inputTokens }} /></>
-              ) : <i className="single" />}
-            </span>
-            <small>{labelIndexes.has(index) ? point.day.slice(5) : ""}</small>
-          </div>
-        ))}
-      </div>
-      <ul className="sr-only">
-        {series.map((point) => <li key={point.day}>{point.day}: {point.tokens.toLocaleString()} tokens, {point.requests} requests, {currency(point.costUsd)}</li>)}
-      </ul>
-      {series.length === 0 && <EmptyState text="No saved usage to chart for this range." />}
-    </figure>
-  );
-}
-
-function completeDailySeries(series: UsagePage["series"], range: string): UsagePage["series"] {
-  if (series.length === 0 && range === "all") return [];
-  const byDay = new Map(series.map((point) => [point.day, point]));
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const fixedDays = range === "24h" ? 1 : range === "7d" ? 7 : range === "30d" ? 30 : undefined;
-  const start = fixedDays
-    ? new Date(today.getFullYear(), today.getMonth(), today.getDate() - fixedDays + 1)
-    : parseLocalDay(series[0]?.day) ?? today;
-  const completed: UsagePage["series"] = [];
-  for (const cursor = new Date(start); cursor <= today; cursor.setDate(cursor.getDate() + 1)) {
-    const day = localDay(cursor);
-    completed.push(byDay.get(day) ?? {
-      day,
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      tokens: 0,
-      costUsd: 0,
-    });
-  }
-  return completed;
-}
-
-function parseLocalDay(day?: string): Date | undefined {
-  const match = day?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return undefined;
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-}
-
-function localDay(date: Date): string {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
-function chartLabelIndexes(length: number): Set<number> {
-  if (length <= 4) {
-    return new Set(Array.from({ length }, (_, index) => index));
-  }
-  return new Set(Array.from({ length: 4 }, (_, index) => Math.round(index * (length - 1) / 3)));
 }
 
 function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {
@@ -2163,7 +2095,7 @@ function SettingsView({
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
           <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
-          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Verified configuration" : "Verification required"}` : "No provider configured"} />
+          <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
           {state.endpointError && <p className="row-warning">{state.endpointError}</p>}
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
@@ -2196,7 +2128,6 @@ function ProfilesSheet({
   onVerify,
   onActivate,
   onDelete,
-  onClearKey,
   onClose,
 }: {
   state: GatewayState;
@@ -2206,7 +2137,6 @@ function ProfilesSheet({
   onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onActivate(profileId: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
-  onClearKey(): Promise<string | undefined>;
   onClose(): void;
 }): React.JSX.Element {
   const [editor, setEditor] = useState<{ kind: "new" } | { kind: "edit"; profileId: string } | undefined>(() => {
@@ -2245,7 +2175,6 @@ function ProfilesSheet({
           profile={editor?.kind === "edit" ? state.profiles.find((profile) => profile.id === editor.profileId) : undefined}
           onVerify={onVerify}
           onDelete={onDelete}
-          onClearKey={onClearKey}
           onComplete={state.profiles.length === 0 ? onClose : completeEditor}
           onDeleted={state.profiles.length === 1 ? onClose : completeEditor}
           onClose={state.profiles.length === 0 ? onClose : completeEditor}
@@ -2312,13 +2241,14 @@ function ProfileListSheet({
           const status = !profileHasCredential(profile)
             ? "Credential unavailable"
             : profile.verifiedAt
-              ? "Verified configuration"
+              ? "Ready"
               : "Verification required";
           return (
             <div className={`profile-list-row${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
-              <Button variant="ghost"
+              <ActionItem
                 type="button"
                 className="profile-select"
+                selected={active}
                 aria-pressed={active}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => void select(profile.id)}
@@ -2326,7 +2256,7 @@ function ProfileListSheet({
                 <ServiceLogo url={profile.remoteUrl} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
-              </Button>
+              </ActionItem>
               <IconButton label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil size={15} /></IconButton>
             </div>
           );
@@ -2350,7 +2280,6 @@ function ProfileEditorSheet({
   profile,
   onVerify,
   onDelete,
-  onClearKey,
   onComplete,
   onDeleted,
   onClose,
@@ -2361,7 +2290,6 @@ function ProfileEditorSheet({
   profile?: ConfidentialProfile;
   onVerify(profile: ConfidentialProfileInput, key?: string): Promise<string | undefined>;
   onDelete(profileId: string): Promise<string | undefined>;
-  onClearKey(): Promise<string | undefined>;
   onComplete(): void;
   onDeleted(): void;
   onClose(): void;
@@ -2387,7 +2315,6 @@ function ProfileEditorSheet({
   const savedCredentialApplies = !isNew
     && profileHasCredential(profile)
     && !profileChanged;
-  const verifiedConfiguration = Boolean(profile?.verifiedAt) && savedCredentialApplies && !apiKeyDraft.trim();
 
   const chooseService = (next: ServicePreset) => {
     const preset = SERVICE_PRESETS.find((service) => service.id === next);
@@ -2423,25 +2350,6 @@ function ProfileEditorSheet({
       onDeleted();
     }
   };
-  const clearKey = async () => {
-    let confirmed: boolean;
-    try {
-      confirmed = await desktopApi.confirm({
-        title: `Delete the credential for “${draft.name}”?`,
-        message: "Protection cannot start with this profile until a new credential is verified and saved.",
-        confirmLabel: "Delete Credential",
-      });
-    } catch (confirmError) {
-      setError(errorMessage(confirmError));
-      return;
-    }
-    if (!confirmed) return;
-    setSaving(true);
-    setError(undefined);
-    const message = await onClearKey();
-    setSaving(false);
-    if (message) setError(message);
-  };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
@@ -2461,13 +2369,13 @@ function ProfileEditorSheet({
         <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-label="Confidential AI provider" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
             <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
-              <ServiceLogo url={service.url} size="large" />
+              <ServiceLogo url={service.url} />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
             </ToggleGroupItem>
           ))}
           <ToggleGroupItem value="custom" className="service-preset" aria-label="Custom" title="Use another ACI endpoint">
-            <ServiceLogo url="custom://service" size="large" />
+            <ServiceLogo url="custom://service" />
             <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
           </ToggleGroupItem>
@@ -2478,9 +2386,7 @@ function ProfileEditorSheet({
           <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
-            <FieldDescription id="profile-key-note">{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
-            {verifiedConfiguration && <StateLabel tone="success" icon={Check} text="Verified configuration" />}
-            {savedCredentialApplies && profile?.id === state.activeProfileId && <Button className="self-start" type="button" variant="link" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</Button>}
+            <FieldDescription id="profile-key-note">{savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
           </Field>
           <FieldError>{error}</FieldError>
         </FieldGroup>
@@ -2803,8 +2709,12 @@ function sortAgents(agents: AgentStatus[]): AgentStatus[] {
 }
 
 function usageSince(range: string): number | undefined {
-  const seconds = range === "24h" ? 86_400 : range === "7d" ? 604_800 : range === "30d" ? 2_592_000 : 0;
-  return seconds ? Math.floor(Date.now() / 1000) - seconds : undefined;
+  const days = range === "24h" ? 1 : range === "7d" ? 7 : range === "30d" ? 30 : 0;
+  if (!days) return undefined;
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - days + 1);
+  return Math.floor(start.getTime() / 1000);
 }
 
 function rangeLabel(range: string): string {
@@ -2904,6 +2814,7 @@ export function Renderer(): React.JSX.Element {
   // Native child windows and the main window share one component entry point.
   const nativeDialog = query.get("native-dialog");
   return nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
+    : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
     : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />

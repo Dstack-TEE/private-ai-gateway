@@ -12,6 +12,7 @@
   --color-primary-foreground: var(--primary-foreground);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -36,7 +37,7 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-/* Neutral palette with one dstack-derived primary, adapted for each appearance. */
+/* Neutral controls, independent semantic state colors and a dstack brand accent. */
 :root {
   color-scheme: light;
   font-family: var(--font-sans);
@@ -44,8 +45,9 @@
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
-  --primary: #3f5c16;
-  --primary-foreground: #ffffff;
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --brand-accent: #c6eb3d;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -95,14 +97,14 @@
   --success: var(--color-green-700);
   --success-foreground: var(--color-white);
   --success-bg: color-mix(in oklch, var(--success) 10%, transparent);
-  --warning: var(--destructive);
-  --warning-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
+  --warning: var(--color-amber-700);
+  --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
   --danger: var(--destructive);
   --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
   --neutral: var(--muted-foreground);
   --neutral-bg: var(--muted);
   --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
-  --veil-color: color-mix(in srgb, var(--success) 16%, var(--panel));
+  --veil-color: color-mix(in srgb, var(--brand-accent) 16%, var(--panel));
 }
 
 @media (prefers-color-scheme: dark) {
@@ -111,8 +113,9 @@
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
-    --primary: #afce70;
-    --primary-foreground: #19220e;
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --warning: var(--color-amber-400);
     --success: var(--color-green-400);
     --success-foreground: var(--color-green-950);
     --secondary: oklch(0.269 0 0);
@@ -135,7 +138,7 @@
   body { @apply bg-background text-foreground; }
 }
 
-/* Development mode uses the theme's destructive token without changing geometry. */
+/* Development mode uses the warning token without changing geometry. */
 [data-slot="switch"].is-development { --primary: var(--warning); }
 @media (prefers-reduced-motion: reduce) {
   [data-slot="button"], [data-slot="switch"], [data-slot="switch-thumb"] { transition: none; }

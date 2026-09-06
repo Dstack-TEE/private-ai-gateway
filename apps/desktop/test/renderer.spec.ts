@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { modelChartData } from "../src/renderer/components/usage-chart";
 
 type Page = import("@playwright/test").Page;
 
@@ -23,6 +24,22 @@ const overflow = (page: Page) =>
       content ? content.scrollWidth - content.clientWidth : 0,
     );
   });
+
+test("model chart aggregation preserves totals and uses monthly buckets for long ranges", () => {
+  const day = new Date();
+  day.setDate(day.getDate() - 120);
+  const first = day.toISOString().slice(0, 10);
+  const series = [{ day: first, requests: 2, inputTokens: 200, outputTokens: 100, tokens: 300, costUsd: 3 }];
+  const modelSeries = [{ day: first, model: "model-a", requests: 1, tokens: 100, costUsd: 1 }, { day: first, model: "model-b", requests: 1, tokens: 200, costUsd: 2 }];
+  for (const [metric, total] of [["tokens", 300], ["cost", 3], ["requests", 2]] as const) {
+    const result = modelChartData({ series, modelSeries }, "all", metric);
+    expect(result.monthly).toBe(true);
+    expect(result.series.map((entry) => entry.label)).toEqual(["model-a", "model-b"]);
+    const sum = result.rows.reduce((sum, row) => sum + result.series.reduce((sum, entry) => sum + Number(row[entry.key] ?? 0), 0), 0);
+    expect(sum).toBe(total);
+    expect(result.rows.at(-1)?.period).toBe(new Date().toISOString().slice(0, 7));
+  }
+});
 
 test("public preview frames the Tauri renderer as a macOS window and exposes the tray contract", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 900 });
@@ -281,7 +298,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await nav(page, "Settings").click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
-  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toContainText("Verified configuration");
+  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toContainText("Ready");
   await page.getByRole("switch", { name: "Start protection" }).click();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
 
@@ -444,7 +461,7 @@ test("updates are discovered on launch and installation requires confirmation", 
   const about = page.getByRole("region", { name: "About", exact: true });
   await expect(about.locator('[data-slot="app-version"]')).toHaveText("v0.1.0");
   await expect(page.getByRole("button", { name: "Check for Updates" })).toHaveCount(0);
-  await expect(about.getByRole("button", { name: "Documentation", exact: true })).toHaveCSS("border-bottom-width", "1px");
+  await expect(about.getByRole("button", { name: "Documentation", exact: true })).toHaveCSS("border-bottom-width", "0px");
   await expect(about.getByRole("button", { name: "GitHub", exact: true })).toHaveAttribute("data-slot", "item");
   await expect(about.getByRole("combobox", { name: "Update channel" })).toHaveCount(0);
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
@@ -490,7 +507,7 @@ test("success colors, list separators, control sizes and About alignment are con
       const version = node.querySelector('[data-slot="app-version"]')?.getBoundingClientRect();
       const status = node.querySelector('[role="status"]')?.getBoundingClientRect();
       if (!version || !status) throw new Error("Missing About metadata");
-      return Math.abs(version.right - status.right);
+      return Math.abs(version.y + version.height / 2 - status.y - status.height / 2);
     });
     expect(aligned).toBeLessThanOrEqual(1);
     await expect(about.getByRole("status")).toHaveCSS("text-align", "right");
@@ -504,11 +521,65 @@ test("availability and connection badges render visible status dots", async ({ p
     const dot = badge.locator('[data-slot="status-dot"]');
     await expect(dot).toHaveCSS("width", "6px");
     await expect(dot).toHaveCSS("height", "6px");
-    await expect(dot).toHaveCSS("background-color", await badge.evaluate((node) => getComputedStyle(node).color));
+    await expect.poll(() => badge.evaluate((node) => {
+      const dot = node.querySelector('[data-slot="status-dot"]');
+      return dot !== null && getComputedStyle(dot).backgroundColor === getComputedStyle(node).color;
+    })).toBe(true);
   }
   await page.getByRole("switch", { name: "Stop protection", exact: true }).click();
   const unavailable = page.locator('[data-slot="badge"]').filter({ hasText: /^Unavailable$/ });
   await expect(unavailable.locator('[data-slot="status-dot"]')).toHaveCSS("width", "6px");
+});
+
+test("agent actions report progress without disabling unrelated switches", async ({ page }) => {
+  await page.goto("/?mock=agent-pending");
+  await nav(page, "Agents").click();
+  await page.getByRole("button", { name: "Detect installed agents" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "5 installed agents detected" })).toBeVisible();
+  await page.getByRole("switch", { name: "Connect Codex", exact: true }).click();
+  const pending = page.getByRole("switch", { name: "Disconnect Codex", exact: true });
+  await expect(pending).toBeChecked();
+  await expect(pending).toBeEnabled();
+  await expect(pending).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByRole("switch", { name: "Connect Pi", exact: true })).toBeEnabled();
+  await pending.click();
+  await expect(pending).toBeChecked();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-agent")));
+  await expect(pending).toHaveAttribute("aria-busy", "false");
+  await expect(pending).toBeChecked();
+});
+
+test("update installation uses a progress dialog and exposes failure without a fake cancel", async ({ page }) => {
+  await page.goto("/?mock=update-install-error");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Update available", exact: true }).click();
+  const progress = page.getByRole("dialog", { name: "Installing update", exact: true });
+  await expect(progress).toBeVisible();
+  await expect(progress.getByRole("progressbar", { name: "Update progress" })).toHaveAttribute("aria-valuenow", "40");
+  await page.keyboard.press("Escape");
+  await expect(progress).toBeVisible();
+  await expect(progress.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-update")));
+  const failure = page.getByRole("dialog", { name: "Update failed", exact: true });
+  await expect(failure).toBeVisible();
+  await failure.getByRole("button", { name: "Done" }).click();
+  await expect(failure).toHaveCount(0);
+});
+
+test("model stacks render under production-style CSP without dynamic style tags", async ({ page }) => {
+  await page.route((url) => url.pathname === "/", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), "content-security-policy": "default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'" } });
+  });
+  await page.goto("/?mock=ready");
+  await nav(page, "Usage").click();
+  const chart = page.locator('[data-slot="chart"]');
+  await expect(chart.locator("style")).toHaveCount(0);
+  await expect.poll(() => chart.locator(".recharts-rectangle").evaluateAll((nodes) => nodes.filter((node) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.height > 0; }).length)).toBeGreaterThan(0);
+  const headers = await page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("thead th").allTextContents();
+  expect(headers).toContain("openai/gpt-oss-20b");
+  expect(headers).not.toContain("Input");
+  expect(headers).not.toContain("Output");
 });
 
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
@@ -561,24 +632,34 @@ test("local copy hover follows the grouped row shape and profiles open their dia
 });
 
 test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-09-06T12:00:00"));
   await page.setViewportSize({ width: 940, height: 760 });
   await page.goto("/?mock=ready");
   await nav(page, "Usage").click();
 
-  await expect(page.locator(".chart-column")).toHaveCount(7);
-  const chartDays = await page.locator(".chart-column").evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("title")?.slice(0, 10)),
+  await expect(page.locator('[data-slot="chart"] .recharts-surface')).toBeVisible();
+  await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody tr")).toHaveCount(7);
+  const chartDays = await page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody th").allTextContents(
   );
   expect(new Set(chartDays).size).toBe(7);
 
-  const metric = page.getByRole("group", { name: "Chart metric" });
-  await metric.getByRole("button", { name: "Tokens", exact: true }).focus();
+  await page.getByRole("button", { name: "Today", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody tr")).toHaveCount(1);
+  await expect.poll(async () => page.locator('.usage-history time').evaluateAll((times) => times.length > 0 && times.every((time) => {
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    return new Date(time.getAttribute("datetime") ?? "").getTime() >= midnight.getTime();
+  }))).toBe(true);
+  await page.getByRole("button", { name: "7 days", exact: true }).click();
+
+  const metric = page.getByRole("tablist", { name: "Chart metric" });
+  await metric.getByRole("tab", { name: "Tokens", exact: true }).focus();
   await page.keyboard.press("ArrowRight");
-  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toBeFocused();
+  await expect(metric.getByRole("tab", { name: "Cost", exact: true })).toBeFocused();
   await page.keyboard.press("Space");
-  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(metric.getByRole("tab", { name: "Cost", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Space");
-  await expect(metric.getByRole("button", { name: "Cost", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(metric.getByRole("tab", { name: "Cost", exact: true })).toHaveAttribute("aria-selected", "true");
 
   const history = page.locator('ul[aria-label="Usage history"]');
   await expect(history.getByRole("button")).toHaveCount(20);
@@ -637,13 +718,14 @@ test("service settings stay focused while privacy verification exposes the compl
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
   const profiles = page.getByRole("dialog", { name: "Profiles" });
   await expect(profiles.getByText("Model catalog", { exact: true })).toHaveCount(0);
-  await expect(profiles.getByText(/Verified configuration/)).toBeVisible();
+  await expect(profiles.getByText(/Ready/)).toBeVisible();
   const redpillLogo = profiles.locator(".service-redpill img");
   await expect(redpillLogo).toBeVisible();
   await expect.poll(() => redpillLogo.evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain("service-redpill-");
   expect(await redpillLogo.evaluate((image) => (image as HTMLImageElement).currentSrc)).toContain(".png");
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
-  await expect(page.getByRole("dialog", { name: "Edit profile" }).getByText("Verified configuration", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Edit profile" }).getByText("Verified configuration", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete credential", exact: true })).toHaveCount(0);
   await page.getByRole("dialog", { name: "Edit profile" }).getByRole("button", { name: "Cancel" }).click();
   await profiles.getByRole("button", { name: "Done" }).click();
   await page.getByRole("switch", { name: "Start protection" }).click();
@@ -701,7 +783,7 @@ test("overview presents local availability and the active profile without sessio
     await nav(page, name).click();
     await expect(page.locator(".page-switch-copy")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   }
-  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toHaveCSS("border-bottom-width", "1px");
+  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toHaveCSS("border-bottom-width", "0px");
   await nav(page, "Agents").click();
   const detect = page.getByRole("button", { name: "Detect installed agents" });
   await expect(page.locator(".page-header").getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
@@ -893,6 +975,21 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "New profile" })).toBeVisible();
+});
+
+test("native update content renders without a second modal and replays failure state", async ({ page }) => {
+  await page.setViewportSize({ width: 480, height: 240 });
+  await page.goto("/?mock=ready&native-dialog=update-progress");
+  await expect(page.getByRole("heading", { name: "Installing update" })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "Update progress" })).toBeVisible();
+  await expect(page.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.goto("/?mock=update-failed&native-dialog=update-progress");
+  await expect(page.getByRole("alert")).toContainText("signature");
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByLabel("Software update closed")).toBeAttached();
+  await expect(page.getByRole("heading", { name: "Update failed" })).toHaveCount(0);
 });
 
 test("fail-closed states stay explicit and never show the success effects", async ({ page }) => {

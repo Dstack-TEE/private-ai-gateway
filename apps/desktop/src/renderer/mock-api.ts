@@ -311,6 +311,7 @@ export function mockApi(name: string | null): DesktopApi {
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
   const keyListeners = new Set<(available: boolean) => void>();
+  const updateListeners = new Set<(progress: { downloaded: number; total: number }) => void>();
   // Each start gets its own verification run; stop or a newer start makes a
   // pending timer a no-op instead of completing the wrong run.
   let verifyRun = 0;
@@ -334,10 +335,20 @@ export function mockApi(name: string | null): DesktopApi {
     checkUpdate: async () => {
       updateAttempts += 1;
       if (name === "update-offline" || (name === "update-recover" && updateAttempts === 1)) throw new Error("offline");
-      return { enabled: true, currentVersion: "0.1.0", channelPublished: name !== "update-unpublished", version: name === "update-available" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null };
+      return { enabled: true, currentVersion: "0.1.0", channelPublished: name !== "update-unpublished", version: name === "update-available" || name === "update-install-error" ? updateChannel === "beta" ? "0.3.0-beta.1" : "0.2.0" : null };
     },
-    installUpdate: async () => undefined,
-    onUpdateProgress: () => () => undefined,
+    installUpdate: async () => {
+      if (name === "update-install-error") {
+        updateListeners.forEach((listener) => listener({ downloaded: 40, total: 100 }));
+        await new Promise<void>((resolve) => window.addEventListener("mock:finish-update", () => resolve(), { once: true }));
+        throw new Error("Installation failed");
+      }
+    },
+    onUpdateProgress: (listener) => {
+      updateListeners.add(listener);
+      listener(name === "update-failed" ? { downloaded: 0, error: "The update could not be downloaded or its signature could not be verified." } : { downloaded: 0 });
+      return () => { updateListeners.delete(listener); };
+    },
     getLaunchPreferences: async () => launchPreferences,
     setLaunchPreference: async (name, enabled) => {
       launchPreferences = { ...launchPreferences, [name]: enabled };
@@ -508,8 +519,10 @@ export function mockApi(name: string | null): DesktopApi {
       const items = filtered.slice(offset, offset + limit);
       const tokens = (item: RequestActivity) => (item.inputTokens ?? 0) + (item.outputTokens ?? 0);
       const daily = new Map<string, { requests: number; inputTokens: number; outputTokens: number; tokens: number; costUsd: number }>();
+      const byModel = new Map<string, { day: string; model: string | null; requests: number; tokens: number; costUsd: number }>();
       for (const item of filtered) {
-        const day = new Date(item.at * 1_000).toISOString().slice(0, 10);
+        const date = new Date(item.at * 1_000);
+        const day = [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
         const point = daily.get(day) ?? { requests: 0, inputTokens: 0, outputTokens: 0, tokens: 0, costUsd: 0 };
         point.requests += 1;
         point.inputTokens += item.inputTokens ?? 0;
@@ -517,6 +530,12 @@ export function mockApi(name: string | null): DesktopApi {
         point.tokens += tokens(item);
         point.costUsd += item.costUsd ?? 0;
         daily.set(day, point);
+        const key = JSON.stringify([day, item.model ?? null]);
+        const modelPoint = byModel.get(key) ?? { day, model: item.model ?? null, requests: 0, tokens: 0, costUsd: 0 };
+        modelPoint.requests += 1;
+        modelPoint.tokens += tokens(item);
+        modelPoint.costUsd += item.costUsd ?? 0;
+        byModel.set(key, modelPoint);
       }
       return {
         items,
@@ -535,6 +554,7 @@ export function mockApi(name: string | null): DesktopApi {
         series: [...daily.entries()]
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([day, point]) => ({ day, ...point })),
+        modelSeries: [...byModel.values()],
         agents: ["claude-code", "codex", "opencode", "pi", "hermes"],
         models: Array.from(new Set(history.flatMap((record) => record.model ? [record.model] : []))),
       };
@@ -585,6 +605,7 @@ export function mockApi(name: string | null): DesktopApi {
       };
     },
     applyAgent: async (agentId, connect) => {
+      if (name === "agent-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-agent", () => resolve(), { once: true }));
       agents = agents.map((agent) =>
         agent.id === agentId
           ? { ...agent, connected: connect, recorded: connect, authorized: connect && state.status === "verified" && !state.configurationVerification && state.apiKeySaved, attention: undefined }

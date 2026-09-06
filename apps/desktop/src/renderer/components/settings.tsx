@@ -1,10 +1,10 @@
 import { Children, Fragment, isValidElement, useId, type ComponentProps, type PropsWithChildren, type ReactNode } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
 import { SwitchControl } from "./controls";
-import { Button } from "./ui/button";
 import { Field, FieldLabel, FieldDescription } from "./ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions, ItemGroup } from "./ui/item";
 import { Separator } from "./ui/separator";
+import { ActionItem } from "./action-item";
 
 export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
   return <ItemGroup className="gap-0 overflow-hidden rounded-2xl border">
@@ -24,12 +24,12 @@ export function RowContent({ title, description, descriptionId }: { title: React
   return <span className="row-main"><span className="row-title">{title}</span>{description && <span className="row-note" id={descriptionId}>{description}</span>}</span>;
 }
 
-export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof Button>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {
+export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof ActionItem>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {
   const Icon = external ? ExternalLink : ChevronRight;
-  return <Item className="rounded-none" render={<Button type="button" variant="ghost" className="h-auto justify-start whitespace-normal" {...props} />}>
+  return <ActionItem {...props}>
     <ItemContent><ItemTitle>{title}</ItemTitle>{description && <ItemDescription>{description}</ItemDescription>}</ItemContent>
     <ItemActions><Icon aria-hidden="true" /></ItemActions>
-  </Item>;
+  </ActionItem>;
 }
 
 export function SettingsToggle({ label, description, ...props }: ComponentProps<typeof SwitchControl> & { description?: ReactNode }): React.JSX.Element {

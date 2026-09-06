@@ -19,11 +19,10 @@ operating system's native dialogs directly.
 ### Renderer Components
 
 The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
-Tailwind CSS 4, Lucide, and the official Neutral light/dark palette with a single
-dstack-derived primary: `#3f5c16` on light surfaces and `#afce70` on dark surfaces.
-Success uses a separate semantic green (Tailwind green-700 in light mode and
-green-400 in dark mode), rather than the brand primary. Primary text contrast is 7.63:1 light / 9.31:1 dark;
-the standard 80% opacity hover retains at least 4.5:1 on the window background.
+Tailwind CSS 4, Lucide, and the official Neutral light/dark primary palette.
+Success uses green-700/green-400, warnings use amber-700/amber-400, and errors
+use the destructive token. The dstack brand accent (`#c6eb3d`) is reserved for
+the Overview background, independently of the neutral primary controls.
 `src/renderer/theme.css` defines the palette and aliases for existing page layouts.
 `styles.css` owns product layout, not a second button/switch implementation.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
@@ -40,8 +39,8 @@ Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 shadcn additions. Use these components for new standard controls; retain semantic
 HTML for navigation/list rows and the operating-system APIs for native surfaces.
 Product statuses use semantic tokens: success for verified/available/connected, muted for
-unknown/inactive, destructive for warnings/errors, and chart tokens for usage.
-Primary remains reserved for commands and selection; error/warning tokens are unchanged. The default Luma
+unknown/inactive, warning for caution states, destructive for errors, and chart tokens for usage.
+Primary remains reserved for commands and selection. The default Luma
 appearance is not an AppKit emulation: WebView content is still web content.
 
 Shared product compositions live one layer above `components/ui`:
@@ -58,8 +57,28 @@ Badge, and errors use Alert/FieldError. Agent detection is a page-content action
 Use the default switch size except for the Overview main switch; do not retain legacy CSS aliases for removed radii.
 
 The sidebar update badge is pinned at the bottom and invokes the same confirmed
-installation action as Settings. About aligns the installed version and update
-status to the right. Settings and agent lists use explicit Separator components.
+installation action as Settings. About displays the installed version and update
+status/action together on one row. After native confirmation, the existing native
+child-window mechanism presents update progress (an attached sheet on macOS, an
+owned window on Windows/Linux), with the shared shadcn Progress content. The web
+preview uses Dialog. A backend snapshot replays progress and failures to newly
+loaded windows; closing is disabled while installation cannot be cancelled.
+Failures are dismissible. Settings, Profile and usage actions
+share the same Item-based clickable row. Lists use explicit Separator components.
+
+Usage charts use shadcn Chart and Recharts, loaded only on the Usage page.
+SQLite supplies per-day/per-model aggregates using the full filter scope,
+independently of pagination. Each model has its own stacked series; input/output
+are not separate stacks. Empty dates are filled and ranges over 90 days are
+aggregated monthly without dropping totals. Chart configuration contains labels
+only; Bar colors reference static theme variables to avoid dynamic style tags
+under the production CSP. Chart metric views use Tabs; filter options use
+outlined ToggleGroup controls.
+
+Profile saves continue to verify the endpoint/key before persisting or
+reconnecting. No separate verified-configuration badge or credential-delete
+action is shown. Agent switches show optimistic pending state instead of a
+disabled flash, reject repeated actions while pending, and roll back on failure.
 
 ### Publishing Updates
 

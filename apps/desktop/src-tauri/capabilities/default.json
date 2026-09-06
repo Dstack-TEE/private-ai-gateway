@@ -8,7 +8,8 @@
     "profile-editor",
     "privacy",
     "local-api",
-    "usage-proof"
+    "usage-proof",
+    "update-progress"
   ],
   "permissions": [
     "core:app:allow-version",
