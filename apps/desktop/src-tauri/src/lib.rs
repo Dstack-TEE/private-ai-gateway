@@ -660,9 +660,10 @@ pub fn run() {
                     let state = states.borrow().clone();
                     if state.client_key_revision != client_key_revision {
                         client_key_revision = state.client_key_revision;
+                        // A restarted backend may retain a token without a rotation result yet.
                         let _ = handle.emit(
                             "gateway://client-key-changed",
-                            state.client_key_available.unwrap_or(false),
+                            state.client_key_available.unwrap_or(true),
                         );
                     }
                     tray::sync(&handle, &state);
