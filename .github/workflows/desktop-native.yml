@@ -206,7 +206,7 @@ jobs:
             }
             if (!(Test-Path $health)) { throw 'Native Windows GUI did not complete its runtime RPC handshake' }
             $result = Get-Content $health -Raw | ConvertFrom-Json
-            if (!$result.ok -or !$result.runtimeAvailable -or $result.agents -ne 5 -or !$result.clientKeyPresent) {
+            if (!$result.ok -or !$result.runtimeAvailable -or $result.agents -ne 5 -or !$result.clientKeyPresent -or !$result.navigationSucceeded -or !$result.pageLoaded) {
               throw "Native Windows GUI health check failed: $(Get-Content $health -Raw)"
             }
             $exitDeadline = (Get-Date).AddSeconds(15)

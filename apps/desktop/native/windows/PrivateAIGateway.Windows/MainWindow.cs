@@ -22,6 +22,7 @@ public sealed class MainWindow : Window
     private readonly ContentPresenter pageHost = new();
     private readonly InfoBar errorBar = new() { Severity = InfoBarSeverity.Error, IsOpen = false, IsClosable = true };
     private readonly Button restartButton = new() { Content = "Restart Runtime", Visibility = Visibility.Collapsed };
+    private readonly TaskCompletionSource<bool> navigationInitialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string page = "overview";
     private bool syncingSwitch;
     private bool initialized;
@@ -74,6 +75,7 @@ public sealed class MainWindow : Window
             navigation.SelectedItem = navigation.MenuItems[0];
             if (pageHost.Content is null) ShowPage("overview");
             App.Trace("navigation:selected");
+            navigationInitialized.TrySetResult(true);
         });
     }
 
@@ -162,8 +164,13 @@ public sealed class MainWindow : Window
         App.Trace("runtime:updating-ui");
         Update(null);
         App.Trace("runtime:ui-updated");
-        var passed = healthy && store.IsRuntimeAvailable && store.Agents.Length == 5;
-        WriteHealthResult(passed);
+        var navigationSucceeded = false;
+        var pageLoaded = false;
+        if (App.IsSmokeTest)
+            (navigationSucceeded, pageLoaded) = await VerifySmokeUiAsync();
+        var passed = healthy && store.IsRuntimeAvailable && store.Agents.Length == 5 &&
+            (!App.IsSmokeTest || navigationSucceeded && pageLoaded);
+        WriteHealthResult(passed, navigationSucceeded, pageLoaded);
         App.Trace(passed ? "health:passed" : "health:failed");
         if (App.IsSmokeTest)
         {
@@ -231,6 +238,59 @@ public sealed class MainWindow : Window
         }
         else UpdatePage(pageName);
         if (!ReferenceEquals(pageHost.Content, nativePage.Content)) pageHost.Content = nativePage.Content;
+    }
+
+    private async Task<(bool NavigationSucceeded, bool PageLoaded)> VerifySmokeUiAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await navigationInitialized.Task.WaitAsync(timeout.Token);
+            foreach (var pageName in new[] { "overview", "agents", "usage", "settings" })
+            {
+                App.Trace($"smoke:navigating:{pageName}");
+                navigation.SelectedItem = NavigationTarget(pageName);
+                if (page != pageName ||
+                    !pages.TryGetValue(pageName, out var nativePage) ||
+                    !ReferenceEquals(pageHost.Content, nativePage.Content) ||
+                    nativePage.Content is not FrameworkElement content)
+                {
+                    App.Trace($"smoke:navigation-failed:{pageName}");
+                    return (false, false);
+                }
+                await WaitForLoadedAsync(content, timeout.Token);
+                App.Trace($"smoke:page-loaded:{pageName}");
+            }
+            return (true, true);
+        }
+        catch (OperationCanceledException)
+        {
+            App.Trace("smoke:page-load-timeout");
+            return (false, false);
+        }
+        catch (Exception error)
+        {
+            App.Trace($"smoke:navigation-error:{error.GetType().Name}");
+            return (false, false);
+        }
+    }
+
+    private object NavigationTarget(string pageName)
+    {
+        if (pageName == "settings") return navigation.SettingsItem;
+        return navigation.MenuItems
+            .OfType<NavigationViewItem>()
+            .First(item => string.Equals(item.Tag?.ToString(), pageName, StringComparison.Ordinal));
+    }
+
+    private static async Task WaitForLoadedAsync(FrameworkElement content, CancellationToken cancellationToken)
+    {
+        if (content.IsLoaded) return;
+        var loaded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        RoutedEventHandler handler = (_, _) => loaded.TrySetResult(true);
+        content.Loaded += handler;
+        try { await loaded.Task.WaitAsync(cancellationToken); }
+        finally { content.Loaded -= handler; }
     }
 
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -320,7 +380,7 @@ public sealed class MainWindow : Window
         restartButton.Visibility = Visibility.Collapsed;
     }
 
-    private void WriteHealthResult(bool healthy)
+    private void WriteHealthResult(bool healthy, bool navigationSucceeded, bool pageLoaded)
     {
         var path = Environment.GetEnvironmentVariable("PRIVATE_AI_GATEWAY_GUI_HEALTH");
         if (string.IsNullOrWhiteSpace(path)) return;
@@ -334,6 +394,8 @@ public sealed class MainWindow : Window
                 status = store.State.Status,
                 agents = store.Agents.Length,
                 clientKeyPresent = !string.IsNullOrEmpty(store.ClientKey),
+                navigationSucceeded,
+                pageLoaded,
             }));
             File.Move(temporary, path, true);
         }
