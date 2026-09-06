@@ -378,8 +378,16 @@ mod tests {
             serde_json::json!({"url": "https://host/a//b"}),
         );
         for invalid in [
-            "{unquoted:1}", "{'single':1}", "{\"a\":1 \"b\":2}",
-            "{\"a\":0xff}", "{\"a\":+1}", "{", "[]", "null", "// comment only", " \n",
+            "{unquoted:1}",
+            "{'single':1}",
+            "{\"a\":1 \"b\":2}",
+            "{\"a\":0xff}",
+            "{\"a\":+1}",
+            "{",
+            "[]",
+            "null",
+            "// comment only",
+            " \n",
         ] {
             assert!(parse_jsonc(invalid).is_err(), "{invalid}");
         }

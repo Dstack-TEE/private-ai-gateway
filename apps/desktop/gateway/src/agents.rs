@@ -273,10 +273,14 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                 set(&["model_provider"], "private_ai_gateway"),
                 absent(&["model_providers", "private_ai_gateway", "env_key"]),
                 absent(&[
-                    "model_providers", "private_ai_gateway", "experimental_bearer_token",
+                    "model_providers",
+                    "private_ai_gateway",
+                    "experimental_bearer_token",
                 ]),
                 absent(&[
-                    "model_providers", "private_ai_gateway", "requires_openai_auth",
+                    "model_providers",
+                    "private_ai_gateway",
+                    "requires_openai_auth",
                 ]),
                 set(
                     &["model_providers", "private_ai_gateway", "name"],
@@ -743,7 +747,9 @@ fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
         Agent::ClaudeCode => (&["apiKeyHelper"][..], helper_command(exe, agent.id()).ok()),
         Agent::Pi => (
             &["providers", "private-ai-gateway"][..],
-            credential_helper_command(exe, agent).ok().map(|command| format!("!{command}")),
+            credential_helper_command(exe, agent)
+                .ok()
+                .map(|command| format!("!{command}")),
         ),
         Agent::Hermes => (
             &["providers", "private-ai-gateway", "key_cmd"][..],
@@ -763,7 +769,9 @@ fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
             }
             _ => None,
         };
-        expected.as_deref().is_none_or(|expected| command != Some(expected))
+        expected
+            .as_deref()
+            .is_none_or(|expected| command != Some(expected))
     })
 }
 
@@ -1415,7 +1423,8 @@ impl Projector {
         let ConfigDoc::Json(projected) = doc else {
             return Err("OpenCode requires a JSON projection".to_string());
         };
-        let global = self.tool_env
+        let global = self
+            .tool_env
             .then(|| env_path("XDG_CONFIG_HOME"))
             .flatten()
             .unwrap_or_else(|| self.home.join(".config"))
@@ -1448,23 +1457,31 @@ impl Projector {
                          fix that file or Disconnect to restore the original config.", path.display(),
                     )),
                 };
-                parse_jsonc(&text).map_err(|reason| format!(
-                    "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; \
-                     fix that file or Disconnect to restore the original config.", path.display(),
-                ))?
+                parse_jsonc(&text).map_err(|reason| {
+                    format!(
+                        "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; \
+                     fix that file or Disconnect to restore the original config.",
+                        path.display(),
+                    )
+                })?
             };
             sources.push(path.display().to_string());
             merge_opencode_config(&mut merged, layer);
         }
         if self.tool_env {
-            if let Some(text) = env::var_os("OPENCODE_CONFIG_CONTENT").filter(|text| !text.is_empty()) {
-                let layer = text.to_str()
+            if let Some(text) =
+                env::var_os("OPENCODE_CONFIG_CONTENT").filter(|text| !text.is_empty())
+            {
+                let layer = text
+                    .to_str()
                     .ok_or_else(|| "not valid Unicode".to_string())
                     .and_then(parse_jsonc)
-                    .map_err(|reason| format!(
+                    .map_err(|reason| {
+                        format!(
                         "Cannot verify OpenCode config merge: OPENCODE_CONFIG_CONTENT is {reason}. \
                          Access is disabled; fix that override or Disconnect.",
-                    ))?;
+                    )
+                    })?;
                 sources.push("OPENCODE_CONFIG_CONTENT".to_string());
                 merge_opencode_config(&mut merged, layer);
             }
@@ -1477,7 +1494,8 @@ impl Projector {
                 return Err(format!(
                     "OpenCode's merged config changes the gateway-owned field {pointer}. \
                      Access is disabled. Review {} without changing unrelated providers, \
-                     or Disconnect to restore the original config.", sources.join(", "),
+                     or Disconnect to restore the original config.",
+                    sources.join(", "),
                 ));
             }
         }
@@ -2218,10 +2236,14 @@ mod tests {
             let catalog = catalog();
             let options = claude_options();
             let path = agent.config_path(&sandbox.home, false);
-            let preview = sandbox.projector
-                .preview(agent, true, Some(&catalog), &options).unwrap();
-            sandbox.projector
-                .apply(agent, true, &preview.revision, Some(&catalog), &options).unwrap();
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options)
+                .unwrap();
             let current = sandbox.projector.helper_exe.clone();
             let assert_scan = |sandbox: &Sandbox, connected: bool, attention: Option<&str>| {
                 let config = fs::read(&path).unwrap();
@@ -2229,8 +2251,10 @@ mod tests {
                 let token_path = sandbox.projector.tokens.path(agent.id());
                 let token = fs::read(&token_path).unwrap();
                 let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-                let status = statuses.iter()
-                    .find(|status| status.id == agent.id()).unwrap();
+                let status = statuses
+                    .iter()
+                    .find(|status| status.id == agent.id())
+                    .unwrap();
                 assert!(status.recorded);
                 assert_eq!(status.connected, connected, "{}", agent.id());
                 assert_eq!(status.authorized, connected, "{}", agent.id());
@@ -2248,9 +2272,12 @@ mod tests {
             // A recorded Pi catalog may differ from today's generated metadata.
             if agent == Agent::Pi {
                 let mut config = doc(&sandbox, agent);
-                config.set_str(
-                    &["providers", "private-ai-gateway", "name"], "Previous name",
-                ).unwrap();
+                config
+                    .set_str(
+                        &["providers", "private-ai-gateway", "name"],
+                        "Previous name",
+                    )
+                    .unwrap();
                 write(&path, &config.render().unwrap());
                 let mut store = sandbox.projector.load_store().unwrap();
                 store.get_mut(agent.id()).unwrap().fields[0].value =
@@ -2258,7 +2285,10 @@ mod tests {
                 sandbox.projector.save_store(&store).unwrap();
                 assert_scan(&sandbox, true, None);
             }
-            let stable = sandbox.home.join("stable helpers").join(helper_binary_name());
+            let stable = sandbox
+                .home
+                .join("stable helpers")
+                .join(helper_binary_name());
             sandbox.projector.helper_exe = stable.clone();
             write(&sandbox.projector.helper_exe, "helper");
             if agent == Agent::OpenCode {
@@ -2283,7 +2313,8 @@ mod tests {
             assert_scan(&sandbox, false, Some("no longer matches"));
             disconnect(&sandbox, agent);
             assert_eq!(
-                doc(&sandbox, agent).get_str(field).as_deref(), Some("external-edit"),
+                doc(&sandbox, agent).get_str(field).as_deref(),
+                Some("external-edit"),
             );
         }
     }
@@ -2667,20 +2698,39 @@ mod tests {
             "provider": {"other": {"name": "User provider"}}
         });
         write(&path, &original.to_string());
-        let benign = "{/* user's comment */\"provider\":{\"other\":{\"name\":\"JSONC user provider\"}},}";
+        let benign =
+            "{/* user's comment */\"provider\":{\"other\":{\"name\":\"JSONC user provider\"}},}";
         write(&jsonc, benign);
         let catalog = catalog();
         let options = claude_options();
-        let preview = sandbox.projector
-            .preview(Agent::OpenCode, true, Some(&catalog), &options).unwrap();
-        assert!(sandbox.projector.apply(
-            Agent::OpenCode, true, &preview.revision, Some(&catalog), &options,
-        ).unwrap().authorized);
+        let preview = sandbox
+            .projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &options)
+            .unwrap();
+        assert!(
+            sandbox
+                .projector
+                .apply(
+                    Agent::OpenCode,
+                    true,
+                    &preview.revision,
+                    Some(&catalog),
+                    &options,
+                )
+                .unwrap()
+                .authorized
+        );
         assert_eq!(fs::read_to_string(&jsonc).unwrap(), benign);
-        assert_eq!(doc(&sandbox, Agent::OpenCode)
-            .get_str(&["provider", "other", "name"]).as_deref(), Some("User provider"));
-        let preview = sandbox.projector
-            .preview(Agent::OpenCode, true, Some(&catalog), &options).unwrap();
+        assert_eq!(
+            doc(&sandbox, Agent::OpenCode)
+                .get_str(&["provider", "other", "name"])
+                .as_deref(),
+            Some("User provider")
+        );
+        let preview = sandbox
+            .projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &options)
+            .unwrap();
         let config_before = fs::read(&path).unwrap();
         let record_before = fs::read(sandbox.projector.store_path()).unwrap();
         let token_path = sandbox.projector.tokens.path("opencode");
@@ -2714,22 +2764,42 @@ mod tests {
         fs::remove_file(&jsonc).unwrap();
         fs::create_dir(&jsonc).unwrap();
         let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        let status = statuses.iter().find(|status| status.id == "opencode").unwrap();
+        let status = statuses
+            .iter()
+            .find(|status| status.id == "opencode")
+            .unwrap();
         assert!(!status.authorized && tokens.is_empty());
         assert!(status.attention.as_deref().unwrap().contains("unreadable"));
         fs::remove_dir(&jsonc).unwrap();
         write(&jsonc, benign);
-        assert!(sandbox.projector.scan(None).unwrap().0.iter()
-            .find(|status| status.id == "opencode").unwrap().authorized);
-        write(&jsonc, "{/* keep on disconnect */\"model\":\"other/override\"}");
+        assert!(
+            sandbox
+                .projector
+                .scan(None)
+                .unwrap()
+                .0
+                .iter()
+                .find(|status| status.id == "opencode")
+                .unwrap()
+                .authorized
+        );
+        write(
+            &jsonc,
+            "{/* keep on disconnect */\"model\":\"other/override\"}",
+        );
         let jsonc_before = fs::read(&jsonc).unwrap();
         let mut edited = doc(&sandbox, Agent::OpenCode);
-        edited.set_str(&["provider", "other", "name"], "Edited outside the app").unwrap();
+        edited
+            .set_str(&["provider", "other", "name"], "Edited outside the app")
+            .unwrap();
         write(&path, &edited.render().unwrap());
         disconnect(&sandbox, Agent::OpenCode);
         let mut restored = original;
         restored["provider"]["other"]["name"] = json!("Edited outside the app");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(), restored);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
+            restored
+        );
         assert_eq!(fs::read(&jsonc).unwrap(), jsonc_before);
         assert!(sandbox.projector.load_store().unwrap().is_empty());
         assert!(!token_path.exists());
@@ -2742,28 +2812,51 @@ mod tests {
             let mut sandbox = sandbox("opencode-env-merge");
             sandbox.projector.tool_env = true;
             let global = env_path("XDG_CONFIG_HOME").unwrap().join("opencode");
-            write(&global.join("opencode.jsonc"), "{/* preserved */\"model\":\"other/model\"}");
+            write(
+                &global.join("opencode.jsonc"),
+                "{/* preserved */\"model\":\"other/model\"}",
+            );
             let expected = ConfigDoc::Json(json!({
                 "model": "private-ai-gateway/test",
                 "provider": {"private-ai-gateway": {"name": "Gateway"}}
             }));
             if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
                 write(&dir.join("opencode.json"), "{\"model\":\"other/dir-json\"}");
-                write(&dir.join("opencode.jsonc"), "{\"model\":\"private-ai-gateway/test\",}");
+                write(
+                    &dir.join("opencode.jsonc"),
+                    "{\"model\":\"private-ai-gateway/test\",}",
+                );
             }
             let result = sandbox.projector.check_opencode_merge(&expected, true);
-            assert_eq!(result.is_ok(), matches!(case.as_str(), "explicit" | "directory"), "{case}: {result:?}");
+            assert_eq!(
+                result.is_ok(),
+                matches!(case.as_str(), "explicit" | "directory"),
+                "{case}: {result:?}"
+            );
             if case == "global" {
                 // A default model is not owned when the user did not select one.
-                assert!(sandbox.projector.check_opencode_merge(&expected, false).is_ok());
+                assert!(sandbox
+                    .projector
+                    .check_opencode_merge(&expected, false)
+                    .is_ok());
             }
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        for case in ["global", "explicit", "directory", "content", "invalid-content"] {
+        for case in [
+            "global",
+            "explicit",
+            "directory",
+            "content",
+            "invalid-content",
+        ] {
             let dir = root.path().join(case);
             let mut command = Command::new(env::current_exe().unwrap());
-            command.args(["--exact", "agents::tests::opencode_process_overrides_follow_official_merge_order"])
+            command
+                .args([
+                    "--exact",
+                    "agents::tests::opencode_process_overrides_follow_official_merge_order",
+                ])
                 .env(CASE, case)
                 .env("XDG_CONFIG_HOME", &dir)
                 .env_remove("OPENCODE_CONFIG")
@@ -2782,8 +2875,12 @@ mod tests {
                 command.env("OPENCODE_CONFIG_CONTENT", "{invalid");
             }
             let output = command.output().unwrap();
-            assert!(output.status.success(), "{case}: {} {}",
-                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -2793,10 +2890,13 @@ mod tests {
         let catalog = catalog();
         let options = claude_options();
         let path = Agent::Codex.config_path(&sandbox.home, false);
-        write(&path, "[model_providers.private_ai_gateway]\n\
+        write(
+            &path,
+            "[model_providers.private_ai_gateway]\n\
                       env_key = 'OLD_KEY'\n\
                       experimental_bearer_token = 'old-synthetic-token'\n\
-                      requires_openai_auth = true\n");
+                      requires_openai_auth = true\n",
+        );
 
         let preview = sandbox
             .projector
@@ -2814,13 +2914,19 @@ mod tests {
             .unwrap();
         assert!(status.connected);
         let codex = doc(&sandbox, Agent::Codex);
-        for key in ["env_key", "experimental_bearer_token", "requires_openai_auth"] {
+        for key in [
+            "env_key",
+            "experimental_bearer_token",
+            "requires_openai_auth",
+        ] {
             assert_eq!(
-                codex.get_value(&["model_providers", "private_ai_gateway", key]), None,
+                codex.get_value(&["model_providers", "private_ai_gateway", key]),
+                None,
             );
         }
         assert!(!fs::read_to_string(sandbox.projector.store_path())
-            .unwrap().contains("old-synthetic-token"));
+            .unwrap()
+            .contains("old-synthetic-token"));
         assert_eq!(
             codex.get_str(&["model_provider"]).as_deref(),
             Some("private_ai_gateway")
@@ -2885,11 +2991,15 @@ mod tests {
         let restored = doc(&sandbox, Agent::Codex);
         for (key, value) in [
             ("env_key", ConfigValue::Str("OLD_KEY".into())),
-            ("experimental_bearer_token", ConfigValue::Str("old-synthetic-token".into())),
+            (
+                "experimental_bearer_token",
+                ConfigValue::Str("old-synthetic-token".into()),
+            ),
             ("requires_openai_auth", ConfigValue::Bool(true)),
         ] {
             assert_eq!(
-                restored.get_value(&["model_providers", "private_ai_gateway", key]), Some(value),
+                restored.get_value(&["model_providers", "private_ai_gateway", key]),
+                Some(value),
             );
         }
 
@@ -2931,11 +3041,15 @@ mod tests {
     #[test]
     fn pi_and_hermes_use_verified_model_discovery() {
         let sandbox = sandbox("discovery-providers");
-        let catalog = Catalog::from_remote(&json!({"data": [
-            {"id": "openai/gpt-oss-20b", "input_modalities": ["text", "image", "audio"],
-             "pricing": {"prompt": "0.000001"}},
-            {"id": "phala/qwen"}
-        ]}), 1).unwrap();
+        let catalog = Catalog::from_remote(
+            &json!({"data": [
+                {"id": "openai/gpt-oss-20b", "input_modalities": ["text", "image", "audio"],
+                 "pricing": {"prompt": "0.000001"}},
+                {"id": "phala/qwen"}
+            ]}),
+            1,
+        )
+        .unwrap();
         let options = ConnectOptions::default();
 
         let preview = sandbox
