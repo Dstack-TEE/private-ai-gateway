@@ -136,11 +136,14 @@ async function launch() {
   // https://learn.microsoft.com/microsoft-edge/webdriver/capabilities-edge-options
   const windows = process.platform === "win32";
   const executable = windows ? nativeDriver : driverPath;
-  const args = windows ? [`--port=${port}`, "--verbose"]
+  const args = windows ? [`--port=${port}`, "--host=127.0.0.1", "--verbose"]
     : ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver];
+  const driverEnv = windows
+    ? { ...env, TAURI_AUTOMATION: "true", TAURI_WEBVIEW_AUTOMATION: "true" }
+    : env;
   captureDriverLog = true;
   driver = spawn(executable, args,
-    { env, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
+    { env: driverEnv, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
   const collectLog = (chunk) => {
     if (captureDriverLog) driverLog = (driverLog + chunk.toString()).slice(-1_048_576);
   };
