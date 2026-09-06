@@ -231,6 +231,10 @@ impl CatalogSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayState {
+    #[serde(default)]
+    pub client_key_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_available: Option<bool>,
     /// Client connection state; the backend leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_connected: Option<bool>,
@@ -285,6 +289,8 @@ impl Default for GatewayState {
         Self {
             status: "stopped".to_string(),
             backend_connected: None,
+            client_key_revision: 0,
+            client_key_available: None,
             configuration_verification: false,
             progress: None,
             remote_url: None,

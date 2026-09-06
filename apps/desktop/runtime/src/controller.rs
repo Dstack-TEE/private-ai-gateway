@@ -983,16 +983,24 @@ impl DesktopRuntime {
     }
 
     pub fn rotate_client_key(&self) -> Result<String, String> {
+        let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
-        let token = self.credentials.rotate()?;
+        let token = match self.credentials.rotate() {
+            Ok(token) => token,
+            Err(error) => {
+                self.manager.client_key_changed(false);
+                return Err(error);
+            }
+        };
         let mut tokens = self.proxy.tokens();
         tokens.insert(token.clone(), LOCAL_TOOLS_AGENT.to_string());
         self.proxy.set_tokens(tokens);
+        self.manager.client_key_changed(true);
         Ok(token)
     }
 
@@ -1493,6 +1501,12 @@ mod tests {
         runtime.proxy.set_tokens(tokens);
 
         let rotated = runtime.rotate_client_key().unwrap();
+        // Subscribers arriving after rotation must see the new non-secret revision.
+        assert_eq!(runtime.subscribe().borrow().client_key_revision, 1);
+        assert_eq!(
+            runtime.subscribe().borrow().client_key_available,
+            Some(true)
+        );
         assert_ne!(rotated, original);
         assert_eq!(runtime.client_key().unwrap(), rotated);
         assert_eq!(runtime.proxy.tokens().agent_for(&original), None);
@@ -1509,6 +1523,11 @@ mod tests {
         std::fs::remove_file(&token_path).unwrap();
         std::fs::create_dir(&token_path).unwrap();
         assert!(runtime.rotate_client_key().is_err());
+        assert_eq!(runtime.subscribe().borrow().client_key_revision, 2);
+        assert_eq!(
+            runtime.subscribe().borrow().client_key_available,
+            Some(false)
+        );
         assert_eq!(runtime.proxy.tokens().agent_for(&rotated), None);
         assert_eq!(
             runtime.proxy.tokens().agent_for("agent-token"),

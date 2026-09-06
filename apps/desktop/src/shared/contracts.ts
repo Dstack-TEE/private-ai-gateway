@@ -189,6 +189,8 @@ export interface LocalApiConfig {
 }
 
 export interface GatewayState {
+  clientKeyRevision?: number;
+  clientKeyAvailable?: boolean;
   backendConnected?: boolean;
   /** Unix seconds when the current protection session became verified. */
   protectedSince?: number;

@@ -315,14 +315,9 @@ async fn get_client_key(client: State<'_, Arc<Client>>) -> Result<String, String
 }
 
 #[tauri::command]
-async fn rotate_client_key(
-    app: AppHandle,
-    client: State<'_, Arc<Client>>,
-) -> Result<String, String> {
+async fn rotate_client_key(client: State<'_, Arc<Client>>) -> Result<String, String> {
     let client = client.inner().clone();
-    let result = run_blocking(move || client.rotate_client_key()).await;
-    let _ = app.emit("gateway://client-key-changed", result.is_ok());
-    result
+    run_blocking(move || client.rotate_client_key()).await
 }
 
 #[tauri::command]
@@ -657,11 +652,19 @@ pub fn run() {
             let handle = app.handle().clone();
             let mut states = client.subscribe();
             let initial = states.borrow().clone();
+            let mut client_key_revision = initial.client_key_revision;
             tray::sync(&handle, &initial);
             let mut alerts = notifications::Observer::new(&initial);
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
+                    if state.client_key_revision != client_key_revision {
+                        client_key_revision = state.client_key_revision;
+                        let _ = handle.emit(
+                            "gateway://client-key-changed",
+                            state.client_key_available.unwrap_or(false),
+                        );
+                    }
                     tray::sync(&handle, &state);
                     alerts.update(&handle, &state);
                     let _ = handle.emit("gateway://state", state);

@@ -127,6 +127,10 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let settings = backend.run(&["settings", "show"]);
     assert_eq!(settings["preferences"]["notifications"]["enabled"], false);
     assert_eq!(settings["preferences"]["appearance"], "dark");
+    backend.run(&["token", "rotate", "--yes"]);
+    let state = backend.run(&["status"]);
+    assert_eq!(state["gateway"]["clientKeyRevision"], 1);
+    assert_eq!(state["gateway"]["clientKeyAvailable"], true);
     assert_eq!(backend.run(&["profiles", "list"]), serde_json::json!([]));
     let rejected = backend
         .command(&["usage", "clear", "--json"])
@@ -205,7 +209,12 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
             .unwrap();
             let response: Response = protocol::read(&mut reader).unwrap();
             if index < 4 {
-                assert!(matches!(response.outcome, Outcome::Result(_)));
+                let Outcome::Result(snapshot) = response.outcome else {
+                    panic!("Subscription failed");
+                };
+                assert!(snapshot["proxyUrl"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("http://127.0.0.1:")));
                 subscribers.push(reader);
             } else {
                 assert!(matches!(response.outcome, Outcome::Error(_)));
