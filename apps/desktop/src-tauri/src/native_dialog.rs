@@ -8,7 +8,8 @@ const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
 const UPDATE_PROGRESS_LABEL: &str = "update-progress";
-const DIALOG_LABELS: [&str; 6] = [
+const DIALOG_LABELS: [&str; 7] = [
+    "local-api-example",
     UPDATE_PROGRESS_LABEL,
     PROFILES_LABEL,
     PROFILE_EDITOR_LABEL,
@@ -38,6 +39,15 @@ pub fn open(
         return Err("Invalid profile identifier".to_string());
     }
     let spec = match kind {
+        "local-api-example" => DialogSpec {
+            label: "local-api-example",
+            title: "Local API examples",
+            width: 720.0,
+            height: 560.0,
+            min_width: 560.0,
+            min_height: 440.0,
+            query: "index.html?native-dialog=local-api-example".to_string(),
+        },
         "update-progress" => DialogSpec {
             label: UPDATE_PROGRESS_LABEL,
             title: "Software Update",

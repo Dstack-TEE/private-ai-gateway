@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use desktop_gateway::{
@@ -41,6 +44,7 @@ pub struct DesktopRuntime {
     codex_sync: CodexCatalogSync,
     agent_policy: Mutex<()>,
     lifecycle: tokio::sync::Mutex<()>,
+    exiting: AtomicBool,
     helper_path: PathBuf,
     #[allow(dead_code)]
     instance: Option<lock::InstanceLock>,
@@ -265,6 +269,7 @@ impl DesktopRuntime {
             codex_sync: CodexCatalogSync::default(),
             agent_policy: Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
+            exiting: AtomicBool::new(false),
             helper_path: options.helper_path,
             instance,
         });
@@ -409,11 +414,26 @@ impl DesktopRuntime {
         Ok(key)
     }
 
-    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
-        let _operation = self
+    fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let operation = self
             .lifecycle
             .try_lock()
             .map_err(|_| "A configuration change is in progress")?;
+        if self.exiting.load(Ordering::Acquire) {
+            return Err("The app is closing".to_string());
+        }
+        Ok(operation)
+    }
+
+    pub fn prepare_exit(&self) -> Result<(), String> {
+        let _operation = self.configuration_change()?;
+        self.stop_inner()?;
+        self.exiting.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+        let _operation = self.configuration_change()?;
         self.start_inner(config)
     }
 
@@ -448,10 +468,7 @@ impl DesktopRuntime {
     }
 
     pub fn stop(&self) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         self.stop_inner()
     }
 
@@ -460,10 +477,7 @@ impl DesktopRuntime {
         &self,
         install: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         self.stop_inner()?;
         install()
     }
@@ -508,10 +522,7 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         let gateway = self.stop_inner().map(|_| ());
         let endpoint = self.endpoint.stop().await;
         gateway.and(endpoint)
@@ -573,10 +584,7 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
         if initial.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -715,10 +723,7 @@ impl DesktopRuntime {
     }
 
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -763,10 +768,7 @@ impl DesktopRuntime {
     }
 
     pub fn delete_profile(&self, profile_id: String) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile".to_string());
         }
@@ -820,10 +822,7 @@ impl DesktopRuntime {
     }
 
     pub fn clear_api_key(&self) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         if self.manager.is_running()? {
             return Err("Stop protection before deleting a profile credential".to_string());
         }
@@ -901,10 +900,7 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         config: LocalApiConfig,
     ) -> Result<GatewayState, String> {
-        let _operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
+        let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
         if previous.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
@@ -1070,6 +1066,9 @@ impl DesktopRuntime {
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
+        if self.exiting.load(Ordering::Acquire) {
+            return Err("The app is closing".to_string());
+        }
         if self.instance.is_none() {
             return Err("Another app instance owns the agent configurations".to_string());
         }
@@ -1258,9 +1257,39 @@ mod tests {
             codex_sync: CodexCatalogSync::default(),
             agent_policy: Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
+            exiting: AtomicBool::new(false),
             helper_path: directory.join("helper"),
             instance: None,
         })
+    }
+
+    #[test]
+    fn preparing_exit_blocks_later_configuration_changes_and_can_retry_if_busy() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        let operation = runtime.lifecycle.try_lock().unwrap();
+        assert!(runtime.prepare_exit().is_err());
+        assert!(!runtime.exiting.load(Ordering::Acquire));
+        drop(operation);
+        runtime.prepare_exit().unwrap();
+        let state = runtime.state().unwrap();
+        assert_eq!(state.status, "stopped");
+        assert_eq!(
+            runtime.start(state.config).unwrap_err(),
+            "The app is closing"
+        );
+        assert_eq!(
+            runtime
+                .apply_agent(
+                    "codex".into(),
+                    true,
+                    "revision".into(),
+                    ConnectOptions::default()
+                )
+                .unwrap_err(),
+            "The app is closing"
+        );
     }
 
     #[test]

@@ -9,7 +9,8 @@
     "privacy",
     "local-api",
     "usage-proof",
-    "update-progress"
+    "update-progress",
+    "local-api-example"
   ],
   "permissions": [
     "core:app:allow-version",

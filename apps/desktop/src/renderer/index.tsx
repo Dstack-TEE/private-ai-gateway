@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   Copy,
   Download,
   Eye,
@@ -46,6 +47,8 @@ import { Button } from "./components/ui/button";
 import { ActionItem } from "./components/action-item";
 import type { UsageMetric } from "./components/usage-chart";
 import { StateLabel } from "./components/state-label";
+import { LocalApiExamples } from "./components/local-api-examples";
+import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
 import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError, FieldSet, FieldLegend, FieldSeparator } from "./components/ui/field";
@@ -188,11 +191,12 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
 }
 
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
+  const appearance = useAppearance();
   const classes = ["brand-logo", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
   return (
     <picture className={classes} aria-hidden="true">
-      <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />
-      <img src={brand.mark.light} alt="" />
+      {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />}
+      <img src={appearance === "dark" ? brand.mark.dark : brand.mark.light} alt="" />
     </picture>
   );
 }
@@ -206,7 +210,7 @@ function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" 
 }
 
 type View = "overview" | "agents" | "usage" | "settings";
-type SettingsTarget = "confidential" | "privacy" | "local-api";
+type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example";
 
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
@@ -388,6 +392,19 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
   );
 }
 
+function NativeLocalApiExampleWindow(): React.JSX.Element {
+  const native = useNativeGatewayWindow("Local API examples");
+  if (native.closed) return <main className="native-dialog-host" aria-label="Local API examples closed" />;
+  if (!native.loaded || native.loadError) return <NativeDialogStatus label="Local API examples" error={native.loadError} onClose={native.close} />;
+  return <main className="native-dialog-host"><LocalApiExamples
+    api={desktopApi}
+    endpoint={native.state.proxyUrl ?? localEndpoint(native.state.localApi)}
+    available={isProtected(native.state) && Boolean(native.state.proxyUrl) && !native.state.endpointError}
+    models={native.state.catalog?.models ?? []}
+    onCopy={(value) => desktopApi.copyText(value)} onClose={native.close}
+  /></main>;
+}
+
 function NativePrivacyWindow(): React.JSX.Element {
   const native = useNativeGatewayWindow("Privacy Verification");
   if (native.closed) return <main className="native-dialog-host" aria-label="Privacy verification closed" />;
@@ -533,8 +550,9 @@ function App(): React.JSX.Element {
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [pendingAgentChanges, setPendingAgentChanges] = useState<Record<string, boolean>>({});
   const agentOperations = useRef(new Set<string>());
-  const [refreshingAgents, setRefreshingAgents] = useState(false);
-  const [agentScanResult, setAgentScanResult] = useState<string>();
+  const agentIntents = useRef(new Map<string, boolean>());
+  const agentScanFlight = useRef<Promise<AgentStatus[] | undefined> | undefined>(undefined);
+  const agentScanQueued = useRef(false);
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
   const [notice, setNotice] = useState<{ id: number; text: string }>();
@@ -677,44 +695,66 @@ function App(): React.JSX.Element {
     setAllowDevelopmentOs(!configuredPolicy);
   }, [configuredPolicy]);
 
-  const loadAgents = useCallback(async () => {
-    const scan = ++agentScan.current;
-    try {
-      const next = await desktopApi.listAgents();
-      if (scan === agentScan.current) setAgents(next);
-      return next;
-    } catch (error) {
-      if (scan === agentScan.current) setActionError(errorMessage(error));
+  const loadAgents = useCallback((fresh = false) => {
+    if (agentScanFlight.current) {
+      if (fresh) agentScanQueued.current = true;
+      return agentScanFlight.current;
     }
+    const request = (async () => {
+      let next: AgentStatus[] | undefined;
+      do {
+        agentScanQueued.current = false;
+        const scan = ++agentScan.current;
+        try {
+          next = await desktopApi.listAgents();
+          if (scan === agentScan.current) setAgents(next);
+        } catch (error) {
+          next = undefined;
+          if (scan === agentScan.current) setActionError(errorMessage(error));
+        }
+      } while (agentScanQueued.current);
+      return next;
+    })().finally(() => { agentScanFlight.current = undefined; });
+    agentScanFlight.current = request;
+    return request;
   }, []);
 
-  const refreshAgents = async () => {
-    if (refreshingAgents) return;
-    setRefreshingAgents(true);
-    setAgentScanResult(undefined);
-    setActionError(undefined);
-    try {
-      const detected = await loadAgents();
-      const message = detected ? `${detected.filter((agent) => agent.installed).length} installed agents detected` : "Agent detection failed";
-      setAgentScanResult(message);
-    } finally {
-      setRefreshingAgents(false);
-    }
-  };
+  useEffect(() => {
+    const refresh = () => { agentScan.current += 1; void loadAgents(true); };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [loadAgents]);
+  useEffect(() => { if (view === "agents") void loadAgents(true); }, [view, loadAgents]);
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.key !== "," || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      setView("settings");
+      window.requestAnimationFrame(() => document.getElementById("page-title-settings")?.focus());
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, []);
 
   // Agent status depends on the verified catalog, so reload with the session.
   const catalogRevision = state.catalog?.revision;
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
-    const refresh = async () => {
-      await loadAgents();
+    const refresh = async (fresh = false) => {
+      await loadAgents(fresh);
       if (active) timer = window.setTimeout(() => void refresh(), 5_000);
     };
-    void refresh();
+    agentScan.current += 1;
+    void refresh(true);
     return () => { active = false; window.clearTimeout(timer); };
   }, [loadAgents, catalogRevision, verified]);
-  useEffect(() => desktopApi.onAgentsChange(() => void loadAgents()), [loadAgents]);
+  useEffect(() => desktopApi.onAgentsChange(() => {
+    agentScan.current += 1;
+    void loadAgents(true);
+  }), [loadAgents]);
 
   const run = async (action: () => Promise<GatewayState | void>) => {
     setActionError(undefined);
@@ -831,24 +871,38 @@ function App(): React.JSX.Element {
   };
 
   const applyAgent = async (agent: AgentStatus, connect: boolean) => {
+    agentIntents.current.set(agent.id, connect);
+    setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
     if (agentOperations.current.has(agent.id)) return;
     agentOperations.current.add(agent.id);
-    const options = connect && agent.id === "codex"
-      ? { defaultModel: models[0]?.id }
-      : {};
-    setPendingAgentChanges((current) => ({ ...current, [agent.id]: connect }));
+    agentScan.current += 1;
     setActionError(undefined);
     try {
-      const preview = await desktopApi.previewAgent(agent.id, connect, options);
-      const changed = await desktopApi.applyAgent(agent.id, connect, preview.revision, options);
-      setAgents((current) => current.map((entry) => entry.id === changed.id ? changed : entry));
-      await loadAgents();
-      setNotice({ id: Date.now(), text: `${displayAgentName(agent)} ${connect ? "connected" : "disconnected"}` });
+      let changed = agent;
+      // Serialize writes per agent and retain the user's latest intent.
+      while (agentIntents.current.has(agent.id)) {
+        const target = agentIntents.current.get(agent.id);
+        if (target === undefined) break;
+        if (changed.recorded !== target) {
+          const options = target && agent.id === "codex" ? { defaultModel: models[0]?.id } : {};
+          const preview = await desktopApi.previewAgent(agent.id, target, options);
+          const status = await desktopApi.applyAgent(agent.id, target, preview.revision, options);
+          changed = status;
+          agentScan.current += 1;
+          setAgents((current) => current.map((entry) => entry.id === status.id ? status : entry));
+        }
+        if (agentIntents.current.get(agent.id) === target) {
+          agentIntents.current.delete(agent.id);
+        }
+      }
+      setNotice({ id: Date.now(), text: `${displayAgentName(agent)} ${changed.recorded ? "connected" : "disconnected"}` });
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
+      agentIntents.current.delete(agent.id);
       agentOperations.current.delete(agent.id);
       setPendingAgentChanges((current) => { const next = { ...current }; delete next[agent.id]; return next; });
+      void loadAgents(true);
     }
   };
 
@@ -941,6 +995,7 @@ function App(): React.JSX.Element {
             onSettings={() => openSettings("confidential")}
             onPrivacy={() => openSettings("privacy")}
             onLocalSettings={() => openSettings("local-api")}
+            onLocalExamples={() => openSettings("local-api-example")}
             onAgents={() => changeView("agents")}
             onUsage={() => changeView("usage")}
             onCopy={copy}
@@ -952,9 +1007,6 @@ function App(): React.JSX.Element {
         {view === "agents" && (
           <AgentsView
             pendingAgentChanges={pendingAgentChanges}
-            scanResult={agentScanResult}
-            refreshing={refreshingAgents}
-            onRefresh={() => void refreshAgents()}
             agents={agents}
             locked={locked}
             problem={problem}
@@ -1010,6 +1062,11 @@ function App(): React.JSX.Element {
       {settingsTarget === "privacy" && (
         <PrivacyVerificationSheet state={state} onClose={() => setSettingsTarget(undefined)} />
       )}
+      {settingsTarget === "local-api-example" && <LocalApiExamples
+        api={desktopApi}
+        endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} available={isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError}
+        models={models} onCopy={(value) => desktopApi.copyText(value)} onClose={() => setSettingsTarget(undefined)}
+      />}
       {settingsTarget === "local-api" && (
         <LocalApiSheet
           state={state}
@@ -1279,6 +1336,7 @@ function Overview({
   onSettings,
   onPrivacy,
   onLocalSettings,
+  onLocalExamples,
   onAgents,
   onUsage,
   onCopy,
@@ -1302,6 +1360,7 @@ function Overview({
   onSettings(): void;
   onPrivacy(): void;
   onLocalSettings(): void;
+  onLocalExamples(): void;
   onAgents(): void;
   onUsage(): void;
   onCopy(label: string, value: string): Promise<void>;
@@ -1331,7 +1390,7 @@ function Overview({
         </p>
       )}
       <div className="overview-grid">
-        <OverviewModule title="Local API" status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
+        <OverviewModule title="Local API" titleAdornment={<Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" title="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             endpointError={state.endpointError}
@@ -1553,12 +1612,14 @@ function ProtectedControl({
 
 function OverviewModule({
   title,
+  titleAdornment,
   status,
   action,
   onAction,
   children,
 }: React.PropsWithChildren<{
   title: string;
+  titleAdornment?: React.ReactNode;
   status?: React.ReactNode;
   action?: string;
   onAction?(): void;
@@ -1567,6 +1628,7 @@ function OverviewModule({
     <section className="overview-module">
       <header className="overview-module-title">
         <h2>{title}</h2>
+        {titleAdornment}
         {status}
         {action && onAction && <Button variant="ghost" size="xs" className="module-action" onClick={onAction}>{action}</Button>}
       </header>
@@ -1671,18 +1733,12 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
 
 function AgentsView({
   pendingAgentChanges,
-  scanResult,
-  refreshing,
-  onRefresh,
   agents,
   locked,
   problem,
   onSelect,
 }: {
   pendingAgentChanges: Record<string, boolean>;
-  scanResult?: string;
-  refreshing: boolean;
-  onRefresh(): void;
   agents: AgentStatus[];
   locked: boolean;
   problem?: string;
@@ -1694,7 +1750,6 @@ function AgentsView({
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
       <div className="page-toolbar">
         <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
-        <div className="flex items-center gap-2"><span className="text-sm text-muted-foreground" role="status">{refreshing ? "Detecting…" : scanResult}</span><IconButton label="Detect installed agents" disabled={refreshing} onClick={onRefresh}><RefreshCw className={refreshing ? "is-spinning" : undefined} aria-hidden="true" /></IconButton></div>
       </div>
       <section className="group" aria-labelledby="agents-title">
         <h2 className="group-title" id="agents-title">Installed <span>{connected} connected</span></h2>
@@ -1766,7 +1821,7 @@ function AgentRow({
         aria-busy={pendingConnection !== undefined}
         disabled={disabled || !actionable}
         label={`${disconnecting ? "Disconnect" : "Connect"} ${name}`}
-        onToggle={() => { if (pendingConnection === undefined) onSelect(!disconnecting); }}
+        onToggle={() => onSelect(!disconnecting)}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
     </Item><Separator className="last:hidden" /></>
@@ -2074,6 +2129,7 @@ function SettingsView({
       {state.endpointError && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">{state.endpointError}</AlertDescription></Alert>}
 
       <SettingsSection title="General">
+          <AppearanceControl />
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
           <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
@@ -2413,8 +2469,6 @@ function LocalApiSheet({
   const [draft, setDraft] = useState<LocalApiConfig>(state.localApi);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
-  const endpoint = localEndpoint(draft) ?? "";
-  const openAi = openAiEndpoint(endpoint) ?? "";
   const update = <Key extends keyof LocalApiConfig>(key: Key, value: LocalApiConfig[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }));
     setError(undefined);
@@ -2478,20 +2532,6 @@ function LocalApiSheet({
             </div>
             <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>
           </Field>
-          <FieldSeparator />
-          <FieldSet>
-          <FieldLegend variant="label">Client endpoints</FieldLegend>
-          <SettingsList>
-          <Item>
-            <ItemContent className="min-w-0"><ItemTitle>OpenAI-style endpoint</ItemTitle><ItemDescription className="line-clamp-none break-all">{openAi || "Invalid settings"}</ItemDescription></ItemContent>
-            <ItemActions><IconButton label="Copy OpenAI-style endpoint" disabled={!openAi} onClick={() => void onCopy("OpenAI-style endpoint", openAi)}>{copied === "OpenAI-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
-          </Item>
-          <Item>
-            <ItemContent className="min-w-0"><ItemTitle>Anthropic-style endpoint</ItemTitle><ItemDescription className="line-clamp-none break-all">{endpoint || "Invalid settings"}</ItemDescription></ItemContent>
-            <ItemActions><IconButton label="Copy Anthropic-style endpoint" disabled={!endpoint} onClick={() => void onCopy("Anthropic-style endpoint", endpoint)}>{copied === "Anthropic-style endpoint" ? <Check /> : <Copy />}</IconButton></ItemActions>
-          </Item>
-          </SettingsList>
-          </FieldSet>
           </FieldGroup>
           {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
         </div>
@@ -2691,10 +2731,6 @@ function checkCount(checks: VerificationCheck[]): string {
   return `${checks.filter((check) => check.status === "pass").length}/${checks.length}`;
 }
 
-function openAiEndpoint(proxyUrl?: string): string | undefined {
-  return proxyUrl ? `${proxyUrl.replace(/\/+$/, "")}/v1` : undefined;
-}
-
 function localEndpoint(config: LocalApiConfig): string | undefined {
   const host = config.clientHost?.trim() || config.listenAddress.trim();
   if (!host || !Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) return undefined;
@@ -2745,14 +2781,19 @@ function errorMessage(error: unknown): string {
   return message;
 }
 
-export function Renderer(): React.JSX.Element {
+function WindowContent(): React.JSX.Element {
   // Native child windows and the main window share one component entry point.
   const nativeDialog = query.get("native-dialog");
   return nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
     : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
+    : nativeDialog === "local-api-example" ? <NativeLocalApiExampleWindow />
     : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
         : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={query.get("record") ?? ""} />
           : <App />;
+}
+
+export function Renderer(): React.JSX.Element {
+  return <AppearanceProvider api={desktopApi}><WindowContent /></AppearanceProvider>;
 }

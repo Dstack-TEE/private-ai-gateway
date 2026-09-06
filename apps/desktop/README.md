@@ -54,10 +54,16 @@ Shared product compositions live one layer above `components/ui`:
 
 Forms use the official Field components without bordered outer input containers.
 Local API sections use FieldSet/FieldSeparator; standalone option rows use Item
-outline, while endpoint previews share one bordered group and a Separator.
-SheetActions provides one shared footer divider, and long endpoint values wrap.
+outline. Client endpoint previews are omitted from Settings; the Overview help
+button opens a native examples sheet with cURL, Python and JavaScript tabs.
+Examples use the configured endpoint and discovered models. The local client key
+is read when the example sheet opens and embedded in its copyable snippets; copied
+snippets are sensitive. Key changes invalidate the displayed code. Provider keys
+are never used in examples.
+SheetActions provides one shared footer divider.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
-Badge, and errors use Alert/FieldError. Agent detection is a page-content action.
+Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
+activation and Agents navigation, plus background reconciliation; no refresh button.
 Use the default switch size except for the Overview main switch; do not retain legacy CSS aliases for removed radii.
 
 The sidebar update badge is pinned at the bottom and invokes the same confirmed
@@ -90,9 +96,33 @@ The generated Calendar forwards its day-button ref to preserve keyboard focus.
 Profile saves continue to verify the endpoint/key before persisting or
 reconnecting. No separate verified-configuration badge or credential-delete
 action is shown. Agent switches show optimistic pending state instead of a
-disabled flash, reject repeated actions while pending, and roll back on failure.
+disabled flash, serialize writes per agent, retain the latest requested state,
+and roll back on failure. Concurrent scans are coalesced. Detection feedback is
+automatic and does not add expanding status text to the Agents toolbar.
+
+Settings offers System (default), Light and Dark appearance, persisted in runtime
+preferences. Tauri applies native appearance; renderer windows synchronize through
+an appearance event. Cmd+, opens Settings on macOS through the native app menu;
+Ctrl+, is also handled by the renderer. Native editing shortcuts retain their
+platform roles. Active modal sheets keep their focus rather than being discarded.
+
+Blocking Tauri commands use the shared `run_blocking` boundary for filesystem,
+SQLite, credential, agent and startup-preference work. Native window presentation
+stays on the platform thread. Exit restoration runs in the background and prevents
+later configuration changes after successful restoration; failed restoration keeps
+the application open. Async verification and listener operations retain their
+existing lifecycle locks.
 
 ### Publishing Updates
+
+The pipeline uses official Tauri CLI signing/updater artifacts, Apple notarytool,
+and GitHub Actions/CLI. Rust setup/cache actions are third-party, not GitHub
+official actions. All external actions are pinned to commit SHAs; checkout does
+not persist credentials, and signing/publishing secrets are scoped to their steps.
+Release-only npm installs skip lifecycle scripts. PRs and main pushes run CI;
+manual dispatch publishes releases. Feed updates serialize separately by channel.
+Manifest/channel orchestration and Icon Composer compilation are project scripts,
+not replacements for the official signature or updater engines.
 
 The Desktop Tauri workflow defaults `release_channel` to `beta`. Use
 `production_macos=true`, a matching `release_version`, and `publish_release=true`

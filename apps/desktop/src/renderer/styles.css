@@ -50,7 +50,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .preview-tray-check { width: 18px; flex: 0 0 auto; color: var(--primary); font-weight: 700; }
 .preview-tray-item:hover .preview-tray-check, .preview-tray-item:focus-visible .preview-tray-check { color: var(--primary-foreground); }
 
-@media (prefers-color-scheme: dark) {
+:root[data-theme="dark"] {
   .mac-menu-bar { color: var(--foreground); background: color-mix(in srgb, var(--background) 82%, transparent); border-bottom-color: color-mix(in srgb, var(--color-white) 13%, transparent); }
   .tray-trigger:hover, .tray-trigger.is-open { background: color-mix(in srgb, var(--color-white) 13%, transparent); }
   .preview-tray { color: var(--foreground); background: color-mix(in srgb, var(--card) 95%, transparent); border-color: color-mix(in srgb, var(--color-white) 17%, transparent); }
@@ -282,6 +282,8 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .profiles-sheet[open], .profile-editor-sheet[open] { display: flex; flex-direction: column; }
 .profile-editor-sheet form { min-height: 0; display: flex; flex-direction: column; }
 .local-api-sheet { width: min(560px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(680px, calc(var(--window-dialog-height, 100vh) - 32px)); }
+.local-api-examples-sheet { width: min(720px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(560px, calc(var(--window-dialog-height, 100vh) - 32px)); }
+.local-api-examples-sheet[open] { display: flex; flex-direction: column; }
 .privacy-sheet { width: min(680px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(680px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .usage-evidence-sheet { width: min(540px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(500px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .sheet::backdrop { background: var(--backdrop); }

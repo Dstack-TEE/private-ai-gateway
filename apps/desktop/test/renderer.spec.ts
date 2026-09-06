@@ -1,11 +1,103 @@
 import { expect, test } from "@playwright/test";
 import { modelChartData } from "../src/renderer/components/usage-chart";
 import { usageDateBounds } from "../src/renderer/lib/usage-dates";
+import { localApiExample } from "../src/renderer/lib/local-api-example";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 type Page = import("@playwright/test").Page;
 
+test("Local API examples safely embed the local client credential", async () => {
+  const calls: { url?: string; authorization?: string; body: unknown }[] = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      try {
+        calls.push({ url: request.url, authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString()) });
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end('{"ok":true}');
+      } catch { response.writeHead(400); response.end(); }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing test endpoint");
+    const endpoint = `http://127.0.0.1:${address.port}`;
+    const model = "vendor/model'\nJSON\nquoted\"";
+    const run = promisify(execFile);
+    for (const language of ["curl", "python", "javascript"] as const) {
+      const code = localApiExample(language, endpoint, model, "test-local-client-key");
+      expect(code).toContain("test-local-client-key");
+      const executable = language === "curl" ? "/bin/sh" : language === "python" ? "python3" : process.execPath;
+      const args = language === "javascript" ? ["--input-type=module", "-e", code] : ["-c", code];
+      await run(executable, args, { env: { ...process.env, PAG_API_KEY: "wrong-key" }, timeout: 5_000 });
+    }
+    expect(calls).toHaveLength(3);
+    for (const call of calls) expect(call).toEqual({ url: "/v1/chat/completions", authorization: "Bearer test-local-client-key", body: { model, messages: [{ role: "user", content: "Hello" }] } });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("Local API help opens examples with model selection and copy actions", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await page.getByRole("button", { name: "Local API examples", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Local API examples", exact: true });
+  await expect(dialog.locator("code")).toContainText("http://127.0.0.1:4180/v1/chat/completions");
+  await expect(dialog.locator("code")).toContainText("sk-pag-");
+  await dialog.getByRole("combobox", { name: "Model", exact: true }).selectOption("zai/glm-5.2");
+  for (const language of ["cURL", "Python", "JavaScript"]) {
+    await dialog.getByRole("tab", { name: language, exact: true }).click();
+    await expect(dialog.locator("code")).toContainText("zai/glm-5.2");
+    await expect(dialog.locator("code")).toContainText("sk-pag-");
+    await dialog.getByRole("button", { name: "Copy example", exact: true }).click();
+    await expect(dialog.getByRole("status")).toHaveText("Example copied");
+  }
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 const nav = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name });
+
+test("appearance defaults to system, persists and settings shortcut navigates", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/?mock=ready");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.keyboard.press("Meta+,");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  const theme = page.getByRole("combobox", { name: "Theme", exact: true });
+  await expect(theme).toHaveValue("system");
+  await theme.selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.keyboard.press("Control+,");
+  await theme.selectOption("dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await theme.selectOption("system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("window activation redetects an uninstalled connected agent", async ({ page }) => {
+  await page.goto("/?mock=agent-uninstalled");
+  await nav(page, "Agents").click();
+  await expect(page.getByRole("switch", { name: "Disconnect Claude Code", exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.dataset.mockAgentRemoved = "true";
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.getByRole("switch", { name: "Disconnect Claude Code", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Not installed", exact: true })).toContainText("Claude Code");
+  await nav(page, "Overview").click();
+  await expect(page.getByRole("group", { name: "Installed agents" }).getByRole("img", { name: "Claude Code" })).toHaveCount(0);
+});
 
 const themeColor = (page: Page, token: string) => page.evaluate((name) => {
   const probe = document.createElement("span");
@@ -182,6 +274,12 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     }).observe(document, { childList: true, subtree: true });
   });
   const cases = [
+    {
+      size: { width: 720, height: 560 },
+      path: "/?mock=ready&native-dialog=local-api-example",
+      name: "Local API examples",
+      text: "sk-pag-",
+    },
     {
       size: { width: 580, height: 510 },
       path: "/?mock=ready&native-dialog=profile-editor",
@@ -460,21 +558,15 @@ test("overview shows four agents, four current-session records, truthful copy su
   for (const label of ["Listen address", "Allow network access", "Port", "Client host", "Client key"]) {
     await expect(localSheet.getByText(label, { exact: true }).first()).toBeVisible();
   }
-  await expect(localSheet.getByRole("button", { name: "Copy OpenAI-style endpoint" })).toBeVisible();
-  await expect(localSheet.getByRole("button", { name: "Copy Anthropic-style endpoint" })).toBeVisible();
+  await expect(localSheet.getByRole("button", { name: /Copy .*endpoint/ })).toHaveCount(0);
   const networkToggle = localSheet.getByRole("switch", { name: "Allow network access" });
   await expect(networkToggle.locator('xpath=ancestor::*[@data-slot="item"][1]')).toHaveAttribute("data-variant", "outline");
-  const clientEndpoints = localSheet.getByRole("group", { name: "Client endpoints", exact: true });
-  await expect(clientEndpoints.locator('[data-slot="item-group"]')).toHaveCSS("border-top-width", "1px");
-  await expect(clientEndpoints.locator('[data-slot="separator"]')).toHaveCount(1);
-  await expect(localSheet.locator('[data-slot="field-separator"]')).toHaveCount(2);
+  await expect(localSheet.getByRole("group", { name: "Client endpoints", exact: true })).toHaveCount(0);
+  await expect(localSheet.locator('[data-slot="field-separator"]')).toHaveCount(1);
   await expect(localSheet.locator('.sheet-footer > [data-slot="separator"]')).toHaveCSS("height", "1px");
   await networkToggle.click();
   await expect(localSheet.getByRole("alert")).toContainText("trusted network");
   await networkToggle.click();
-  await localSheet.getByLabel("Client host", { exact: true }).fill(`${"a".repeat(50)}.${"b".repeat(50)}.example.com`);
-  expect(await clientEndpoints.locator('[data-slot="item"]').evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
-  await localSheet.getByLabel("Client host", { exact: true }).fill("");
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeEnabled();
   await expect(localSheet).toContainText("Saving briefly restarts protection");
@@ -554,7 +646,7 @@ test("success colors, list separators, control sizes and About alignment are con
     const success = await themeColor(page, "--success");
     expect(success).not.toBe(await themeColor(page, "--primary"));
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
-    await expect(local.locator('[data-slot="badge"]')).toHaveCSS("color", success);
+    await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
     await expect(page.locator(".status-local .status-fact").filter({ hasText: "1 agent connected" })).toHaveCSS("color", success);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
@@ -574,7 +666,7 @@ test("success colors, list separators, control sizes and About alignment are con
     await nav(page, "Settings").click();
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     const general = page.getByRole("region", { name: "General", exact: true });
-    await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
+    await expect(general.locator('[data-slot="separator"]')).toHaveCount(4);
     await expect(general.locator('[data-slot="separator"]').first()).toHaveCSS("height", "1px");
     const about = page.getByRole("region", { name: "About", exact: true });
     await expect(about.getByRole("status")).toHaveText("You're up to date");
@@ -607,10 +699,12 @@ test("availability and connection badges render visible status dots", async ({ p
 });
 
 test("agent actions report progress without disabling unrelated switches", async ({ page }) => {
+  await page.addInitScript(() => window.addEventListener("mock:agent-write", () => {
+    document.documentElement.dataset.agentWrites = String(Number(document.documentElement.dataset.agentWrites ?? 0) + 1);
+  }));
   await page.goto("/?mock=agent-pending");
   await nav(page, "Agents").click();
-  await page.getByRole("button", { name: "Detect installed agents" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "5 installed agents detected" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
   await page.getByRole("switch", { name: "Connect Codex", exact: true }).click();
   const pending = page.getByRole("switch", { name: "Disconnect Codex", exact: true });
   await expect(pending).toBeChecked();
@@ -618,10 +712,15 @@ test("agent actions report progress without disabling unrelated switches", async
   await expect(pending).toHaveAttribute("aria-busy", "true");
   await expect(page.getByRole("switch", { name: "Connect Pi", exact: true })).toBeEnabled();
   await pending.click();
-  await expect(pending).toBeChecked();
+  const reversed = page.getByRole("switch", { name: "Connect Codex", exact: true });
+  await expect(reversed).not.toBeChecked();
+  await expect(reversed).toHaveAttribute("aria-busy", "true");
+  await reversed.click();
+  await pending.click();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-agent")));
-  await expect(pending).toHaveAttribute("aria-busy", "false");
-  await expect(pending).toBeChecked();
+  await expect(reversed).toHaveAttribute("aria-busy", "false");
+  await expect(reversed).not.toBeChecked();
+  await expect(page.locator("html")).toHaveAttribute("data-agent-writes", "2");
 });
 
 test("update installation uses a progress dialog and exposes failure without a fake cancel", async ({ page }) => {
@@ -881,11 +980,7 @@ test("overview presents local availability and the active profile without sessio
   }
   await expect(page.getByRole("button", { name: "Profiles", exact: true })).toHaveCSS("border-bottom-width", "0px");
   await nav(page, "Agents").click();
-  const detect = page.getByRole("button", { name: "Detect installed agents" });
-  await expect(page.locator(".page-header").getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
-  await expect(page.locator(".content").getByRole("button", { name: "Detect installed agents" })).toBeVisible();
-  await detect.click();
-  await expect(detect).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
 
   await page.goto("/?mock=no-key");
   await expect(page.getByLabel("Protection status").getByText("Credential unavailable", { exact: true })).toBeVisible();
@@ -1109,7 +1204,7 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeDisabled();
   await nav(page, "Settings").click();
   const general = page.getByRole("region", { name: "General", exact: true });
-  await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
+  await expect(general.locator('[data-slot="separator"]')).toHaveCount(4);
   await expect(general.locator(".row-warning")).toHaveCount(0);
   await expect(page.getByRole("alert")).toContainText("Address already in use");
 });

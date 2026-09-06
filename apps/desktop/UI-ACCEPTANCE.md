@@ -35,15 +35,21 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 - Live Verified is a small, right-aligned button opening Privacy Verification.
 - Forms use standard FieldSet/FieldSeparator and a shared footer divider.
   Settings error alerts sit outside row groups to avoid double separators.
-  Local API option rows retain borders, and long endpoint values wrap.
+  Local API option rows retain borders. Endpoint previews have been removed;
+  Overview help opens model-aware cURL/Python/JavaScript examples with the current
+  local client key, read on demand. Provider credentials are never embedded.
 - Settings, profiles and usage share an Item-based action row with full-row hover.
   Provider logos are 18px; chart metrics use standard Tabs with visible selection.
 - Profile forms omit the credential-delete action and verification badge.
   Verify and Save remains intentional: invalid replacement credentials must not
   overwrite a working profile or trigger an unverified reconnection.
-- Agent refresh reports the detected count; connection mutations show optimistic
+- Agent detection is automatic on startup and window activation; connection mutations show optimistic
   state and progress without disabling unrelated agents. Restore all is locked
   during a connection mutation. Model-sync filler text is removed.
+- No manual detection control remains. Writes
+  serialize per agent and coalesce repeated input to the latest intent. Tauri
+  filesystem, SQLite and credential commands execute on blocking workers, not
+  the UI thread. Exit restores configurations asynchronously before allowing exit.
 - Usage uses shadcn Chart/Recharts stacks per model, with full-filter SQL totals,
   zero-filled dates and monthly aggregation for long ranges. Filters use local
   calendar-day boundaries, including Today. Production-CSP
@@ -80,9 +86,10 @@ upgrade/restart still require platform acceptance.
 
 ## Verification
 
-- Renderer: 31 tests passed.
+- Renderer: 35 tests cover executable examples, appearance persistence, Settings
+  shortcuts and activation-triggered uninstall detection in addition to UI flows.
 - Gateway: 45 tests passed; one OS keyring integration test intentionally ignored.
-- Runtime: 18 tests passed.
+- Runtime: 19 tests passed, including exit retry and post-exit mutation rejection.
 - Release tooling: 4 tests passed.
 - No provider secrets or production traffic were used for these checks.
 - The paused-delivery regression uses notifications, not timing guesses, to

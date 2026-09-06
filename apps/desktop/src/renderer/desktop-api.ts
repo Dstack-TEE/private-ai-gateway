@@ -29,6 +29,9 @@ export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
 delete window.__GATEWAY_INITIAL_STATE__;
 
 export const desktopApi: DesktopApi = {
+  getAppearance: () => invoke("get_appearance"),
+  setAppearance: (appearance) => invoke("set_appearance", { appearance }),
+  onAppearanceChange: (listener) => subscribe("gateway://appearance", listener),
   getAppVersion: getVersion,
   getUpdateChannel: () => invoke("get_update_channel"),
   setUpdateChannel: (channel) => invoke("set_update_channel", { channel }),

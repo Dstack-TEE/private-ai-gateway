@@ -324,15 +324,19 @@ fn toggle_or_open_settings(app: &AppHandle) {
 fn sync_autostart(app: &AppHandle) {
     let menu = app.state::<TrayMenu>();
     let checked = menu.autostart.is_checked().unwrap_or(false);
-    let result = set_open_at_login(app, checked);
-    if let Err(error) = result {
-        let _ = menu.autostart.set_checked(!checked);
-        app.state::<std::sync::Arc<DesktopRuntime>>()
-            .report_error(format!("Open at Login could not be changed: {error}"));
-    }
-    if let Ok(preferences) = crate::get_launch_preferences(app.clone()) {
-        let _ = app.emit("gateway://launch-preferences", preferences);
-    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let menu = app.state::<TrayMenu>();
+        let result = set_open_at_login(&app, checked);
+        if let Err(error) = result {
+            let _ = menu.autostart.set_checked(!checked);
+            app.state::<std::sync::Arc<DesktopRuntime>>()
+                .report_error(format!("Open at Login could not be changed: {error}"));
+        }
+        if let Ok(preferences) = crate::load_launch_preferences(&app) {
+            let _ = app.emit("gateway://launch-preferences", preferences);
+        }
+    });
 }
 
 pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -388,7 +392,7 @@ fn tray_icon(protected: bool) -> tauri::Result<tauri::image::Image<'static>> {
         tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
     let mut rgba = image.rgba().to_vec();
     if !protected {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
         }
     }
@@ -523,7 +527,7 @@ mod tests {
             let icon = tray_icon(protected).unwrap();
             assert_eq!((icon.width(), icon.height()), (36, 36));
             let mut bounds = (36, 36, 0, 0);
-            for (index, pixel) in icon.rgba().chunks_exact(4).enumerate() {
+            for (index, pixel) in icon.rgba().as_chunks::<4>().0.iter().enumerate() {
                 if pixel[3] > 0 {
                     let (x, y) = (index % 36, index / 36);
                     bounds = (
@@ -544,8 +548,10 @@ mod tests {
         let inactive = tray_icon(false).unwrap();
         for (on, off) in active
             .rgba()
-            .chunks_exact(4)
-            .zip(inactive.rgba().chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(inactive.rgba().as_chunks::<4>().0.iter())
         {
             assert_eq!(&on[..3], &off[..3]);
             assert_eq!(u16::from(off[3]), u16::from(on[3]) * 45 / 100);

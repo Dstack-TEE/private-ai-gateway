@@ -14,6 +14,15 @@ pub enum UpdateChannel {
     Stable,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
@@ -21,6 +30,8 @@ pub struct Preferences {
     pub connect_on_launch: bool,
     #[serde(default)]
     pub update_channel: Option<UpdateChannel>,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 pub fn load() -> Result<Preferences, String> {
@@ -55,17 +66,21 @@ pub fn update(change: impl FnOnce(&mut Preferences)) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Preferences, UpdateChannel};
+    use super::{Appearance, Preferences, UpdateChannel};
 
     #[test]
     fn update_channel_is_optional_and_preserves_startup_preference() {
         let mut preferences: Preferences =
             serde_json::from_str(r#"{"connectOnLaunch":true}"#).unwrap();
         assert_eq!(preferences.update_channel, None);
+        assert_eq!(preferences.appearance, Appearance::System);
+        preferences.appearance = Appearance::Dark;
         preferences.update_channel = Some(UpdateChannel::Beta);
         let restored: Preferences =
             serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
         assert!(restored.connect_on_launch);
+        assert_eq!(restored.appearance, Appearance::Dark);
+        assert!(serde_json::from_str::<Preferences>(r#"{"appearance":"invalid"}"#).is_err());
         assert_eq!(restored.update_channel, Some(UpdateChannel::Beta));
         assert!(serde_json::from_str::<Preferences>(r#"{"updateChannel":"nightly"}"#).is_err());
     }

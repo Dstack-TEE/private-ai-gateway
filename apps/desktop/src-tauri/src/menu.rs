@@ -99,12 +99,15 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit(NAVIGATE_EVENT, "settings");
         }
         "documentation" | "github" => {
-            if let Err(error) = crate::open_about_link(app.clone(), event.id().as_ref().to_string())
-            {
-                use tauri::Manager;
-                app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
-                    .report_error(error);
-            }
+            let app = app.clone();
+            let target = event.id().as_ref().to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::open_about_link(app.clone(), target).await {
+                    use tauri::Manager;
+                    app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                        .report_error(error);
+                }
+            });
         }
         _ => {}
     });

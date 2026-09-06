@@ -335,6 +335,12 @@ export function mockApi(name: string | null): DesktopApi {
   let updateAttempts = 0;
   let keyRotations = 0;
   return {
+    getAppearance: async () => {
+      const value = localStorage.getItem("pag-preview-appearance");
+      return value === "light" || value === "dark" ? value : "system";
+    },
+    setAppearance: async (appearance) => { localStorage.setItem("pag-preview-appearance", appearance); },
+    onAppearanceChange: () => () => undefined,
     getAppVersion: async () => "0.1.0",
     getUpdateChannel: async () => updateChannel,
     setUpdateChannel: async (channel) => { updateChannel = channel; return channel; },
@@ -574,7 +580,12 @@ export function mockApi(name: string | null): DesktopApi {
       return count;
     },
     refreshCatalog: async () => state,
-    listAgents: async () => agents,
+    listAgents: async () => {
+      if (name === "agent-uninstalled" && document.documentElement.dataset.mockAgentRemoved === "true") {
+        agents = agents.map((agent) => agent.id === "claude-code" ? { ...agent, installed: false, authorized: false, attention: "CLI not found; previous configuration restored" } : agent);
+      }
+      return agents;
+    },
     disconnectAllAgents: async () => {
       agents = agents.map((agent) => ({ ...agent, connected: false, recorded: false, authorized: false, attention: undefined }));
       return agents;
@@ -606,7 +617,10 @@ export function mockApi(name: string | null): DesktopApi {
       };
     },
     applyAgent: async (agentId, connect) => {
-      if (name === "agent-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-agent", () => resolve(), { once: true }));
+      if (name === "agent-pending") {
+        window.dispatchEvent(new Event("mock:agent-write"));
+        if (connect) await new Promise<void>((resolve) => window.addEventListener("mock:finish-agent", () => resolve(), { once: true }));
+      }
       agents = agents.map((agent) =>
         agent.id === agentId
           ? { ...agent, connected: connect, recorded: connect, authorized: connect && state.status === "verified" && !state.configurationVerification && state.apiKeySaved, attention: undefined }

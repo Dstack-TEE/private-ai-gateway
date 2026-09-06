@@ -15,6 +15,7 @@ export interface UpdateInfo {
 }
 
 export type UpdateChannel = "beta" | "stable";
+export type Appearance = "system" | "light" | "dark";
 
 export interface UpdateProgress {
   downloaded: number;
@@ -253,6 +254,9 @@ export interface LaunchPreferences {
 }
 
 export interface DesktopApi {
+  getAppearance(): Promise<Appearance>;
+  setAppearance(appearance: Appearance): Promise<void>;
+  onAppearanceChange(listener: (appearance: Appearance) => void): () => void;
   getAppVersion(): Promise<string>;
   getUpdateChannel(): Promise<UpdateChannel>;
   setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
@@ -274,7 +278,7 @@ export interface DesktopApi {
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
+  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */

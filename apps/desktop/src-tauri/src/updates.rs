@@ -20,15 +20,18 @@ fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
 }
 
 #[tauri::command]
-pub fn get_update_channel(app: AppHandle) -> Result<UpdateChannel, String> {
-    let saved = preferences::load().map_err(|_| "Could not read update preferences")?;
-    Ok(saved.update_channel.unwrap_or_else(|| {
-        if app.package_info().version.pre.is_empty() {
-            UpdateChannel::Stable
-        } else {
-            UpdateChannel::Beta
-        }
-    }))
+pub async fn get_update_channel(app: AppHandle) -> Result<UpdateChannel, String> {
+    crate::run_blocking(move || {
+        let saved = preferences::load().map_err(|_| "Could not read update preferences")?;
+        Ok(saved.update_channel.unwrap_or_else(|| {
+            if app.package_info().version.pre.is_empty() {
+                UpdateChannel::Stable
+            } else {
+                UpdateChannel::Beta
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -40,8 +43,11 @@ pub async fn set_update_channel(
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
-    preferences::update(|preferences| preferences.update_channel = Some(channel))
-        .map_err(|_| "Could not save update channel")?;
+    crate::run_blocking(move || {
+        preferences::update(|preferences| preferences.update_channel = Some(channel))
+            .map_err(|_| "Could not save update channel".to_string())
+    })
+    .await?;
     *pending = None;
     Ok(channel)
 }
@@ -91,8 +97,8 @@ pub fn reset_progress(app: &AppHandle) {
 fn publish_progress(app: &AppHandle, progress: DownloadProgress) {
     if let Ok(mut current) = app.state::<UpdateProgress>().0.lock() {
         *current = progress.clone();
-        let _ = app.emit("gateway://update-progress", progress);
     }
+    let _ = app.emit("gateway://update-progress", progress);
 }
 
 #[tauri::command]
@@ -115,7 +121,7 @@ pub async fn check_update(
         return Ok(info);
     }
     *pending = None;
-    let channel = get_update_channel(app.clone())?;
+    let channel = get_update_channel(app.clone()).await?;
     let channel_name = match channel {
         UpdateChannel::Beta => "beta",
         UpdateChannel::Stable => "stable",
