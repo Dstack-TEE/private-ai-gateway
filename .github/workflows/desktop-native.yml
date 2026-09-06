@@ -183,19 +183,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $sandbox = Join-Path $env:RUNNER_TEMP 'private-ai-gateway-windows-smoke'
           $health = Join-Path $sandbox 'gui-health.json'
-          $home = Join-Path $sandbox 'home'
-          $appData = Join-Path $home 'AppData\Roaming'
-          $localAppData = Join-Path $home 'AppData\Local'
+          $isolatedHome = Join-Path $sandbox 'home'
+          $appData = Join-Path $isolatedHome 'AppData\Roaming'
+          $localAppData = Join-Path $isolatedHome 'AppData\Local'
           $crashLog = Join-Path $localAppData 'Private AI Gateway\crash.log'
           $env:PRIVATE_AI_GATEWAY_HOME = Join-Path $sandbox 'gateway-home'
-          $env:HOME = $home
-          $env:USERPROFILE = $home
+          $env:HOME = $isolatedHome
+          $env:USERPROFILE = $isolatedHome
           $env:APPDATA = $appData
           $env:LOCALAPPDATA = $localAppData
           $env:PRIVATE_AI_GATEWAY_GUI_HEALTH = $health
           $env:PRIVATE_AI_GATEWAY_LAUNCH_TRACE = Join-Path $sandbox 'launch.log'
           $env:PRIVATE_AI_GATEWAY_CRASH_LOG = $crashLog
-          New-Item -ItemType Directory -Force -Path $env:PRIVATE_AI_GATEWAY_HOME, $home, $appData, $localAppData | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:PRIVATE_AI_GATEWAY_HOME, $isolatedHome, $appData, $localAppData | Out-Null
           $process = $null
           try {
             $process = Start-Process -FilePath 'release/native-windows/Private-AI-Gateway/PrivateAIGateway.Windows.exe' -ArgumentList '--smoke-test' -PassThru
