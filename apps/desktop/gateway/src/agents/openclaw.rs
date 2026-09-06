@@ -534,13 +534,16 @@ fn validate_windows_helper(path: &Path) -> Result<(), String> {
     };
 
     // The path travels only in an environment value, never in executable text.
+    // PowerShell reconstructs PSModulePath even after env_clear; constrain
+    // discovery inside the script before resolving any inspection cmdlets.
     const QUERY: &str = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $p = $env:PRIVATE_AI_GATEWAY_ACL_PATH
-$item = Get-Item -LiteralPath $p -Force
+$item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $p -Force
 if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse point' }
-$acl = Get-Acl -LiteralPath $p
+$acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $p
 $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
 $entries = @()
 foreach ($ace in $raw.DiscretionaryAcl) {
@@ -552,7 +555,7 @@ $root = [IO.Path]::GetPathRoot($p)
 $extendedDrive = $p.Length -ge 7 -and $p.StartsWith('\\?\') -and [char]::IsLetter($p[4]) -and $p[5] -eq ':' -and $p[6] -eq '\'
 $driveRoot = if ($extendedDrive) { $p.Substring(4,3) } else { $root }
 $local = (-not $p.StartsWith('\\') -or $extendedDrive) -and [IO.DriveInfo]::new($driveRoot).DriveType -ne [IO.DriveType]::Network
-@{ownerSid=$raw.Owner.Value;currentUserSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;local=$local;daclPresent=(($raw.ControlFlags -band 4) -ne 0 -and $null -ne $raw.DiscretionaryAcl);aces=$entries} | ConvertTo-Json -Depth 4 -Compress
+@{ownerSid=$raw.Owner.Value;currentUserSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;local=$local;daclPresent=(($raw.ControlFlags -band 4) -ne 0 -and $null -ne $raw.DiscretionaryAcl);aces=$entries} | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4 -Compress
 "#;
     let root = env_path("SystemRoot")
         .filter(|p| p.is_absolute())
@@ -601,17 +604,20 @@ $local = (-not $p.StartsWith('\\') -or $extendedDrive) -and [IO.DriveInfo]::new(
             if let Ok(result) = receiver.try_recv() {
                 output = Some(result);
             }
-            if start.elapsed() >= Duration::from_secs(5)
-                || output.as_ref().is_some_and(|r| match r {
-                    Ok(b) => b.len() as u64 > LIMIT,
-                    Err(_) => true,
-                })
-            {
+            let failure = match output.as_ref() {
+                Some(Err(_)) => Some("Cannot read the OpenClaw helper ACL inspector output"),
+                Some(Ok(bytes)) if bytes.len() as u64 > LIMIT => {
+                    Some("The OpenClaw helper ACL inspector output exceeded 64 KiB")
+                }
+                _ if start.elapsed() >= Duration::from_secs(5) => {
+                    Some("The OpenClaw helper ACL inspector did not finish within 5 seconds")
+                }
+                _ => None,
+            };
+            if let Some(failure) = failure {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(
-                    "The OpenClaw helper ACL inspection exceeded its limits or failed".into(),
-                );
+                return Err(failure.into());
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
