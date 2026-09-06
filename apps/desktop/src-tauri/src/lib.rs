@@ -514,7 +514,9 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             let helper_path = if app.env().appimage.is_some() {
                 helper_staging::stage(&helper_path, &desktop_gateway::agents::app_data_dir()?)
-                    .map_err(|error| format!("Cannot stage the AppImage credential helper: {error}"))?
+                    .map_err(|error| {
+                        format!("Cannot stage the AppImage credential helper: {error}")
+                    })?
             } else {
                 helper_path
             };
