@@ -3449,6 +3449,7 @@ dependencies = [
  "private-ai-gateway-desktop-gateway",
  "private-ai-gateway-desktop-runtime",
  "reqwest 0.13.4",
+ "rustix",
  "semver",
  "serde",
  "serde_json",
