@@ -134,13 +134,15 @@ pub struct ProxyState {
 impl ProxyState {
     /// `events` is bounded; when it is full, low-value rejection events are
     /// dropped rather than blocking a request.
-    pub fn new(events: mpsc::Sender<ProxyEvent>) -> Arc<Self> {
+    pub fn new(events: mpsc::Sender<ProxyEvent>) -> Result<Arc<Self>, String> {
         let client = reqwest::Client::builder()
+            // Only the owned loopback sidecar may receive these requests.
+            .no_proxy()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
             .read_timeout(UPSTREAM_READ_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Arc::new(Self {
+            .map_err(|_| "Cannot initialize the local gateway HTTP client".to_string())?;
+        Ok(Arc::new(Self {
             session: RwLock::new(Session::default()),
             credentials: RwLock::new(Credentials::default()),
             credential_epoch: AtomicU64::new(1),
@@ -150,7 +152,7 @@ impl ProxyState {
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             #[cfg(test)]
             pause: std::sync::Mutex::new(None),
-        })
+        }))
     }
 
     /// Cancel every delivery admitted so far; called after any state change
@@ -1254,7 +1256,7 @@ mod tests {
 
     fn state() -> (Arc<ProxyState>, mpsc::Receiver<ProxyEvent>) {
         let (sender, receiver) = mpsc::channel(4);
-        (ProxyState::new(sender), receiver)
+        (ProxyState::new(sender).unwrap(), receiver)
     }
 
     fn tokens() -> TokenSet {
@@ -1263,6 +1265,56 @@ mod tests {
         set.insert("claude-token".to_string(), "claude-code".to_string());
         set.insert("opencode-token".to_string(), "opencode".to_string());
         set
+    }
+
+    #[test]
+    fn sidecar_requests_ignore_proxy_environment() {
+        const CHILD: &str = "PAG_TEST_PROXY_ENV_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate proxy variables from the other concurrently running tests.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "proxy::tests::sidecar_requests_ignore_proxy_environment",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("HTTP_PROXY", "http://127.0.0.1:1")
+                .env("http_proxy", "http://127.0.0.1:1")
+                .env("ALL_PROXY", "http://127.0.0.1:1")
+                .env("all_proxy", "http://127.0.0.1:1")
+                .env("NO_PROXY", "")
+                .env("no_proxy", "")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (state, _events) = state();
+                let sidecar = mock_sidecar().await;
+                assert!(reqwest::Client::builder()
+                    .timeout(Duration::from_secs(1))
+                    .build()
+                    .unwrap()
+                    .get(format!("{sidecar}/v1/models"))
+                    .send()
+                    .await
+                    .is_err());
+                verified(&state, &sidecar, 1, 1).await;
+                let response = state
+                    .client
+                    .post(format!("{sidecar}/v1/responses"))
+                    .json(&json!({ "model": "openai/gpt-oss-20b", "input": "fixture" }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+            });
     }
 
     async fn verified(state: &ProxyState, sidecar: &str, generation: u64, epoch: u64) {

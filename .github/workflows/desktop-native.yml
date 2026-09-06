@@ -3,6 +3,10 @@ name: Desktop Tauri
 on:
   workflow_dispatch:
     inputs:
+      run_ui_tests:
+        description: Run optional renderer and installed app UI checks
+        default: false
+        type: boolean
       production_macos:
         description: Sign and notarize the macOS package for distribution
         required: true
@@ -48,6 +52,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
 
 concurrency:
   group: desktop-${{ github.event_name }}-${{ github.ref }}-${{ inputs.release_version || 'ci' }}
@@ -101,9 +108,13 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run check
+          npm run test:release
+      - name: Optional renderer UI checks
+        if: github.event_name == 'workflow_dispatch' && inputs.run_ui_tests
+        working-directory: apps/desktop
+        run: |
           npx playwright install chromium
           npm run test:renderer
-          npm run test:release
       - name: Stage Tauri sidecars
         working-directory: apps/desktop
         run: npm run build:sidecars:debug
@@ -119,6 +130,7 @@ jobs:
           cargo +1.89 test --locked --manifest-path apps/desktop/runtime/Cargo.toml
           cargo +1.89 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --bin aci
+          cargo test --locked --test aci_cli
 
   package:
     needs: verify
@@ -181,7 +193,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
@@ -256,12 +268,95 @@ jobs:
             --issuer "$APPLE_API_ISSUER" \
             --wait
           xcrun stapler staple "$dmg"
+
+      - name: Test Windows desktop libraries
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --locked --manifest-path gateway/Cargo.toml --lib
+          cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Check installed Windows sidecars without UI
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw 'Expected one NSIS installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Tauri Installed Check'
+          if (Test-Path $installDir) { throw 'Install check directory already exists' }
+          function Run-Installer($executable, $arguments) {
+            $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru
+            if (!$process.WaitForExit(60000)) {
+              & taskkill.exe /PID $process.Id /T /F
+              throw 'Installer timed out'
+            }
+            if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          }
+          try {
+            Run-Installer $installers[0].FullName "/S /D=$installDir"
+            node scripts/packaged-sidecars-smoke.mjs $installDir
+            if ($LASTEXITCODE -ne 0) { throw 'Installed sidecar checks failed' }
+            $env:PAG_TEST_HELPER_PATH = "$installDir/private-ai-gateway-helper.exe"
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored hermes_windows_installed_command_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Hermes credential command failed' }
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+            if ($LASTEXITCODE -ne 0) { throw 'Credential Manager check failed' }
+          } finally {
+            if (Test-Path "$installDir/uninstall.exe") {
+              Run-Installer "$installDir/uninstall.exe" "/S _?=$installDir"
+            }
+            foreach ($binary in @('private-ai-gateway-desktop.exe', 'aci.exe', 'private-ai-gateway-helper.exe')) {
+              if (Test-Path "$installDir/$binary") { throw "Uninstall left $binary" }
+            }
+          }
+
+      - name: Check installed Linux sidecars without UI
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(src-tauri/target/release/bundle/deb/*.deb)
+          test "${#packages[@]}" -eq 1
+          package=$(dpkg-deb -f "${packages[0]}" Package)
+          if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+            echo 'Refusing to replace an existing installation'
+            exit 1
+          fi
+          scratch=$(mktemp -d "$RUNNER_TEMP/tauri-installed.XXXXXX")
+          cleanup() {
+            local status=$?
+            sudo apt-get remove -y "$package" || status=1
+            for binary in private-ai-gateway-desktop aci private-ai-gateway-helper; do
+              if [[ -e "/usr/bin/$binary" ]]; then status=1; fi
+            done
+            rm -rf "$scratch"
+            return "$status"
+          }
+          trap cleanup EXIT
+          sudo apt-get install -y "./${packages[0]}"
+          node scripts/packaged-sidecars-smoke.mjs /usr/bin
+          export TAURI_CHECK_KEYRING_HOME="$scratch"
+          export XDG_RUNTIME_DIR="$scratch/runtime"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- bash -euc '
+            HOME="$TAURI_CHECK_KEYRING_HOME" gnome-keyring-daemon --foreground --unlock --components=secrets <<< ci-check-only &
+            keyring_pid=$!
+            trap "kill $keyring_pid 2>/dev/null || true; wait $keyring_pid || true" EXIT
+            gdbus wait --session --timeout 10 org.freedesktop.secrets
+            cargo test --release --locked --manifest-path gateway/Cargo.toml --lib -- --ignored keyring_round_trip
+          '
       - name: Stage and inspect macOS package
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         shell: bash
         env:
           PRODUCTION_MACOS: ${{ inputs.production_macos }}
+          RUN_UI_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ui_tests }}
         run: |
           set -euo pipefail
           mkdir -p release
@@ -288,21 +383,25 @@ jobs:
           else
             grep -q '^Signature=adhoc$' <<<"$codesign_details"
           fi
-          launch_log="$RUNNER_TEMP/private-ai-gateway-launch.log"
-          "$app_bundle/Contents/MacOS/private-ai-gateway-desktop" >"$launch_log" 2>&1 &
-          app_pid=$!
-          cleanup() {
-            kill "$app_pid" 2>/dev/null || true
-            wait "$app_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-          sleep 5
-          if ! kill -0 "$app_pid" 2>/dev/null; then
-            cat "$launch_log"
-            exit 1
+          if [[ "$RUN_UI_TESTS" == true ]]; then
+            launch_log="$RUNNER_TEMP/private-ai-gateway-launch.log"
+            "$app_bundle/Contents/MacOS/private-ai-gateway-desktop" >"$launch_log" 2>&1 &
+            app_pid=$!
+            cleanup() {
+              kill "$app_pid" 2>/dev/null || true
+              wait "$app_pid" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            sleep 5
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat "$launch_log"
+              exit 1
+            fi
+            cleanup
+            trap - EXIT
+          else
+            echo 'Installed UI checks: not run (manual opt-in required).'
           fi
-          cleanup
-          trap - EXIT
           hdiutil verify "$dmg"
           cp "$dmg" release/
           ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "release/Private-AI-Gateway-macos-arm64.zip"

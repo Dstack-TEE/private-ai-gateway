@@ -488,7 +488,12 @@ usage, persistent-history filters and cursor pagination, CSV/clear flows,
 proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
 media, 200% zoom, and
-940/720/540/320 widths. CI runs it before all three platform packages.
+940/720/540/320 widths. UI checks require the explicit `run_ui_tests` manual
+workflow input and are disabled on ordinary PR builds. TypeScript, release
+manifest tests, and Rust checks still run. Windows package jobs also execute
+the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
+ACI and helper without opening the app, then uninstall the package; temporary
+credential-store fixtures are separate from real provider credentials.
 
 ## Packaging
 

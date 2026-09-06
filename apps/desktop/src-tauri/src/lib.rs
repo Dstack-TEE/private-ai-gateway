@@ -1,3 +1,4 @@
+mod autostart;
 mod menu;
 mod native_dialog;
 mod runtime_adapter;
@@ -23,7 +24,6 @@ use desktop_runtime::{
 };
 use runtime_adapter::TauriSidecarLauncher;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 pub(crate) async fn run_blocking<T: Send + 'static>(
@@ -54,10 +54,7 @@ async fn get_launch_preferences(app: AppHandle) -> Result<LaunchPreferences, Str
 
 fn load_launch_preferences(app: &AppHandle) -> Result<LaunchPreferences, String> {
     Ok(LaunchPreferences {
-        open_at_login: app
-            .autolaunch()
-            .is_enabled()
-            .map_err(|error| error.to_string())?,
+        open_at_login: autostart::is_enabled(app)?,
         connect_on_launch: desktop_runtime::preferences::load()?.connect_on_launch,
     })
 }
@@ -403,14 +400,16 @@ pub fn run() {
     let launcher = Arc::new(TauriSidecarLauncher::default());
     let launcher_for_setup = launcher.clone();
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let app =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_window(app);
-        }))
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![AUTOSTART_ARG]),
-        ))
+        }));
+    #[cfg(target_os = "macos")]
+    let app = app.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![AUTOSTART_ARG]),
+    ));
+    let app = app
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -466,6 +465,8 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            autostart::setup(app.handle())?;
             if let Ok(preferences) = desktop_runtime::preferences::load() {
                 apply_appearance(app.handle(), preferences.appearance);
             }
