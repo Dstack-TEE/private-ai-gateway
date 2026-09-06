@@ -51,7 +51,9 @@ import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
+import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
 import { installNativeInteractions } from "./lib/native-interactions";
+import { prepareDialogPresentation } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
@@ -215,7 +217,7 @@ function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" 
 }
 
 type View = "overview" | "agents" | "usage" | "settings";
-type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example";
+type SettingsTarget = "confidential" | "privacy" | "local-api" | "local-api-example" | "notifications";
 
 const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
@@ -267,15 +269,17 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   const presented = useRef(false);
 
   useEffect(() => {
-    if (!loaded || (!contentReady && !loadError) || previewMode || presented.current) return;
+    if (!loaded || (!contentReady && !loadError) || closed || presented.current) return;
     let active = true;
-    // The dialog's layout effect has opened it before this presentation effect runs.
-    presented.current = true;
-    void desktopApi.nativeDialogReady().catch((error: unknown) => {
+    void prepareDialogPresentation().then(async () => {
+      if (!active || presented.current) return;
+      presented.current = true;
+      await desktopApi.nativeDialogReady();
+    }).catch((error: unknown) => {
       if (active) setLoadError(errorMessage(error));
     });
     return () => { active = false; };
-  }, [loaded, contentReady, loadError]);
+  }, [loaded, contentReady, loadError, closed]);
 
   useEffect(() => {
     document.title = `${title} - ${brand.productName}`;
@@ -393,12 +397,21 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
   );
 }
 
+function NativeNotificationsWindow(): React.JSX.Element {
+  const { data, error } = useNotifications();
+  const native = useNativeGatewayWindow("Notifications", Boolean(data || error));
+  if (native.closed) return <main aria-label="Notifications closed" />;
+  return <main className="native-dialog-host"><NotificationsSheet onClose={native.close} /></main>;
+}
+
 function NativeLocalApiExampleWindow(): React.JSX.Element {
-  const native = useNativeGatewayWindow("Local API examples");
+  const [exampleReady, setExampleReady] = useState(false);
+  const native = useNativeGatewayWindow("Local API examples", exampleReady);
   if (native.closed) return <main className="native-dialog-host" aria-label="Local API examples closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="Local API examples" error={native.loadError} onClose={native.close} />;
   return <main className="native-dialog-host"><LocalApiExamples
     api={desktopApi}
+    onReady={() => setExampleReady(true)}
     endpoint={native.state.proxyUrl ?? localEndpoint(native.state.localApi)}
     models={native.state.catalog?.models ?? []}
     onCopy={(value) => desktopApi.copyText(value)} onClose={native.close}
@@ -1062,6 +1075,7 @@ function App(): React.JSX.Element {
       {settingsTarget === "privacy" && (
         <PrivacyVerificationSheet state={state} onClose={() => setSettingsTarget(undefined)} />
       )}
+      {settingsTarget === "notifications" && <NotificationsSheet onClose={() => setSettingsTarget(undefined)} />}
       {settingsTarget === "local-api-example" && <LocalApiExamples
         api={desktopApi}
         endpoint={state.proxyUrl ?? localEndpoint(state.localApi)}
@@ -1172,7 +1186,6 @@ function Sidebar({
           const Icon = entry.icon;
           return (
             <SidebarMenuItem key={entry.id}><SidebarMenuButton
-              className="font-medium"
               size="default"
               isActive={view === entry.id}
               id={`nav-${entry.id}`}
@@ -2131,8 +2144,11 @@ function SettingsView({
 
       <SettingsSection title="General">
           <SettingsToggle label="Open at Login" checked={launchPreferences?.openAtLogin ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("openAtLogin", !launchPreferences?.openAtLogin)} />
-          <SettingsToggle label="Connect on launch" description="Start protection using the selected profile." checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
+          <SettingsToggle label="Protect on launch" checked={launchPreferences?.connectOnLaunch ?? false} disabled={!launchPreferences || savingPreference} onToggle={() => onLaunchPreference("connectOnLaunch", !launchPreferences?.connectOnLaunch)} />
           <AppearanceControl />
+          <SettingsLink title="Notifications" aria-label="Notifications" aria-haspopup="dialog" onClick={() => onOpen("notifications")} />
+      </SettingsSection>
+      <SettingsSection title="Connections">
           <SettingsLink title="Profiles" aria-label="Profiles" aria-haspopup="dialog" onClick={() => onOpen("confidential")} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${isProtected(state) ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Verification required"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
@@ -2803,6 +2819,7 @@ function WindowContent(): React.JSX.Element {
   return nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
     : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
     : nativeDialog === "local-api-example" ? <NativeLocalApiExampleWindow />
+    : nativeDialog === "notifications" ? <NativeNotificationsWindow />
     : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
@@ -2813,5 +2830,5 @@ function WindowContent(): React.JSX.Element {
 export function Renderer(): React.JSX.Element {
   const [interactionError, setInteractionError] = useState("");
   useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
+  return <AppearanceProvider api={desktopApi}><NotificationsProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider></NotificationsProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
 }

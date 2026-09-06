@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const PROFILES_LABEL: &str = "profiles";
 const PROFILE_EDITOR_LABEL: &str = "profile-editor";
@@ -7,8 +7,10 @@ const LOCAL_API_LABEL: &str = "local-api";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
+const PRESENTED_EVENT: &str = "gateway://dialog-presented";
 const UPDATE_PROGRESS_LABEL: &str = "update-progress";
-const DIALOG_LABELS: [&str; 7] = [
+const DIALOG_LABELS: [&str; 8] = [
+    "notifications",
     "local-api-example",
     UPDATE_PROGRESS_LABEL,
     PROFILES_LABEL,
@@ -39,6 +41,15 @@ pub fn open(
         return Err("Invalid profile identifier".to_string());
     }
     let spec = match kind {
+        "notifications" => DialogSpec {
+            label: "notifications",
+            title: "Notifications",
+            width: 580.0,
+            height: 580.0,
+            min_width: 500.0,
+            min_height: 500.0,
+            query: "index.html?native-dialog=notifications".to_string(),
+        },
         "local-api-example" => DialogSpec {
             label: "local-api-example",
             title: "Local API examples",
@@ -225,6 +236,30 @@ pub fn open(
             }
         }
     });
+    let presented = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let did_present = presented.clone();
+    let listener = window.once(PRESENTED_EVENT, move |_| {
+        did_present.store(true, std::sync::atomic::Ordering::Release);
+    });
+    let pending = window.clone();
+    tauri::async_runtime::spawn(async move {
+        // A deadline for a failed renderer handshake, not a presentation delay.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        pending.unlisten(listener);
+        if !presented.load(std::sync::atomic::Ordering::Acquire)
+            && matches!(pending.is_visible(), Ok(false))
+        {
+            let app = pending.app_handle().clone();
+            if pending.destroy().is_ok() {
+                app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                    .report_error(
+                        "The dialog could not finish loading. Please try opening it again."
+                            .to_string(),
+                    );
+                crate::tray::show_window(&app);
+            }
+        }
+    });
     Ok(())
 }
 
@@ -253,7 +288,7 @@ fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+pub async fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     if !DIALOG_LABELS.contains(&window.label()) {
         return Err("Only native dialogs can present themselves".to_string());
     }
@@ -267,14 +302,24 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     .ok_or("The parent window is unavailable")?;
     #[cfg(target_os = "macos")]
     {
-        macos::present(parent, window.clone())
+        if let Err(error) = macos::render(window).await {
+            let _ = window.destroy();
+            app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                .report_error(error.clone());
+            crate::tray::show_window(app);
+            return Err(error);
+        }
+        macos::present(parent, window.clone())?;
     }
     #[cfg(not(target_os = "macos"))]
     {
         window.show().map_err(window_error)?;
         window.set_focus().map_err(window_error)?;
-        parent.set_enabled(false).map_err(window_error)
+        parent.set_enabled(false).map_err(window_error)?;
     }
+    window
+        .emit_to(window.label(), PRESENTED_EVENT, ())
+        .map_err(window_error)
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -309,6 +354,47 @@ mod macos {
     use objc2_app_kit::{NSWindow, NSWindowButton};
     use tauri::WebviewWindow;
 
+    pub async fn render(window: &WebviewWindow) -> Result<(), String> {
+        use block2::RcBlock;
+        use objc2_app_kit::NSImage;
+        use objc2_foundation::NSError;
+        use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |webview| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    let _ = sender.send(false);
+                    return;
+                };
+                // Tauri owns this WKWebView; the callback receives a transient image
+                // after WebKit incorporates screen updates. No image leaves memory.
+                let view = unsafe { Retained::retain(webview.inner().cast::<WKWebView>()) };
+                let Some(view) = view else {
+                    let _ = sender.send(false);
+                    return;
+                };
+                let sender = std::sync::Mutex::new(Some(sender));
+                let completed = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                    if let Ok(mut sender) = sender.lock() {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(!image.is_null() && error.is_null());
+                        }
+                    }
+                });
+                // Public WebKit API, called on its owning main thread with valid objects.
+                unsafe {
+                    let config = WKSnapshotConfiguration::new(mtm);
+                    config.setAfterScreenUpdates(true);
+                    view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &completed);
+                }
+            })
+            .map_err(window_error)?;
+        match tokio::time::timeout(std::time::Duration::from_secs(10), receiver).await {
+            Ok(Ok(true)) => Ok(()),
+            _ => Err("The dialog could not render. Please try opening it again.".into()),
+        }
+    }
+
     pub fn present(parent: WebviewWindow, window: WebviewWindow) -> Result<(), String> {
         let dispatcher = window.clone();
         on_main(&dispatcher, move || {
@@ -327,6 +413,11 @@ mod macos {
                 }
             }
             sheet.setMovable(false);
+            // Lay out and display AppKit content before the sheet animation starts.
+            if let Some(content) = sheet.contentView() {
+                content.layoutSubtreeIfNeeded();
+                content.displayIfNeeded();
+            }
             parent.beginSheet_completionHandler(&sheet, None);
             Ok(())
         })

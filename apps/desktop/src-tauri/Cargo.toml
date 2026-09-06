@@ -32,6 +32,7 @@ tauri-plugin-shell = "2.3.6"
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
+tauri-plugin-notification = "2"
 tokio = { version = "1", features = ["sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -42,10 +43,15 @@ rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["UI_Notifications"] }
 auto-launch-windows = { package = "auto-launch", version = "0.5.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-user-notifications = "0.3"
+objc2-web-kit = "0.3"
+objc2-foundation = "0.3"
+block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
 tauri-plugin-autostart = "2.5.1"
 

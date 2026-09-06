@@ -12,6 +12,7 @@
   --color-background: var(--background);
   --color-card: var(--card);
   --color-card-foreground: var(--foreground);
+  --color-card-foreground: var(--foreground);
   --color-foreground: var(--foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);

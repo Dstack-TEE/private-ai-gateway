@@ -8,10 +8,11 @@ import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
-export function LocalApiExamples({ endpoint, models, api, onCopy, onClose }: {
+export function LocalApiExamples({ endpoint, models, api, onCopy, onClose, onReady }: {
   api: Pick<DesktopApi, "getClientKey" | "onClientKeyChange">;
   endpoint?: string; models: ModelSummary[];
   onCopy(value: string): Promise<void>; onClose(): void;
+  onReady?(): void;
 }) {
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
@@ -19,14 +20,16 @@ export function LocalApiExamples({ endpoint, models, api, onCopy, onClose }: {
   const [copying, setCopying] = useState(false);
   const [error, setError] = useState<string>();
   const [apiKey, setApiKey] = useState<string>();
+  useEffect(() => { if (apiKey !== undefined || error) onReady?.(); }, [apiKey, error, onReady]);
   useEffect(() => {
     let active = true;
     let generation = 0;
     const load = () => {
       const current = ++generation;
       setApiKey(undefined);
+      setError(undefined);
       setCopied(undefined);
-      void api.getClientKey().then((key) => { if (active && current === generation) setApiKey(key); }).catch(() => { if (active) setError("Local API key is unavailable."); });
+      void api.getClientKey().then((key) => { if (active && current === generation) setApiKey(key); }).catch(() => { if (active && current === generation) setError("Local API key is unavailable."); });
     };
     const unsubscribe = api.onClientKeyChange(load);
     load();

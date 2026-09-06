@@ -165,6 +165,17 @@ export interface StartGatewayConfig {
   requireProductionOs: boolean;
 }
 
+export interface NotificationPreferences {
+  enabled: boolean;
+  gateway: boolean;
+  localApi: boolean;
+  verification: boolean;
+}
+export interface NotificationConfiguration {
+  preferences: NotificationPreferences;
+  permission: "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
+}
+
 export interface LocalApiConfig {
   listenAddress: string;
   allowNetworkAccess: boolean;
@@ -272,6 +283,10 @@ export interface DesktopApi {
   rotateClientKey(): Promise<string>;
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
   listListenAddresses(): Promise<{ address: string; name: string }[]>;
+  getNotificationSettings(): Promise<NotificationConfiguration>;
+  saveNotificationSettings(config: NotificationPreferences): Promise<void>;
+  requestNotificationPermission(): Promise<NotificationConfiguration["permission"]>;
+  openNotificationSettings(): Promise<void>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the main window to show a section. */
@@ -280,7 +295,7 @@ export interface DesktopApi {
   onProfileRepairRequest(listener: () => void): () => void;
   onUsageProofRequest(listener: (recordId: string) => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
-  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
+  openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
   onNativeCloseRequest(listener: () => void): () => void;
   closeNativeDialog(): Promise<void>;

@@ -3,6 +3,7 @@ mod autostart;
 mod helper_staging;
 mod menu;
 mod native_dialog;
+mod notifications;
 mod runtime_adapter;
 mod tray;
 mod updates;
@@ -415,8 +416,8 @@ fn open_native_dialog(
 }
 
 #[tauri::command]
-fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
-    native_dialog::ready(&window)
+async fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    native_dialog::ready(&window).await
 }
 
 #[tauri::command]
@@ -458,8 +459,14 @@ pub fn run() {
         .manage(updates::PendingUpdate::default())
         .manage(updates::UpdateProgress::default())
         .manage(ExitState::default())
+        .plugin(tauri_plugin_notification::init())
+        .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
+            notifications::get_notification_settings,
+            notifications::save_notification_settings,
+            notifications::request_notification_permission,
+            notifications::open_notification_settings,
             get_appearance,
             set_appearance,
             updates::check_update,
@@ -497,6 +504,7 @@ pub fn run() {
             disconnect_all_agents
         ])
         .setup(move |app| {
+            notifications::initialize(app.handle());
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             autostart::setup(app.handle())?;
             if let Ok(preferences) = desktop_runtime::preferences::load() {
@@ -565,10 +573,12 @@ pub fn run() {
             let mut states = runtime.subscribe();
             let initial = runtime.state()?;
             tray::sync(&handle, &initial);
+            let mut alerts = notifications::Observer::new(&initial);
             tauri::async_runtime::spawn(async move {
                 while states.changed().await.is_ok() {
                     let state = states.borrow().clone();
                     tray::sync(&handle, &state);
+                    alerts.update(&handle, &state);
                     let _ = handle.emit("gateway://state", state);
                 }
             });

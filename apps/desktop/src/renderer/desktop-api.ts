@@ -73,6 +73,10 @@ export const desktopApi: DesktopApi = {
     return invoke("save_local_api_config", { config });
   },
   listListenAddresses: () => invoke("list_listen_addresses"),
+  getNotificationSettings: () => invoke("get_notification_settings"),
+  saveNotificationSettings: (config) => invoke("save_notification_settings", { config }),
+  requestNotificationPermission: () => invoke("request_notification_permission"),
+  openNotificationSettings: () => invoke("open_notification_settings"),
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");
   },
