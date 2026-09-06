@@ -34,7 +34,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
         "/v1/models" => true,
         "/v1/responses" | "/v1/responses/compact" => matches!(agent, "codex" | "pi"),
         "/v1/messages" | "/v1/messages/count_tokens" => agent == "claude-code",
-        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes"),
+        "/v1/chat/completions" => matches!(agent, "opencode" | "hermes" | "openclaw"),
         _ => false,
     }
 }
@@ -80,7 +80,9 @@ impl TokenFiles {
     }
 
     fn issue(&self, agent: &str) -> Result<String, String> {
-        let token = if agent == LOCAL_TOOLS_AGENT {
+        // OpenClaw's text exec resolver first attempts JSON parsing. A prefix
+        // prevents a randomly all-numeric token from being treated as a number.
+        let token = if agent == LOCAL_TOOLS_AGENT || agent == "openclaw" {
             format!("sk-pag-{}", generate())
         } else {
             generate()
@@ -436,6 +438,14 @@ mod tests {
         let client = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
         assert!(client.starts_with("sk-pag-"));
         assert_eq!(client.len(), "sk-pag-".len() + TOKEN_BYTES * 2);
+        let openclaw = files.ensure("openclaw").unwrap();
+        assert!(openclaw.starts_with("sk-pag-"));
+        assert_eq!(openclaw.len(), "sk-pag-".len() + TOKEN_BYTES * 2);
+        assert!(serde_json::from_str::<serde_json::Value>(&openclaw).is_err());
+        assert_eq!(files.ensure("openclaw").unwrap(), openclaw);
+        let rotated = files.rotate("openclaw").unwrap();
+        assert_ne!(rotated, openclaw);
+        assert!(rotated.starts_with("sk-pag-"));
         files.revoke("codex").unwrap();
         assert!(files.read("codex").unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
@@ -450,6 +460,11 @@ mod tests {
         assert!(!agent_allows("claude-code", "/v1/chat/completions"));
         assert!(agent_allows("opencode", "/v1/chat/completions"));
         assert!(agent_allows("hermes", "/v1/chat/completions"));
+        assert!(agent_allows("openclaw", "/v1/chat/completions"));
+        assert!(agent_allows("openclaw", "/v1/models"));
+        assert!(!agent_allows("openclaw", "/v1/responses"));
+        assert!(!agent_allows("openclaw", "/v1/messages"));
+        assert!(!agent_allows("openclaw", "/v1/responses/compact"));
         assert!(agent_allows("pi", "/v1/responses"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/messages"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));
