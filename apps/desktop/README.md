@@ -275,11 +275,13 @@ runtime operations as the main window, including profile reconnection and config
 
 Agent connections are saved preferences, not permanent config rewrites. Only
 connected agents under active protection receive gateway settings. Stopping,
-verification failure, or quitting restores the owned settings while retaining
+verification failure, or stopping the backend restores the owned settings while retaining
 the connection choices. Startup recovers unfinished restoration before any
 automatic connection. Uninstalled agents stay linked but inactive; deleted
 configs are not recreated, and external edits are preserved. Failed restoration
-keeps its journal for retry and prevents a normal quit from silently discarding it.
+keeps its journal for retry and prevents backend shutdown from silently discarding it.
+Closing or quitting only the desktop UI leaves protection and the backend running;
+use Stop All and Quit or `pag --yes service stop` to shut down both.
 Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
 
 Settings exposes **Open at Login** (the operating system's login item, also

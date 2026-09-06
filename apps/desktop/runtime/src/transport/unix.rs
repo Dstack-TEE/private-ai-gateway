@@ -72,6 +72,10 @@ impl Drop for Listener {
     fn drop(&mut self) {
         if FileIdentity::read(&self.endpoint).ok() == Some(self.socket_identity) {
             let _ = fs::remove_file(&self.endpoint);
+            if let Some(parent) = self.endpoint.parent() {
+                // Only remove an empty directory; never recursively remove runtime state.
+                let _ = fs::remove_dir(parent);
+            }
         }
     }
 }
@@ -123,6 +127,12 @@ impl Write for Stream {
 
 pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
     let hash = endpoint_hash(data_dir.as_os_str().as_bytes());
+    if env::var_os(desktop_gateway::agents::HOME_OVERRIDE_ENV).is_some() {
+        let endpoint = data_dir.join("runtime").join(SOCKET_FILE);
+        if socket_path_fits(&endpoint) {
+            return Ok(endpoint);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {

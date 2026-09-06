@@ -270,12 +270,18 @@ jobs:
           version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
           target_triple="$(rustc -vV | sed -n 's/^host: //p')"
           test -n "$target_triple"
+          source_args=()
+          if [[ '${{ runner.os }}' == macOS ]]; then
+            app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
+            test -n "$app_bundle"
+            source_args=(--source "$app_bundle/Contents/MacOS")
+          fi
           node scripts/package-cli.mjs \
             --platform '${{ matrix.cli_platform }}' \
             --arch '${{ matrix.cli_arch }}' \
             --version "$version" \
             --target-triple "$target_triple" \
-            --output release
+            --output release "${source_args[@]}"
 
       - name: Build and inspect unsigned macOS PKG
         if: runner.os == 'macOS'
@@ -395,6 +401,14 @@ jobs:
             --issuer "$APPLE_API_ISSUER" \
             --wait
           xcrun stapler staple "$dmg"
+          cli_scratch="$(mktemp -d "$RUNNER_TEMP/pag-cli-notary.XXXXXX")"
+          trap 'rm -rf "$cli_scratch"' EXIT
+          tar -xzf "release/private-ai-gateway-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-arm64.tar.gz" -C "$cli_scratch"
+          cli_directory="$cli_scratch/private-ai-gateway-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-arm64"
+          for executable in "$cli_directory"/*; do codesign --verify --strict "$executable"; done
+          ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
+          xcrun notarytool submit "$cli_scratch/cli.zip" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
           packages=(release/*.pkg)
           if [[ -e "${packages[0]}" ]]; then
             test "${#packages[@]}" -eq 1

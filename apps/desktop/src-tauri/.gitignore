@@ -3,3 +3,5 @@
 /target/
 /gen/schemas
 /binaries/*
+# Generated brand-specific package ownership check.
+/installer/rpm-pre-install.generated.sh

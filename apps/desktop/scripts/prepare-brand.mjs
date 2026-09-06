@@ -212,6 +212,10 @@ if (updaterEndpoint) {
     throw new Error("The updater endpoint must use HTTPS without embedded credentials");
   }
 }
+const rpmPreinstall = await readFile(path.join(appRoot, "src-tauri/installer/rpm-pre-install.sh"), "utf8");
+const rpmPackageName = brand.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+await writeFile(path.join(appRoot, "src-tauri/installer/rpm-pre-install.generated.sh"),
+  rpmPreinstall.replace('"private-ai-gateway"', JSON.stringify(rpmPackageName)), { mode: 0o755 });
 await writeFile(
   path.join(appRoot, "src-tauri/tauri.brand.conf.json"),
   `${JSON.stringify(
@@ -227,6 +231,7 @@ await writeFile(
         longDescription: brand.bundle.longDescription,
         publisher: brand.organizationName,
         homepage: brand.homepageUrl,
+        linux: { rpm: { preInstallScript: "installer/rpm-pre-install.generated.sh" } },
         ...(process.platform === "darwin"
           ? {
               icon: [...LEGACY_DESKTOP_ICONS.map((file) => `icons/${file}`), "icons/Assets.car"],

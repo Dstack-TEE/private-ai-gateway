@@ -40,7 +40,9 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
   await mkdir(destination, { recursive: true });
   for (const name of binaries) {
     const extension = platform === "windows" ? ".exe" : "";
-    const source = path.join(sourceDir, `${name}-${targetTriple}${extension}`);
+    const staged = path.join(sourceDir, `${name}-${targetTriple}${extension}`);
+    const source = (await stat(staged).catch(() => undefined))?.isFile()
+      ? staged : path.join(sourceDir, `${name}${extension}`);
     const target = path.join(destination, `${name}${extension}`);
     const metadata = await stat(source).catch(() => undefined);
     if (!metadata?.isFile()) {
@@ -203,7 +205,9 @@ async function copyInstallerScript(name, destination) {
 
 async function rpmScriptlet(name) {
   const script = await readFile(path.join(appRoot, "src-tauri/installer", name), "utf8");
-  return script.replace(/^#![^\n]*\n/, "").trimEnd();
+  return script.replace(/^#![^\n]*\n/, "")
+    .replaceAll('"private-ai-gateway"', '"private-ai-gateway-cli"')
+    .replaceAll("%", "%%").trimEnd();
 }
 
 async function treeSize(root) {
