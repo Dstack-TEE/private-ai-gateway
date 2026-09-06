@@ -1003,7 +1003,7 @@ function StatusSurface({
       <div className="status-edge status-edge-right" aria-hidden="true" />
 
       <div className="status-segment status-local">
-        <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This Mac</span></div>
+        <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This device</span></div>
         <span className="status-meta">{enabled} enabled · {connected} active</span>
         <div className="status-agent-icons" role="group" aria-label="Enabled agents">
           {agents.filter((agent) => agent.recorded).slice(0, 5).map((agent) => (
@@ -1012,7 +1012,7 @@ function StatusSurface({
             </span>
           ))}
         </div>
-        <p>Enabled agents send their requests to the gateway on this Mac.</p>
+        <p>Enabled agents send their requests to the gateway on this device.</p>
       </div>
 
       <div className="status-segment status-gateway">
@@ -1517,7 +1517,7 @@ function UsageView({
       <section className="group usage-history" aria-labelledby="usage-history-title">
         <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
           Usage history
-          <span aria-live="polite">{loading ? "Loading" : `${page?.summary.requests ?? 0} records · kept on this Mac`}</span>
+          <span aria-live="polite">{loading ? "Loading" : `${page?.summary.requests ?? 0} records · kept on this device`}</span>
           <span className="group-actions">
             <IconButton label="Export usage as CSV" onClick={() => void exportCsv()}><Download size={16} /></IconButton>
             <IconButton label="Clear usage history" onClick={() => setConfirmClear(true)}><Trash2 size={16} /></IconButton>
@@ -1658,7 +1658,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       <dt>Network</dt>
       <dd>
         {!activity.leftDevice
-          ? "Blocked locally; request content did not leave this Mac."
+          ? "Blocked locally; request content did not leave this device."
           : deliveryUnconfirmed
             ? "The request entered upstream delivery; whether the service received it could not be confirmed."
             : "Forwarded to the attested service."}
@@ -2145,7 +2145,7 @@ function LocalApiSheet({
               <IconButton label="Copy client key" onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check size={16} /> : <Copy size={16} />}</IconButton>
               <button type="button" className="button" disabled={frozen || saving} onClick={() => void onRotate()}><RefreshCw size={15} />Generate</button>
             </div>
-            <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</span>
+            <span className={`field-note ${copied === "Client key" ? "is-saved" : ""}`} id="client-key-note">{copied === "Client key" ? "Copied" : "Stored locally for this user; agent keys are separate."}</span>
           </div>
         </div>
         <div className="sheet-card endpoints-card">
@@ -2187,7 +2187,7 @@ function PrivacyVerification({ state, verified }: { state: GatewayState; verifie
       ok: verified && passed("id-6"),
       title: "Attested encrypted channel",
       detail: verified
-        ? "Requests leave this Mac only over an SPKI-pinned TLS channel whose key is bound to the verified service identity."
+        ? "Requests leave this device only over an SPKI-pinned TLS channel whose key is bound to the verified service identity."
         : "Not established while protection is off.",
     },
     {

@@ -36,31 +36,58 @@ pub struct DesktopRuntime {
     secrets: Arc<dyn SecretStore>,
     credentials: ClientCredentials,
     endpoint: EndpointRuntime,
+    local_api_update: tokio::sync::Mutex<()>,
     codex_sync: CodexCatalogSync,
     helper_path: PathBuf,
-    #[allow(dead_code)]
     instance: Option<lock::InstanceLock>,
 }
 
-struct ClientCredentials(Mutex<TokenFiles>);
+struct ClientCredentials(Mutex<ClientCredentialState>);
+
+struct ClientCredentialState {
+    files: TokenFiles,
+    rotation_failed: bool,
+}
 
 impl ClientCredentials {
     fn new() -> Result<Self, String> {
-        Ok(Self(Mutex::new(TokenFiles::new(&app_data_dir()?))))
+        Ok(Self::from_files(TokenFiles::new(&app_data_dir()?)))
+    }
+
+    fn from_files(files: TokenFiles) -> Self {
+        Self(Mutex::new(ClientCredentialState {
+            files,
+            rotation_failed: false,
+        }))
     }
 
     fn token(&self) -> Result<String, String> {
-        self.0
+        self.active_token()?.ok_or_else(|| {
+            "Client key rotation failed; generate a new client key before using the Local API"
+                .to_string()
+        })
+    }
+
+    fn active_token(&self) -> Result<Option<String>, String> {
+        let state = self
+            .0
             .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .ensure(LOCAL_TOOLS_AGENT)
+            .map_err(|_| "Client credential store unavailable".to_string())?;
+        if state.rotation_failed {
+            return Ok(None);
+        }
+        state.files.ensure(LOCAL_TOOLS_AGENT).map(Some)
     }
 
     fn rotate(&self) -> Result<String, String> {
-        self.0
+        let mut state = self
+            .0
             .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?
-            .rotate(LOCAL_TOOLS_AGENT)
+            .map_err(|_| "Client credential store unavailable".to_string())?;
+        state.rotation_failed = true;
+        let token = state.files.rotate(LOCAL_TOOLS_AGENT)?;
+        state.rotation_failed = false;
+        Ok(token)
     }
 }
 
@@ -221,7 +248,7 @@ impl DesktopRuntime {
             ),
         };
         let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
-        let proxy = ProxyState::new(proxy_events_tx);
+        let proxy = ProxyState::new(proxy_events_tx)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join("usage.sqlite3")) {
             Ok(store) => (Arc::new(store), None),
             Err(error) => match UsageStore::memory() {
@@ -254,6 +281,7 @@ impl DesktopRuntime {
             secrets,
             credentials: ClientCredentials::new()?,
             endpoint: EndpointRuntime::default(),
+            local_api_update: tokio::sync::Mutex::new(()),
             codex_sync: CodexCatalogSync::default(),
             helper_path: options.helper_path,
             instance,
@@ -303,6 +331,7 @@ impl DesktopRuntime {
     }
 
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+        let _endpoint = self.endpoint_guard()?;
         let config = service_config::resolve_runtime_config(config)?;
         let state = self.manager.snapshot()?;
         if config.remote_url != state.config.remote_url {
@@ -340,6 +369,7 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
+        let _endpoint = self.local_api_update.lock().await;
         let gateway = self.manager.stop().map(|_| ());
         let endpoint = self.endpoint.stop().await;
         gateway.and(endpoint)
@@ -351,6 +381,12 @@ impl DesktopRuntime {
 
     fn current_projector(&self) -> Result<Projector, String> {
         self.projector(&self.manager.local_api()?.endpoint)
+    }
+
+    fn endpoint_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.local_api_update
+            .try_lock()
+            .map_err(|_| "Another gateway operation is in progress; try again shortly".to_string())
     }
 
     fn reload_agent_tokens(&self) -> Result<(), String> {
@@ -368,6 +404,7 @@ impl DesktopRuntime {
         require_production_os: bool,
         key: Option<String>,
     ) -> Result<GatewayState, String> {
+        let endpoint = self.endpoint_guard()?;
         if self.manager.is_running()? {
             return Err("Stop protection before verifying a different service".to_string());
         }
@@ -427,6 +464,7 @@ impl DesktopRuntime {
             self.manager.restore_snapshot(previous);
             return Err("Configuration verification did not start".to_string());
         };
+        drop(endpoint);
         let verified = self.manager.wait_for_verification(&session_id).await;
         let stop_result = self.manager.stop();
         if let Err(error) = verified {
@@ -605,6 +643,7 @@ impl DesktopRuntime {
     }
 
     pub fn rotate_client_key(&self) -> Result<String, String> {
+        let _endpoint = self.endpoint_guard()?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
         let token = self.credentials.rotate()?;
@@ -618,6 +657,10 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         config: LocalApiConfig,
     ) -> Result<GatewayState, String> {
+        let _endpoint = self.local_api_update.lock().await;
+        if self.instance.is_none() {
+            return Err("Change Local API settings in the primary app instance".to_string());
+        }
         if self.manager.is_running()? {
             return Err("Stop protection before changing Local API settings".to_string());
         }
@@ -696,6 +739,7 @@ impl DesktopRuntime {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        let _endpoint = self.endpoint_guard()?;
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
@@ -740,6 +784,7 @@ impl DesktopRuntime {
         revision: String,
         options: ConnectOptions,
     ) -> Result<AgentStatus, String> {
+        let _endpoint = self.endpoint_guard()?;
         let agent = Agent::from_id(&agent_id)?;
         let catalog = self.connection_catalog(agent, connect)?;
         let projector = self.current_projector()?;
@@ -761,6 +806,7 @@ impl DesktopRuntime {
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        let _endpoint = self.endpoint_guard()?;
         self.proxy
             .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
         let projector = self.current_projector()?;
@@ -860,7 +906,9 @@ fn with_client_token(
     mut tokens: TokenSet,
     credentials: &ClientCredentials,
 ) -> Result<TokenSet, String> {
-    tokens.insert(credentials.token()?, LOCAL_TOOLS_AGENT.to_string());
+    if let Some(token) = credentials.active_token()? {
+        tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
+    }
     Ok(tokens)
 }
 
@@ -872,5 +920,233 @@ fn restore_secret_entry(
     match value {
         Some(value) => secrets.set(entry, value),
         None => secrets.delete(entry),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::mpsc::Receiver,
+    };
+
+    use super::*;
+    use crate::gateway::{SidecarChild, SidecarEvent};
+    use desktop_gateway::agents::HOME_OVERRIDE_ENV;
+
+    struct RefusingLauncher;
+
+    impl SidecarLauncher for RefusingLauncher {
+        fn spawn(
+            &self,
+            _: Vec<String>,
+        ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String> {
+            Err("The sidecar must not start while Local API settings are tested".to_string())
+        }
+    }
+
+    /// A runtime over the overridden data directory that never touches the
+    /// OS keyring or spawns a sidecar. `instance` mirrors what `launch`
+    /// decided about the primary-instance lock.
+    fn runtime(
+        instance: Option<lock::InstanceLock>,
+    ) -> (Arc<DesktopRuntime>, Receiver<ProxyEvent>) {
+        let data_dir = app_data_dir().unwrap();
+        let (events, receiver) = tokio::sync::mpsc::channel(8);
+        let proxy = ProxyState::new(events).unwrap();
+        let usage = Arc::new(UsageStore::memory().unwrap());
+        let settings = service_config::ServiceSettings::default();
+        let manager = Arc::new(GatewayManager::new(
+            proxy.clone(),
+            usage.clone(),
+            Arc::new(RefusingLauncher),
+            LocalApiConfig::default(),
+            settings.runtime_config().unwrap(),
+            settings.profiles,
+            settings.active_profile_id,
+        ));
+        let runtime = Arc::new(DesktopRuntime {
+            manager,
+            proxy,
+            usage,
+            secrets: Arc::new(KeyringStore),
+            credentials: ClientCredentials::from_files(TokenFiles::new(&data_dir)),
+            endpoint: EndpointRuntime::default(),
+            local_api_update: tokio::sync::Mutex::new(()),
+            codex_sync: CodexCatalogSync::default(),
+            helper_path: data_dir.join("private-ai-gateway-helper"),
+            instance,
+        });
+        (runtime, receiver)
+    }
+
+    fn free_port() -> u16 {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn is_free(port: u16) -> bool {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+    }
+
+    fn loopback(port: u16) -> LocalApiConfig {
+        LocalApiConfig {
+            port,
+            ..LocalApiConfig::default()
+        }
+    }
+
+    #[test]
+    fn failed_client_rotation_does_not_reload_the_old_key() {
+        let data = tempfile::tempdir().unwrap();
+        let files = TokenFiles::new(data.path());
+        let old = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
+        let token_path = files.path(LOCAL_TOOLS_AGENT);
+        let protected_path = if cfg!(unix) {
+            token_path.parent().unwrap()
+        } else {
+            token_path.as_path()
+        };
+        let original = std::fs::metadata(protected_path).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(protected_path, readonly).unwrap();
+        let credentials = ClientCredentials::from_files(files);
+        let failed = credentials.rotate();
+        // Restore permissions before assertions so the fixture is always removable.
+        std::fs::set_permissions(protected_path, original).unwrap();
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&token_path).unwrap(), old);
+        assert!(credentials.token().is_err());
+        let mut agents = TokenSet::default();
+        agents.insert("agent-fixture".to_string(), "pi".to_string());
+        let active = with_client_token(agents, &credentials).unwrap();
+        assert_eq!(active.agent_for(&old), None);
+        assert_eq!(active.agent_for("agent-fixture"), Some("pi"));
+
+        let replacement = credentials.rotate().unwrap();
+        assert_ne!(replacement, old);
+        assert_eq!(credentials.token().unwrap(), replacement);
+    }
+
+    async fn health(bind: SocketAddr) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut stream = tokio::net::TcpStream::connect(bind).await.unwrap();
+            stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        })
+        .await
+        .expect("Local API health request timed out")
+    }
+
+    /// Runs in a child process: the data-directory override is process
+    /// environment, which must not race the other tests in this binary.
+    #[test]
+    fn local_api_settings_stay_consistent_and_primary_only() {
+        const CHILD: &str = "PAG_TEST_LOCAL_API_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::local_api_settings_stay_consistent_and_primary_only",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(HOME_OVERRIDE_ENV, home.path())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let data_dir = app_data_dir().unwrap();
+                let config_file = data_dir.join("local-api.json");
+                let primary_lock = lock::instance(&data_dir)
+                    .unwrap()
+                    .expect("the first process is the primary instance");
+                let (primary, _events) = runtime(Some(primary_lock));
+                let initial = local_api::resolve(loopback(free_port())).unwrap();
+                let listener = proxy::bind_std(initial.bind).unwrap();
+                primary
+                    .manager
+                    .set_endpoint(initial.config.clone(), Ok(initial.endpoint.clone()));
+                primary
+                    .endpoint
+                    .start(
+                        primary.manager.clone(),
+                        primary.proxy.clone(),
+                        listener,
+                        initial.config.clone(),
+                    )
+                    .unwrap();
+
+                // Two overlapping saves: the second waits for the first
+                // instead of racing it through the listener hand-over.
+                let (first, second) = (free_port(), free_port());
+                let (a, b) = tokio::join!(
+                    primary.save_local_api_config(loopback(first)),
+                    primary.save_local_api_config(loopback(second))
+                );
+                let (a, b) = (a.unwrap(), b.unwrap());
+                let mut saved = [a.local_api.port, b.local_api.port];
+                let mut requested = [first, second];
+                saved.sort_unstable();
+                requested.sort_unstable();
+                assert_eq!(saved, requested, "each save completed with its own port");
+                let live = primary.manager.local_api().unwrap();
+                assert!(requested.contains(&live.bind.port()));
+                assert_eq!(
+                    local_api::load().unwrap().bind,
+                    live.bind,
+                    "persisted settings match the bound listener"
+                );
+                let response = health(live.bind).await;
+                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                for port in [initial.bind.port(), first, second] {
+                    if port != live.bind.port() {
+                        assert!(is_free(port), "port {port} was released");
+                    }
+                }
+
+                // A process that lost the instance lock must neither save,
+                // bind, nor touch the shared settings file.
+                assert!(lock::instance(&data_dir).unwrap().is_none());
+                let (secondary, _secondary_events) = runtime(None);
+                secondary.manager.set_endpoint(
+                    LocalApiConfig::default(),
+                    Err("Another Private AI Gateway instance is already running".to_string()),
+                );
+                let persisted = std::fs::read(&config_file).unwrap();
+                let hijack = free_port();
+                let error = secondary
+                    .save_local_api_config(loopback(hijack))
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("primary"), "{error}");
+                assert_eq!(std::fs::read(&config_file).unwrap(), persisted);
+                assert!(is_free(hijack));
+                assert!(secondary.endpoint.0.lock().unwrap().is_none());
+                let state = secondary.manager.snapshot().unwrap();
+                assert!(state.proxy_url.is_none() && state.endpoint_error.is_some());
+                assert!(health(live.bind).await.starts_with("HTTP/1.1 200"));
+
+                primary.shutdown().await.unwrap();
+                assert!(is_free(live.bind.port()));
+            });
     }
 }

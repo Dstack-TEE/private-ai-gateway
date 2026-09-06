@@ -39,7 +39,16 @@ protocol is the service's own response, shown as such.
   single-instance plugin only focuses the window; the lock decides).
 - **Local endpoint** defaults to loopback-only `http://127.0.0.1:4180`. The
   app claims the configured address and port before agent connections are
-  available.
+  available. Windows, macOS, and Linux share the same listener, token checks,
+  and verified-session gate. Internal requests to the ACI sidecar bypass
+  environment/system HTTP proxies. Enabling network access does not change OS
+  firewall rules; reaching the gateway from another device depends on those
+  rules as well as the configured listen address.
+- **Agent connection state** describes the managed configuration and token,
+  not a live connection to an agent process or successful inference. A connected
+  agent can remain configured while protection is stopped; its requests stay
+  blocked until the gateway is verified. Refreshing unchanged agent tokens
+  does not revoke pending requests.
 - **Sessions.** The proxy forwards only while a *verified session* is
   published: the sidecar's verified identity and the catalog read through it,
   together, under one generation (per sidecar start) and epoch (per identity
@@ -54,12 +63,13 @@ protocol is the service's own response, shown as such.
   delivered. A failure before `send()` is recorded as `Blocked locally`; once
   upstream delivery begins, a timeout or connection failure is recorded as an
   upstream failure with delivery explicitly unconfirmed, never as "did not
-  leave this Mac." Deletes revoke the key in memory before touching the
+  leave this device." Deletes revoke the key in memory before touching the
   credential store. The sidecar re-checks verification for every method and
   refuses to forward when a re-verification changed the service identity
   mid-request.
-- **Agent tokens** are random per-agent secrets in owner-only files under the
-  app data directory. A token is a capability for that agent's endpoints
+- **Agent tokens** are random per-agent secrets in files under the user app
+  data directory (owner-only on Unix, inherited user-directory ACLs on Windows).
+  A token is a capability for that agent's endpoints
   (Claude Code: Messages and `count_tokens`; Codex and Pi: Responses and
   `responses/compact`; OpenCode and Hermes: Chat Completions; `/v1/models`
   for all) plus
@@ -78,10 +88,11 @@ protocol is the service's own response, shown as such.
   credential is loaded into the proxy's memory and swapped for the agent token
   on the way to the sidecar; it never reaches the window. Previews show `Existing secret` /
   `Managed local credential` in place of values; the connection record stores
-  an opaque `secret_ref`. Record, tokens, and temp files are owner-only
-  (0600/0700; on Windows they inherit the per-user profile ACL) and tightened
-  when read; config writes hold a cross-process file lock from the revision
-  check to the final rename.
+  an opaque `secret_ref`. Record, tokens, and temp files use 0600/0700 on Unix;
+  Windows inherits the per-user directory ACL rather than rewriting it.
+  Explicit Unix maintenance tightens permissions; ordinary reads do not.
+  Config writes hold a cross-process file lock from the revision check to the
+  final rename.
 - **Confidential AI profiles** are verified before they are saved. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
   Settings offers local, self-hosted branding for the Phala and RedPill
@@ -148,8 +159,11 @@ Python's actual shell contract, including a special-character path and missing
 token/executable cases. A passing command test is not proof of successful
 verified inference or a complete Hermes connection workflow.
 Pi's Windows credential commands use its own Bash discovery with a system-shell
-fallback; not every Windows shell configuration has been validated. Neither
-contract should be inferred from Claude Code's Git `sh` behavior.
+fallback. Its projection uses the same encoded PowerShell command so neither
+Bash nor `cmd.exe` has to parse the helper path. Native Windows execution of the
+Pi projection still needs verification. Neither contract should be inferred
+from Claude Code's Git `sh` behavior. Windows home discovery prefers
+`USERPROFILE` over Git's `HOME`; explicit agent-specific overrides still apply.
 
 The verified catalog is the only model source. Codex requires a selected
 verified default because it does not discover this custom provider's model
@@ -160,12 +174,12 @@ as a concise catalog summary instead of serialized JSON. `Apply` refuses if any
 moved. Token, parked secrets, config, and record are applied as one transaction
 and rolled back together.
 `Disconnect` and `Restore all` work without endpoint or gateway.
-`Disconnect` tombstones the record (disabled, cleanup pending), deletes the
-token file before any record or config is touched, and syncs the removal to
-the parent directory (on Windows, a directory-handle flush) before anything
-else runs: revoking the capability itself is durable, so no later failure can
-leave an agent authorized, while the record stays visible for an idempotent
-retry. A failed sync fails the disconnect closed. `Disconnect` removes token,
+`Disconnect` tombstones the record (disabled, cleanup pending) and revokes the
+token before restoring config. Unix syncs the removal to the parent directory.
+Windows first clears and flushes the regular token file, then removes it; a
+recovered directory entry can therefore contain only an empty tombstone, not
+the old capability. A persistence failure fails the disconnect closed and the
+record remains visible for retry. `Disconnect` removes token,
 record, and consumed parked secrets and leaves an unreadable config untouched.
 Install detection requires a real executable on `PATH` or in common per-user
 and macOS package-manager binary directories; a config directory alone does

@@ -55,7 +55,9 @@ pub fn resolve(mut config: LocalApiConfig) -> Result<ResolvedLocalApi, String> {
         return Err("Port must be between 1024 and 65535".to_string());
     }
     if !config.allow_network_access && !address.is_loopback() {
-        return Err("Turn on Allow network access before listening outside this Mac".to_string());
+        return Err(
+            "Turn on Allow network access before listening outside this device".to_string(),
+        );
     }
     config.client_host = normalize_client_host(config.client_host.as_deref())?;
     if address.is_unspecified() && config.client_host.is_none() {
