@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -30,13 +30,16 @@ let captureDriverLog = false;
 let driverLog = "";
 const diagnosticEvents = [];
 let previousProcesses = new Map();
+let webviewDataDirectory;
+const observedPortFiles = new Set();
 
 function record(event, details = {}) {
   diagnosticEvents.push({ at: new Date().toISOString(), event, ...details });
 }
 
 async function sampleWindowsProcesses() {
-  // No command lines, environment, window titles, or unrelated process data.
+  // Persist only allowlisted discovery switches from owned processes, never
+  // full command lines, environment, window titles, or unrelated process data.
   const script = `
     $all = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe' OR Name = 'msedgewebview2.exe' OR Name = 'msedgedriver.exe'")
     $selected = @($all | Where-Object { $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION -or $_.ProcessId -eq [int]$env:TAURI_SMOKE_DRIVER_PID })
@@ -46,7 +49,9 @@ async function sampleWindowsProcesses() {
       if (!$next.Count) { break }
       $selected += $next
     }
-    ConvertTo-Json -Compress -InputObject @($selected | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate)
+    ConvertTo-Json -Depth 4 -Compress -InputObject @($selected | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate, @{
+      Name = 'DiscoverySwitches'; Expression = { @([regex]::Matches($_.CommandLine, '--(?:remote-debugging-port|remote-debugging-address|user-data-dir)=(?:"[^"]*"|[^\\s"]+)') | ForEach-Object Value) }
+    })
   `;
   const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
     Buffer.from(script, "utf16le").toString("base64")], {
@@ -68,9 +73,48 @@ async function sampleWindowsProcesses() {
 async function monitorWindowsLaunch(signal) {
   while (!signal.aborted) {
     try { await sampleWindowsProcesses(); } catch (error) {
-      record("process-snapshot-error", { message: error.message });
+      record("process-snapshot-error", { code: error.code, killed: error.killed });
+    }
+    try { await inspectDevToolsDiscovery(); } catch (error) {
+      record("devtools-discovery-error", { name: error.name, code: error.code });
     }
     try { await delay(1000, undefined, { signal }); } catch { break; }
+  }
+}
+
+async function inspectDevToolsDiscovery() {
+  // Only inspect our explicit WebView2 UDF, never enumerate a user profile.
+  // WebView2 may place Chromium state below EBWebView inside the UDF.
+  for (const relative of ["DevToolsActivePort", "EBWebView/DevToolsActivePort"]) {
+    const file = path.join(webviewDataDirectory, relative);
+    if (observedPortFiles.has(file)) continue;
+    try {
+      const resolved = await realpath(file);
+      assert.ok(resolved.startsWith(`${await realpath(home)}${path.sep}`));
+      assert.ok((await stat(resolved)).size <= 4096, "Unexpected DevTools port file size");
+      const lines = (await readFile(resolved, "utf8")).trim().split(/\r?\n/);
+      assert.match(lines[0], /^\d{1,5}$/);
+      const port = Number(lines[0]);
+      assert.ok(port > 0 && port <= 65535);
+      observedPortFiles.add(file);
+      record("devtools-port-file", { launch: launchNumber, relative, port,
+        browserSocketPathPresent: lines[1]?.startsWith("/devtools/browser/") === true });
+      for (const endpoint of ["/json/version", "/json/list"]) {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: AbortSignal.timeout(1000) });
+          const value = await response.json();
+          const details = endpoint === "/json/version"
+            ? { browser: value.Browser, protocolVersion: value["Protocol-Version"], browserSocketPresent: typeof value.webSocketDebuggerUrl === "string" }
+            : { targetCount: Array.isArray(value) ? value.length : null,
+                targetTypes: Array.isArray(value) ? [...new Set(value.map((target) => target.type))] : [] };
+          record("devtools-http-probe", { launch: launchNumber, endpoint, status: response.status, ...details });
+        } catch (error) {
+          record("devtools-http-probe-error", { launch: launchNumber, endpoint, name: error.name });
+        }
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
   }
 }
 
@@ -135,6 +179,10 @@ async function launch() {
   // https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
   // https://learn.microsoft.com/microsoft-edge/webdriver/capabilities-edge-options
   const windows = process.platform === "win32";
+  if (windows) {
+    webviewDataDirectory = path.join(home, `webview-${launchNumber}`);
+    await mkdir(webviewDataDirectory, { mode: 0o700 });
+  }
   const executable = windows ? nativeDriver : driverPath;
   const args = windows ? [`--port=${port}`, "--host=127.0.0.1", "--verbose"]
     : ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver];
@@ -174,7 +222,7 @@ async function launch() {
   try {
     const capabilities = windows ? {
       browserName: "webview2", "ms:edgeChromium": true,
-      "ms:edgeOptions": { binary: application, args: [] },
+      "ms:edgeOptions": { binary: application, args: [], webviewOptions: { userDataFolder: webviewDataDirectory } },
     } : { "tauri:options": { application } };
     record("session-launch", { launch: launchNumber, capabilities });
     created = await request("POST", "/session", { capabilities: { alwaysMatch: capabilities } });
@@ -182,6 +230,8 @@ async function launch() {
     captureDriverLog = false;
     monitorAbort.abort();
     await monitor;
+    if (windows) record("devtools-discovery-summary", { launch: launchNumber,
+      portFilesObserved: [...observedPortFiles].filter((file) => file.startsWith(`${webviewDataDirectory}${path.sep}`)).length });
     await writeFile(path.join(evidenceDirectory, "driver-launch.log"), driverLog, { mode: 0o600 });
   }
   session = created.sessionId;
