@@ -276,6 +276,26 @@ the existing stateful mock; they do not prove native WebView or tray behavior.
 Hosted package builds and installed-app smoke checks are still required before
 claiming a platform release is ready.
 
+The package workflow now installs and uninstalls the NSIS/DEB on disposable
+runners. `tauri-driver` uses the installed release app with the real React
+bundle and WebView bridge, without test hooks or weakened verification. The
+smoke covers startup, agent discovery, unverified-connect rejection, empty
+restore/export, local client-token rotation, endpoint settings and restart
+persistence. All app and agent files use a temporary `PRIVATE_AI_GATEWAY_HOME`.
+The existing credential-store round trip runs against Windows Credential
+Manager or a temporary Linux Secret Service session. The installed helper is
+checked with synthetic local token files, not provider credentials.
+
+Installed ACI checks cover offline audit and fail-closed loopback failures for
+`verify`, `sessions`, `send`, and `serve`. The existing `tests/aci_cli.rs`
+signed-artifact regression runs in release mode on Linux; its Cargo integration
+target also builds the Unix-only root server, currently blocking Windows use.
+DEB installs `/usr/bin/aci`; NSIS supports the executable's full installed path
+and does not promise a bare `aci` command on PATH. Neither fixture tests nor
+WebDriver prove successful attested inference, verified agent connect/restore,
+native tray clicks, graceful Quit, or login-item registration. These remain
+separate release checks; process-tree cleanup in the smoke is not a Quit test.
+
 The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.

@@ -170,6 +170,9 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Synchronous setup and tray callbacks also spawn shared runtime tasks.
+    let runtime_handle = tauri::async_runtime::handle();
+    let _runtime_guard = runtime_handle.inner().enter();
     let show_on_launch =
         !std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG));
     let launcher = Arc::new(TauriSidecarLauncher::default());
