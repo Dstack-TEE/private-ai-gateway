@@ -10,7 +10,8 @@
     "local-api",
     "usage-proof",
     "update-progress",
-    "local-api-example"
+    "local-api-example",
+    "notifications"
   ],
   "permissions": [
     "core:app:allow-version",

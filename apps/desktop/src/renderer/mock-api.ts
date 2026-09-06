@@ -369,7 +369,10 @@ export function mockApi(name: string | null): DesktopApi {
     },
     onLaunchPreferencesChange: () => () => undefined,
     copyText: async () => undefined,
-    getClientKey: async () => clientKey,
+    getClientKey: async () => {
+      if (name === "example-key-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-example-key", () => resolve(), { once: true }));
+      return clientKey;
+    },
     rotateClientKey: async () => {
       keyRotations += 1;
       if (name === "key-rotation-error" && keyRotations === 1) {
@@ -404,7 +407,7 @@ export function mockApi(name: string | null): DesktopApi {
     onClientKeyChange: (listener) => { keyListeners.add(listener); return () => { keyListeners.delete(listener); }; },
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
-    nativeDialogReady: async () => undefined,
+    nativeDialogReady: async () => { document.documentElement.dataset.nativePresented = "true"; },
     onNativeCloseRequest: (listener) => {
       window.addEventListener("mock:native-close", listener);
       return () => window.removeEventListener("mock:native-close", listener);
@@ -528,6 +531,21 @@ export function mockApi(name: string | null): DesktopApi {
       if (name === "network-scan-error") throw new Error("Could not read network interfaces. Enter an IP address manually.");
       return [{ address: "127.0.0.1", name: "lo" }, { address: "192.168.1.20", name: "en0" }];
     },
+    getNotificationSettings: async () => ({
+      preferences: {
+        enabled: localStorage.getItem("mock:notifications:enabled") !== "false",
+        gateway: localStorage.getItem("mock:notifications:gateway") !== "false",
+        localApi: localStorage.getItem("mock:notifications:localApi") !== "false",
+        verification: localStorage.getItem("mock:notifications:verification") !== "false",
+      },
+      permission: name === "notifications-denied" ? "denied" : name === "notifications-prompt" && localStorage.getItem("mock:notifications:permission") !== "granted" ? "notDetermined" : "granted",
+    }),
+    saveNotificationSettings: async (config) => {
+      if (name === "notification-save-error") throw new Error("Preference unavailable");
+      for (const [key, value] of Object.entries(config)) localStorage.setItem(`mock:notifications:${key}`, String(value));
+    },
+    requestNotificationPermission: async () => { localStorage.setItem("mock:notifications:permission", "granted"); return "granted"; },
+    openNotificationSettings: async () => { document.documentElement.dataset.notificationSettingsOpened = "true"; },
     queryUsage: async (query: UsageQuery) => {
       if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));
       if (name === "usage-query-error" && query.model) throw new Error("Usage database temporarily unavailable");

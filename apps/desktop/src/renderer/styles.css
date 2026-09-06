@@ -291,6 +291,9 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .local-api-sheet { width: min(560px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(680px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .local-api-examples-sheet { width: min(720px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(560px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .local-api-examples-sheet[open] { display: flex; flex-direction: column; }
+.notifications-sheet { width: min(580px, calc(var(--window-dialog-width, 100vw) - 32px)); }
+.notifications-sheet[open] { display: flex; flex-direction: column; }
+.content > [role="alert"] { margin-bottom: 16px; }
 .privacy-sheet { width: min(680px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(680px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .usage-evidence-sheet { width: min(540px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(500px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .sheet::backdrop { background: var(--backdrop); }

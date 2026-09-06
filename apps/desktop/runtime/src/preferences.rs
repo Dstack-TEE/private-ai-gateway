@@ -27,6 +27,8 @@ pub enum Appearance {
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
     #[serde(default)]
+    pub notifications: NotificationPreferences,
+    #[serde(default)]
     pub connect_on_launch: bool,
     #[serde(default)]
     pub update_channel: Option<UpdateChannel>,
@@ -43,6 +45,21 @@ pub fn load() -> Result<Preferences, String> {
             serde_json::from_str(&text).map_err(|_| "Startup preferences are invalid".to_string())
         }
         None => Ok(Preferences::default()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationPreferences {
+    pub enabled: bool,
+    pub gateway: bool,
+    pub local_api: bool,
+    pub verification: bool,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self { enabled: true, gateway: true, local_api: true, verification: true }
     }
 }
 
@@ -74,11 +91,14 @@ mod tests {
             serde_json::from_str(r#"{"connectOnLaunch":true}"#).unwrap();
         assert_eq!(preferences.update_channel, None);
         assert_eq!(preferences.appearance, Appearance::System);
+        assert!(preferences.notifications.enabled);
+        preferences.notifications.enabled = false;
         preferences.appearance = Appearance::Dark;
         preferences.update_channel = Some(UpdateChannel::Beta);
         let restored: Preferences =
             serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
         assert!(restored.connect_on_launch);
+        assert!(!restored.notifications.enabled);
         assert_eq!(restored.appearance, Appearance::Dark);
         assert!(serde_json::from_str::<Preferences>(r#"{"appearance":"invalid"}"#).is_err());
         assert_eq!(restored.update_channel, Some(UpdateChannel::Beta));

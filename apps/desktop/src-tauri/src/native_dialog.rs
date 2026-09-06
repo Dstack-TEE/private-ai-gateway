@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const PROFILES_LABEL: &str = "profiles";
 const PROFILE_EDITOR_LABEL: &str = "profile-editor";
@@ -7,8 +7,10 @@ const LOCAL_API_LABEL: &str = "local-api";
 const USAGE_PROOF_LABEL: &str = "usage-proof";
 const PROFILE_REPAIR_EVENT: &str = "gateway://profile-repair";
 const USAGE_PROOF_EVENT: &str = "gateway://usage-proof";
+const PRESENTED_EVENT: &str = "gateway://dialog-presented";
 const UPDATE_PROGRESS_LABEL: &str = "update-progress";
-const DIALOG_LABELS: [&str; 7] = [
+const DIALOG_LABELS: [&str; 8] = [
+    "notifications",
     "local-api-example",
     UPDATE_PROGRESS_LABEL,
     PROFILES_LABEL,
@@ -39,6 +41,15 @@ pub fn open(
         return Err("Invalid profile identifier".to_string());
     }
     let spec = match kind {
+        "notifications" => DialogSpec {
+            label: "notifications",
+            title: "Notifications",
+            width: 580.0,
+            height: 580.0,
+            min_width: 500.0,
+            min_height: 500.0,
+            query: "index.html?native-dialog=notifications".to_string(),
+        },
         "local-api-example" => DialogSpec {
             label: "local-api-example",
             title: "Local API examples",
@@ -225,6 +236,30 @@ pub fn open(
             }
         }
     });
+    let presented = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let did_present = presented.clone();
+    let listener = window.once(PRESENTED_EVENT, move |_| {
+        did_present.store(true, std::sync::atomic::Ordering::Release);
+    });
+    let pending = window.clone();
+    tauri::async_runtime::spawn(async move {
+        // A deadline for a failed renderer handshake, not a presentation delay.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        pending.unlisten(listener);
+        if !presented.load(std::sync::atomic::Ordering::Acquire)
+            && matches!(pending.is_visible(), Ok(false))
+        {
+            let app = pending.app_handle().clone();
+            if pending.destroy().is_ok() {
+                app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                    .report_error(
+                        "The dialog could not finish loading. Please try opening it again."
+                            .to_string(),
+                    );
+                crate::tray::show_window(&app);
+            }
+        }
+    });
     Ok(())
 }
 
@@ -267,14 +302,17 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     .ok_or("The parent window is unavailable")?;
     #[cfg(target_os = "macos")]
     {
-        macos::present(parent, window.clone())
+        macos::present(parent, window.clone())?;
     }
     #[cfg(not(target_os = "macos"))]
     {
         window.show().map_err(window_error)?;
         window.set_focus().map_err(window_error)?;
-        parent.set_enabled(false).map_err(window_error)
+        parent.set_enabled(false).map_err(window_error)?;
     }
+    window
+        .emit_to(window.label(), PRESENTED_EVENT, ())
+        .map_err(window_error)
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -327,6 +365,11 @@ mod macos {
                 }
             }
             sheet.setMovable(false);
+            // Lay out and display AppKit content before the sheet animation starts.
+            if let Some(content) = sheet.contentView() {
+                content.layoutSubtreeIfNeeded();
+                content.displayIfNeeded();
+            }
             parent.beginSheet_completionHandler(&sheet, None);
             Ok(())
         })

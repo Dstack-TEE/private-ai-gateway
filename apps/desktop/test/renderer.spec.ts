@@ -108,6 +108,41 @@ test("desktop suppresses browser reload menus and preserves native editing actio
   await expect(page.locator("html")).toHaveAttribute("data-edit-menu", '{"editable":false}');
 });
 
+test("Notifications defaults on, preserves category choices and reports permission problems", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Notifications", exact: true }).click();
+  const sheet = page.getByRole("dialog", { name: "Notifications" });
+  const toggle = sheet.getByRole("switch", { name: "Allow notifications" });
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  const category = sheet.getByRole("switch", { name: "Gateway problems" });
+  await expect(category).toHaveAttribute("aria-checked", "true");
+  await category.click();
+  await expect(category).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(category).toBeDisabled();
+  await page.reload();
+  await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Notifications", exact: true }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await toggle.click();
+  await expect(category).toBeEnabled();
+  await expect(category).toHaveAttribute("aria-checked", "false");
+  await page.goto("/?mock=notification-save-error&native-dialog=notifications");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await expect(toggle).toBeEnabled();
+  await expect(sheet.getByRole("alert")).toContainText("Could not save notification settings.");
+  await page.goto("/?mock=notifications-denied");
+  await expect(page.getByRole("alert")).toContainText("Notifications are disabled in system settings.");
+  await page.getByRole("button", { name: "System Settings", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-notification-settings-opened", "true");
+  await page.goto("/?mock=notifications-prompt&native-dialog=notifications");
+  await sheet.getByRole("button", { name: "Allow Notifications", exact: true }).click();
+  await expect(sheet.getByRole("alert")).toHaveCount(0);
+});
+
 test("appearance defaults to system, persists and settings shortcut navigates", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/?mock=ready");
@@ -399,6 +434,28 @@ test("fixed sidebar does not consume Cmd+B or Ctrl+B", async ({ page }) => {
   expect(prevented).toEqual([false, false]);
 });
 
+test("native presentation waits for example credentials and image decoding", async ({ page }) => {
+  await page.goto("/?mock=example-key-pending&native-dialog=local-api-example");
+  await expect(page.getByRole("dialog", { name: "Local API examples" })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-native-presented", "true");
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-example-key")));
+  await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
+  await expect(page.locator("code")).toContainText("sk-pag-");
+
+  await page.addInitScript(() => {
+    const decode = HTMLImageElement.prototype.decode;
+    HTMLImageElement.prototype.decode = async function () {
+      await new Promise<void>((resolve) => window.addEventListener("test:decode-images", () => resolve(), { once: true }));
+      return decode.call(this);
+    };
+  });
+  await page.goto("/?mock=ready&native-dialog=profile-editor");
+  await expect(page.getByRole("dialog", { name: "New profile" })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-native-presented", "true");
+  await page.evaluate(() => window.dispatchEvent(new Event("test:decode-images")));
+  await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
+});
+
 test("complex dialogs render as native child-window surfaces", async ({ page }) => {
   await page.addInitScript(() => {
     new MutationObserver((mutations) => {
@@ -450,6 +507,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(page.locator(".desktop-window, .sidebar")).toHaveCount(0);
     const dialog = page.getByRole("dialog", { name: entry.name });
     await expect(dialog).toContainText(entry.text);
+    await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
     await expect(page.locator("html")).not.toHaveAttribute("data-loading-frame-observed", "true");
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
     if (entry.name === "New profile") await expect(dialog.getByRole("textbox", { name: "Profile name" })).toBeFocused();
@@ -852,9 +910,11 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(page.locator(".tracks-right")).toHaveCSS("color", await themeColor(page, "--primary"));
     await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "128px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
-    const agentLabelBefore = await nav(page, "Agents").locator("span").evaluate((element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect().width; });
+    await expect(nav(page, "Agents")).toHaveCSS("font-weight", "400");
+    const buttonBefore = await nav(page, "Agents").boundingBox();
     await nav(page, "Agents").click();
-    expect(await nav(page, "Agents").locator("span").evaluate((element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect().width; })).toBe(agentLabelBefore);
+    await expect(nav(page, "Agents")).toHaveCSS("font-weight", "500");
+    expect(await nav(page, "Agents").boundingBox()).toEqual(buttonBefore);
     const installed = page.getByRole("region", { name: /^Installed/ });
     const separators = installed.locator('[data-slot="separator"]:visible');
     expect(await separators.count()).toBe((await installed.locator(".agent-block").count()) - 1);
@@ -866,7 +926,9 @@ test("success colors, list separators, control sizes and About alignment are con
     await nav(page, "Settings").click();
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     const general = page.getByRole("region", { name: "General", exact: true });
-    await expect(general.locator('[data-slot="separator"]')).toHaveCount(4);
+    await expect(general.locator('[data-slot="separator"]')).toHaveCount(5);
+    await expect(general.locator('[data-slot="item-group"]')).toHaveCSS("background-color", await themeColor(page, "--card"));
+    await expect(general.locator('[data-slot="item-group"]')).toHaveCSS("padding", "0px");
     await expect(general.locator('[data-slot="separator"]').first()).toHaveCSS("height", "1px");
     const about = page.getByRole("region", { name: "About", exact: true });
     await expect(about.getByRole("status")).toHaveText("You're up to date");
@@ -1420,7 +1482,7 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await expect(page.getByRole("switch", { name: "Start protection" })).toBeDisabled();
   await nav(page, "Settings").click();
   const general = page.getByRole("region", { name: "General", exact: true });
-  await expect(general.locator('[data-slot="separator"]')).toHaveCount(4);
+  await expect(general.locator('[data-slot="separator"]')).toHaveCount(5);
   await expect(general.locator(".row-warning")).toHaveCount(0);
   await expect(page.getByRole("alert")).toContainText("Address already in use");
 });

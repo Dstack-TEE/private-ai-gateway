@@ -69,6 +69,28 @@ Form scroll regions own horizontal padding so the standard 3px focus ring is
 not clipped. Continuous bordered lists keep edge-to-edge hover backgrounds
 and use an inset focus ring on full-row actions. Image clipping and actual
 scroll viewports remain intact.
+
+Notifications has its own native dialog with a master switch and gateway,
+Local API and response-verification categories. All default to enabled; saved
+choices are never reset on launch. Delivery uses the official Tauri notification
+plugin from Rust, independent of renderer lifecycle. Each category is limited
+to one notification per minute, and foreground faults are not replayed on hide.
+Notification text never includes credentials, prompts, endpoints or profile names.
+Authorization is checked on launch and focus: macOS uses UNUserNotificationCenter
+settings and Windows uses ToastNotifier.Setting. Denied permission produces a
+system-settings prompt; macOS not-determined status offers the native permission
+request. Linux has no portable per-app authorization query, so the dialog reports
+that limitation without claiming permission is granted. Focus modes may still
+suppress delivery. Installed packages must be tested on each OS; tray state,
+update badges and inline errors remain available without notification delivery.
+
+Native dialogs wait for content, font readiness and image decoding before the
+presentation handshake. Example dialogs also wait for their local key read.
+AppKit lays out and displays the sheet content before beginning the sheet
+animation. No sleep is used to delay normal presentation, and no hidden window
+pool retains credentials. A 20-second failed-handshake deadline cleans up an
+unpresented window and reports the failure in the main window. Browser checks
+cover readiness ordering; compositor behavior still requires macOS acceptance.
 SheetActions provides one shared footer divider.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
