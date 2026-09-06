@@ -387,6 +387,40 @@ test("Usage chart preserves its layout while the initial query is pending", asyn
   expect(await chart.boundingBox()).toEqual(before);
 });
 
+test("profile imports require confirmation, stay unverified and preserve the active profile", async ({ page }) => {
+  await page.goto("/?mock=ready&native-dialog=profiles");
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await profiles.getByRole("button", { name: "Import profile configurations" }).click();
+  await expect(profiles.getByRole("button", { name: "Edit Imported Phala" })).toHaveCount(0);
+  page.once("dialog", (dialog) => dialog.accept());
+  await profiles.getByRole("button", { name: "Import profile configurations" }).click();
+  await expect(profiles.getByRole("status")).toHaveText("1 imported, 0 duplicates skipped.");
+  const imported = profiles.locator(".profile-list-row", { hasText: "Imported Phala" });
+  await expect(imported).toContainText("Credential unavailable");
+  await expect(profiles.locator(".profile-select", { hasText: "RedPill" })).toHaveAttribute("aria-pressed", "true");
+  page.once("dialog", (dialog) => dialog.accept());
+  await profiles.getByRole("button", { name: "Import profile configurations" }).click();
+  await expect(profiles.getByRole("status")).toHaveText("0 imported, 1 duplicates skipped.");
+  await profiles.getByRole("button", { name: "Export profile configurations" }).click();
+  await expect(profiles.getByRole("status")).toContainText("without credentials");
+  await page.goto("/?mock=export-error&native-dialog=profiles");
+  await profiles.getByRole("button", { name: "Export profile configurations" }).click();
+  await expect(profiles.getByRole("alert")).toContainText("Could not export profile configurations.");
+  await expect(profiles.getByRole("button", { name: "Done", exact: true })).toBeEnabled();
+});
+
+test("diagnostics export has success and error feedback", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Export diagnostics" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Diagnostics exported" })).toContainText("without keys");
+  await page.goto("/?mock=export-error");
+  await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Export diagnostics" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Could not export diagnostics." })).toBeVisible();
+});
+
 test("Profiles keeps its list underneath the profile editor", async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 560 });
   await page.goto("/?mock=no-key&native-dialog=profiles");

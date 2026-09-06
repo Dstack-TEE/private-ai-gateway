@@ -171,6 +171,11 @@ export interface NotificationPreferences {
   localApi: boolean;
   verification: boolean;
 }
+
+export interface ProfileBackup {
+  version: number;
+  profiles: Pick<ConfidentialProfile, "name" | "provider" | "remoteUrl">[];
+}
 export interface NotificationConfiguration {
   preferences: NotificationPreferences;
   permission: "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
@@ -284,6 +289,10 @@ export interface DesktopApi {
   saveLocalApiConfig(config: LocalApiConfig): Promise<GatewayState>;
   listListenAddresses(): Promise<{ address: string; name: string }[]>;
   getNotificationSettings(): Promise<NotificationConfiguration>;
+  readProfileBackup(path: string): Promise<ProfileBackup>;
+  importProfiles(backup: ProfileBackup): Promise<{ imported: number; skipped: number }>;
+  exportProfiles(path: string): Promise<void>;
+  exportDiagnostics(path: string): Promise<void>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
   requestNotificationPermission(): Promise<NotificationConfiguration["permission"]>;
   openNotificationSettings(): Promise<void>;

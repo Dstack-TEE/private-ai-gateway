@@ -51,6 +51,7 @@ import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
+import { ProfileTransfer, ExportDiagnostics } from "./components/maintenance";
 import { installNativeInteractions } from "./lib/native-interactions";
 import { prepareDialogPresentation } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
@@ -2133,6 +2134,7 @@ function SettingsView({
   onLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): void;
 }): React.JSX.Element {
   const frozen = busy || running;
+  const [diagnosticMessage, setDiagnosticMessage] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body settings-page">
@@ -2164,9 +2166,11 @@ function SettingsView({
       {anyRecorded && <SettingsSection title="Agents"><Item><ItemContent><ItemTitle>Restore all agent configs</ItemTitle><ItemDescription>Restore the original configuration for every connected agent.</ItemDescription></ItemContent><ItemActions><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></ItemActions></Item></SettingsSection>}
 
       <SettingsSection title="About">
+          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
           <UpdateControl updates={updates} productName={brand.productName} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
       </SettingsSection>
+      {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}
     </div>
   );
 }
@@ -2254,7 +2258,9 @@ function ProfileListSheet({
   onClose(): void;
   error?: string;
 }): React.JSX.Element {
-  const frozen = busy;
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferMessage, setTransferMessage] = useState<string>();
+  const frozen = busy || transferBusy;
   const [workingProfileId, setWorkingProfileId] = useState<string>();
   const [error, setError] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
@@ -2277,7 +2283,7 @@ function ProfileListSheet({
     onClose();
   };
   return (
-    <Sheet title="Profiles" className="profiles-sheet" dismissible={!workingProfileId} onClose={onClose}>
+    <Sheet title="Profiles" className="profiles-sheet" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="sheet-text">Choose the verified service and credential used when protection starts.</p>
       {!activeProfileAvailable && (
         <p className="banner sheet-banner profile-availability">
@@ -2314,10 +2320,14 @@ function ProfileListSheet({
       </div>
       {running && <p className="field-note profile-lock-note">Switching profiles briefly stops protection and reconnects to the selected provider.</p>}
       {(error || openError) && <Alert variant="destructive"><AlertDescription>{error || openError}</AlertDescription></Alert>}
+      {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
       <SheetActions leading={
+        <div className="flex items-center gap-2">
         <Button type="button" variant="outline" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
+        <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
+        </div>
       }>
-        <Button type="button" variant="outline" disabled={Boolean(workingProfileId)} onClick={onClose}>Done</Button>
+        <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
       </SheetActions>
     </Sheet>
   );
