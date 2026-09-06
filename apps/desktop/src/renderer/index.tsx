@@ -1127,8 +1127,8 @@ function Sidebar({
         </SidebarMenu>
       </nav>
       </SidebarProvider>
-      {updateAvailable && <div className="mt-auto px-2 pt-4">
-        <Badge render={<button type="button" disabled={updateBusy} />} aria-label="Update available" title="Install update" onClick={onInstallUpdate}>
+      {updateAvailable && <div className="mt-auto pt-4">
+        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" title="Install update" onClick={onInstallUpdate}>
           <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
         </Badge>
       </div>}

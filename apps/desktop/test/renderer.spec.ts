@@ -434,6 +434,17 @@ test("updates are discovered on launch and installation requires confirmation", 
   await page.goto("/?mock=update-available");
   const updateBadge = page.getByRole("button", { name: "Update available", exact: true });
   await expect(updateBadge).toHaveAttribute("data-slot", "badge");
+  await expect(updateBadge).toHaveAttribute("data-variant", "outline");
+  await expect(updateBadge).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(updateBadge).toHaveCSS("height", "32px");
+  await expect(updateBadge).toHaveCSS("font-size", "14px");
+  await expect(updateBadge.locator("svg")).toHaveCSS("width", "16px");
+  const badgeBounds = await updateBadge.boundingBox();
+  const navigationBounds = await page.getByRole("navigation", { name: "Main navigation" }).boundingBox();
+  expect(badgeBounds).not.toBeNull();
+  expect(navigationBounds).not.toBeNull();
+  expect(badgeBounds?.x).toBe(navigationBounds?.x);
+  expect(badgeBounds?.width).toBe(navigationBounds?.width);
   const bottomGap = await updateBadge.evaluate((badge) => {
     const sidebar = badge.closest("aside");
     if (!sidebar) throw new Error("Update badge must be inside the sidebar");
