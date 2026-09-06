@@ -1,4 +1,6 @@
 mod autostart;
+#[cfg(target_os = "linux")]
+mod helper_staging;
 mod menu;
 mod native_dialog;
 mod runtime_adapter;
@@ -509,6 +511,13 @@ pub fn run() {
                 .parent()
                 .ok_or_else(|| "Cannot locate the app directory".to_string())?
                 .join(helper_binary_name());
+            #[cfg(target_os = "linux")]
+            let helper_path = if app.env().appimage.is_some() {
+                helper_staging::stage(&helper_path, &desktop_gateway::agents::app_data_dir()?)
+                    .map_err(|error| format!("Cannot stage the AppImage credential helper: {error}"))?
+            } else {
+                helper_path
+            };
             let runtime = DesktopRuntime::launch(RuntimeOptions {
                 launcher: launcher_for_setup.clone(),
                 helper_path,
