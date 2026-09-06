@@ -21,8 +21,8 @@ operating system's native dialogs directly.
 The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
 Tailwind CSS 4, Lucide, and the official Neutral light/dark palette with a single
 dstack-derived primary: `#3f5c16` on light surfaces and `#afce70` on dark surfaces.
-Only primary and its foreground differ; component styles and other palette
-tokens remain unchanged. Primary text contrast is 7.63:1 light / 9.31:1 dark;
+Success uses a separate semantic green (Tailwind green-700 in light mode and
+green-400 in dark mode), rather than the brand primary. Primary text contrast is 7.63:1 light / 9.31:1 dark;
 the standard 80% opacity hover retains at least 4.5:1 on the window background.
 `src/renderer/theme.css` defines the palette and aliases for existing page layouts.
 `styles.css` owns product layout, not a second button/switch implementation.
@@ -32,13 +32,16 @@ shadows or typography; choose from the official component variants instead.
 
 Component sources in `src/renderer/components/ui` were obtained from the official
 `https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
-Local changes are import paths and Lucide icon substitution only.
+Local changes are import paths, Lucide icon substitution and an explicit large
+switch size for the Overview protection control. Its geometry is 60x28 with
+the existing Base UI switch behavior; other switches use the default 44x20.
+Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
 shadcn additions. Use these components for new standard controls; retain semantic
 HTML for navigation/list rows and the operating-system APIs for native surfaces.
-Product statuses use the standard palette: primary for verified, muted for
+Product statuses use semantic tokens: success for verified/available/connected, muted for
 unknown/inactive, destructive for warnings/errors, and chart tokens for usage.
-No separate green/yellow status palette is maintained. The default Luma
+Primary remains reserved for commands and selection; error/warning tokens are unchanged. The default Luma
 appearance is not an AppKit emulation: WebView content is still web content.
 
 Shared product compositions live one layer above `components/ui`:
@@ -52,7 +55,11 @@ Shared product compositions live one layer above `components/ui`:
 Forms use the official Field components without bordered outer input containers.
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection is a page-content action.
-Use default switch sizes; do not retain legacy CSS aliases for removed radii.
+Use the default switch size except for the Overview main switch; do not retain legacy CSS aliases for removed radii.
+
+The sidebar update badge is pinned at the bottom and invokes the same confirmed
+installation action as Settings. About aligns the installed version and update
+status to the right. Settings and agent lists use explicit Separator components.
 
 ### Publishing Updates
 

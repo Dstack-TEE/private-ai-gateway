@@ -130,9 +130,12 @@ export function UpdateControl({ updates, productName }: { updates: ReturnType<ty
       : info ? "You're up to date" : "Update status unavailable");
   return <Item>
     <ItemContent>
-      <ItemTitle>{productName}<span className="font-normal text-muted-foreground" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span></ItemTitle>
-      <ItemDescription role="status">{label}</ItemDescription>
+      <ItemTitle>{productName}</ItemTitle>
     </ItemContent>
-    {info?.version && <ItemActions><Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button></ItemActions>}
+    <ItemActions className="ml-auto max-w-full flex-col items-end text-right">
+      <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
+      <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>
+      {info?.version && <Button disabled={Boolean(busy)} onClick={() => void updates.install()}><Download aria-hidden="true" />Install and Restart</Button>}
+    </ItemActions>
   </Item>;
 }

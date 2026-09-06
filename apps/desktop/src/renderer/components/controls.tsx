@@ -15,7 +15,7 @@ type SwitchControlProps = {
   checked: boolean;
   disabled?: boolean;
   developmentMode?: boolean;
-  size?: "sm" | "default";
+  size?: "sm" | "default" | "lg";
   title?: string;
   "aria-describedby"?: string;
   onToggle(): void;

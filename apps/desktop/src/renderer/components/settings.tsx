@@ -1,15 +1,22 @@
-import { useId, type ComponentProps, type PropsWithChildren, type ReactNode } from "react";
+import { Children, Fragment, isValidElement, useId, type ComponentProps, type PropsWithChildren, type ReactNode } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
 import { SwitchControl } from "./controls";
 import { Button } from "./ui/button";
 import { Field, FieldLabel, FieldDescription } from "./ui/field";
 import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions, ItemGroup } from "./ui/item";
+import { Separator } from "./ui/separator";
+
+export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
+  return <ItemGroup className="gap-0 overflow-hidden rounded-2xl border">
+    {Children.toArray(children).map((child, index) => <Fragment key={isValidElement(child) ? child.key : index}>{index > 0 && <Separator />}{child}</Fragment>)}
+  </ItemGroup>;
+}
 
 export function SettingsSection({ title, children }: PropsWithChildren<{ title: string }>): React.JSX.Element {
   const id = useId();
   return <section className="group" aria-labelledby={id}>
     <h2 className="group-title" id={id}>{title}</h2>
-    <ItemGroup className="gap-0 overflow-hidden rounded-2xl border divide-y">{children}</ItemGroup>
+    <SettingsList>{children}</SettingsList>
   </section>;
 }
 

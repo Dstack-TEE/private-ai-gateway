@@ -117,7 +117,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .service-redpill { background: transparent; }
 .service-redpill img { width: 100%; height: 100%; }
 .service-custom-icon { color: var(--text-secondary); background: var(--neutral-bg); }
-.status-profile { width: min(192px, 100%); min-width: 0; }
+.status-profile { width: min(128px, 100%); min-width: 0; }
 .status-profile > span:not(.service-logo):not(.service-custom-icon) { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .status-profile > svg { flex: 0 0 auto; }
 .status-profile .service-logo, .status-profile .service-custom-icon { width: 20px; height: 20px; }
@@ -264,7 +264,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 
 .fact { align-items: flex-start; }
 .check-icon { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; }
-.check-icon.check-pass { color: var(--primary-foreground); background: var(--success); }
+.check-icon.check-pass { color: var(--success-foreground); background: var(--success); }
 .check-icon.check-fail { color: var(--danger); background: var(--danger-bg); }
 .check-icon.check-skip, .check-icon.check-info { color: var(--warning); background: var(--warning-bg); }
 .disclosure > summary { padding: 9px 13px; color: var(--primary); font-weight: 550; }
@@ -310,7 +310,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .profile-select strong, .profile-select small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-select strong { color: var(--text); font-size: 13px; font-weight: 650; }
 .profile-select small { color: var(--text-tertiary); font-size: 12px; }
-.profile-select > svg { flex: 0 0 auto; color: var(--success); }
+.profile-select > svg { flex: 0 0 auto; color: var(--primary); }
 .profile-list-row > .icon-button { justify-self: center; }
 .profile-lock-note { margin-top: 8px; }
 .is-spinning { animation: control-spin 900ms linear infinite; }
@@ -318,7 +318,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .service-presets { width: 100%; margin-top: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .service-preset { min-width: 0; text-align: left; }
 .service-preset strong { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.service-preset > svg { flex: 0 0 auto; color: var(--success); }
+.service-preset > svg { flex: 0 0 auto; color: var(--primary); }
 .sheet-banner { margin-top: 10px; }
 .profile-availability { color: var(--warning); background: var(--warning-bg); }
 .privacy-section-heading { min-height: 36px; padding: 0 2px 8px; display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; }

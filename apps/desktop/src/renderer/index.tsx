@@ -47,12 +47,13 @@ import { Field, FieldGroup, FieldLabel, FieldDescription, FieldError } from "./c
 import { Badge } from "./components/ui/badge";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
-import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription, ItemGroup } from "./components/ui/item";
+import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./components/ui/item";
+import { Separator } from "./components/ui/separator";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
 import { IconButton, SwitchControl } from "./components/controls";
 import { Sheet, SheetActions, DismissSheetAction } from "./components/sheet";
-import { SettingsSection, SettingsLink, SettingsToggle, FormField } from "./components/settings";
+import { SettingsSection, SettingsList, SettingsLink, SettingsToggle, FormField } from "./components/settings";
 import { NativeSelect } from "./components/ui/native-select";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import type {
@@ -892,7 +893,7 @@ function App(): React.JSX.Element {
 
   const windowContent = (
     <main className="app-shell">
-      <Sidebar view={view} previewControls={previewMode} updateAvailable={Boolean(updates.info?.version)} onChange={changeView} />
+      <Sidebar view={view} previewControls={previewMode} updateAvailable={Boolean(updates.info?.version)} updateBusy={Boolean(updates.busy)} onInstallUpdate={() => void updates.install()} onChange={changeView} />
       <section className="workspace">
         <PageHeader
           view={view}
@@ -1050,10 +1051,14 @@ function Sidebar({
   previewControls,
   onChange,
   updateAvailable,
+  updateBusy,
+  onInstallUpdate,
 }: {
   view: View;
   previewControls: boolean;
   updateAvailable: boolean;
+  updateBusy: boolean;
+  onInstallUpdate(): void;
   onChange(view: View, focusHeading?: boolean): void;
 }): React.JSX.Element {
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
@@ -1089,7 +1094,7 @@ function Sidebar({
           const Icon = entry.icon;
           return (
             <SidebarMenuItem key={entry.id}><SidebarMenuButton
-              size="lg"
+              size="default"
               isActive={view === entry.id}
               id={`nav-${entry.id}`}
               aria-label={entry.label}
@@ -1106,7 +1111,7 @@ function Sidebar({
       </nav>
       </SidebarProvider>
       {updateAvailable && <div className="mt-auto px-2 pt-4">
-        <Badge render={<button type="button" />} aria-label="Update available" title="Update available" onClick={() => onChange("settings", true)}>
+        <Badge render={<button type="button" disabled={updateBusy} />} aria-label="Update available" title="Install update" onClick={onInstallUpdate}>
           <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
         </Badge>
       </div>}
@@ -1406,7 +1411,7 @@ function StatusSurface({
           <span className="status-icon" aria-hidden="true"><span className="dot" /></span>
           <span>Local API {localApiAvailable ? "available" : "unavailable"}</span>
         </div>
-        <div className="status-fact"><Bot size={14} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} connected</span></div>
+        <div className={`status-fact ${connected > 0 ? "state-success" : "state-neutral"}`}><Bot size={14} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} connected</span></div>
         <div className="status-agent-icons" role="group" aria-label="Installed agents">
           {sortAgents(agents.filter((agent) => agent.installed)).sort((a, b) => Number(b.connected) - Number(a.connected)).map((agent) => (
             <span className={`status-agent-icon${agent.connected ? "" : " is-disconnected"}`} key={agent.id} title={`${agent.name} · ${agent.connected ? "Connected" : "Not connected"}`}>
@@ -1435,7 +1440,7 @@ function StatusSurface({
 
       <div className="status-segment status-remote">
         <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>Confidential AI</span></div>
-        <Button variant="outline" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+        <Button variant="outline" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
@@ -1511,7 +1516,7 @@ function ProtectedControl({
       {!iconOnly && <span>Protected</span>}
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
-        size="default"
+        size={compact ? "default" : "lg"}
         checked={checked}
         label={label}
         disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
@@ -1714,7 +1719,7 @@ function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
+    <><Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
       <span className={agent.connected ? "agent-mark-on" : undefined}><AgentMark agent={agent} /></span>
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
@@ -1732,7 +1737,7 @@ function AgentRow({
         onToggle={() => onSelect(!disconnecting)}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
-    </Item>
+    </Item><Separator className="last:hidden" /></>
   );
 }
 
@@ -1755,7 +1760,7 @@ function StateLabel({
   text: string;
 }): React.JSX.Element {
   return (
-    <Badge variant={tone === "danger" || tone === "warning" ? "destructive" : tone === "success" ? "secondary" : "outline"}>
+    <Badge variant={tone === "danger" || tone === "warning" ? "destructive" : "outline"} className={tone === "success" ? "border-success/20 bg-success/10 text-success" : undefined}>
       {Icon ? <Icon size={13} aria-hidden="true" /> : <span className="dot" aria-hidden="true" />}
       {text}
     </Badge>
@@ -2166,10 +2171,10 @@ function SettingsView({
       <Collapsible className="group settings-advanced">
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
-          <ItemGroup className="gap-0 overflow-hidden rounded-2xl border divide-y">
+          <SettingsList>
           <SettingsToggle label="Allow development OS" description={`Accept development OS images that are not intended for production workloads.${frozen ? " Stop protection to change this setting." : ""}`} checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={frozen} onToggle={() => onPolicy(!allowDevelopmentOs)} />
           <UpdateChannelControl updates={updates} />
-          </ItemGroup>
+          </SettingsList>
         </CollapsibleContent>
       </Collapsible>
 
@@ -2474,7 +2479,7 @@ function ProfileEditorSheet({
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
             <FieldDescription id="profile-key-note">{verifiedConfiguration ? "The endpoint and credential were verified together and saved securely." : savedCredentialApplies ? "Using this profile's saved key. Enter a new one to replace it after verification." : profileChanged ? "A key is required for a new provider or endpoint." : "The key is stored in the system credential store and never written into agent configs."}</FieldDescription>
-            {verifiedConfiguration && <Badge variant="secondary"><Check aria-hidden="true" />Verified configuration</Badge>}
+            {verifiedConfiguration && <StateLabel tone="success" icon={Check} text="Verified configuration" />}
             {savedCredentialApplies && profile?.id === state.activeProfileId && <Button className="self-start" type="button" variant="link" onClick={() => void clearKey()} disabled={saving || frozen || running}>Delete credential</Button>}
           </Field>
           <FieldError>{error}</FieldError>

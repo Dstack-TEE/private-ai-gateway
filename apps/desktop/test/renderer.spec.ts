@@ -424,9 +424,17 @@ test("updates are discovered on launch and installation requires confirmation", 
   });
   expect(bottomGap).toBeGreaterThanOrEqual(10);
   expect(bottomGap).toBeLessThanOrEqual(16);
+  let sidebarConfirmation = "";
+  page.once("dialog", async (dialog) => {
+    sidebarConfirmation = dialog.message();
+    await dialog.dismiss();
+  });
   await updateBadge.click();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await nav(page, "Settings").click();
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
   page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toBe(sidebarConfirmation);
     expect(dialog.message()).toContain("connected agent configurations will be restored");
     await dialog.dismiss();
   });
@@ -450,6 +458,43 @@ test("updates are discovered on launch and installation requires confirmation", 
   await expect(channel).toHaveValue("beta");
   await channel.selectOption("stable");
   await expect(page.getByRole("status").filter({ hasText: "Version 0.2.0 is available" })).toBeVisible();
+});
+
+test("success colors, list separators, control sizes and About alignment are consistent", async ({ page }) => {
+  await page.setViewportSize({ width: 1052, height: 784 });
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.goto("/?mock=ready");
+    const success = await themeColor(page, "--success");
+    expect(success).not.toBe(await themeColor(page, "--primary"));
+    const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
+    await expect(local.locator('[data-slot="badge"]')).toHaveCSS("color", success);
+    await expect(page.locator(".status-local .status-fact").filter({ hasText: "1 agent connected" })).toHaveCSS("color", success);
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
+    await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "128px");
+    await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
+    await nav(page, "Agents").click();
+    const installed = page.getByRole("region", { name: /^Installed/ });
+    const separators = installed.locator('[data-slot="separator"]:visible');
+    expect(await separators.count()).toBe((await installed.locator(".agent-block").count()) - 1);
+    await expect(installed.locator('[data-slot="badge"]', { hasText: /^Connected$/ }).first()).toHaveCSS("color", success);
+    await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("width", "44px");
+    await nav(page, "Settings").click();
+    const general = page.getByRole("region", { name: "General", exact: true });
+    await expect(general.locator('[data-slot="separator"]')).toHaveCount(3);
+    await expect(general.locator('[data-slot="separator"]').first()).toHaveCSS("height", "1px");
+    const about = page.getByRole("region", { name: "About", exact: true });
+    await expect(about.getByRole("status")).toHaveText("You're up to date");
+    const aligned = await about.evaluate((node) => {
+      const version = node.querySelector('[data-slot="app-version"]')?.getBoundingClientRect();
+      const status = node.querySelector('[role="status"]')?.getBoundingClientRect();
+      if (!version || !status) throw new Error("Missing About metadata");
+      return Math.abs(version.right - status.right);
+    });
+    expect(aligned).toBeLessThanOrEqual(1);
+    await expect(about.getByRole("status")).toHaveCSS("text-align", "right");
+  }
 });
 
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
