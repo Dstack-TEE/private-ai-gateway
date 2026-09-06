@@ -217,7 +217,7 @@ jobs:
             $driverVersion = [version]$driverVersions[0].Value
             if ($driverVersion.ToString(3) -ne $env:TAURI_SMOKE_EDGE_BUILD) { throw 'EdgeDriver does not match WebView2' }
             Write-Host "Selected WebView2: $version; driver: $driverVersion"
-            "WebView2=$version; EdgeDriver=$driverVersion; starting native driver launch diagnostics" | Set-Content "$evidenceDir/workflow-stage.txt"
+            "WebView2=$version; EdgeDriver=$driverVersion; starting installed app with scoped CDP, then attaching WebDriver" | Set-Content "$evidenceDir/workflow-stage.txt"
             $smokeArgs = @("$installDir/private-ai-gateway-desktop.exe", "$toolsDir/bin/tauri-driver.exe", "$toolsDir/edge/msedgedriver.exe", "$PWD/test-results/installed")
             node scripts/installed-webview-smoke.mjs @smokeArgs
             if ($LASTEXITCODE -ne 0) { throw 'Installed WebView smoke failed' }

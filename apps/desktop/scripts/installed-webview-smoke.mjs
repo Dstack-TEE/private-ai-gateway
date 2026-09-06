@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -23,99 +23,59 @@ let driver;
 let driverExit;
 let driverError;
 let driverExited;
+let app;
+let appExit;
+let appError;
+let appExited;
 let session;
 let base;
 let launchNumber = 0;
 let captureDriverLog = false;
 let driverLog = "";
 const diagnosticEvents = [];
-let previousProcesses = new Map();
 let webviewDataDirectory;
-const observedPortFiles = new Set();
 
 function record(event, details = {}) {
   diagnosticEvents.push({ at: new Date().toISOString(), event, ...details });
 }
 
-async function sampleWindowsProcesses() {
-  // Persist only allowlisted discovery switches from owned processes, never
-  // full command lines, environment, window titles, or unrelated process data.
-  const script = `
-    $all = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe' OR Name = 'msedgewebview2.exe' OR Name = 'msedgedriver.exe'")
-    $selected = @($all | Where-Object { $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION -or $_.ProcessId -eq [int]$env:TAURI_SMOKE_DRIVER_PID })
-    for ($depth = 0; $depth -lt 8; $depth++) {
-      $ids = @($selected | ForEach-Object ProcessId)
-      $next = @($all | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids })
-      if (!$next.Count) { break }
-      $selected += $next
-    }
-    ConvertTo-Json -Depth 4 -Compress -InputObject @($selected | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate, @{
-      Name = 'DiscoverySwitches'; Expression = { @([regex]::Matches($_.CommandLine, '--(?:remote-debugging-port|remote-debugging-address|user-data-dir)=(?:"[^"]*"|[^\\s"]+)') | ForEach-Object Value) }
-    })
-  `;
-  const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(script, "utf16le").toString("base64")], {
-    env: { ...process.env, TAURI_SMOKE_APPLICATION: application, TAURI_SMOKE_DRIVER_PID: String(driver?.pid ?? 0) },
-    timeout: 5000, maxBuffer: 262144,
+async function windowsCommand(script, variables) {
+  return promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(`$ErrorActionPreference = 'Stop'; ${script}`, "utf16le").toString("base64")], {
+    env: { ...process.env, ...variables }, timeout: 8000, maxBuffer: 65536,
   });
-  const processes = JSON.parse(stdout);
-  const current = new Map(processes.map((process) => [`${process.ProcessId}:${process.CreationDate}`, process]));
-  for (const [key, process] of current) {
-    if (!previousProcesses.has(key)) record("process-first-observed", { process });
-  }
-  for (const [key, process] of previousProcesses) {
-    if (!current.has(key)) record("process-no-longer-observed", { process });
-  }
-  previousProcesses = current;
-  record("windows-process-snapshot", { launch: launchNumber, processes });
 }
 
-async function monitorWindowsLaunch(signal) {
-  while (!signal.aborted) {
-    try { await sampleWindowsProcesses(); } catch (error) {
-      record("process-snapshot-error", { code: error.code, killed: error.killed });
-    }
-    try { await inspectDevToolsDiscovery(); } catch (error) {
-      record("devtools-discovery-error", { name: error.name, code: error.code });
-    }
-    try { await delay(1000, undefined, { signal }); } catch { break; }
-  }
-}
-
-async function inspectDevToolsDiscovery() {
-  // Only inspect our explicit WebView2 UDF, never enumerate a user profile.
-  // WebView2 may place Chromium state below EBWebView inside the UDF.
-  for (const relative of ["DevToolsActivePort", "EBWebView/DevToolsActivePort"]) {
-    const file = path.join(webviewDataDirectory, relative);
-    if (observedPortFiles.has(file)) continue;
-    try {
-      const resolved = await realpath(file);
-      assert.ok(resolved.startsWith(`${await realpath(home)}${path.sep}`));
-      assert.ok((await stat(resolved)).size <= 4096, "Unexpected DevTools port file size");
-      const lines = (await readFile(resolved, "utf8")).trim().split(/\r?\n/);
-      assert.match(lines[0], /^\d{1,5}$/);
-      const port = Number(lines[0]);
-      assert.ok(port > 0 && port <= 65535);
-      observedPortFiles.add(file);
-      record("devtools-port-file", { launch: launchNumber, relative, port,
-        browserSocketPathPresent: lines[1]?.startsWith("/devtools/browser/") === true });
-      for (const endpoint of ["/json/version", "/json/list"]) {
-        try {
-          const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: AbortSignal.timeout(1000) });
-          const value = await response.json();
-          const details = endpoint === "/json/version"
-            ? { browser: value.Browser, protocolVersion: value["Protocol-Version"], browserSocketPresent: typeof value.webSocketDebuggerUrl === "string" }
-            : { targetCount: Array.isArray(value) ? value.length : null,
-                targetTypes: Array.isArray(value) ? [...new Set(value.map((target) => target.type))] : [] };
-          record("devtools-http-probe", { launch: launchNumber, endpoint, status: response.status, ...details });
-        } catch (error) {
-          record("devtools-http-probe-error", { launch: launchNumber, endpoint, name: error.name });
-        }
+async function waitForCdp(port) {
+  const deadline = Date.now() + 30_000;
+  let targets;
+  await until(async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
+    // Even a non-CDP HTTP listener must reach the ownership check, rather
+    // than turning a port conflict into a generic readiness timeout.
+    await response.body?.cancel();
+    return true;
+  });
+  // A released ephemeral port can be taken by another process. Verify the
+  // listener belongs to this app's tree before allowing WebDriver to attach.
+  await windowsCommand(`
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $env:TAURI_SMOKE_CDP_PORT)
+    if (!$listeners.Count) { throw 'CDP listener disappeared' }
+    foreach ($listener in $listeners) {
+      if ($listener.LocalAddress -notin @('127.0.0.1', '::1')) { throw 'CDP is not loopback-only' }
+      $owner = $listener.OwningProcess
+      for ($depth = 0; $depth -lt 8 -and $owner -ne [int]$env:TAURI_SMOKE_APP_PID; $depth++) {
+        $owner = (Get-CimInstance Win32_Process -Filter "ProcessId = $owner").ParentProcessId
       }
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if ($owner -ne [int]$env:TAURI_SMOKE_APP_PID) { throw 'CDP port conflict: listener is outside the owned app tree' }
     }
-  }
+  `, { TAURI_SMOKE_CDP_PORT: String(port), TAURI_SMOKE_APP_PID: String(app.pid) });
+  await until(async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
+    targets = await response.json();
+    return response.ok && Array.isArray(targets) && targets.some((target) => target.type === "page");
+  }, Math.max(0, deadline - Date.now()));
+  record("cdp-ready", { launch: launchNumber, targetCount: targets.length });
 }
 
 async function freePort() {
@@ -145,10 +105,12 @@ async function request(method, route, body) {
   }
 }
 
-async function until(check) {
-  const deadline = Date.now() + 30_000;
+async function until(check, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
+    if (appError) throw appError;
+    if (appExited) throw new Error(`Installed app exited with status ${app.exitCode}`);
     if (driverError) throw driverError;
     if (driverExited) throw new Error(`tauri-driver exited with status ${driver.exitCode}`);
     try { if (await check()) return; } catch (error) { lastError = error; }
@@ -170,36 +132,56 @@ async function invoke(command, args = {}) {
 
 async function launch() {
   launchNumber++;
+  driverError = undefined;
+  driverExited = false;
   const port = await freePort();
   const nativePort = await freePort();
   assert.notEqual(port, nativePort, "WebDriver ports must be distinct");
   base = `http://127.0.0.1:${port}`;
-  // Match tauri-driver 2.0.6's Windows capabilities directly so the native
-  // driver can receive --verbose (the intermediary cannot forward that flag).
+  // Use Microsoft's attach contract on the same installed release executable.
   // https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver
   // https://learn.microsoft.com/microsoft-edge/webdriver/capabilities-edge-options
   const windows = process.platform === "win32";
+  let cdpPort;
   if (windows) {
     webviewDataDirectory = path.join(home, `webview-${launchNumber}`);
     await mkdir(webviewDataDirectory, { mode: 0o700 });
+    cdpPort = await freePort();
+    assert.ok(cdpPort !== port && cdpPort !== nativePort, "CDP and driver ports must be distinct");
+    appError = undefined;
+    appExited = false;
+    app = spawn(application, [], { env: {
+      ...env,
+      WEBVIEW2_USER_DATA_FOLDER: webviewDataDirectory,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort}`,
+    }, stdio: "ignore" });
+    record("app-start", { launch: launchNumber, pid: app.pid });
+    appExit = new Promise((resolve) => {
+      app.on("error", (error) => {
+        appError = error;
+        if (!app.pid) { appExited = true; resolve(); }
+      });
+      app.once("exit", (code, signal) => {
+        record("app-exit", { launch: launchNumber, code, signal });
+        appExited = true;
+        resolve();
+      });
+    });
+    await waitForCdp(cdpPort);
   }
   const executable = windows ? nativeDriver : driverPath;
-  const args = windows ? [`--port=${port}`, "--host=127.0.0.1", "--verbose"]
+  const args = windows ? [`--port=${port}`, "--host=127.0.0.1"]
     : ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver];
-  const driverEnv = windows
-    ? { ...env, TAURI_AUTOMATION: "true", TAURI_WEBVIEW_AUTOMATION: "true" }
-    : env;
-  captureDriverLog = true;
+  // Windows verbose driver logs contain CDP websocket URLs and IPC payloads.
+  captureDriverLog = !windows;
   driver = spawn(executable, args,
-    { env: driverEnv, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
+    { env, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
   const collectLog = (chunk) => {
     if (captureDriverLog) driverLog = (driverLog + chunk.toString()).slice(-1_048_576);
   };
   driver.stdout.on("data", collectLog);
   driver.stderr.on("data", collectLog);
   record("driver-start", { launch: launchNumber, executable, pid: driver.pid });
-  driverError = undefined;
-  driverExited = false;
   driverExit = new Promise((resolve) => {
     driver.on("error", (error) => {
       driverError = error;
@@ -216,22 +198,16 @@ async function launch() {
     assert.equal(driver.exitCode, null, "tauri-driver exited");
     return (await request("GET", "/status")).ready;
   });
-  const monitorAbort = new AbortController();
-  const monitor = windows ? monitorWindowsLaunch(monitorAbort.signal) : Promise.resolve();
   let created;
   try {
     const capabilities = windows ? {
       browserName: "webview2", "ms:edgeChromium": true,
-      "ms:edgeOptions": { binary: application, args: [], webviewOptions: { userDataFolder: webviewDataDirectory } },
+      "ms:edgeOptions": { debuggerAddress: `127.0.0.1:${cdpPort}` },
     } : { "tauri:options": { application } };
-    record("session-launch", { launch: launchNumber, capabilities });
+    record("session-launch", { launch: launchNumber, mode: windows ? "attach" : "launch" });
     created = await request("POST", "/session", { capabilities: { alwaysMatch: capabilities } });
   } finally {
     captureDriverLog = false;
-    monitorAbort.abort();
-    await monitor;
-    if (windows) record("devtools-discovery-summary", { launch: launchNumber,
-      portFilesObserved: [...observedPortFiles].filter((file) => file.startsWith(`${webviewDataDirectory}${path.sep}`)).length });
     await writeFile(path.join(evidenceDirectory, "driver-launch.log"), driverLog, { mode: 0o600 });
   }
   session = created.sessionId;
@@ -244,6 +220,15 @@ async function launch() {
     console.log(`Installed WebView2 runtime: ${version}`);
   }
   await until(() => execute("return !!window.__TAURI_INTERNALS__ && !!document.querySelector('#nav-overview')"));
+}
+
+async function reap(exit, label) {
+  let timer;
+  try {
+    await Promise.race([exit, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out reaping the owned ${label}`)), 5000);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 
 async function shutdown() {
@@ -264,36 +249,44 @@ async function shutdown() {
               // Native EdgeDriver has no tauri-driver Job wrapper. Surface tree
               // cleanup failures; killing only its parent is not sufficient.
               driver.kill("SIGKILL");
+              await reap(driverExit, "driver");
               throw error;
             }
           }
         } else {
           try { process.kill(-driver.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
         }
-        let timer;
-        try {
-          await Promise.race([driverExit, new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Timed out reaping the owned driver tree")), 5000);
-          })]);
-        } finally {
-          clearTimeout(timer);
-        }
+        await reap(driverExit, "driver");
       }
     } finally {
-      if (process.platform === "win32") {
-        // Also reap an app whose native driver exited before taskkill could
-        // follow its tree. Restrict selection to this smoke's installed path.
-        await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-          Buffer.from(`
-            $apps = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe'" | Where-Object { $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION })
-            foreach ($app in $apps) {
-              & "$env:SystemRoot/System32/taskkill.exe" /PID $app.ProcessId /T /F
-              if ($LASTEXITCODE -ne 0) { throw "Cannot clean up installed smoke app" }
+      if (app?.pid) {
+        // Attach session deletion does not own the app. Kill it independently,
+        // including orphaned WebView2 processes identified by our private UDF.
+        await windowsCommand(`
+          $all = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe' OR Name = 'msedgewebview2.exe'")
+          $isOwned = {
+            ($_.ProcessId -eq [int]$env:TAURI_SMOKE_APP_PID -and $_.ExecutablePath -eq $env:TAURI_SMOKE_APPLICATION) -or
+            ($_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -and $_.CommandLine.Contains($env:TAURI_SMOKE_UDF))
+          }
+          $owned = @($all | Where-Object $isOwned)
+          foreach ($process in $owned) {
+            if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
+              & "$env:SystemRoot/System32/taskkill.exe" /PID $process.ProcessId /T /F | Out-Null
+              if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {
+                throw 'Cannot clean up the owned app or WebView2 process'
+              }
             }
-          `, "utf16le").toString("base64")], {
-          env: { ...process.env, TAURI_SMOKE_APPLICATION: application }, timeout: 8000, maxBuffer: 65536,
-        });
+          }
+          $remaining = @(Get-CimInstance Win32_Process -Filter "Name = 'private-ai-gateway-desktop.exe' OR Name = 'msedgewebview2.exe'" | Where-Object $isOwned)
+          if ($remaining.Count) { throw 'Owned app tree remains; retaining private UDF' }
+        `, { TAURI_SMOKE_APP_PID: String(app.pid), TAURI_SMOKE_APPLICATION: path.normalize(application),
+          TAURI_SMOKE_UDF: path.normalize(webviewDataDirectory) });
+        await reap(appExit, "app");
+        record("app-tree-cleaned", { launch: launchNumber });
       }
+      app = undefined;
+      appExited = false;
+      appError = undefined;
       driver = undefined;
     }
   }
@@ -346,7 +339,7 @@ try {
   console.log("Installed WebView: real React/IPC, five-agent discovery, unverified-connect rejection, empty restore/export, local token rotation/revocation, settings persistence and restart passed");
   console.log("Not covered: verified connect/inference, native tray interaction, login registration or graceful Quit");
 } catch (error) {
-  record("smoke-failure", { name: error.name, message: error.message });
+  record("smoke-failure", { name: error.name });
   if (session) {
     try {
       const screenshot = await request("GET", `/session/${session}/screenshot`);
@@ -357,15 +350,11 @@ try {
   }
   throw error;
 } finally {
-  try { await shutdown(); } finally {
+  let cleaned = false;
+  try { await shutdown(); cleaned = true; } finally {
     try {
-      if (process.platform === "win32") {
-        try { await sampleWindowsProcesses(); } catch (error) {
-          record("cleanup-snapshot-error", { message: error.message });
-        }
-      }
       await writeFile(path.join(evidenceDirectory, "driver-launch.log"), driverLog, { mode: 0o600 });
       await writeFile(path.join(evidenceDirectory, "launch-diagnostics.json"), JSON.stringify(diagnosticEvents, null, 2), { mode: 0o600 });
-    } finally { await rm(home, { recursive: true, force: true }); }
+    } finally { if (cleaned) await rm(home, { recursive: true, force: true }); }
   }
 }
