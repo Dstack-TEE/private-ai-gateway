@@ -18,7 +18,11 @@ mod platform {
     pub fn setup(app: &AppHandle) -> Result<(), auto_launch::Error> {
         let executable = std::env::current_exe()?;
         #[cfg(target_os = "linux")]
-        let executable = app.env().appimage.unwrap_or(executable);
+        let executable = app
+            .env()
+            .appimage
+            .map(std::path::PathBuf::from)
+            .unwrap_or(executable);
         app.manage(ManagerState(build(
             app.package_info().name.as_str(),
             &executable,
