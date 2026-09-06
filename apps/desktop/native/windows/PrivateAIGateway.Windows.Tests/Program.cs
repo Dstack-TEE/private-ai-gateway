@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using PrivateAIGateway.Windows;
 
 const string ChildMode = "PRIVATE_AI_GATEWAY_RUNTIME_TEST_CHILD";
@@ -15,6 +16,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("pending request fails on EOF", PendingRequestFailsOnEofAsync),
     ("malformed frame disconnects", () => InvalidFrameDisconnectsAsync("malformed")),
     ("oversized frame disconnects", () => InvalidFrameDisconnectsAsync("oversized")),
+    ("wrong protocol version disconnects", () => InvalidFrameDisconnectsAsync("wrong-version")),
     ("unresponsive shutdown is bounded", UnresponsiveShutdownIsBoundedAsync),
     ("status presentation distinguishes protection", StatusPresentationIsAccurateAsync),
 };
@@ -39,7 +41,12 @@ static async Task InvalidFrameDisconnectsAsync(string mode)
 {
     await using var client = await StartClientAsync(mode);
     var error = await ExpectRuntimeFailureAsync(client.RequestAsync<GatewayState>("getState", new { }));
-    var expected = mode == "oversized" ? "message_too_large" : "invalid_response";
+    var expected = mode switch
+    {
+        "oversized" => "message_too_large",
+        "wrong-version" => "unsupported_schema",
+        _ => "invalid_response",
+    };
     Assert(error.Code == expected, $"Expected {expected}, got {error.Code}");
     Assert(!client.IsAvailable, "Invalid runtime output did not disconnect the client");
 }
@@ -122,6 +129,13 @@ static void RunChild(string mode)
         case "oversized":
             Console.ReadLine();
             Console.Write(new string('x', 1024 * 1024 + 1));
+            Console.Out.Flush();
+            Thread.Sleep(TimeSpan.FromSeconds(30));
+            return;
+        case "wrong-version":
+            var request = JsonDocument.Parse(Console.ReadLine() ?? throw new InvalidOperationException("Missing request"));
+            var id = request.RootElement.GetProperty("id").GetString();
+            Console.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 2, id, result = new { } }));
             Console.Out.Flush();
             Thread.Sleep(TimeSpan.FromSeconds(30));
             return;

@@ -173,25 +173,50 @@ public sealed class RuntimeClient : IAsyncDisposable
         {
             using var document = JsonDocument.Parse(utf8.GetString(frame));
             var root = document.RootElement;
-            if (!root.TryGetProperty("schemaVersion", out var schema) || schema.GetInt32() != 1)
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid protocol envelope.");
+            if (!root.TryGetProperty("schemaVersion", out var schema) ||
+                schema.ValueKind != JsonValueKind.Number ||
+                !schema.TryGetInt32(out var version) ||
+                version != 1)
                 throw new RuntimeException("unsupported_schema", "The desktop runtime returned an unsupported protocol version.");
-            if (root.TryGetProperty("event", out var eventName) && eventName.GetString() == "stateChanged")
+            if (root.TryGetProperty("event", out var eventName))
             {
-                var state = root.GetProperty("payload").Deserialize<GatewayState>(json);
-                if (state is not null) StateChanged?.Invoke(state);
+                if (eventName.ValueKind != JsonValueKind.String ||
+                    eventName.GetString() != "stateChanged" ||
+                    !root.TryGetProperty("payload", out var payload) ||
+                    root.TryGetProperty("id", out _) ||
+                    root.TryGetProperty("result", out _) ||
+                    root.TryGetProperty("error", out _))
+                    throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid event envelope.");
+                var state = payload.Deserialize<GatewayState>(json) ??
+                    throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid state event.");
+                StateChanged?.Invoke(state);
                 return;
             }
-            if (!root.TryGetProperty("id", out var idValue))
+            if (!root.TryGetProperty("id", out var idValue) || idValue.ValueKind != JsonValueKind.String)
                 throw new RuntimeException("invalid_response", "The desktop runtime returned a response without an id.");
-            if (!pending.TryRemove(idValue.GetString() ?? "", out var completion)) return;
-            if (root.TryGetProperty("error", out var error))
+            var hasResult = root.TryGetProperty("result", out var result);
+            var hasError = root.TryGetProperty("error", out var error);
+            if (hasResult == hasError || root.TryGetProperty("payload", out _))
+                throw new RuntimeException("invalid_response", "The desktop runtime returned an ambiguous response envelope.");
+            var errorCode = "operation_failed";
+            var errorMessage = "The operation failed.";
+            if (hasError)
             {
-                completion.TrySetException(new RuntimeException(
-                    error.TryGetProperty("code", out var code) ? code.GetString() ?? "operation_failed" : "operation_failed",
-                    error.TryGetProperty("message", out var message) ? message.GetString() ?? "The operation failed." : "The operation failed."));
+                if (error.ValueKind != JsonValueKind.Object ||
+                    !error.TryGetProperty("code", out var code) || code.ValueKind != JsonValueKind.String ||
+                    !error.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.String)
+                    throw new RuntimeException("invalid_response", "The desktop runtime returned an invalid error response.");
+                errorCode = code.GetString() ?? errorCode;
+                errorMessage = message.GetString() ?? errorMessage;
             }
-            else if (root.TryGetProperty("result", out var result)) completion.TrySetResult(result.Clone());
-            else throw new RuntimeException("invalid_response", "The desktop runtime returned a response without a result.");
+            if (!pending.TryRemove(idValue.GetString() ?? "", out var completion)) return;
+            if (hasError)
+            {
+                completion.TrySetException(new RuntimeException(errorCode, errorMessage));
+            }
+            else completion.TrySetResult(result.Clone());
         }
         catch (Exception error)
         {
