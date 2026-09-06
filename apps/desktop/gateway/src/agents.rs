@@ -59,6 +59,7 @@ pub struct AgentStatus {
     pub config_path: String,
     pub installed: bool,
     /// The config currently carries this app's projection and a token exists.
+    /// This does not imply a verified gateway session or successful inference.
     pub connected: bool,
     /// A connection record exists (whatever the config now says).
     pub recorded: bool,
@@ -361,7 +362,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
                     &["providers", provider, "key_cmd"],
-                    hermes_helper_command(inputs.helper_exe)?,
+                    credential_helper_command(inputs.helper_exe, Agent::Hermes)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
             ];
@@ -469,7 +470,7 @@ fn pi_provider(
     Ok(serde_json::json!({
         "baseUrl": format!("{base}/v1"),
         "api": "openai-responses",
-        "apiKey": format!("!{}", helper_command(helper_exe, "pi")?),
+        "apiKey": format!("!{}", credential_helper_command(helper_exe, Agent::Pi)?),
         "models": models,
     }))
 }
@@ -687,12 +688,12 @@ fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
 }
 
 #[cfg(not(windows))]
-fn hermes_helper_command(exe: &Path) -> Result<String, String> {
-    helper_command(exe, "hermes")
+fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String> {
+    helper_command(exe, agent.id())
 }
 
 #[cfg(windows)]
-fn hermes_helper_command(exe: &Path) -> Result<String, String> {
+fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     let path = exe
@@ -701,16 +702,17 @@ fn hermes_helper_command(exe: &Path) -> Result<String, String> {
     if path.contains('\0') {
         return Err("The app path contains a null character".to_string());
     }
-    // Hermes uses Python shell=True (cmd.exe). Encoding the PowerShell command
-    // and its path data keeps shell metacharacters and Unicode quote characters
-    // out of both parsers. No execution-policy override is needed.
+    // Hermes uses cmd.exe; Pi tries Bash then falls back to cmd.exe. Only the
+    // PowerShell executable, fixed switches and base64 reach either shell.
+    // The path stays data, including metacharacters and Unicode quotes.
     let encoded_path = STANDARD.encode(
         path.encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
     let command = format!(
-        "$ErrorActionPreference = 'Stop'; & ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded_path}'))) --agent-token hermes; exit $LASTEXITCODE"
+        "$ErrorActionPreference = 'Stop'; & ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded_path}'))) --agent-token {}; exit $LASTEXITCODE",
+        agent.id()
     );
     let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
     Ok(format!(
@@ -1743,6 +1745,10 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 fn home_dir() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    if let Some(home) = env_path("USERPROFILE") {
+        return Ok(home);
+    }
     env_path("HOME")
         .or_else(|| env_path("USERPROFILE"))
         .ok_or_else(|| "Cannot determine the home directory".to_string())
@@ -1957,7 +1963,13 @@ mod tests {
 
         // Process-local environment avoids races with the other agent tests.
         let root = tempfile::tempdir().unwrap();
-        for case in ["default", "local-appdata", "override", "isolated"] {
+        for case in [
+            "default",
+            "local-appdata",
+            "override",
+            "isolated",
+            "native-home",
+        ] {
             let mut command = Command::new(env::current_exe().unwrap());
             command
                 .args([
@@ -1974,7 +1986,7 @@ mod tests {
                 .env_remove(HOME_OVERRIDE_ENV)
                 .env_remove("HERMES_HOME")
                 .env_remove("LOCALAPPDATA");
-            if case != "default" {
+            if matches!(case, "local-appdata" | "override" | "isolated") {
                 command.env("LOCALAPPDATA", root.path().join("local-data"));
             }
             if matches!(case, "override" | "isolated") {
@@ -1984,6 +1996,9 @@ mod tests {
                 command
                     .env(HOME_OVERRIDE_ENV, root.path().join("isolated"))
                     .env("CODEX_HOME", root.path().join("outside-codex"));
+            }
+            if cfg!(windows) && case == "native-home" {
+                command.env("HOME", root.path().join("git-home"));
             }
             let output = command.output().unwrap();
             assert!(output.status.success(), "{case}: {output:?}");
@@ -2193,10 +2208,20 @@ mod tests {
         };
         assert_eq!(provider["models"].as_array().unwrap().len(), 2);
         assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
-        assert!(provider["apiKey"]
-            .as_str()
-            .unwrap()
-            .contains("--agent-token pi"));
+        assert_eq!(
+            provider["apiKey"],
+            format!(
+                "!{}",
+                credential_helper_command(&sandbox.projector.helper_exe, Agent::Pi).unwrap()
+            )
+        );
+        // A scan without a catalog retains the configuration connection.
+        // This flag is not runtime verification or evidence of forwarding.
+        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+        let pi_status = statuses.iter().find(|status| status.id == "pi").unwrap();
+        assert!(pi_status.connected && pi_status.authorized);
+        let pi_token = sandbox.projector.tokens.read("pi").unwrap().unwrap();
+        assert_eq!(tokens.agent_for(&pi_token), Some("pi"));
         disconnect(&sandbox, Agent::Pi);
 
         let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
@@ -2259,7 +2284,7 @@ mod tests {
         );
         assert_eq!(
             hermes.get_str(&["providers", "private-ai-gateway", "key_cmd"]),
-            Some(hermes_helper_command(&fresh.projector.helper_exe).unwrap())
+            Some(credential_helper_command(&fresh.projector.helper_exe, Agent::Hermes).unwrap())
         );
     }
 
@@ -2327,7 +2352,7 @@ mod tests {
                 assert!(output.stdout.is_empty());
             }
         }
-        assert!(hermes_helper_command(Path::new("bad\0path")).is_err());
+        assert!(credential_helper_command(Path::new("bad\0path"), Agent::Hermes).is_err());
     }
 
     #[test]
@@ -2819,6 +2844,50 @@ mod tests {
                 Err(error) => panic!("cannot run sh: {error}"),
             }
         }
+        #[cfg(windows)]
+        {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            // Pi's Bash and cmd.exe fallback see only fixed switches and a
+            // base64 word. Neither shell interprets the Windows helper path.
+            let hostile = Path::new(r"C:\Users\O'Brien %USERPROFILE% ! &\helper.exe");
+            let provider = pi_provider(&catalog(), ENDPOINT, hostile).unwrap();
+            let command = provider["apiKey"]
+                .as_str()
+                .unwrap()
+                .strip_prefix('!')
+                .unwrap();
+            let words: Vec<_> = command.split_ascii_whitespace().collect();
+            assert_eq!(words.len(), 5);
+            assert_eq!(
+                &words[..4],
+                &[
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand"
+                ]
+            );
+            assert_eq!(shlex::split(command).unwrap(), words);
+            let bytes = STANDARD.decode(words[4]).unwrap();
+            let script = String::from_utf16(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let encoded_path = STANDARD.encode(
+                hostile
+                    .to_str()
+                    .unwrap()
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            assert!(script.contains(&format!("FromBase64String('{encoded_path}')")));
+            assert!(script.ends_with("--agent-token pi; exit $LASTEXITCODE"));
+        }
     }
 
     /// Deleting the token file is the revocation itself: even when the very
@@ -3009,7 +3078,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(sidecar_listener, sidecar).await.unwrap() });
 
         let (sender, _events) = tokio::sync::mpsc::channel(8);
-        let state = ProxyState::new(sender);
+        let state = ProxyState::new(sender).unwrap();
         state.set_api_key(Some("sk-live".into()));
         state.publish(Session {
             generation: 1,
