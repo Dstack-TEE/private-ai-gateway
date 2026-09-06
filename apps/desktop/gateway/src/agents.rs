@@ -185,7 +185,7 @@ impl Agent {
                     .join("opencode")
                     .join("opencode.json")
             }),
-            Agent::Pi => override_dir("PI_AGENT_DIR")
+            Agent::Pi => override_dir("PI_CODING_AGENT_DIR")
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
@@ -271,6 +271,13 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_gateway"),
+                absent(&["model_providers", "private_ai_gateway", "env_key"]),
+                absent(&[
+                    "model_providers", "private_ai_gateway", "experimental_bearer_token",
+                ]),
+                absent(&[
+                    "model_providers", "private_ai_gateway", "requires_openai_auth",
+                ]),
                 set(
                     &["model_providers", "private_ai_gateway", "name"],
                     PRODUCT_NAME,
@@ -437,6 +444,10 @@ fn pi_provider(
             }
             let input = model.string_array("input_modalities");
             if !input.is_empty() {
+                let input: Vec<_> = input
+                    .iter()
+                    .filter(|mode| matches!(mode.as_str(), "text" | "image"))
+                    .collect();
                 value.insert("input".to_string(), serde_json::json!(input));
             }
             if model
@@ -461,6 +472,10 @@ fn pi_provider(
                 }
             }
             if !cost.is_empty() {
+                // Pi requires all four fields for new models; match its zero defaults.
+                for key in ["input", "output", "cacheRead", "cacheWrite"] {
+                    cost.entry(key.to_string()).or_insert(serde_json::json!(0));
+                }
                 value.insert("cost".to_string(), serde_json::Value::Object(cost));
             }
             serde_json::Value::Object(value)
@@ -717,6 +732,39 @@ fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String>
         "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
         STANDARD.encode(bytes)
     ))
+}
+
+fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
+    let (path, expected) = match agent {
+        Agent::Codex => (
+            &["model_providers", "private_ai_gateway", "auth", "command"][..],
+            exe.to_str().map(str::to_string),
+        ),
+        Agent::ClaudeCode => (&["apiKeyHelper"][..], helper_command(exe, agent.id()).ok()),
+        Agent::Pi => (
+            &["providers", "private-ai-gateway"][..],
+            credential_helper_command(exe, agent).ok().map(|command| format!("!{command}")),
+        ),
+        Agent::Hermes => (
+            &["providers", "private-ai-gateway", "key_cmd"][..],
+            credential_helper_command(exe, agent).ok(),
+        ),
+        Agent::OpenCode => return false,
+    };
+    // Only inspect the helper-bearing field we recorded, not provider metadata.
+    record.fields.iter().any(|field| {
+        if field.path != owned(path) {
+            return false;
+        }
+        let command = match &field.value {
+            Some(ConfigValue::Str(command)) if agent != Agent::Pi => Some(command.as_str()),
+            Some(ConfigValue::Json(provider)) if agent == Agent::Pi => {
+                provider.get("apiKey").and_then(serde_json::Value::as_str)
+            }
+            _ => None,
+        };
+        expected.as_deref().is_none_or(|expected| command != Some(expected))
+    })
 }
 
 /// Credential-bearing keys: their values never reach previews, manifests,
@@ -1436,32 +1484,20 @@ impl Projector {
                 "This agent's access is revoked; retry Disconnect to restore its config"
                     .to_string(),
             );
+        } else if stale_helper(agent, record, &self.helper_exe) {
+            status.connected = false;
+            status.authorized = false;
+            status.attention = Some(
+                "This connection uses an outdated credential helper path or command. Disconnect, \
+                 then Connect again to update it."
+                    .to_string(),
+            );
         } else if status.connected {
             if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
                 if catalog.get(&model).is_none() {
                     status.attention = Some(format!(
                         "`{model}` is no longer served; choose another model and reconnect"
                     ));
-                }
-            }
-        }
-        #[cfg(windows)]
-        if agent == Agent::Pi && status.connected && !record.disabled && !record.cleanup_pending {
-            if let Ok(command) = helper_command(&self.helper_exe, "pi") {
-                let legacy = format!("!{command}");
-                let legacy_record = record.fields.iter().any(|field| {
-                    field.path == owned(&["providers", "private-ai-gateway"])
-                        && matches!(&field.value, Some(ConfigValue::Json(provider))
-                            if provider.get("apiKey").and_then(serde_json::Value::as_str) == Some(legacy.as_str()))
-                });
-                if legacy_record {
-                    status.connected = false;
-                    status.authorized = false;
-                    status.attention = Some(
-                        "This Pi connection uses the old Windows credential command. Disconnect, \
-                         then Connect again to update it."
-                            .to_string(),
-                    );
                 }
             }
         }
@@ -2070,6 +2106,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
+        for agent in Agent::ALL {
+            let mut sandbox = sandbox(&format!("helper-relocation-{}", agent.id()));
+            let catalog = catalog();
+            let options = claude_options();
+            let path = agent.config_path(&sandbox.home, false);
+            let preview = sandbox.projector
+                .preview(agent, true, Some(&catalog), &options).unwrap();
+            sandbox.projector
+                .apply(agent, true, &preview.revision, Some(&catalog), &options).unwrap();
+            let current = sandbox.projector.helper_exe.clone();
+            let assert_scan = |sandbox: &Sandbox, connected: bool, attention: Option<&str>| {
+                let config = fs::read(&path).unwrap();
+                let manifest = fs::read(sandbox.projector.store_path()).unwrap();
+                let token_path = sandbox.projector.tokens.path(agent.id());
+                let token = fs::read(&token_path).unwrap();
+                let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+                let status = statuses.iter()
+                    .find(|status| status.id == agent.id()).unwrap();
+                assert!(status.recorded);
+                assert_eq!(status.connected, connected, "{}", agent.id());
+                assert_eq!(status.authorized, connected, "{}", agent.id());
+                assert_eq!(tokens.is_empty(), !connected);
+                if let Some(attention) = attention {
+                    assert!(status.attention.as_deref().unwrap().contains(attention));
+                } else {
+                    assert!(status.attention.is_none());
+                }
+                assert_eq!(fs::read(&path).unwrap(), config);
+                assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), manifest);
+                assert_eq!(fs::read(token_path).unwrap(), token);
+            };
+            assert_scan(&sandbox, true, None);
+            // A recorded Pi catalog may differ from today's generated metadata.
+            if agent == Agent::Pi {
+                let mut config = doc(&sandbox, agent);
+                config.set_str(
+                    &["providers", "private-ai-gateway", "name"], "Previous name",
+                ).unwrap();
+                write(&path, &config.render().unwrap());
+                let mut store = sandbox.projector.load_store().unwrap();
+                store.get_mut(agent.id()).unwrap().fields[0].value =
+                    config.get_value(&["providers", "private-ai-gateway"]);
+                sandbox.projector.save_store(&store).unwrap();
+                assert_scan(&sandbox, true, None);
+            }
+            let stable = sandbox.home.join("stable helpers").join(helper_binary_name());
+            sandbox.projector.helper_exe = stable.clone();
+            write(&sandbox.projector.helper_exe, "helper");
+            if agent == Agent::OpenCode {
+                assert_scan(&sandbox, true, None);
+            } else {
+                assert_scan(&sandbox, false, Some("Disconnect, then Connect"));
+                sandbox.projector.helper_exe = current;
+                assert_scan(&sandbox, true, None);
+                sandbox.projector.helper_exe = stable;
+            }
+            // External edits take precedence over helper relocation and survive cleanup.
+            let mut config = doc(&sandbox, agent);
+            let field = match agent {
+                Agent::Codex => &["model"][..],
+                Agent::ClaudeCode => &["apiKeyHelper"][..],
+                Agent::OpenCode => &["model"][..],
+                Agent::Pi => &["providers", "private-ai-gateway", "apiKey"][..],
+                Agent::Hermes => &["providers", "private-ai-gateway", "key_cmd"][..],
+            };
+            config.set_str(field, "external-edit").unwrap();
+            write(&path, &config.render().unwrap());
+            assert_scan(&sandbox, false, Some("no longer matches"));
+            disconnect(&sandbox, agent);
+            assert_eq!(
+                doc(&sandbox, agent).get_str(field).as_deref(), Some("external-edit"),
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_output_resolves_the_discovered_shebang_runtime() {
@@ -2123,6 +2236,14 @@ mod tests {
                 Agent::Hermes.config_path(&projector.home, projector.tool_env),
                 expected.join("config.yaml")
             );
+            assert_eq!(
+                Agent::Pi.config_path(&projector.home, projector.tool_env),
+                if case == "isolated" {
+                    home.join(".pi").join("agent").join("models.json")
+                } else {
+                    root.join("pi-override").join("models.json")
+                }
+            );
             if case == "isolated" {
                 assert!(!projector.tool_env);
                 assert_eq!(projector.data_dir, home.join(".private-ai-gateway"));
@@ -2164,6 +2285,8 @@ mod tests {
                 .env("USERPROFILE", root.path().join("user"))
                 .env("APPDATA", root.path().join("roaming"))
                 .env("XDG_DATA_HOME", root.path().join("data"))
+                .env("PI_CODING_AGENT_DIR", root.path().join("pi-override"))
+                .env("PI_AGENT_DIR", root.path().join("unused-pi-dir"))
                 .env("PATH", "")
                 .env_remove(HOME_OVERRIDE_ENV)
                 .env_remove("HERMES_HOME")
@@ -2434,6 +2557,11 @@ mod tests {
         let sandbox = sandbox("providers");
         let catalog = catalog();
         let options = claude_options();
+        let path = Agent::Codex.config_path(&sandbox.home, false);
+        write(&path, "[model_providers.private_ai_gateway]\n\
+                      env_key = 'OLD_KEY'\n\
+                      experimental_bearer_token = 'old-synthetic-token'\n\
+                      requires_openai_auth = true\n");
 
         let preview = sandbox
             .projector
@@ -2451,6 +2579,13 @@ mod tests {
             .unwrap();
         assert!(status.connected);
         let codex = doc(&sandbox, Agent::Codex);
+        for key in ["env_key", "experimental_bearer_token", "requires_openai_auth"] {
+            assert_eq!(
+                codex.get_value(&["model_providers", "private_ai_gateway", key]), None,
+            );
+        }
+        assert!(!fs::read_to_string(sandbox.projector.store_path())
+            .unwrap().contains("old-synthetic-token"));
         assert_eq!(
             codex.get_str(&["model_provider"]).as_deref(),
             Some("private_ai_gateway")
@@ -2512,6 +2647,16 @@ mod tests {
         assert_eq!(generated["models"][0]["web_search_tool_type"], "text");
         assert_eq!(generated["models"][0]["shell_type"], "unified_exec");
         disconnect(&sandbox, Agent::Codex);
+        let restored = doc(&sandbox, Agent::Codex);
+        for (key, value) in [
+            ("env_key", ConfigValue::Str("OLD_KEY".into())),
+            ("experimental_bearer_token", ConfigValue::Str("old-synthetic-token".into())),
+            ("requires_openai_auth", ConfigValue::Bool(true)),
+        ] {
+            assert_eq!(
+                restored.get_value(&["model_providers", "private_ai_gateway", key]), Some(value),
+            );
+        }
 
         let preview = sandbox
             .projector
@@ -2551,7 +2696,11 @@ mod tests {
     #[test]
     fn pi_and_hermes_use_verified_model_discovery() {
         let sandbox = sandbox("discovery-providers");
-        let catalog = catalog();
+        let catalog = Catalog::from_remote(&json!({"data": [
+            {"id": "openai/gpt-oss-20b", "input_modalities": ["text", "image", "audio"],
+             "pricing": {"prompt": "0.000001"}},
+            {"id": "phala/qwen"}
+        ]}), 1).unwrap();
         let options = ConnectOptions::default();
 
         let preview = sandbox
@@ -2573,6 +2722,12 @@ mod tests {
         };
         assert_eq!(provider["models"].as_array().unwrap().len(), 2);
         assert_eq!(provider["models"][0]["id"], "openai/gpt-oss-20b");
+        assert_eq!(provider["models"][0]["input"], json!(["text", "image"]));
+        assert_eq!(
+            provider["models"][0]["cost"],
+            json!({"input": 1.0, "output": 0, "cacheRead": 0, "cacheWrite": 0}),
+        );
+        assert!(provider["models"][1].get("cost").is_none());
         assert_eq!(
             provider["apiKey"],
             format!(
