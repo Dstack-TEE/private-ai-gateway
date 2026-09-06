@@ -497,6 +497,20 @@ test("success colors, list separators, control sizes and About alignment are con
   }
 });
 
+test("availability and connection badges render visible status dots", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  for (const label of ["Available", "Connected", "Not connected"]) {
+    const badge = page.locator('[data-slot="badge"]').filter({ hasText: new RegExp(`^${label}$`) }).first();
+    const dot = badge.locator('[data-slot="status-dot"]');
+    await expect(dot).toHaveCSS("width", "6px");
+    await expect(dot).toHaveCSS("height", "6px");
+    await expect(dot).toHaveCSS("background-color", await badge.evaluate((node) => getComputedStyle(node).color));
+  }
+  await page.getByRole("switch", { name: "Stop protection", exact: true }).click();
+  const unavailable = page.locator('[data-slot="badge"]').filter({ hasText: /^Unavailable$/ });
+  await expect(unavailable.locator('[data-slot="status-dot"]')).toHaveCSS("width", "6px");
+});
+
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
   for (const [scenario, message] of [
     ["update-unpublished", "No releases published in this channel yet"],

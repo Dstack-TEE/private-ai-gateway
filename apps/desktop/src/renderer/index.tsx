@@ -1713,7 +1713,7 @@ function AgentRow({
       : agent.error
         ? { label: "Error", tone: "danger" as Tone, icon: TriangleAlert }
         : agent.connected
-          ? { label: "Connected", tone: "success" as Tone, icon: ShieldCheck }
+          ? { label: "Connected", tone: "success" as Tone, icon: undefined }
           : { label: "Not connected", tone: "neutral" as Tone, icon: undefined };
   const disconnecting = agent.recorded;
   const actionable = disconnecting || !agent.error;
@@ -1761,7 +1761,7 @@ function StateLabel({
 }): React.JSX.Element {
   return (
     <Badge variant={tone === "danger" || tone === "warning" ? "destructive" : "outline"} className={tone === "success" ? "border-success/20 bg-success/10 text-success" : undefined}>
-      {Icon ? <Icon size={13} aria-hidden="true" /> : <span className="dot" aria-hidden="true" />}
+      {Icon ? <Icon size={13} aria-hidden="true" /> : <span data-slot="status-dot" className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />}
       {text}
     </Badge>
   );
