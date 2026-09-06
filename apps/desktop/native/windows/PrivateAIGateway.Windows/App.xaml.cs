@@ -35,7 +35,7 @@ public partial class App : Application
         Trace("app:activating");
         MainWindow.Activate();
         Trace("app:activated");
-        if (Environment.GetCommandLineArgs().Contains("--autostart") || IsSmokeTest) MainWindow.HideAfterLaunch();
+        if (Environment.GetCommandLineArgs().Contains("--autostart")) MainWindow.HideAfterLaunch();
     }
 
     private static void WriteCrashLog(Exception error)

@@ -138,7 +138,7 @@ public sealed class MainWindow : Window
         Activate();
     }
 
-    public void HideAfterLaunch() => DispatcherQueue.TryEnqueue(appWindow.Hide);
+    public void HideAfterLaunch() => DispatcherQueue.TryEnqueue(() => appWindow.Hide());
 
     public void ShowSettings()
     {
