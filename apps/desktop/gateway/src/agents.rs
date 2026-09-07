@@ -4092,11 +4092,11 @@ mod tests {
             let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
             let pi = statuses.iter().find(|status| status.id == "pi").unwrap();
             assert!(pi.recorded && !pi.connected && !pi.authorized);
-            assert!(pi
-                .attention
-                .as_deref()
-                .unwrap()
-                .contains("no longer matches"));
+            assert!(pi.attention.is_some());
+            assert!(matches!(
+                pi.repair_action,
+                Some(AgentRepairAction::Reconnect)
+            ));
             assert_eq!(tokens.agent_for(&pi_token), None);
             assert_eq!(fs::read(&config_path).unwrap(), edited);
             assert_eq!(
