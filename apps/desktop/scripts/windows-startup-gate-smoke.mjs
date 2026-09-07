@@ -85,12 +85,15 @@ try {
     platform: "windows",
     destination: portable,
   });
+  const nsisEnv = Object.fromEntries(Object.entries(env).filter(
+    ([key]) => !["NSISDIR", "NSISCONFDIR"].includes(key.toUpperCase()),
+  ));
   await execute(makeNsis, [
     `-DBUNDLEID=${identifier}`,
     `-DHOOKS_DIR=${path.join(appRoot, "src-tauri/installer")}`,
     `-DOUTPUT=${fixture}`,
     path.join(appRoot, "src-tauri/installer/windows-startup-gate-fixture.nsi"),
-  ], { env, timeout: 20_000, windowsHide: true });
+  ], { env: nsisEnv, timeout: 20_000, windowsHide: true });
 
   gate = spawn(fixture, ["/S"], { env, stdio: "ignore", windowsHide: true });
   await once(gate, "spawn");

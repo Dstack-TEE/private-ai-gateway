@@ -301,9 +301,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tools = @(Get-ChildItem "$env:LOCALAPPDATA/tauri" -Filter makensis.exe -File -Recurse)
-          if ($tools.Count -ne 1) { throw 'Expected one Tauri-managed makensis.exe' }
-          $makensis = $tools[0].FullName
+          $makensis = Join-Path $env:LOCALAPPDATA 'tauri/NSIS/makensis.exe'
+          if (!(Test-Path -LiteralPath $makensis -PathType Leaf)) { throw 'Tauri-managed makensis.exe is missing' }
           node scripts/windows-startup-gate-smoke.mjs $makensis
           if ($LASTEXITCODE -ne 0) { throw 'Windows startup-gate smoke failed' }
 
