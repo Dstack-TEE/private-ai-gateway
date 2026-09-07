@@ -38,10 +38,38 @@ test("compact overview separates provider verification from current-session usag
   }
 });
 
+test("development policy changes stop protection only after confirmation", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  const policy = page.getByRole("switch", { name: "Allow development OS" });
+  await expect(policy).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await policy.click();
+  await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
+  await expect(policy).not.toBeChecked();
+  page.once("dialog", (dialog) => dialog.accept());
+  await policy.click();
+  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+  await expect(policy).toBeChecked();
+});
+
+test("startup requests undetermined notification permission and proof content reserves a scrollbar lane", async ({ page }) => {
+  await page.goto("/?mock=notifications-prompt");
+  await expect(page.locator("html")).toHaveAttribute("data-notification-permission-requested", "true");
+  await expect(page.getByText(/System permission is needed/)).toHaveCount(0);
+  await page.goto("/?mock=ready&native-dialog=usage-proof&record=51be02");
+  const proof = page.locator(".proof-card");
+  await expect(proof).toHaveCSS("padding-right", "20px");
+  await expect(proof).toHaveCSS("scrollbar-gutter", "stable");
+  expect(await proof.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+});
+
 test("CLI registration and explicit backend recovery are reachable", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings" }).click();
-  const cli = page.getByRole("region", { name: "Command Line", exact: true });
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  const cli = page.locator(".settings-advanced");
   await cli.getByRole("button", { name: "Install", exact: true }).click();
   await cli.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(cli.getByRole("button", { name: "Install", exact: true })).toBeVisible();
@@ -53,7 +81,8 @@ test("CLI registration and explicit backend recovery are reachable", async ({ pa
 test("CLI startup errors remain visible until a successful retry", async ({ page }) => {
   await page.goto("/?mock=cli-startup-error");
   await nav(page, "Settings").click();
-  const cli = page.getByRole("region", { name: "Command Line", exact: true });
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  const cli = page.locator(".settings-advanced");
   await expect(cli).toContainText("Move Private AI Gateway to a stable location");
   await cli.getByRole("button", { name: "Install", exact: true }).click();
   await expect(cli).not.toContainText("Move Private AI Gateway to a stable location");
@@ -472,10 +501,12 @@ test("profile imports require confirmation, stay unverified and preserve the act
 test("diagnostics export has success and error feedback", async ({ page }) => {
   await page.goto("/?mock=ready");
   await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
   await page.getByRole("button", { name: "Export diagnostics" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Diagnostics exported" })).toContainText("without keys");
   await page.goto("/?mock=export-error");
   await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
   await page.getByRole("button", { name: "Export diagnostics" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Could not export diagnostics." })).toBeVisible();
 });
@@ -721,7 +752,8 @@ test("network listeners show discovered addresses and require explicit save cons
   await sheet.getByRole("button", { name: "Choose listen address" }).click();
   await page.getByRole("option", { name: "192.168.1.20 en0" }).click();
   await expect(input).toHaveValue("192.168.1.20");
-  await expect(sheet.getByRole("alert")).toContainText("unencrypted HTTP");
+  await sheet.getByRole("button", { name: "Network access warning" }).hover();
+  await expect(page.getByRole("tooltip")).toContainText("unencrypted HTTP");
   page.once("dialog", (dialog) => { expect(dialog.message()).toContain("192.168.1.20"); void dialog.dismiss(); });
   await sheet.getByRole("button", { name: "Save", exact: true }).click();
   await expect(sheet).toBeVisible();
@@ -754,7 +786,8 @@ test("rotating the client key requires an explicit native confirmation", async (
   expect(listen?.y).toBe(port?.y);
   await expect(page.getByRole("switch", { name: "Allow network access" })).toHaveCount(0);
   await page.getByLabel("Listen address", { exact: true }).fill("192.168.1.20");
-  await expect(page.getByText(/The local API uses unencrypted HTTP/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Network access warning" })).toBeVisible();
   await page.getByLabel("Listen address", { exact: true }).fill("127.0.0.1");
   await page.keyboard.press("Escape");
   const original = await key.inputValue();
@@ -934,12 +967,13 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localSheet.locator('.sheet-footer > [data-slot="separator"]')).toHaveCSS("height", "1px");
   await localSheet.getByLabel("Listen address", { exact: true }).fill("192.168.1.20");
   await page.keyboard.press("Escape");
-  await expect(localSheet.getByRole("alert")).toContainText("trusted network");
+  await localSheet.getByRole("button", { name: "Network access warning" }).hover();
+  await expect(page.getByRole("tooltip")).toContainText("trusted network");
   await localSheet.getByLabel("Listen address", { exact: true }).fill("127.0.0.1");
   await page.keyboard.press("Escape");
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
   await expect(localSheet.getByRole("button", { name: "Save" })).toBeEnabled();
-  await expect(localSheet).toContainText("Saving briefly restarts protection");
+  await expect(localSheet).not.toContainText("Saving briefly");
   await localSheet.getByLabel("Port", { exact: true }).fill("4181");
   await localSheet.getByRole("button", { name: "Save", exact: true }).click();
   await expect(localSheet).not.toBeVisible();
@@ -1399,12 +1433,13 @@ test("editing a live profile reconnects, while a failed candidate stays unsaved 
   await profiles.getByRole("button", { name: "Edit RedPill" }).click();
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor.getByLabel("RedPill API key")).toBeEnabled();
-  await expect(editor.getByText(/Saving briefly stops protection/)).toBeVisible();
+  await expect(editor.getByText(/Saving briefly stops protection/)).toHaveCount(0);
+  page.once("dialog", (dialog) => dialog.accept());
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(profiles).toBeVisible();
   await profiles.getByRole("button", { name: "New Profile" }).click();
   const candidate = page.getByRole("dialog", { name: "New profile" });
-  await expect(candidate.getByText(/Saving briefly stops protection/)).toBeVisible();
+  await expect(candidate.getByText(/Saving briefly stops protection/)).toHaveCount(0);
   await candidate.getByRole("button", { name: "Custom", exact: true }).click();
   await candidate.getByLabel("Service endpoint").fill("https://unreachable.invalid");
   await candidate.getByLabel("API key", { exact: true }).fill("sk-test-candidate");
@@ -1464,9 +1499,11 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   await expect(advanced.getByText("Allow development OS", { exact: true })).toBeVisible();
   const devMode = advanced.getByRole("switch", { name: "Allow development OS" });
   await expect(devMode).toHaveAttribute("aria-checked", "false");
+  page.once("dialog", (dialog) => dialog.accept());
   await devMode.click();
   await expect(page.getByText("Dev mode", { exact: true })).toBeVisible();
   await expect(page.getByRole("switch", { name: "Start protection" })).toHaveClass(/is-development/);
+  page.once("dialog", (dialog) => dialog.accept());
   await devMode.click();
 
   const localApi = page.locator("section", { has: page.getByRole("heading", { name: "Local API", level: 2 }) });

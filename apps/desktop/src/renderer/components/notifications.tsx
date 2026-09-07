@@ -10,6 +10,15 @@ function useNotificationSettings(api: DesktopApi) {
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const startupRequested = useRef(false);
+  useEffect(() => {
+    if (!data || new URLSearchParams(window.location.search).has("native-dialog") || startupRequested.current) return;
+    startupRequested.current = true;
+    if (!data.preferences.enabled || data.permission !== "notDetermined") return;
+    let active = true;
+    void api.requestNotificationPermission().then(() => refresh()).catch(() => { if (active) setError("Could not request notification permission. Check system settings."); });
+    return () => { active = false; };
+  }, [api, data]);
   const refresh = useCallback(async () => {
     const run = ++generation.current;
     try { const value = await api.getNotificationSettings(); if (run === generation.current) { setData(value); setError(undefined); } }

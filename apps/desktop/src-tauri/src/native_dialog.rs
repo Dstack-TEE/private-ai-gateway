@@ -110,9 +110,9 @@ pub fn open(
             label: LOCAL_API_LABEL,
             title: "Local API Settings",
             width: 600.0,
-            height: 680.0,
+            height: 520.0,
             min_width: 540.0,
-            min_height: 580.0,
+            min_height: 480.0,
             query: "index.html?native-dialog=local-api".to_string(),
         },
         "usage-proof" => {
@@ -250,12 +250,10 @@ pub fn open(
         // A deadline for a failed renderer handshake, not a presentation delay.
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         pending.unlisten(listener);
-        if !presented.load(std::sync::atomic::Ordering::Acquire)
-            && matches!(pending.is_visible(), Ok(false))
-        {
+        if !presented.load(std::sync::atomic::Ordering::Acquire) && pending.is_visible().is_ok() {
             let app = pending.app_handle().clone();
             if pending.destroy().is_ok() {
-                app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
                     .report_error(
                         "The dialog could not finish loading. Please try opening it again."
                             .to_string(),
@@ -286,6 +284,10 @@ pub fn open_profiles(app: &AppHandle, repair: bool) -> Result<(), String> {
 }
 
 fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if macos::is_preparing(window)? {
+        return Ok(());
+    }
     if window.is_visible().map_err(window_error)? {
         window.set_focus().map_err(window_error)?;
     }
@@ -317,6 +319,21 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     window
         .emit_to(window.label(), PRESENTED_EVENT, ())
         .map_err(window_error)
+}
+
+pub fn prepare(window: &tauri::WebviewWindow) -> Result<bool, String> {
+    if !DIALOG_LABELS.contains(&window.label()) {
+        return Err("Only native dialogs can prepare presentation".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::prepare(window.clone())?;
+        Ok(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -351,6 +368,33 @@ mod macos {
     use objc2_app_kit::{NSWindow, NSWindowButton};
     use tauri::WebviewWindow;
 
+    pub fn is_preparing(window: &WebviewWindow) -> Result<bool, String> {
+        let result = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let value = result.clone();
+        let target = window.clone();
+        on_main(window, move || {
+            value.store(
+                native(&target)?.alphaValue() == 0.0,
+                std::sync::atomic::Ordering::Release,
+            );
+            Ok(())
+        })?;
+        Ok(result.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub fn prepare(window: WebviewWindow) -> Result<(), String> {
+        let dispatcher = window.clone();
+        on_main(&dispatcher, move || {
+            let sheet = native(&window)?;
+            if sheet.sheetParent().is_none() {
+                sheet.setAlphaValue(0.0);
+                sheet.setIgnoresMouseEvents(true);
+                sheet.orderFront(None);
+            }
+            Ok(())
+        })
+    }
+
     pub fn present(parent: WebviewWindow, window: WebviewWindow) -> Result<(), String> {
         let dispatcher = window.clone();
         on_main(&dispatcher, move || {
@@ -374,6 +418,9 @@ mod macos {
                 content.layoutSubtreeIfNeeded();
                 content.displayIfNeeded();
             }
+            sheet.orderOut(None);
+            sheet.setAlphaValue(1.0);
+            sheet.setIgnoresMouseEvents(false);
             parent.beginSheet_completionHandler(&sheet, None);
             Ok(())
         })

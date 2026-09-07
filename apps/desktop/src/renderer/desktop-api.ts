@@ -120,6 +120,7 @@ export const desktopApi: DesktopApi = {
     return invoke("close_native_dialog");
   },
   nativeDialogReady: () => invoke("native_dialog_ready"),
+  prepareNativeDialog: () => invoke("prepare_native_dialog"),
   onNativeCloseRequest: (listener) => subscribe("gateway://dialog-close-requested", listener),
   openAboutLink(target: "documentation" | "github"): Promise<void> {
     return invoke("open_about_link", { target });

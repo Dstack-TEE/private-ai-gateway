@@ -436,6 +436,7 @@ export function mockApi(name: string | null): DesktopApi {
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => { document.documentElement.dataset.nativePresented = "true"; },
+    prepareNativeDialog: async () => true,
     onNativeCloseRequest: (listener) => {
       window.addEventListener("mock:native-close", listener);
       return () => window.removeEventListener("mock:native-close", listener);
@@ -584,7 +585,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (name === "notification-save-error") throw new Error("Preference unavailable");
       for (const [key, value] of Object.entries(config)) localStorage.setItem(`mock:notifications:${key}`, String(value));
     },
-    requestNotificationPermission: async () => { localStorage.setItem("mock:notifications:permission", "granted"); return { permission: "granted", alertsEnabled: true }; },
+    requestNotificationPermission: async () => { document.documentElement.dataset.notificationPermissionRequested = "true"; localStorage.setItem("mock:notifications:permission", "granted"); return { permission: "granted", alertsEnabled: true }; },
     openNotificationSettings: async () => { document.documentElement.dataset.notificationSettingsOpened = "true"; },
     queryUsage: async (query: UsageQuery) => {
       if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));

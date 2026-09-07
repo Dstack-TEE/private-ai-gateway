@@ -127,6 +127,13 @@ update badges and inline errors remain available without notification delivery.
 
 Native dialogs wait for content, font readiness and image decoding before the
 presentation handshake. Example dialogs also wait for their local key read.
+On macOS presentation has a short transparent preparation stage: the window is
+ordered without becoming key, ignores mouse events, then the renderer waits for
+visible animation frames before beginning the sheet. This uses public AppKit
+APIs, not snapshots or fixed presentation sleeps. Animation frames are not a
+cross-process compositor guarantee; transparent-window visibility and first-frame
+behavior require installed-app acceptance on supported macOS versions. The
+handshake watchdog also removes a stalled transparent window.
 Native dialogs receive the saved appearance with their initial state and apply
 it in a layout effect, avoiding a temporary System-theme render before the async
 preferences read. Recharts is loaded only on Usage; its fixed-height shell stays
@@ -138,6 +145,11 @@ pool retains credentials. A 20-second failed-handshake deadline cleans up an
 unpresented window and reports the failure in the main window. Browser checks
 cover readiness ordering; compositor behavior still requires macOS acceptance.
 SheetActions provides one shared footer divider.
+Proof and privacy scroll content reserve an overlay-scrollbar lane; scrollable
+surfaces use scrollbar-gutter while non-scrolling native dialog roots do not.
+
+Oh My Pi's local SVG comes from can1357/oh-my-pi, commit
+08db86f87bda871e574eda56de39745523836116, assets/icon.svg (MIT; adjacent LICENSE).
 Sidebar navigation uses SidebarMenu, information rows use Item, status labels use
 Badge, and errors use Alert/FieldError. Agent detection runs on startup, window
 activation and Agents navigation, plus background reconciliation; no refresh button.
@@ -343,7 +355,7 @@ both public settings are present. No signing secrets are embedded in the app.
 The macOS DMG app automatically attempts user-level `pag` registration after it
 is launched from a stable location. Mounted disk images and App Translocation are
 rejected so they cannot leave a broken command link. It does not request
-administrator privileges or edit shell profiles. Settings > Command Line retains
+administrator privileges or edit shell profiles. Settings > Advanced retains
 startup errors for retry; removing the command there disables registration on
 subsequent launches. No PKG installer is produced.
 

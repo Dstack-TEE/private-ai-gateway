@@ -51,11 +51,13 @@ import { UsageChart, type UsageMetric } from "./components/usage-chart";
 import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
+import { NetworkWarning } from "./components/network-warning";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
+import ohMyPiIcon from "./assets/oh-my-pi.svg";
 import { ProfileTransfer, ExportDiagnostics } from "./components/maintenance";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { prepareDialogPresentation } from "./lib/dialog-presentation";
+import { prepareDialogPresentation, waitForDialogFrames } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
@@ -152,6 +154,7 @@ const AGENT_ICONS: Record<string, string> = {
   "claude-code": claudeCodeIcon,
   opencode: openCodeIcon,
   pi: piIcon,
+  "oh-my-pi": ohMyPiIcon,
   hermes: hermesIcon,
   openclaw: openClawIcon,
 };
@@ -284,14 +287,19 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   useEffect(() => {
     if (!loaded || (!contentReady && !loadError) || closed || presented.current) return;
     let active = true;
+    const controller = new AbortController();
     void prepareDialogPresentation().then(async () => {
       if (!active || presented.current) return;
+      const warmup = await desktopApi.prepareNativeDialog();
+      if (!active) return;
+      if (warmup) await waitForDialogFrames(controller.signal);
+      if (!active) return;
       presented.current = true;
       await desktopApi.nativeDialogReady();
     }).catch((error: unknown) => {
       if (active) setLoadError(errorMessage(error));
     });
-    return () => { active = false; };
+    return () => { active = false; controller.abort(); };
   }, [loaded, contentReady, loadError, closed]);
 
   useEffect(() => {
@@ -837,6 +845,16 @@ function App(): React.JSX.Element {
     );
   };
 
+  const changeDevelopmentOs = async (enabled: boolean) => {
+    try {
+      if (!await desktopApi.confirm({ title: enabled ? "Allow development OS?" : "Require production OS?", message: "Protection will stop before changing this policy.", confirmLabel: "Stop and Change" })) return;
+      setApplying(true);
+      setState(await desktopApi.stop());
+      setAllowDevelopmentOs(enabled);
+    } catch (error) { setActionError(errorMessage(error)); }
+    finally { setApplying(false); }
+  };
+
   const verifyConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
     setActionError(undefined);
     try {
@@ -1093,7 +1111,7 @@ function App(): React.JSX.Element {
             anyRecorded={anyRecorded}
             locked={locked || Object.keys(pendingAgentChanges).length > 0}
             problem={problem}
-            onPolicy={setAllowDevelopmentOs}
+            onPolicy={(value) => void changeDevelopmentOs(value)}
             onRestoreAll={() => void restoreAll()}
             onAboutLink={(target) => void run(() => desktopApi.openAboutLink(target))}
             onOpen={openSettings}
@@ -1713,7 +1731,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
     <section className="session-overview" aria-labelledby="session-usage-heading">
-      <header className="session-overview-heading"><h2 id="session-usage-heading">Current session</h2></header>
+      <h2 className="sr-only" id="session-usage-heading">Current session</h2>
     <div className="session-summary" role="group" aria-label="Usage in this session">
       <div><span>Requests</span><strong>{active ? summary.requests.toLocaleString() : "—"}</strong></div>
       <div><span>Tokens</span><strong>{active ? formatTokens(totalTokens) : "—"}</strong></div>
@@ -1746,7 +1764,7 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
   const icon = AGENT_ICONS[agent.id];
   return (
     <span className="mark" aria-hidden="true">
-      {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
+      {agent.id === "oh-my-pi" ? <span className="agent-symbol" style={{ maskImage: `url("${ohMyPiIcon}")` }} /> : icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
 }
@@ -1827,7 +1845,7 @@ function AgentRow({
   const note = agent.attention ?? agent.error;
   return (
     <><Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
-      <span className={agent.connected ? "agent-mark-on" : undefined}><AgentMark agent={agent} /></span>
+      <span className={agent.connected ? "agent-mark-on" : "agent-mark-off"}><AgentMark agent={agent} /></span>
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
           <span className="row-title">{name}</span>
@@ -2153,7 +2171,6 @@ function CliRegistrationControl(): React.JSX.Element {
     </ItemContent>
     <ItemActions>
       <Button variant="outline" disabled={busy || !registration} onClick={() => void change()}>
-        <SquareTerminal aria-hidden="true" />
         {busy ? "Working…" : registration?.installed ? "Remove" : "Install"}
       </Button>
     </ItemActions>
@@ -2214,16 +2231,14 @@ function SettingsView({
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
 
-      <SettingsSection title="Command Line">
-        <CliRegistrationControl />
-      </SettingsSection>
-
       <Collapsible className="group settings-advanced">
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <SettingsToggle label="Allow development OS" description={`Accept development OS images that are not intended for production workloads.${frozen ? " Stop protection to change this setting." : ""}`} checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={frozen} onToggle={() => onPolicy(!allowDevelopmentOs)} />
+          <SettingsToggle label="Allow development OS" checked={allowDevelopmentOs} developmentMode={allowDevelopmentOs} disabled={locked} onToggle={() => onPolicy(!allowDevelopmentOs)} />
           <UpdateChannelControl updates={updates} />
+          <CliRegistrationControl />
+          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
           </SettingsList>
         </CollapsibleContent>
       </Collapsible>
@@ -2233,7 +2248,6 @@ function SettingsView({
       <SettingsSection title="About">
           <UpdateControl updates={updates} productName={brand.productName} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
-          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
       </SettingsSection>
       {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}
     </div>
@@ -2383,7 +2397,6 @@ function ProfileListSheet({
           );
         })}
       </div>
-      {running && <p className="field-note profile-lock-note">Switching profiles briefly stops protection and reconnects to the selected provider.</p>}
       {(error || openError) && <Alert variant="destructive"><AlertDescription>{error || openError}</AlertDescription></Alert>}
       {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
       <SheetActions leading={
@@ -2480,17 +2493,16 @@ function ProfileEditorSheet({
     event.preventDefault();
     setSaving(true);
     setError(undefined);
-    const message = await onVerify(draft, apiKeyDraft.trim() || undefined);
-    setSaving(false);
-    if (message) {
-      setError(message);
-      return;
-    }
-    onComplete();
+    try {
+      if (running && profile?.id === state.activeProfileId && !await desktopApi.confirm({ title: "Save and reconnect?", message: "Saving this active profile restarts protection. In-flight requests may be interrupted.", confirmLabel: "Save and Reconnect" })) return;
+      const message = await onVerify(draft, apiKeyDraft.trim() || undefined);
+      if (message) setError(message);
+      else onComplete();
+    } catch (error) { setError(errorMessage(error)); }
+    finally { setSaving(false); }
   };
   return (
     <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet form-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
-      {running && <p className="field-note">Saving briefly stops protection, verifies this profile, then reconnects. If verification fails, protection stays off.</p>}
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-1">
         <FieldGroup>
@@ -2613,14 +2625,14 @@ function LocalApiSheet({
         <div className="sheet-scroll py-4">
           <FieldGroup>
           <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-start gap-4">
-          <FormField id="local-listen-address" label="Listen address">
+          <Field>
+            <div className="flex items-center gap-2"><FieldLabel htmlFor="local-listen-address">Listen address</FieldLabel>{networkAccess && <NetworkWarning />}</div>
             <ListenAddress api={desktopApi} value={draft.listenAddress} disabled={frozen || saving} onChange={(value) => update("listenAddress", value)} />
-          </FormField>
+          </Field>
           <FormField id="local-port" label="Port">
             <Input id="local-port" title="1024–65535" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
           </FormField>
           </div>
-          {networkAccess && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">The local API uses unencrypted HTTP. Other devices need the client key. Use only a trusted network; never expose this port to the internet.</AlertDescription></Alert>}
           <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
             <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} required={addressKind === "unspecified"} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />
           </FormField>
@@ -2628,17 +2640,16 @@ function LocalApiSheet({
           <Field>
             <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
             <InputGroup>
-              <InputGroupInput id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly aria-describedby="client-key-note" />
+              <InputGroupInput id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} title={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton>
                 <InputGroupButton size="icon-xs" aria-label="Copy client key" title="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton>
                 <InputGroupButton size="icon-xs" aria-label="Rotate key" title="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton>
               </InputGroupAddon>
             </InputGroup>
-            <FieldDescription id="client-key-note">{copied === "Client key" ? "Copied" : "Stored in an owner-only file; agent keys are separate."}</FieldDescription>
+            {copied === "Client key" && <FieldDescription role="status">Copied</FieldDescription>}
           </Field>
           </FieldGroup>
-          {isProtected(state) && <p className="sheet-text">Saving briefly restarts protection and updates connected agents. In-flight requests may be interrupted.</p>}
         </div>
         <FieldError className="mt-3">{error ?? externalError}</FieldError>
         <SheetActions leading={
