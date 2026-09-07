@@ -50,6 +50,7 @@ import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { NetworkWarning } from "./components/network-warning";
+import { AgentAttention } from "./components/agent-attention";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
 import ohMyPiIcon from "./assets/oh-my-pi.svg";
@@ -191,7 +192,7 @@ function hasLiveVerification(state: GatewayState): boolean {
 
 function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
   const active = isProtected(state);
-  const since = active ? state.protectedSince : undefined;
+  const since = active || state.reconnecting ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (since === undefined) return;
@@ -203,9 +204,9 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
   const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
   return (
     <span className="protection-status">
-      {active ? <ShieldCheck size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
+      {active ? <ShieldCheck size={14} aria-hidden="true" /> : state.reconnecting ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{label}</span>
-      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Protected for ${elapsed}`} title={`Protected since ${formatTimestamp((since ?? 0) * 1_000, true)}`}>{elapsed}</time>}
+      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`} title={`Session started ${formatTimestamp((since ?? 0) * 1_000, true)}`}>{elapsed}</time>}
     </span>
   );
 }
@@ -818,12 +819,12 @@ function App(): React.JSX.Element {
 
   const toggleGateway = () => {
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
-    if (!running && !busy && !profileIsAvailable(activeProfile, state)) {
+    if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
       showProfiles(Boolean(activeProfile));
       return;
     }
     void run(() =>
-      running || busy ? desktopApi.stop() : desktopApi.start({ remoteUrl: state.config.remoteUrl, requireProductionOs: !allowDevelopmentOs }),
+      running || busy || state.reconnecting ? desktopApi.stop() : desktopApi.start({ remoteUrl: state.config.remoteUrl, requireProductionOs: !allowDevelopmentOs }),
     );
   };
 
@@ -932,8 +933,8 @@ function App(): React.JSX.Element {
       while (agentIntents.current.has(agent.id)) {
         const target = agentIntents.current.get(agent.id);
         if (target === undefined) break;
-        if (changed.recorded !== target) {
-          const options = target && agent.id === "codex" ? { defaultModel: models[0]?.id } : {};
+        if (changed.recorded !== target || (target && !changed.authorized && changed.attention)) {
+          const options = target && agent.id === "codex" && !agent.recorded ? { defaultModel: models[0]?.id } : {};
           const preview = await desktopApi.previewAgent(agent.id, target, options);
           const status = await desktopApi.applyAgent(agent.id, target, preview.revision, options);
           changed = status;
@@ -1440,7 +1441,7 @@ function Overview({
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
-  const recent = protectedNow ? state.activity.slice(0, 4) : [];
+  const recent = protectedNow || state.reconnecting ? state.activity.slice(0, 4) : [];
   return (
     <div className="overview-page">
       <div className="overview-top">
@@ -1455,7 +1456,7 @@ function Overview({
         onSettings={onSettings}
         onPrivacy={onPrivacy}
       />
-      <SessionSummary summary={state.sessionUsage} active={protectedNow} />
+      <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.reconnecting)} />
       </div>
       {problem && (
         <p className="banner overview-banner" role="alert">
@@ -1538,10 +1539,11 @@ function StatusSurface({
       <TrackLayer />
       <span className="status-background-mark" aria-hidden="true" style={{ maskImage: `url("${brand.mark.light}")` }} />
       <div className="status-compact-content">
-        <Button variant="ghost" className={`status-verdict-button state-${verdict.tone}`} aria-label="Privacy verification" title="View privacy verification" aria-haspopup="dialog" onClick={onPrivacy}>
+        <div className={`status-heading state-${verdict.tone}`}>
           <ProtectionStatus state={state} label={verdict.title} />
-        </Button>
-        <Button id="overview-profile" variant="outline" className="status-profile" title={activeProfile?.name ?? "Set up profile"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
+        </div>
+        <Button variant="outline" size="xs" className="status-privacy" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Privacy verification</Button>
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile" title={activeProfile?.name ?? "Set up profile"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
@@ -1604,10 +1606,10 @@ function ProtectedControl({
   onToggle(): void;
 }): React.JSX.Element {
   const protectionStarting = busy && !state.configurationVerification;
-  const checked = running || protectionStarting;
+  const checked = running || protectionStarting || Boolean(state.reconnecting);
   const label = busy
     ? state.configurationVerification ? "Verifying configuration" : "Cancel protection start"
-    : running ? "Stop protection" : "Start protection";
+    : state.reconnecting ? "Cancel reconnection" : running ? "Stop protection" : "Start protection";
   return (
     <div className={`protected-control ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only" : ""}`}>
       {!iconOnly && <span>Protected</span>}
@@ -1830,10 +1832,11 @@ function AgentRow({
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
           <span className="row-title">{name}</span>
-          <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />
+          {note && pendingConnection === undefined
+            ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
+            : <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />}
         </ItemTitle>
         {agent.installed && !compact && <ItemDescription title={agent.configPath}>{homePath(agent.configPath)}</ItemDescription>}
-        {note && <ItemDescription>{note}</ItemDescription>}
       </ItemContent>
       <ItemActions>
       {agent.installed ? <SwitchControl
@@ -2764,6 +2767,9 @@ function presentation(state: GatewayState): {
   /** A Settings shortcut when the fix lives there. */
   settings?: string;
 } {
+  if (state.reconnecting) {
+    return { title: "Reconnecting", detail: state.error ?? "Requests are paused until verification succeeds. You can cancel reconnection with the switch.", tone: "neutral" };
+  }
   if (state.endpointError) {
     return {
       title: "Not protected",
@@ -2779,7 +2785,7 @@ function presentation(state: GatewayState): {
     case "blocked":
       return { title: "Protection blocked", detail: state.error ?? "The verified identity or policy changed. Forwarding is fail-closed until a new verification succeeds.", tone: "danger" };
     case "error":
-      return { title: "Verification failed", detail: "Nothing was sent. Check the service address and start again.", tone: "danger", settings: "Open Settings" };
+      return { title: "Protection interrupted", detail: state.error ?? "Forwarding is paused. Check the connection and profile, then start protection again.", tone: "danger", settings: "Open Settings" };
     case "stopped":
       return { title: "Not protected", detail: "Start to verify the service and route your agents through it.", tone: "neutral" };
     case "verified":

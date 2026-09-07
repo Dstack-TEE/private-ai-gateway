@@ -54,14 +54,14 @@ test("development policy changes stop protection only after confirmation", async
   await expect(policy).toBeChecked();
 });
 
-test("startup requests undetermined notification permission and proof content reserves a scrollbar lane", async ({ page }) => {
+test("startup requests notification permission and proof content keeps symmetric padding", async ({ page }) => {
   await page.goto("/?mock=notifications-prompt");
   await expect(page.locator("html")).toHaveAttribute("data-notification-permission-requested", "true");
   await expect(page.getByText(/System permission is needed/)).toHaveCount(0);
   await page.goto("/?mock=ready&native-dialog=usage-proof&record=51be02");
   const proof = page.locator(".proof-card");
-  await expect(proof).toHaveCSS("padding-right", "20px");
-  await expect(proof).toHaveCSS("scrollbar-gutter", "stable");
+  await expect(proof).toHaveCSS("padding-right", "0px");
+  await expect(proof).toHaveCSS("scrollbar-gutter", "auto");
   expect(await proof.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
 });
 
@@ -591,19 +591,43 @@ test("fixed sidebar does not consume Cmd+B or Ctrl+B", async ({ page }) => {
   expect(prevented).toEqual([false, false]);
 });
 
+test("reconnection preserves visible session totals and can be cancelled", async ({ page }) => {
+  await page.goto("/?mock=reconnecting");
+  const card = page.getByLabel("Protection status");
+  await expect(card.getByText("Reconnecting", { exact: true })).toBeVisible();
+  await expect(card.getByRole("switch", { name: "Cancel reconnection" })).toBeChecked();
+  await expect(page.locator(".session-summary strong").first()).not.toHaveText("—");
+  await card.getByRole("switch", { name: "Cancel reconnection" }).click();
+  await expect(card.getByText("Not protected", { exact: true })).toBeVisible();
+  await expect(page.locator(".session-summary strong")).toHaveText(["—", "—", "—", "—"]);
+});
+
+test("agent attention badges expose the correct recovery action", async ({ page }) => {
+  await page.goto("/?mock=needs-attention");
+  await nav(page, "Agents").click();
+  await page.getByRole("button", { name: "Claude Code: Reconnect required" }).click();
+  await expect(page.getByText("Gateway authentication settings changed.", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect Claude Code", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Claude Code: Reconnect required" })).toHaveCount(0);
+  await page.getByRole("button", { name: "OpenCode: Finish disconnecting" }).click();
+  await page.getByRole("button", { name: "Disconnect OpenCode", exact: true }).click();
+  await expect(page.getByRole("button", { name: "OpenCode: Finish disconnecting" })).toHaveCount(0);
+});
+
 test("overview profile and setup controls share compact dimensions", async ({ page }) => {
   for (const scenario of ["ready", "no-profiles"]) {
     await page.goto(`/?mock=${scenario}`);
     const card = page.getByLabel("Protection status");
     const profile = card.locator("#overview-profile");
     await expect(profile).toHaveCSS("width", "120px");
-    await expect(profile).toHaveCSS("height", "36px");
+    await expect(profile).toHaveCSS("height", "32px");
     const bounds = await profile.boundingBox();
     const toggle = await card.getByRole("switch").boundingBox();
     expect(bounds).not.toBeNull();
     expect(toggle).not.toBeNull();
-    expect(toggle?.y).toBeGreaterThan((bounds?.y ?? 0) + (bounds?.height ?? 0));
-    await expect(card.locator(".status-background-mark")).toHaveCSS("width", "180px");
+    expect(toggle?.y).toBeLessThan(bounds?.y ?? 0);
+    expect(toggle?.x).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0));
+    await expect(card.locator(".status-background-mark")).toHaveCSS("width", "128px");
   }
 });
 
@@ -879,7 +903,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".status-verdict-button")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
+  await expect(page.locator(".status-heading")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   let editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
@@ -1438,7 +1462,8 @@ test("overview presents local availability and the active profile without sessio
     const verified = node.querySelector('[aria-label="Privacy verification"]')?.getBoundingClientRect();
     const profile = node.querySelector(".status-profile")?.getBoundingClientRect();
     const toggle = node.querySelector('[role="switch"]')?.getBoundingClientRect();
-    return { leftEdges: [verified?.left, toggle?.left, profile?.left], positions: [verified?.bottom ?? 0, profile?.top ?? 0, toggle?.top ?? 0] };
+    const heading = node.querySelector(".status-heading")?.getBoundingClientRect();
+    return { leftEdges: [heading?.left, verified?.left, profile?.left], positions: [toggle?.top ?? 0, verified?.top ?? 0, profile?.top ?? 0] };
   });
   expect(new Set(alignment.leftEdges).size).toBe(1);
   expect(alignment.positions[0]).toBeLessThan(alignment.positions[1]);

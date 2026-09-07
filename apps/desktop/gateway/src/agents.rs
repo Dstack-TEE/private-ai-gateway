@@ -64,18 +64,27 @@ pub struct AgentStatus {
     pub name: String,
     pub config_path: String,
     pub installed: bool,
-    /// The config currently carries this app's projection and a token exists.
+    /// A connected link, including one suspended until protection resumes.
     pub connected: bool,
     /// A connection record exists (whatever the config now says).
     pub recorded: bool,
     /// The proxy would authorize this agent's token right now: recorded,
-    /// enabled, config readable and still exactly the app's projection.
+    /// enabled, config readable and its routing/authentication still managed.
     pub authorized: bool,
     /// Something the user must act on (removed model, incomplete disconnect).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_action: Option<AgentRepairAction>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRepairAction {
+    Reconnect,
+    Disconnect,
 }
 
 /// One config field a connection changes. Sensitive fields never show their
@@ -1225,12 +1234,20 @@ impl Projector {
                     if store.contains_key(agent.id()) {
                         self.suspend(agent, &mut store)?;
                     }
+                    let saved_options = if options.default_model.is_none() {
+                        store
+                            .get(agent.id())
+                            .map(|record| record.options.clone())
+                            .unwrap_or_default()
+                    } else {
+                        options.clone()
+                    };
                     store.insert(
                         agent.id().to_string(),
                         Connection {
                             config_path: Some(path),
                             suspended: true,
-                            options: options.clone(),
+                            options: saved_options,
                             ..Connection::default()
                         },
                     );
@@ -1361,11 +1378,8 @@ impl Projector {
                     path.display()
                 )
             })?;
-        let default_model = record
-            .options
-            .default_model
-            .clone()
-            .or_else(|| selected_model(agent, Some(&doc)));
+        let default_model =
+            selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
             restore(&mut doc, &record, self.secrets.as_ref())?
         } else {
@@ -1410,15 +1424,8 @@ impl Projector {
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
     ) -> Result<(), String> {
-        let options = if agent == Agent::Codex && options.default_model.is_none() {
-            ConnectOptions {
-                default_model: catalog
-                    .and_then(|catalog| catalog.models.first())
-                    .map(|model| model.id().to_string()),
-            }
-        } else {
-            options.clone()
-        };
+        let doc = self.parse_config(agent, text.as_deref())?;
+        let options = connection_options(agent, &doc, store.get(agent.id()), catalog, options);
         if store
             .get(agent.id())
             .is_some_and(|record| record.disabled || record.cleanup_pending)
@@ -1564,7 +1571,8 @@ impl Projector {
             openclaw::validate_config(doc, store.get(agent.id()))?;
             openclaw::validate_selection(doc, options)?;
         }
-        self.validate_native_config(agent, doc, store.get(agent.id()), options, catalog)?;
+        let options = connection_options(agent, doc, store.get(agent.id()), catalog, options);
+        self.validate_native_config(agent, doc, store.get(agent.id()), &options, catalog)?;
         let codex_catalog_path = self.codex_catalog_path();
         let inputs = Inputs {
             endpoint: &self.endpoint,
@@ -1572,7 +1580,7 @@ impl Projector {
             token_path: &self.tokens.path(agent.id()),
             codex_catalog_path: &codex_catalog_path,
             catalog,
-            options,
+            options: &options,
         };
         let fields = fields(agent, &inputs)?;
         let edit = project(doc, &fields, store.get(agent.id()), agent)?;
@@ -1783,6 +1791,7 @@ impl Projector {
             authorized: false,
             attention: None,
             error: None,
+            repair_action: None,
         };
         if agent == Agent::OpenClaw && !installed && record.is_none() {
             return status;
@@ -1838,7 +1847,11 @@ impl Projector {
                         .to_string()
                 })
             });
+            if status.attention.is_some() && installed && status.error.is_none() {
+                status.repair_action = Some(AgentRepairAction::Reconnect);
+            }
             if !record.fields.is_empty() {
+                status.repair_action = Some(AgentRepairAction::Disconnect);
                 status.attention = Some(
                     "Configuration restoration is incomplete; retry stopping protection"
                         .to_string(),
@@ -1847,36 +1860,42 @@ impl Projector {
             return status;
         }
         let managed = doc.as_ref().is_some_and(|doc| {
-            record
-                .fields
-                .iter()
-                .all(|field| doc.get_value(&refs(&field.path)) == field.value)
+            record.fields.iter().all(|field| {
+                (agent == Agent::Codex && field.path == ["model"])
+                    || doc.get_value(&refs(&field.path)) == field.value
+            })
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
         status.connected = managed && token;
         status.authorized = !record.disabled && managed && token;
         if record.cleanup_pending {
+            status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention = Some(
                 "Disconnect did not complete; this agent's access is disabled until Disconnect \
                  is retried"
                     .to_string(),
             );
         } else if record.disabled {
+            status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention =
                 Some("This connection is disabled; Disconnect to restore your config".to_string());
         } else if !managed {
+            if status.error.is_none() {
+                status.repair_action = Some(AgentRepairAction::Reconnect);
+            }
             status.attention = Some(
-                "The config no longer matches what the app wrote (edited outside the app, or \
-                 unreadable); this agent's access is disabled. Disconnect to clean up, or \
-                 reconnect"
+                "The gateway endpoint or authentication settings changed outside the app. \
+                 Access is paused. Reconnect this agent in the app, then restart its CLI to reload the configuration."
                     .to_string(),
             );
         } else if !token {
+            status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention = Some(
                 "This agent's access is revoked; retry Disconnect to restore its config"
                     .to_string(),
             );
         } else if stale_helper(agent, record, &self.helper_exe) {
+            status.repair_action = Some(AgentRepairAction::Reconnect);
             status.connected = false;
             status.authorized = false;
             status.attention = Some(
@@ -1888,7 +1907,7 @@ impl Projector {
             if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
                 if catalog.get(&model).is_none() {
                     status.attention = Some(format!(
-                        "`{model}` is no longer served; choose another model and reconnect"
+                        "`{model}` is not available from the current profile. Choose an available model in the agent; the connection does not need to be recreated."
                     ));
                 }
             }
@@ -2321,6 +2340,33 @@ fn preview_change(
 
 fn refs(path: &[String]) -> Vec<&str> {
     path.iter().map(String::as_str).collect()
+}
+
+fn connection_options(
+    agent: Agent,
+    doc: &ConfigDoc,
+    prior: Option<&Connection>,
+    catalog: Option<&Catalog>,
+    options: &ConnectOptions,
+) -> ConnectOptions {
+    if agent != Agent::Codex || options.default_model.is_some() {
+        return options.clone();
+    }
+    let current = selected_model(agent, Some(doc))
+        .filter(|model| catalog.is_some_and(|catalog| catalog.get(model).is_some()));
+    let saved = prior.and_then(|record| record.options.default_model.clone());
+    let preferred = if prior.is_some_and(|record| record.suspended && record.attention.is_none()) {
+        saved.or(current)
+    } else {
+        current.or(saved)
+    };
+    ConnectOptions {
+        default_model: preferred.or_else(|| {
+            catalog
+                .and_then(|catalog| catalog.models.first())
+                .map(|model| model.id().to_string())
+        }),
+    }
 }
 
 fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
@@ -2767,7 +2813,7 @@ mod tests {
             // External edits take precedence over helper relocation and survive cleanup.
             let mut config = doc(&sandbox, agent);
             let field = match agent {
-                Agent::Codex => &["model"][..],
+                Agent::Codex => &["model_provider"][..],
                 Agent::ClaudeCode => &["apiKeyHelper"][..],
                 Agent::OpenCode => &["model"][..],
                 Agent::Pi => &["providers", "private-ai-gateway", "apiKey"][..],
@@ -2777,7 +2823,7 @@ mod tests {
             };
             config.set_str(field, "external-edit").unwrap();
             write(&path, &config.render().unwrap());
-            assert_scan(&sandbox, false, Some("no longer matches"));
+            assert_scan(&sandbox, false, Some("settings changed"));
             disconnect(&sandbox, agent);
             assert_eq!(
                 doc(&sandbox, agent).get_str(field).as_deref(),
@@ -2978,6 +3024,78 @@ mod tests {
             }
         }
         assert!(credential_helper_command(Path::new("bad\0path"), Agent::Hermes).is_err());
+    }
+
+    #[test]
+    fn codex_model_changes_keep_credentials_but_endpoint_changes_revoke_them() {
+        let sandbox = sandbox("codex-model-preference");
+        let agent = Agent::Codex;
+        let path = agent.config_path(&sandbox.home, false);
+        write(&sandbox.home.join(".local/bin/codex"), "test cli");
+        let options = claude_options();
+        let catalog = catalog();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &options)
+            .unwrap();
+        let token = sandbox.projector.tokens.read(agent.id()).unwrap();
+        let mut config = doc(&sandbox, agent);
+        config.set_str(&["model"], "phala/qwen").unwrap();
+        write(&path, &config.render().unwrap());
+        sandbox.projector.reconcile(Some(&catalog)).unwrap();
+        assert!(
+            sandbox
+                .projector
+                .status(
+                    agent,
+                    &sandbox.projector.load_store().unwrap(),
+                    Some(&catalog)
+                )
+                .authorized
+        );
+        assert_eq!(sandbox.projector.tokens.read(agent.id()).unwrap(), token);
+        sandbox.projector.reconcile(None).unwrap();
+        let mut legacy = sandbox.projector.load_store().unwrap();
+        let record = legacy.get_mut(agent.id()).unwrap();
+        record.options = options.clone();
+        record.attention = Some("Configuration changed in an older app version".into());
+        sandbox.projector.save_store(&legacy).unwrap();
+        let repair = ConnectOptions::default();
+        let preview = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &repair)
+            .unwrap();
+        sandbox
+            .projector
+            .apply(agent, true, &preview.revision, Some(&catalog), &repair)
+            .unwrap();
+        sandbox.projector.reconcile(None).unwrap();
+        sandbox.projector.reconcile(Some(&catalog)).unwrap();
+        assert_eq!(
+            doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+            Some("phala/qwen")
+        );
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_some());
+        let mut config = doc(&sandbox, agent);
+        config
+            .set_str(
+                &["model_providers", "private_ai_gateway", "base_url"],
+                "https://example.com/v1",
+            )
+            .unwrap();
+        write(&path, &config.render().unwrap());
+        sandbox.projector.reconcile(Some(&catalog)).unwrap();
+        assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+        assert_eq!(
+            doc(&sandbox, agent)
+                .get_str(&["model_providers", "private_ai_gateway", "base_url"])
+                .as_deref(),
+            Some("https://example.com/v1")
+        );
     }
 
     fn connect(sandbox: &Sandbox) -> AgentStatus {
@@ -4154,7 +4272,7 @@ mod tests {
             .attention
             .as_deref()
             .unwrap()
-            .contains("no longer served"));
+            .contains("not available"));
 
         disconnect(&sandbox, Agent::ClaudeCode);
         let text = fs::read_to_string(&path).unwrap();
@@ -4479,7 +4597,7 @@ mod tests {
             .attention
             .as_deref()
             .unwrap()
-            .contains("no longer matches"));
+            .contains("settings changed"));
 
         // Corrupt the file entirely: still recorded, error reported, token
         // still unauthorized, and Disconnect retains its recovery journal.

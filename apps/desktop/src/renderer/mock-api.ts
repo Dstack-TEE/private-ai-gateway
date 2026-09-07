@@ -287,9 +287,9 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
           catalog: { ...CATALOG, models: CATALOG.models.slice(1), removed: ["openai/gpt-oss-20b"] },
         },
         agents: [
-          { ...CODEX, connected: true, recorded: true, authorized: true, attention: "The selected model is no longer served; choose another model and reconnect" },
-          { ...CLAUDE, authorized: false, attention: "The config no longer matches what the app wrote (edited outside the app, or unreadable); this agent's access is disabled. Disconnect to clean up, or reconnect" },
-          { ...OPENCODE, recorded: true, attention: "Disconnect did not complete; this agent's access is disabled until Disconnect is retried" },
+          { ...CODEX, connected: true, recorded: true, authorized: true, attention: "The selected model is not available from this profile. Choose an available model in Codex; the connection does not need to be recreated." },
+          { ...CLAUDE, authorized: false, repairAction: "reconnect", attention: "Gateway authentication settings changed. Reconnect this agent, then restart its CLI to reload the configuration." },
+          { ...OPENCODE, recorded: true, repairAction: "disconnect", attention: "Disconnect did not complete. Retry Disconnect to restore the configuration." },
           PI,
           HERMES,
         ],
@@ -311,6 +311,7 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "reconnecting") state = { ...state, status: "stopped", reconnecting: true, protectedSince: now - 600, error: "Network unavailable. Connect to a network; protection resumes after verification." };
   if (name === "all-agent-icons") agents = [...agents,
     { ...PI, id: "oh-my-pi", name: "Oh My Pi", configPath: "/Users/dev/.omp/agent/models.json" },
     { ...OPENCODE, id: "openclaw", name: "OpenClaw", configPath: "/Users/dev/.openclaw/openclaw.json" },
@@ -555,7 +556,7 @@ export function mockApi(name: string | null): DesktopApi {
     stop: async () => {
       if (name === "stop-protection-error") throw new Error("Could not stop protection");
       verifyRun += 1;
-      state = { ...state, status: "stopped", protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
+      state = { ...state, status: "stopped", reconnecting: false, protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
       publish();
       return state;
     },

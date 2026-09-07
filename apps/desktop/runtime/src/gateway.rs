@@ -170,7 +170,14 @@ impl GatewayManager {
 
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
-        runtime.session_id = format!("{:016x}-{:016x}", now_secs(), generation);
+        let continuing = !verification_only
+            && runtime.state.reconnecting
+            && runtime.state.session_id.is_some()
+            && runtime.state.config.remote_url == config.remote_url
+            && runtime.state.config.require_production_os == config.require_production_os;
+        if !continuing {
+            runtime.session_id = format!("{:016x}-{:016x}", now_secs(), generation);
+        }
         let session_id = runtime.session_id.clone();
         runtime.child = Some(child);
         runtime.stdout.clear();
@@ -187,13 +194,27 @@ impl GatewayManager {
             progress: Some("Starting the verifier".to_string()),
             remote_url: Some(remote_url.clone()),
             session_id: Some(session_id.clone()),
-            session_usage: UsageSummary::default(),
+            reconnecting: continuing,
+            protected_since: if continuing {
+                runtime.state.protected_since
+            } else {
+                None
+            },
+            session_usage: if continuing {
+                runtime.state.session_usage.clone()
+            } else {
+                UsageSummary::default()
+            },
             config: StartGatewayConfig {
                 remote_url,
                 require_production_os: config.require_production_os,
             },
             catalog: None,
-            activity: Vec::new(),
+            activity: if continuing {
+                runtime.state.activity.clone()
+            } else {
+                Vec::new()
+            },
             ..Self::carried(&runtime.state)
         };
         let state = runtime.state.clone();
@@ -256,6 +277,10 @@ impl GatewayManager {
     /// Stop the sidecar in any state, including while verifying. Requests
     /// already forwarded fail with the sidecar; no new request is accepted.
     pub fn stop(&self) -> Result<GatewayState, String> {
+        self.stop_with_reconnect(false)
+    }
+
+    pub fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
         let mut runtime = self.lock()?;
         let child = runtime.child.take();
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -265,7 +290,12 @@ impl GatewayManager {
         runtime.sidecar_url = None;
         runtime.identity_ready = false;
         runtime.verification_only = false;
+        let protected_since = runtime.state.protected_since;
         runtime.state = Self::carried(&runtime.state);
+        runtime.state.reconnecting = reconnecting;
+        if reconnecting {
+            runtime.state.protected_since = protected_since;
+        }
         let state = runtime.state.clone();
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
@@ -274,7 +304,7 @@ impl GatewayManager {
         self.proxy.publish(Session {
             generation,
             epoch,
-            session_id: Some(session_id),
+            session_id: reconnecting.then_some(session_id),
             ..Session::default()
         });
         if let Some(mut child) = child {
@@ -437,6 +467,10 @@ impl GatewayManager {
         self.update(|state| state.error = Some(message));
     }
 
+    pub fn cancel_reconnection(&self) {
+        self.update(|state| state.reconnecting = false);
+    }
+
     pub fn clear_session_usage(&self) {
         self.update(|state| {
             state.activity.clear();
@@ -526,6 +560,7 @@ impl GatewayManager {
                 runtime.last_catalog = Some(summary.clone());
                 runtime.state.catalog = Some(summary);
                 runtime.state.status = "verified".to_string();
+                runtime.state.reconnecting = false;
                 runtime.state.progress = None;
                 runtime.state.error = None;
                 if !runtime.verification_only {
@@ -653,6 +688,7 @@ impl GatewayManager {
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 runtime.state.status = "blocked".to_string();
+                runtime.state.reconnecting = false;
                 runtime.state.progress = None;
                 runtime.state.catalog = None;
                 runtime.state.error = Some(
@@ -661,6 +697,7 @@ impl GatewayManager {
                 );
             }
             "fatal" => {
+                runtime.state.reconnecting = false;
                 runtime.epoch += 1;
                 runtime.identity_ready = false;
                 runtime.state.status = "error".to_string();
@@ -741,6 +778,7 @@ impl GatewayManager {
         runtime.state.configuration_verification = false;
         runtime.state.catalog = None;
         runtime.state.progress = None;
+        runtime.state.reconnecting = false;
         if runtime.state.status != "error" {
             let diagnostic =
                 String::from_utf8_lossy(&runtime.diagnostic.iter().copied().collect::<Vec<_>>())
@@ -776,6 +814,7 @@ impl GatewayManager {
         runtime.identity_ready = false;
         runtime.verification_only = false;
         runtime.state.configuration_verification = false;
+        runtime.state.reconnecting = false;
         runtime.state.status = "error".to_string();
         runtime.state.progress = None;
         runtime.state.catalog = None;
@@ -1033,6 +1072,72 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WaitingSidecar;
+    struct WaitingChild(Option<tokio::sync::mpsc::Sender<SidecarEvent>>);
+    impl SidecarChild for WaitingChild {
+        fn kill(&mut self) -> Result<(), String> {
+            self.0.take();
+            Ok(())
+        }
+    }
+    impl SidecarLauncher for WaitingSidecar {
+        fn spawn(
+            &self,
+            _: Vec<String>,
+        ) -> Result<(Receiver<SidecarEvent>, Box<dyn SidecarChild>), String> {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            Ok((receiver, Box::new(WaitingChild(Some(sender)))))
+        }
+    }
+
+    #[test]
+    fn reconnection_preserves_session_history_but_requires_fresh_verification() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        let proxy = ProxyState::new(events).unwrap();
+        let manager = Arc::new(GatewayManager::new(
+            proxy.clone(),
+            Arc::new(UsageStore::memory().unwrap()),
+            Arc::new(WaitingSidecar),
+            executor.handle().clone(),
+            GatewayState::default(),
+        ));
+        let config = StartGatewayConfig {
+            remote_url: "https://inference.phala.com".into(),
+            require_production_os: true,
+        };
+        manager.restore_snapshot(GatewayState {
+            status: "verified".into(),
+            config: config.clone(),
+            session_id: Some("same-session".into()),
+            protected_since: Some(123),
+            session_usage: UsageSummary {
+                requests: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        manager.stop_with_reconnect(true).unwrap();
+        let retired_generation = proxy.session().generation;
+        let resumed = manager.start(config.clone()).unwrap();
+        assert_eq!(resumed.session_id.as_deref(), Some("same-session"));
+        assert_eq!(resumed.protected_since, Some(123));
+        assert_eq!(resumed.session_usage.requests, 7);
+        assert!(resumed.reconnecting);
+        assert!(resumed.identity.is_none() && resumed.catalog.is_none());
+        assert!(!proxy.session().verified);
+        assert!(proxy.session().generation > retired_generation);
+        manager.terminated(retired_generation).unwrap();
+        assert_eq!(manager.snapshot().unwrap().status, "verifying");
+        manager.stop().unwrap();
+        assert!(proxy.session().session_id.is_none());
+        let fresh = manager.start(config).unwrap();
+        assert_ne!(fresh.session_id.as_deref(), Some("same-session"));
+        assert_eq!(fresh.session_usage.requests, 0);
+        assert!(fresh.protected_since.is_none() && !fresh.reconnecting);
+        manager.stop().unwrap();
+    }
 
     #[test]
     fn stopping_preserves_usage_but_not_the_protection_clock() {

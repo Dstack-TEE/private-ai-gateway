@@ -428,7 +428,8 @@ pub fn show_window(app: &AppHandle) {
 
 fn should_stop(state: &GatewayState) -> bool {
     !state.configuration_verification
-        && matches!(state.status.as_str(), "verifying" | "verified" | "blocked")
+        && (state.reconnecting
+            || matches!(state.status.as_str(), "verifying" | "verified" | "blocked"))
 }
 
 fn protection_action_enabled(state: &GatewayState) -> bool {
@@ -437,6 +438,9 @@ fn protection_action_enabled(state: &GatewayState) -> bool {
 }
 
 fn protection_action(state: &GatewayState) -> &'static str {
+    if state.reconnecting {
+        return "Cancel reconnection";
+    }
     if state.status == "verifying" && !state.configuration_verification {
         "Cancel verification"
     } else if should_stop(state) {
@@ -449,6 +453,9 @@ fn protection_action(state: &GatewayState) -> &'static str {
 }
 
 fn menu_state(state: &GatewayState) -> &'static str {
+    if state.reconnecting {
+        return "Reconnecting - requests paused";
+    }
     if state.endpoint_error.is_some() {
         return "Local API unavailable";
     }

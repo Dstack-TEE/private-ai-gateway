@@ -480,7 +480,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         let state = self.manager.snapshot()?;
-        if state.status == "verifying" {
+        if state.status == "verifying" && self.recovery.online() {
             return Ok(());
         }
         self.recovery.clear_request();
@@ -503,13 +503,20 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.clear_wait();
-        self.stop_inner()?;
+        if let Err(error) = self.stop_with_reconnect(true) {
+            self.manager.cancel_reconnection();
+            self.recovery.cancel();
+            return Err(error);
+        }
         if !self.recovery.online() {
             self.recovery.wait();
-            self.manager.report_error("Network unavailable. Protection will be verified again when a network address returns.".into());
+            self.manager.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.".into());
             return Ok(());
         }
-        self.start_inner(state.config)?;
+        if let Err(error) = self.start_inner(state.config) {
+            self.manager.cancel_reconnection();
+            return Err(format!("Could not reconnect. Check the network and active profile, then enable protection again: {error}"));
+        }
         Ok(())
     }
 
@@ -556,11 +563,15 @@ impl DesktopRuntime {
     }
 
     fn stop_inner(&self) -> Result<GatewayState, String> {
+        self.stop_with_reconnect(false)
+    }
+
+    fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
         let _guard = self
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
-        let result = self.manager.stop();
+        let result = self.manager.stop_with_reconnect(reconnecting);
         self.proxy.set_api_key(None);
         if self.instance.is_none() {
             return result;
@@ -579,7 +590,8 @@ impl DesktopRuntime {
             Ok(state) => state,
             Err(_) => return,
         };
-        let running = matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
+        let running = state.reconnecting
+            || matches!(state.status.as_str(), "verifying" | "verified" | "blocked");
         let result = if running {
             self.stop()
         } else {
@@ -1045,10 +1057,20 @@ impl DesktopRuntime {
         }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
         // Suspend projections before changing the URL; reconnect rebuilds them against the new endpoint.
-        self.stop_inner()?;
+        self.stop_with_reconnect(reconnect || previous.reconnecting)?;
         let result = self.rebind_local_api(config, current, resolved).await;
-        if reconnect && self.manager.snapshot()?.endpoint_error.is_none() {
+        if self.manager.snapshot()?.endpoint_error.is_some() {
+            self.recovery.cancel();
+            self.manager.cancel_reconnection();
+        } else if previous.reconnecting && !self.recovery.online() {
+            self.recovery.wait();
+            result?;
+            return self.manager.snapshot();
+        }
+        if (reconnect || previous.reconnecting) && self.manager.snapshot()?.endpoint_error.is_none()
+        {
             if let Err(error) = self.start_inner(previous.config) {
+                self.manager.cancel_reconnection();
                 return Err(match result {
                     Ok(_) => format!(
                         "Local API settings saved, but protection could not restart: {error}"
@@ -1349,7 +1371,7 @@ fn restore_secret_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::GatewayState;
+    use crate::contracts::{GatewayState, UsageSummary};
 
     struct NoSidecar;
     impl SidecarLauncher for NoSidecar {
@@ -1489,6 +1511,12 @@ mod tests {
         let runtime = test_runtime(&executor, directory.path());
         runtime.manager.restore_snapshot(GatewayState {
             status: "verified".into(),
+            session_id: Some("network-session".into()),
+            protected_since: Some(123),
+            session_usage: UsageSummary {
+                requests: 7,
+                ..Default::default()
+            },
             config: StartGatewayConfig {
                 remote_url: "https://inference.phala.com".into(),
                 require_production_os: true,
@@ -1508,16 +1536,26 @@ mod tests {
         let mut verifying = runtime.state().unwrap();
         verifying.status = "verifying".into();
         runtime.manager.restore_snapshot(verifying.clone());
+        runtime.recovery.available.store(true, Ordering::Release);
         runtime.recover_network().unwrap();
         assert!(runtime.recovery.needs_check());
-        verifying.status = "verified".into();
+        runtime.recovery.available.store(false, Ordering::Release);
         runtime.manager.restore_snapshot(verifying);
         runtime.recover_network().unwrap();
         assert!(!runtime.recovery.needs_check());
         assert!(!runtime.proxy.session().verified);
         assert_eq!(runtime.state().unwrap().status, "stopped");
+        assert!(runtime.state().unwrap().reconnecting);
+        assert_eq!(
+            runtime.state().unwrap().session_id.as_deref(),
+            Some("network-session")
+        );
+        assert_eq!(runtime.state().unwrap().protected_since, Some(123));
+        assert_eq!(runtime.state().unwrap().session_usage.requests, 7);
         assert!(runtime.recovery.pending());
         runtime.stop().unwrap();
+        assert!(!runtime.state().unwrap().reconnecting);
+        assert!(runtime.state().unwrap().protected_since.is_none());
         assert!(!runtime.recovery.pending());
         runtime.recovery.available.store(true, Ordering::Release);
         runtime.recover_network().unwrap();

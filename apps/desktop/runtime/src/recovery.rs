@@ -71,7 +71,8 @@ impl Recovery {
 }
 
 pub fn should_recover(status: &str, configuration_verification: bool, pending: bool) -> bool {
-    !configuration_verification && (status == "verified" || (pending && status == "stopped"))
+    !configuration_verification
+        && (matches!(status, "verified" | "verifying") || (pending && status == "stopped"))
 }
 
 #[cfg(test)]
@@ -81,7 +82,8 @@ mod tests {
     fn recovery_never_retries_failed_verification_or_manual_stop() {
         assert!(should_recover("verified", false, false));
         assert!(should_recover("stopped", false, true));
-        for status in ["blocked", "error", "verifying"] {
+        assert!(should_recover("verifying", false, false));
+        for status in ["blocked", "error"] {
             assert!(!should_recover(status, false, true));
         }
         assert!(!should_recover("stopped", false, false));

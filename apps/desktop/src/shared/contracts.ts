@@ -197,6 +197,7 @@ export interface GatewayState {
   wakeMonitorAvailable?: boolean;
   /** Unix seconds when the current protection session became verified. */
   protectedSince?: number;
+  reconnecting?: boolean;
   status: GatewayStatus;
   /** Settings is verifying a candidate without enabling forwarding. */
   configurationVerification: boolean;
@@ -223,6 +224,7 @@ export interface GatewayState {
 }
 
 export interface AgentStatus {
+  repairAction?: "reconnect" | "disconnect";
   id: string;
   name: string;
   configPath: string;

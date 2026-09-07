@@ -110,8 +110,12 @@ Linux reconnects and re-subscribes every five seconds after subscription failure
 or stream termination, with cancellation on backend exit. Monitor availability is
 visible in Settings and redacted diagnostics. Environments without login1 retain
 network recovery but cannot report wake until the service becomes available.
-Recovery revokes the old session and restores agent configurations before a fresh
-verification. If all non-loopback addresses disappear it waits for an address to
+Recovery revokes the old transport generation and restores agent configurations
+before fresh verification. Automatic network/wake recovery preserves the user
+session ID, start time, usage totals, and recent records. Changing Local API
+settings also preserves that session; manual stop/start or switching profiles
+starts a new one. Retaining usage never reuses a verified identity or catalog.
+If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
 verification requires user attention, not unlimited retries. Events survive a busy
 lifecycle lock or in-progress verification and are revisited by the existing
@@ -169,8 +173,8 @@ changes and deleting a profile during protection use explicit stop-and-confirm
 flows. Deletion aborts if stopping fails; backend lifecycle checks remain in
 force if a concurrent client starts protection again. Preset service endpoints
 are read-only and copyable, not disabled merely because they are preset values.
-Proof and privacy scroll content reserve an overlay-scrollbar lane; scrollable
-surfaces use scrollbar-gutter while non-scrolling native dialog roots do not.
+Scroll surfaces use the system's normal scrollbar behavior and symmetric content
+padding, without a permanently reserved gutter or an extra right-side lane.
 
 Oh My Pi's local SVG comes from can1357/oh-my-pi, commit
 08db86f87bda871e574eda56de39745523836116, assets/icon.svg (MIT; adjacent LICENSE).
@@ -579,6 +583,15 @@ execution and real inference are not claimed by those checks.
 | OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
 | Pi | `~/.pi/agent/models.json`: an app-owned Responses provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
 | Hermes | `~/.hermes/config.yaml`: a comment-preserving custom Chat Completions provider with `discover_models`, optional default, and command-backed auth | helper command |
+
+Codex's default model is a user preference, separate from connection authorization.
+Changing it does not revoke the helper credential; endpoint, provider, and auth
+fields remain strictly checked. Suspension preserves the selected model for the
+next verified connection. A removed model produces an actionable warning and is
+still rejected by the proxy catalog gate. Agent warning badges expose backend
+repair actions; reconnect and incomplete-disconnect recovery are distinct.
+An already-running CLI may retain old configuration: after repair or disconnect,
+restart it to reload the file. The helper never creates or restores credentials.
 
 The verified catalog is the only model source. Codex requires a selected
 verified default because it does not discover this custom provider's model

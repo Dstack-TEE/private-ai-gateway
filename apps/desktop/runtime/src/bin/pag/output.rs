@@ -121,6 +121,7 @@ fn status(value: &Value) -> String {
         _ if state["configurationVerification"] == true => {
             "Verifying profile (not protecting traffic)"
         }
+        _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",
         Some("blocked") => "Not protected (blocked)",

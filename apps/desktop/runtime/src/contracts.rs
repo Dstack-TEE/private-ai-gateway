@@ -269,6 +269,8 @@ pub struct GatewayState {
     /// Unix seconds when this protection session first became verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_since: Option<u64>,
+    #[serde(default)]
+    pub reconnecting: bool,
     pub session_usage: UsageSummary,
     /// Changes only when persisted usage changes; renderer queries can depend
     /// on this instead of the bounded activity preview.
@@ -307,6 +309,7 @@ impl Default for GatewayState {
             activity: Vec::new(),
             session_id: None,
             protected_since: None,
+            reconnecting: false,
             session_usage: UsageSummary::default(),
             usage_revision: 0,
             error: None,

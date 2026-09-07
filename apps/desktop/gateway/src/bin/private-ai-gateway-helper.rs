@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         .and_then(|token| {
             token.ok_or_else(|| {
                 format!(
-                    "This agent is not connected in {}",
+                    "No active gateway credential. Open {}, enable protection, and reconnect this agent if it needs attention. After disconnecting, restart the agent to reload its restored configuration.",
                     desktop_gateway::brand::PRODUCT_NAME
                 )
             })

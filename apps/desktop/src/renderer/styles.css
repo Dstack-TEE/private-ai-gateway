@@ -102,27 +102,28 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 
 .status-surface { position: relative; isolation: isolate; min-height: 168px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; background: var(--panel); border: 1px solid var(--separator); border-radius: calc(var(--radius) + 4px); }
 .overview-top { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
-.overview-top .status-surface.status-compact { width: 100%; height: auto; min-height: 168px; display: flex; align-items: stretch; overflow: hidden; }
-.status-compact-content { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 16px 20px; width: 100%; }
+.overview-top .status-surface.status-compact { width: 100%; height: auto; min-height: 140px; display: flex; align-items: stretch; overflow: hidden; }
+.status-compact-content { position: relative; z-index: 2; display: grid; grid-template-columns: minmax(0, 1fr) 44px; grid-template-rows: auto auto 1fr; gap: 8px 12px; padding: 16px 20px; width: 100%; }
 .status-compact.status-ready { border-color: var(--success); }
 .status-compact.status-ready .status-background-mark { background: color-mix(in srgb, var(--success) 12%, var(--card)); }
 .status-compact.status-ready.is-development { border-color: var(--warning); }
 .status-compact.status-ready.is-development .status-background-mark { background: color-mix(in srgb, var(--warning) 12%, var(--card)); }
-.status-compact .status-verdict-button { height: auto; min-height: 52px; max-width: 100%; padding: 0; border: 0; border-radius: 4px; background: transparent; text-align: left; white-space: normal; align-items: flex-start; }
-.status-verdict-button .protection-status { display: grid; grid-template-columns: 18px minmax(0, 1fr); justify-content: start; justify-items: start; gap: 4px 7px; font-size: 20px; font-weight: 600; line-height: 26px; }
-.status-verdict-button .protection-status > svg { width: 18px; height: 18px; align-self: center; }
-.status-verdict-button .protection-duration { grid-column: 1 / -1; font-size: 14px; line-height: 20px; text-align: left; }
-.status-compact .status-background-mark { position: absolute; z-index: 1; right: -28px; top: 50%; transform: translateY(-50%); width: 180px; height: 180px; background: color-mix(in srgb, var(--foreground) 8%, var(--card)); mask-size: contain; mask-position: center; mask-repeat: no-repeat; pointer-events: none; }
+.status-heading { grid-column: 1; grid-row: 1; min-width: 0; }
+.status-heading .protection-status { display: flex; flex-wrap: wrap; gap: 6px; font-size: 18px; font-weight: 600; line-height: 24px; }
+.status-heading .protection-duration { font-size: 12px; font-weight: 400; line-height: 20px; }
+.status-privacy { grid-column: 1; grid-row: 2; justify-self: start; }
+.status-compact .protected-control { grid-column: 2; grid-row: 1; align-self: start; justify-self: end; padding-top: 2px; }
+.status-compact .status-background-mark { position: absolute; z-index: 1; right: -12px; bottom: -24px; width: 128px; height: 128px; background: color-mix(in srgb, var(--foreground) 8%, var(--card)); mask-size: contain; mask-position: center; mask-repeat: no-repeat; pointer-events: none; }
 .status-compact .tracks-right { inset: 0; mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent); color: color-mix(in srgb, var(--muted-foreground) 5%, var(--card)); }
 .status-compact.status-ready .tracks-right { opacity: 1; }
-.status-compact .status-profile { width: min(120px, 100%); background: var(--card); }
+.status-compact .status-profile { grid-column: 1; grid-row: 3; align-self: end; width: min(120px, 100%); background: var(--card); }
 .status-compact .status-background-mark { opacity: .55; }
 .mark.mark-oh-my-pi { background: #0d0d0d; }
 .status-compact .is-icon-only { margin: 0; }
 .status-compact .protection-status { justify-content: flex-start; }
 .status-surface.status-compact,
 .status-compact .status-background-mark,
-.status-compact .status-verdict-button,
+.status-compact .status-heading,
 .status-compact [data-slot="switch"] {
   transition-property: color, background-color, border-color;
   transition-duration: 200ms;
@@ -222,7 +223,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .session-overview { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .session-overview-heading { display: flex; align-items: center; justify-content: space-between; min-height: 20px; gap: 8px; }
 .session-overview-heading h2 { font-size: var(--font-body); font-weight: 600; }
-.session-summary { flex: 1; min-height: 156px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.session-summary { flex: 1; min-height: 140px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .session-summary div { min-width: 0; min-height: 0; padding: 10px 12px; display: grid; align-content: center; gap: 3px; border: 1px solid var(--separator); background: var(--card); border-radius: 8px; }
 .session-summary strong { display: block; max-width: 100%; overflow: hidden; font-size: 20px; line-height: 26px; font-weight: 650; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .session-summary span { color: var(--text-secondary); font-size: var(--font-caption); line-height: 18px; }
@@ -356,9 +357,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .proof-boundary { margin: 12px 0 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .privacy-verdict.state-neutral { background: transparent; border-color: var(--separator); }
 .native-dialog-host .usage-evidence-sheet .proof-card { min-height: 0; flex: 1 1 auto; overflow: auto; }
-.sheet, .sheet-scroll, .privacy-content, .proof-card, .profile-list, .content, [data-slot="table-container"], [data-slot="select-content"], [data-slot="combobox-list"] { scrollbar-gutter: stable; }
-.native-dialog-host .sheet { scrollbar-gutter: auto; }
-.native-dialog-host .usage-evidence-sheet .proof-card, .native-dialog-host .privacy-content { padding-right: 20px; padding-bottom: 12px; }
+.native-dialog-host .usage-evidence-sheet .proof-card, .native-dialog-host .privacy-content { padding-bottom: 12px; }
 .privacy-verdict.state-danger { background: transparent; border-color: currentColor; }
 .privacy-content { margin-top: 14px; }
 .privacy-verdict { padding: 14px; display: flex; align-items: flex-start; gap: 12px; background: var(--neutral-bg); border: 1px solid var(--separator); border-radius: var(--radius); }
@@ -481,7 +480,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 
 @media (prefers-reduced-motion: reduce) {
   .status-surface.status-compact, .status-compact .status-background-mark,
-  .status-compact .status-verdict-button, .status-compact [data-slot="switch"] { transition: none; }
+  .status-compact .status-heading, .status-compact [data-slot="switch"] { transition: none; }
   .track-layer { transition: none; }
   .track-strip, .brand-logo.is-busy, .is-spinning { animation: none; }
 }
