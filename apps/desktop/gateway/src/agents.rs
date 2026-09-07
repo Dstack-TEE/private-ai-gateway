@@ -1173,6 +1173,8 @@ impl Projector {
                 },
             ),
             revision: revision(
+                agent,
+                connect,
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
@@ -1197,6 +1199,8 @@ impl Projector {
             let path = self.action_path(agent, store.get(agent.id()), connect);
             let (text, read_error) = self.config_text_at(agent, &path);
             if revision(
+                agent,
+                connect,
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
@@ -2056,6 +2060,8 @@ fn merge_opencode_config(target: &mut serde_json::Value, source: serde_json::Val
 /// compared only, never logged or shown, since the text may contain
 /// credentials.
 fn revision(
+    agent: Agent,
+    connect: bool,
     path: Option<&Path>,
     text: Option<&str>,
     record: Option<&Connection>,
@@ -2067,6 +2073,8 @@ fn revision(
         hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
     };
+    part(agent.id().as_bytes());
+    part(&[u8::from(connect)]);
     part(path.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
     part(text.unwrap_or_default().as_bytes());
     part(
@@ -4210,6 +4218,18 @@ mod tests {
             .projector
             .preview(Agent::ClaudeCode, true, Some(&catalog), &claude_options())
             .unwrap();
+        let error = sandbox
+            .projector
+            .apply(
+                Agent::ClaudeCode,
+                false,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap_err();
+        assert!(error.contains("changed since the preview"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
         write(&path, r#"{"model": "sonnet"}"#);
         let error = sandbox
             .projector

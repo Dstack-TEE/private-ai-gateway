@@ -31,6 +31,107 @@ fn argument_errors_are_machine_readable_in_json_mode() {
     }
 }
 
+#[test]
+fn command_discovery_is_detailed_and_machine_readable() {
+    let settings = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .args(["settings", "set", "--help"])
+        .output()
+        .unwrap();
+    assert_success(&settings);
+    let settings = String::from_utf8(settings.stdout).unwrap();
+    for key in [
+        "autoCliRegistration",
+        "connectOnLaunch",
+        "allowNetworkAccess",
+        "clientHost",
+    ] {
+        assert!(settings.contains(key), "missing settings key {key}");
+    }
+
+    let usage = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .args(["usage", "export", "--help"])
+        .output()
+        .unwrap();
+    assert_success(&usage);
+    let usage = String::from_utf8(usage.stdout).unwrap();
+    assert!(usage.contains("Unix timestamp in seconds"));
+    assert!(!usage.contains("--cursor"));
+    assert!(!usage.contains("--limit"));
+
+    let schema = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .arg("schema")
+        .output()
+        .unwrap();
+    assert_success(&schema);
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema["name"], "pag");
+    let json_flag = schema["arguments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|arg| arg["long"] == "json")
+        .unwrap();
+    assert_eq!(json_flag["takesValue"], false);
+    assert_eq!(json_flag["numArgs"]["max"], 0);
+    assert_eq!(json_flag["possibleValues"], serde_json::json!([]));
+    assert!(schema["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "profiles"));
+
+    let completion = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert_success(&completion);
+    assert!(String::from_utf8(completion.stdout)
+        .unwrap()
+        .contains("pag"));
+
+    let conflict = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .args([
+            "agents",
+            "connect",
+            "codex",
+            "--dry-run",
+            "--revision",
+            "preview-revision",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(2));
+}
+
+#[test]
+fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pag"))
+        .args([
+            "--json",
+            "profiles",
+            "add",
+            "--id",
+            "test",
+            "--name",
+            "Test",
+            "--url",
+            "https://example.com",
+            "--key-stdin",
+        ])
+        .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--yes"));
+    assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+}
+
 impl Backend {
     fn start() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -133,6 +234,24 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .join("home/.private-ai-gateway/helpers/private-ai-gateway-helper")
         .is_file());
     let first = backend.run(&["status"]);
+    let rejected = backend
+        .command(&[
+            "--json",
+            "--yes",
+            "agents",
+            "disconnect",
+            "codex",
+            "--revision",
+            "stale-revision",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    let rejected: Value = serde_json::from_slice(&rejected.stderr).unwrap();
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("revision_conflict"));
     assert_eq!(first["gateway"]["status"], "stopped");
     let second = backend.run(&["service", "start"]);
     assert_eq!(first["backend"]["instanceId"], second["instanceId"]);
@@ -166,6 +285,12 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     assert_eq!(
         backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"])["imported"],
         1
+    );
+    let profiles = backend.run(&["profiles", "list"]);
+    let profile_id = profiles[0]["id"].as_str().unwrap();
+    assert_eq!(
+        backend.run(&["profiles", "show", profile_id])["name"],
+        "Work"
     );
     let exported = backend.directory.path().join("exported.json");
     backend.run(&["profiles", "export", "--output", exported.to_str().unwrap()]);
@@ -222,6 +347,20 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
 fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
     use std::io::{BufReader, Write};
     let backend = Backend::start();
+    let home = backend.directory.path().join("diagnostic-home");
+    let command_dir = home.join(".local/bin");
+    fs::create_dir_all(&command_dir).unwrap();
+    fs::write(command_dir.join("pag"), "unrelated command").unwrap();
+    let diagnostic = backend
+        .command(&["doctor", "--json"])
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert_eq!(diagnostic.status.code(), Some(1));
+    let diagnostic: Value = serde_json::from_slice(&diagnostic.stdout).unwrap();
+    assert_eq!(diagnostic["backendRunning"], true);
+    assert!(diagnostic["errors"]["cli"].is_string());
+    assert!(diagnostic["endpoint"].is_string());
     let endpoint = backend.run(&["doctor"])["endpoint"]
         .as_str()
         .unwrap()

@@ -330,6 +330,8 @@ Closing or quitting only the desktop UI leaves protection and the backend runnin
 use Stop All and Quit or `pag --yes service stop` to shut down both.
 
 Ordinary CLI output uses short status summaries, lists, and operation results.
+See the [CLI guide](CLI.md) for command discovery, profile editing, reviewed
+agent changes and a core-capability coverage matrix.
 For automation, use `pag --json --non-interactive <command>`. JSON mode never
 prompts; successful results go to stdout, structured errors to stderr.
 `status --watch --json` emits one JSON object per line. Argument errors exit

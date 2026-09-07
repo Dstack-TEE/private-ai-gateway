@@ -17,6 +17,9 @@ native clients or their stdio runtime.
 
 ## Commands
 
+See the [CLI guide](CLI.md) for human and automated workflows, command discovery,
+confirmation rules, output contracts and desktop-only boundaries.
+
 ```sh
 pag status --json
 pag status --watch --json
