@@ -13,6 +13,31 @@ async function choose(page: Page, control: import("@playwright/test").Locator, l
   await page.getByRole("option", { name: label, exact: true }).click();
 }
 
+test("compact overview separates provider verification from current-session usage", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 960 });
+  await page.goto("/?mock=ready");
+  const protection = page.getByRole("region", { name: "Protection status", exact: true });
+  await expect(protection.getByText("Request protection", { exact: false })).toHaveCount(0);
+  await expect(protection.getByText("Protect requests", { exact: true })).toHaveCount(0);
+  await expect(protection.locator(".tracks-left, .status-glow, .status-local")).toHaveCount(0);
+  const session = page.getByRole("region", { name: "Current session", exact: true });
+  await expect(session.locator(".session-summary > div")).toHaveCount(4);
+  await expect(session.getByText("Active", { exact: true })).toHaveCount(0);
+  await protection.getByRole("button", { name: "Privacy verification" }).click();
+  await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await protection.getByRole("button", { name: "Profiles: RedPill" }).click();
+  await expect(page.getByRole("dialog", { name: "Profiles" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.goto("/?mock=interactive");
+  await expect(session.getByText("Not active", { exact: true })).toHaveCount(0);
+  await expect(session.locator("strong")).toHaveText(["—", "—", "—", "—"]);
+  for (const width of [540, 320]) {
+    await page.setViewportSize({ width, height: 780 });
+    expect(await page.locator(".content").evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+  }
+});
+
 test("CLI registration and explicit backend recovery are reachable", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings" }).click();
@@ -369,14 +394,14 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   await expect(openAtLogin).toHaveAttribute("aria-checked", "true");
 
   const brandImageElements = page.locator(".brand-logo img");
-  await expect(brandImageElements).toHaveCount(3);
+  await expect(brandImageElements).toHaveCount(2);
   await expect.poll(() => brandImageElements.evaluateAll((images) =>
     images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0),
   )).toBe(true);
   const brandIcons = await brandImageElements.evaluateAll((images) =>
     images.map((image) => ({ source: (image as HTMLImageElement).currentSrc })),
   );
-  expect(brandIcons).toHaveLength(3);
+  expect(brandIcons).toHaveLength(2);
   expect(brandIcons.every(({ source }) => /brand-mark-(light|dark)/.test(source) && !source.startsWith("data:"))).toBe(true);
   for (const source of new Set(brandIcons.map((icon) => icon.source))) {
     const vector = await page.evaluate(async (url) => {
@@ -763,7 +788,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await expect(page).toHaveTitle("Private AI Gateway");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".gateway-verdict")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
+  await expect(page.locator(".status-verdict-button")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   let editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
@@ -795,12 +820,12 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await nav(page, "Overview").click();
   await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeFocused();
   await expect(page.getByLabel("Protection status").getByText("Protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".tracks-left")).toHaveCSS("opacity", "0.07");
-  await expect(page.locator(".tracks-right")).toHaveCSS("opacity", "0.12");
+  await expect(page.locator(".tracks-left")).toHaveCount(0);
+  await expect(page.locator(".tracks-right")).toHaveCSS("opacity", "1");
 
   await page.getByRole("switch", { name: "Stop protection" }).click();
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".tracks-left")).toHaveCSS("opacity", "0");
+  await expect(page.locator(".tracks-right")).toHaveCSS("opacity", "0");
 });
 
 test("five agents connect and disconnect directly from the verified discovered catalog", async ({ page }) => {
@@ -861,8 +886,8 @@ test("overview shows four agents, four current-session records, truthful copy su
   const spacing = await page.locator(".overview-page").evaluate((node) => {
     const modules = Array.from(node.querySelectorAll(".overview-module"), (item) => item.getBoundingClientRect());
     const surface = node.querySelector(".status-surface")?.getBoundingClientRect();
-    if (!surface || modules.length !== 4) throw new Error("Overview modules missing");
-    return [modules[0].top - surface.bottom, modules[2].top - modules[0].bottom];
+    if (!surface || modules.length !== 3) throw new Error("Overview modules missing");
+    return [modules[0].top - surface.bottom, modules[1].top - modules[0].bottom];
   });
   expect(Math.abs(spacing[0] - spacing[1])).toBeLessThanOrEqual(1);
   await expect(page.locator(".overview-module-title").first()).toHaveCSS("user-select", "none");
@@ -871,9 +896,9 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(overviewProof).toContainText("Signed receipt verified");
   await overviewProof.getByRole("button", { name: "Done" }).click();
 
-  const session = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Usage in this session" }) });
+  const session = page.getByRole("region", { name: "Current session", exact: true });
   const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
-  for (const label of ["Requests", "Tokens", "Cost", "Protected"]) {
+  for (const label of ["Requests", "Tokens", "Estimated cost", "Verified answers"]) {
     await expect(session.getByText(label, { exact: true })).toBeVisible();
   }
   await expect(session.locator("small")).toHaveCount(0);
@@ -881,10 +906,8 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localApi.locator(".overview-module-title").getByText("Available", { exact: true })).toBeVisible();
   await expect(localApi.locator(".copy-rows").getByText("Available", { exact: true })).toHaveCount(0);
   await expect(localApi.getByText("for your own tools", { exact: true })).toHaveCount(0);
-  for (const module of [localApi, session]) {
-    const height = await module.locator(".module").evaluate((node) => node.getBoundingClientRect().height);
-    expect(height).toBe(136);
-  }
+  await expect(localApi.locator(".module")).toHaveCSS("height", "136px");
+  await expect(session.locator(".session-summary > div")).toHaveCount(4);
 
   const endpoint = localApi.getByRole("button", { name: /Local endpoint/ });
   await endpoint.hover();
@@ -994,12 +1017,11 @@ test("success colors, list separators, control sizes and About alignment are con
     expect(success).not.toBe(await themeColor(page, "--primary"));
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
     await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
-    await expect(page.locator(".status-local .status-fact").filter({ hasText: "1 agent connected" })).toHaveCSS("color", success);
+    await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
-    await expect(page.locator(".tracks-right")).toHaveCSS("color", await themeColor(page, "--primary"));
-    await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "128px");
+    await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "140px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
     await expect(nav(page, "Agents")).toHaveCSS("font-weight", "400");
     const buttonBefore = await nav(page, "Agents").boundingBox();
@@ -1291,9 +1313,8 @@ test("overview presents local availability and the active profile without sessio
   await page.goto("/?mock=ready");
 
   const status = page.getByLabel("Protection status");
-  await expect(status.getByText("Local API available", { exact: true })).toBeVisible();
-  await expect(status.getByText("1 agent connected", { exact: true })).toBeVisible();
-  await expect(status.getByText("AI service", { exact: true })).toBeVisible();
+  await expect(status.locator(".status-local")).toHaveCount(0);
+  await expect(status.getByText("Protected", { exact: true })).toBeVisible();
   const localHeader = page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) });
   const badgeOffset = await localHeader.evaluate((header) => {
     const title = header.querySelector("h2")?.getBoundingClientRect();
@@ -1306,29 +1327,22 @@ test("overview presents local availability and the active profile without sessio
   await expect(status.locator(".status-endpoint")).toHaveCount(0);
   await expect(status.locator(".protection-duration")).toHaveText(/00:10:\d{2}/);
   const alignment = await status.evaluate((node) => {
-    const facts = Array.from(node.querySelectorAll(".status-local .status-fact"));
-    const text = facts.map((fact) => fact.lastElementChild?.getBoundingClientRect().x);
-    const icons = facts.map((fact) => fact.firstElementChild?.getBoundingClientRect().width);
-    const left = node.querySelector(".status-local .status-heading")?.getBoundingClientRect();
-    const right = node.querySelector(".status-remote .status-heading")?.getBoundingClientRect();
     const verified = node.querySelector('[aria-label="Privacy verification"]')?.getBoundingClientRect();
     const profile = node.querySelector(".status-profile")?.getBoundingClientRect();
-    return { text, icons, heights: facts.map((fact) => fact.getBoundingClientRect().height), headings: [left?.y, right?.y], verifiedHeight: verified?.height, buttonRightEdges: [verified?.right, profile?.right] };
+    const toggle = node.querySelector('[role="switch"]')?.getBoundingClientRect();
+    return { leftEdges: [verified?.left, toggle?.left, profile?.left], positions: [verified?.bottom ?? 0, toggle?.top ?? 0, profile?.top ?? 0] };
   });
-  expect(alignment.text[0]).toBe(alignment.text[1]);
-  expect(alignment.icons).toEqual([14, 14]);
-  expect(alignment.heights).toEqual([18, 18]);
-  expect(alignment.headings[0]).toBe(alignment.headings[1]);
-  expect(alignment.verifiedHeight).toBe(32);
-  expect(alignment.buttonRightEdges[0]).toBe(alignment.buttonRightEdges[1]);
+  expect(new Set(alignment.leftEdges).size).toBe(1);
+  expect(alignment.positions[0]).toBeLessThan(alignment.positions[1]);
+  expect(alignment.positions[1]).toBeLessThan(alignment.positions[2]);
   await status.getByRole("button", { name: "Privacy verification", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
   await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();
   await expect(status.getByText(/answers this session/i)).toHaveCount(0);
 
   await page.getByRole("switch", { name: "Stop protection" }).click();
-  await expect(status.getByRole("button", { name: "Privacy verification", exact: true })).toHaveCount(0);
-  await expect(status.getByText("Not connected", { exact: true })).toBeVisible();
+  await expect(status.getByRole("button", { name: "Privacy verification", exact: true })).toBeVisible();
+  await expect(status.getByText("Not protected", { exact: true })).toBeVisible();
   await expect(page.locator(".tray-template-icon")).toHaveCSS("opacity", "0.45");
   for (const name of ["Agents", "Usage", "Settings"]) {
     await nav(page, name).click();
@@ -1339,7 +1353,7 @@ test("overview presents local availability and the active profile without sessio
   await expect(page.getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
 
   await page.goto("/?mock=no-key");
-  await expect(page.getByLabel("Protection status").getByText("Credential unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
   await page.getByRole("switch", { name: "Start protection" }).click();
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
@@ -1348,8 +1362,7 @@ test("overview presents local availability and the active profile without sessio
 
 test("installed agents stay ordered and protection state is consistent across pages", async ({ page }) => {
   await page.goto("/?mock=mixed-agents");
-  await expect(page.locator(".status-agent-icon")).toHaveCount(4);
-  await expect(page.locator(".status-agent-icon.is-disconnected")).toHaveCount(3);
+  await expect(page.locator(".status-agent-icon")).toHaveCount(0);
   const preview = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents", exact: true }) });
   await expect(preview.locator(".agent-block")).toHaveCount(4);
   await page.getByRole("button", { name: "Agents", exact: true }).click();
@@ -1376,7 +1389,7 @@ test("installed agents stay ordered and protection state is consistent across pa
   await expect(header.getByText("Not protected", { exact: true })).toBeVisible();
   await expect(header.locator(".protection-duration")).toHaveCount(0);
   await page.getByRole("button", { name: "Overview", exact: true }).click();
-  await expect(page.getByText("Local API unavailable", { exact: true })).toBeVisible();
+  await expect(page.locator(".overview-module-title").filter({ has: page.getByRole("heading", { name: "Local API", exact: true }) })).toContainText("Unavailable");
 });
 
 test("editing a live profile reconnects, while a failed candidate stays unsaved and unprotected", async ({ page }) => {
@@ -1563,8 +1576,8 @@ test("fail-closed states stay explicit and never show the success effects", asyn
   await expect(status.getByText("Protection blocked", { exact: true })).toBeVisible();
   await expect(page.getByText(/identity changed after verification/i)).toBeVisible();
   await expect(page.getByRole("switch", { name: "Stop protection" })).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator(".tracks-left")).toHaveCSS("opacity", "0");
-  await expect(page.locator(".status-glow")).toHaveCSS("opacity", "0");
+  await expect(page.locator(".tracks-left, .status-glow")).toHaveCount(0);
+  await expect(page.locator(".tracks-right")).toHaveCSS("opacity", "0");
   for (const name of ["Agents", "Usage", "Settings"]) {
     await nav(page, name).click();
     await expect(page.locator(".page-protection").getByText("Protection blocked", { exact: true })).toBeVisible();

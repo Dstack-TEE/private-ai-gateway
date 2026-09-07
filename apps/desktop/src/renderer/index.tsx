@@ -1229,7 +1229,7 @@ function Sidebar({
       </div>
       <div className="sidebar-brand" data-tauri-drag-region>
         <BrandMark className="brand-mark" />
-        <span>{brand.productName}</span>
+        <span className="sidebar-brand-copy"><span>{brand.productName}</span><small>by dstack TEE</small></span>
       </div>
       <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
       <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>
@@ -1532,39 +1532,22 @@ function StatusSurface({
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
-  const activeProfileAvailable = profileIsAvailable(activeProfile, state);
-  const liveVerified = hasLiveVerification(state);
-  const profileStatus = !activeProfile
-    ? "Not configured"
-    : liveVerified
-      ? "Verified"
-      : state.status === "verifying"
-        ? "Verifying…"
-      : state.status === "blocked" || state.status === "error"
-        ? "Not verified"
-      : activeProfileAvailable
-        ? "Not connected"
-      : profileHasCredential(activeProfile)
-        ? "Verification required"
-        : "Credential unavailable";
   return (
     <section className={`status-surface status-compact status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer side="right" lines={TLS_TRACKS} active={protectedNow} />
       <span className="status-background-mark" aria-hidden="true" style={{ maskImage: `url("${brand.mark.light}")` }} />
       <div className="status-compact-content">
-        <div className="status-heading">AI service
-          {liveVerified && <Badge variant="outline" className="border-success/20 bg-success/10 text-success" render={<button type="button" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy} />}><ShieldCheck aria-hidden="true" />Verified</Badge>}
-        </div>
-        <Button variant="outline" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
+        <Button variant="ghost" className={`status-verdict-button state-${verdict.tone}`} aria-label="Privacy verification" title="View privacy verification" aria-haspopup="dialog" onClick={onPrivacy}>
+          <ProtectionStatus state={state} label={verdict.title} />
+        </Button>
+        <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
+        <Field className="mt-auto">
+        <Button id="overview-profile" variant="outline" className="status-profile" title={activeProfile?.name ?? "Set up profile"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
-          <span>{activeProfile?.name ?? "Setup provider"}</span>
+          <span>{activeProfile?.name ?? "Set up profile"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {!liveVerified && <div className="status-fact status-profile-state state-neutral"><ShieldX size={13} aria-hidden="true" /><span>{profileStatus}</span></div>}
-        <div className="status-compact-protection">
-          <span className={`gateway-verdict state-${verdict.tone}`}><ProtectionStatus state={state} label={verdict.title} /></span>
-          <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
-        </div>
+        </Field>
       </div>
     </section>
   );
@@ -1729,12 +1712,15 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
+    <section className="session-overview" aria-labelledby="session-usage-heading">
+      <header className="session-overview-heading"><h2 id="session-usage-heading">Current session</h2></header>
     <div className="session-summary" role="group" aria-label="Usage in this session">
       <div><span>Requests</span><strong>{active ? summary.requests.toLocaleString() : "—"}</strong></div>
       <div><span>Tokens</span><strong>{active ? formatTokens(totalTokens) : "—"}</strong></div>
-      <div><span>Cost</span><strong>{active ? currency(summary.costUsd) : "—"}</strong></div>
-      <div><span>Protected</span><strong>{active && forwarded ? `${protectedRate}%` : "—"}</strong></div>
+      <div><span>Estimated cost</span><strong>{active ? currency(summary.costUsd) : "—"}</strong></div>
+      <div><span>Verified answers</span><strong>{active && forwarded ? `${protectedRate}%` : "—"}</strong></div>
     </div>
+    </section>
   );
 }
 
