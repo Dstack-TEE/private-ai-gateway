@@ -1,5 +1,31 @@
 use tauri::{AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
+#[derive(Default)]
+pub struct DialogCache(std::sync::Mutex<std::collections::HashSet<String>>);
+
+fn idle(app: &AppHandle, label: &str) -> bool {
+    app.state::<DialogCache>()
+        .0
+        .lock()
+        .map(|idle| idle.contains(label))
+        .unwrap_or(false)
+}
+
+fn set_idle(app: &AppHandle, label: &str, value: bool) -> Result<(), String> {
+    let cache = app.state::<DialogCache>();
+    let mut idle = cache.0.lock().map_err(|_| "Dialog state unavailable")?;
+    if value {
+        idle.insert(label.to_string());
+    } else {
+        idle.remove(label);
+    }
+    Ok(())
+}
+
+fn active_window(app: &AppHandle, label: &str) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window(label).filter(|_| !idle(app, label))
+}
+
 const PROFILES_LABEL: &str = "profiles";
 const PROFILE_EDITOR_LABEL: &str = "profile-editor";
 const PRIVACY_LABEL: &str = "privacy";
@@ -143,7 +169,7 @@ pub fn open(
     for label in DIALOG_LABELS.into_iter().filter(|label| {
         *label != spec.label && !(spec.label == PROFILE_EDITOR_LABEL && *label == PROFILES_LABEL)
     }) {
-        if let Some(window) = app.get_webview_window(label) {
+        if let Some(window) = active_window(app, label) {
             if spec.label == UPDATE_PROGRESS_LABEL {
                 focus_if_visible(&window)?;
                 return Err("Close the open dialog before installing an update".to_string());
@@ -153,27 +179,45 @@ pub fn open(
     }
 
     if let Some(window) = app.get_webview_window(spec.label) {
+        if idle(app, spec.label) {
+            window.set_title(spec.title).map_err(window_error)?;
+            set_idle(app, spec.label, false)?;
+            watch_presentation(&window);
+            let state = app
+                .state::<std::sync::Arc<desktop_runtime::client::Client>>()
+                .subscribe()
+                .borrow()
+                .clone();
+            let request = serde_json::json!({
+                "state": state, "repair": repair,
+                "recordId": record_id, "profileId": profile_id
+            });
+            if let Err(error) = window.emit_to(window.label(), "gateway://dialog-open", request) {
+                let _ = window.destroy();
+                return Err(window_error(error));
+            }
+            return Ok(());
+        }
         if spec.label == UPDATE_PROGRESS_LABEL {
             focus_if_visible(&window)?;
             return Err("An update dialog is already open".to_string());
         }
         if spec.label == PROFILES_LABEL && repair {
             window
-                .emit(PROFILE_REPAIR_EVENT, ())
+                .emit_to(window.label(), PROFILE_REPAIR_EVENT, ())
                 .map_err(window_error)?;
         } else if let Some(record_id) = record_id.filter(|_| spec.label == USAGE_PROOF_LABEL) {
             window
-                .emit(USAGE_PROOF_EVENT, record_id)
+                .emit_to(window.label(), USAGE_PROOF_EVENT, record_id)
                 .map_err(window_error)?;
         }
         return focus_if_visible(&window);
     }
 
+    set_idle(app, spec.label, false)?;
     let main = app
         .get_webview_window(
-            if spec.label == PROFILE_EDITOR_LABEL
-                && app.get_webview_window(PROFILES_LABEL).is_some()
-            {
+            if spec.label == PROFILE_EDITOR_LABEL && active_window(app, PROFILES_LABEL).is_some() {
                 PROFILES_LABEL
             } else {
                 "main"
@@ -182,7 +226,9 @@ pub fn open(
         .ok_or_else(|| "The main window is unavailable".to_string())?;
     let state = app
         .state::<std::sync::Arc<desktop_runtime::client::Client>>()
-        .state()?;
+        .subscribe()
+        .borrow()
+        .clone();
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
     let theme = main.theme().map_err(window_error)?;
     let initial_appearance = if theme == tauri::Theme::Dark {
@@ -240,6 +286,11 @@ pub fn open(
             }
         }
     });
+    watch_presentation(&window);
+    Ok(())
+}
+
+fn watch_presentation(window: &tauri::WebviewWindow) {
     let presented = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let did_present = presented.clone();
     let listener = window.once(PRESENTED_EVENT, move |_| {
@@ -262,20 +313,22 @@ pub fn open(
             }
         }
     });
-    Ok(())
 }
 
 pub fn request_close(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if idle(window.app_handle(), window.label()) {
+        return Ok(());
+    }
     if !DIALOG_LABELS.contains(&window.label()) {
         return window.close().map_err(window_error);
     }
     if window.label() == PROFILES_LABEL {
-        if let Some(child) = window.app_handle().get_webview_window(PROFILE_EDITOR_LABEL) {
+        if let Some(child) = active_window(window.app_handle(), PROFILE_EDITOR_LABEL) {
             return focus_if_visible(&child);
         }
     }
     window
-        .emit("gateway://dialog-close-requested", ())
+        .emit_to(window.label(), "gateway://dialog-close-requested", ())
         .map_err(window_error)
 }
 
@@ -291,13 +344,12 @@ fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if !DIALOG_LABELS.contains(&window.label()) {
+    if !DIALOG_LABELS.contains(&window.label()) || idle(window.app_handle(), window.label()) {
         return Err("Only native dialogs can present themselves".to_string());
     }
     let app = window.app_handle();
     let parent = if window.label() == PROFILE_EDITOR_LABEL {
-        app.get_webview_window(PROFILES_LABEL)
-            .or_else(|| app.get_webview_window("main"))
+        active_window(app, PROFILES_LABEL).or_else(|| app.get_webview_window("main"))
     } else {
         app.get_webview_window("main")
     }
@@ -308,6 +360,17 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        if let (Ok(size), Ok(scale)) = (window.outer_size(), window.scale_factor()) {
+            if let Some((x, y)) = centered_position(
+                &parent,
+                size.width as f64 / scale,
+                size.height as f64 / scale,
+            ) {
+                window
+                    .set_position(tauri::LogicalPosition::new(x, y))
+                    .map_err(window_error)?;
+            }
+        }
         window.show().map_err(window_error)?;
         window.set_focus().map_err(window_error)?;
         parent.set_enabled(false).map_err(window_error)?;
@@ -318,8 +381,11 @@ pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if idle(window.app_handle(), window.label()) {
+        return Ok(());
+    }
     if window.label() == PROFILES_LABEL {
-        if let Some(child) = window.app_handle().get_webview_window(PROFILE_EDITOR_LABEL) {
+        if let Some(child) = active_window(window.app_handle(), PROFILE_EDITOR_LABEL) {
             focus_if_visible(&child)?;
             return Err("Close the profile editor first".to_string());
         }
@@ -334,12 +400,33 @@ pub fn close(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        macos::dismiss(window.clone())
+        macos::dismiss(window.clone())?;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        window.destroy().map_err(window_error)
+        window.hide().map_err(window_error)?;
+        let parent = if window.label() == PROFILE_EDITOR_LABEL {
+            active_window(window.app_handle(), PROFILES_LABEL)
+        } else {
+            None
+        }
+        .or_else(|| window.app_handle().get_webview_window("main"));
+        if let Some(parent) = parent {
+            parent.set_enabled(true).map_err(window_error)?;
+            parent.set_focus().map_err(window_error)?;
+        }
     }
+    // Update windows are one-shot. Windows/Linux editor ownership is fixed at creation.
+    if window.label() == UPDATE_PROGRESS_LABEL
+        || (!cfg!(target_os = "macos") && window.label() == PROFILE_EDITOR_LABEL)
+    {
+        return window.destroy().map_err(window_error);
+    }
+    if let Err(error) = window.emit_to(window.label(), "gateway://dialog-dismissed", ()) {
+        let _ = window.destroy();
+        return Err(window_error(error));
+    }
+    set_idle(window.app_handle(), window.label(), true)
 }
 
 #[cfg(target_os = "macos")]
@@ -379,7 +466,8 @@ mod macos {
             if let Some(parent) = sheet.sheetParent() {
                 parent.endSheet(&sheet);
             }
-            window.destroy().map_err(window_error)
+            sheet.orderOut(None);
+            Ok(())
         })
     }
 

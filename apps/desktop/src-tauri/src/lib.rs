@@ -643,6 +643,7 @@ pub fn run() {
         )
         .manage(updates::PendingUpdate::default())
         .manage(CliStartup::default())
+        .manage(native_dialog::DialogCache::default())
         .manage(updates::UpdateProgress::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())

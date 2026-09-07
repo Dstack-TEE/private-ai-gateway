@@ -24,6 +24,7 @@ export const brand = {
       "accentDark": "#7fd3a2",
       "brandColor": "#C6EB3D",
       "iconBackground": "#101C18",
+      "iconGlass": true,
       "iconForeground": "#f2f3f5",
       "markLight": "#303236",
       "markDark": "#e8e9eb"

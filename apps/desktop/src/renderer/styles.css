@@ -112,10 +112,10 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .status-verdict-button .protection-status { display: grid; grid-template-columns: 18px minmax(0, 1fr); justify-content: start; justify-items: start; gap: 4px 7px; font-size: 20px; font-weight: 600; line-height: 26px; }
 .status-verdict-button .protection-status > svg { width: 18px; height: 18px; align-self: center; }
 .status-verdict-button .protection-duration { grid-column: 1 / -1; font-size: 14px; line-height: 20px; text-align: left; }
-.status-compact .status-background-mark { position: absolute; z-index: 1; right: -64px; top: -24px; width: 240px; height: 240px; background: color-mix(in srgb, var(--foreground) 8%, var(--card)); mask-size: contain; mask-position: center; mask-repeat: no-repeat; pointer-events: none; }
+.status-compact .status-background-mark { position: absolute; z-index: 1; right: -28px; top: 50%; transform: translateY(-50%); width: 180px; height: 180px; background: color-mix(in srgb, var(--foreground) 8%, var(--card)); mask-size: contain; mask-position: center; mask-repeat: no-repeat; pointer-events: none; }
 .status-compact .tracks-right { inset: 0; mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent); color: color-mix(in srgb, var(--muted-foreground) 5%, var(--card)); }
 .status-compact.status-ready .tracks-right { opacity: 1; }
-.status-compact .status-profile { width: min(140px, 100%); background: var(--card); }
+.status-compact .status-profile { width: min(120px, 100%); background: var(--card); }
 .status-compact .status-background-mark { opacity: .55; }
 .mark.mark-oh-my-pi { background: #0d0d0d; }
 .status-compact .is-icon-only { margin: 0; }

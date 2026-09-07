@@ -64,6 +64,7 @@ const optional = {
   "theme.iconForeground": "color",
   "theme.markLight": "color",
   "theme.markDark": "color",
+  "theme.iconGlass": "boolean",
   "assets.appIconLightMark": "file",
   "assets.appIconDarkMark": "file",
   "assets.appIconWhiteAsCutout": "boolean",
@@ -118,7 +119,7 @@ const uiMarkDark = brand.assets.appIconDarkMark ? await asset("appIconDarkMark")
 const appIconWhiteAsCutout = brand.assets.appIconWhiteAsCutout ?? false;
 const iconMark = standaloneMark(appIconMark, appIconWhiteAsCutout, brand.theme.iconForeground);
 const appIconSvg = composeAppIcon(iconMark, brand.theme.iconBackground, false);
-const appIconComposerManifest = composeIconComposerManifest(brand.theme.iconBackground);
+const appIconComposerManifest = composeIconComposerManifest(brand.theme.iconBackground, brand.theme.iconGlass ?? false);
 const appIconLayer = render(composeIconLayer(iconMark, false), 1024);
 const traySource = await asset("trayTemplate");
 const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout);
@@ -341,7 +342,7 @@ function standaloneMark(mark, whiteAsCutout, color) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">${markContent(mark, whiteAsCutout, color)}</svg>`;
 }
 
-function composeIconComposerManifest(background) {
+function composeIconComposerManifest(background, glass) {
   return {
     fill: { "automatic-gradient": iconComposerColor(background) },
     groups: [
@@ -357,9 +358,9 @@ function composeIconComposerManifest(background) {
         ],
         lighting: "individual",
         name: "Dstack mark",
-        shadow: { kind: "layer-color", opacity: 0 },
-        specular: false,
-        translucency: { enabled: false, value: 0 },
+        shadow: { kind: "layer-color", opacity: glass ? 0.15 : 0 },
+        specular: glass,
+        translucency: { enabled: glass, value: glass ? 0.15 : 0 },
       },
     ],
     "supported-platforms": { circles: ["watchOS"], squares: "shared" },

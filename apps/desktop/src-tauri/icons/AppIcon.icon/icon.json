@@ -23,12 +23,12 @@
       "name": "Dstack mark",
       "shadow": {
         "kind": "layer-color",
-        "opacity": 0
+        "opacity": 0.15
       },
-      "specular": false,
+      "specular": true,
       "translucency": {
-        "enabled": false,
-        "value": 0
+        "enabled": true,
+        "value": 0.15
       }
     }
   ],

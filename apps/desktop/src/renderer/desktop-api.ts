@@ -120,6 +120,8 @@ export const desktopApi: DesktopApi = {
     return invoke("close_native_dialog");
   },
   nativeDialogReady: () => invoke("native_dialog_ready"),
+  onNativeDialogOpen: (listener) => subscribe("gateway://dialog-open", listener),
+  onNativeDialogDismissed: (listener) => subscribe("gateway://dialog-dismissed", listener),
   onNativeCloseRequest: (listener) => subscribe("gateway://dialog-close-requested", listener),
   openAboutLink(target: "documentation" | "github"): Promise<void> {
     return invoke("open_about_link", { target });
@@ -190,7 +192,7 @@ function subscribe<T>(event: string, listener: (payload: T) => void): () => void
   let disposed = false;
   let unlisten: (() => void) | undefined;
   try {
-    void listen<T>(event, (received) => listener(received.payload)).then(
+    void listen<T>(event, (received) => { if (!disposed) listener(received.payload); }).then(
       (nextUnlisten) => {
         if (disposed) {
           nextUnlisten();

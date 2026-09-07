@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   BatteryMedium,
   Bot,
@@ -55,7 +55,6 @@ import { NotificationsProvider, NotificationsSheet, useNotifications } from "./c
 import ohMyPiIcon from "./assets/oh-my-pi.svg";
 import { ProfileTransfer, ExportDiagnostics } from "./components/maintenance";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { prepareDialogPresentation } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
@@ -255,6 +254,8 @@ const TLS_TRACKS = [
   "17 03 03 00 3c   7a0d 2c95 f6e3 41b8 d9c0 3f5e 8a2b 6e17 c4d8 0b93 5a6f e1d2 7c04 93ab 5e8f 21c6 d0a3 7b19",
 ];
 
+const NativeStateContext = createContext<GatewayState | undefined>(initialGatewayState);
+
 function useNativeGatewayWindow(title: string, contentReady = true): {
   state: GatewayState;
   setState: React.Dispatch<React.SetStateAction<GatewayState>>;
@@ -263,8 +264,9 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   closed: boolean;
   close(): void;
 } {
-  const [state, setState] = useState<GatewayState>(initialGatewayState ?? INITIAL_STATE);
-  const [loaded, setLoaded] = useState(Boolean(initialGatewayState));
+  const initialState = useContext(NativeStateContext);
+  const [state, setState] = useState<GatewayState>(initialState ?? INITIAL_STATE);
+  const [loaded, setLoaded] = useState(Boolean(initialState));
   const [loadError, setLoadError] = useState<string>();
   const [closed, setClosed] = useState(false);
   const presented = useRef(false);
@@ -272,11 +274,8 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   useEffect(() => {
     if (!loaded || (!contentReady && !loadError) || closed || presented.current) return;
     let active = true;
-    void prepareDialogPresentation().then(async () => {
-      if (!active || presented.current) return;
-      presented.current = true;
-      await desktopApi.nativeDialogReady();
-    }).catch((error: unknown) => {
+    presented.current = true;
+    void desktopApi.nativeDialogReady().catch((error: unknown) => {
       if (active) setLoadError(errorMessage(error));
     });
     return () => { active = false; };
@@ -289,13 +288,15 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
     root.style.setProperty("--accent-light", brand.theme.accentLight);
     root.style.setProperty("--accent-dark", brand.theme.accentDark);
     let active = true;
+    let receivedState = false;
     const unsubscribe = desktopApi.onStateChange((nextState) => {
+      receivedState = true;
       if (active) setState(nextState);
     });
     void desktopApi.getState().then(
       (nextState) => {
         if (!active) return;
-        setState(nextState);
+        if (!receivedState) setState(nextState);
         setLoaded(true);
       },
       (error: unknown) => {
@@ -349,8 +350,8 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
   );
 }
 
-function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; editor?: boolean }): React.JSX.Element {
-  const native = useNativeGatewayWindow(editor ? query.get("profile") ? "Edit Profile" : "New Profile" : "Profiles");
+function NativeProfilesWindow({ repair, editor = false, profileId }: { repair: boolean; editor?: boolean; profileId?: string | null }): React.JSX.Element {
+  const native = useNativeGatewayWindow(editor ? profileId ? "Edit Profile" : "New Profile" : "Profiles");
   const [actionError, setActionError] = useState<string>();
   const [repairRequest, setRepairRequest] = useState(repair ? 1 : 0);
   useEffect(() => desktopApi.onProfileRepairRequest(() => setRepairRequest((current) => current + 1)), []);
@@ -370,7 +371,7 @@ function NativeProfilesWindow({ repair, editor = false }: { repair: boolean; edi
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
-  const editingProfileId = query.get("profile");
+  const editingProfileId = profileId;
   const editingProfile = native.state.profiles.find((profile) => profile.id === editingProfileId);
   if (editor && editingProfileId && !editingProfile) return <NativeDialogStatus label="profile" error="This profile is no longer available." onClose={native.close} />;
   if (editor) return <main className="native-dialog-host"><ProfileEditorSheet
@@ -527,7 +528,8 @@ function NativeLocalApiWindow(): React.JSX.Element {
 
 function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }): React.JSX.Element {
   const [recordId, setRecordId] = useState(initialRecordId);
-  const [activity, setActivity] = useState<RequestActivity | undefined>(() => initialGatewayState?.activity.find((item) => item.id === initialRecordId));
+  const initialState = useContext(NativeStateContext);
+  const [activity, setActivity] = useState<RequestActivity | undefined>(() => initialState?.activity.find((item) => item.id === initialRecordId));
   const [error, setError] = useState<string>();
   const native = useNativeGatewayWindow("Usage Proof", Boolean(activity || error));
   useEffect(() => desktopApi.onUsageProofRequest(setRecordId), []);
@@ -1539,14 +1541,12 @@ function StatusSurface({
         <Button variant="ghost" className={`status-verdict-button state-${verdict.tone}`} aria-label="Privacy verification" title="View privacy verification" aria-haspopup="dialog" onClick={onPrivacy}>
           <ProtectionStatus state={state} label={verdict.title} />
         </Button>
-        <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
-        <Field className="mt-auto">
         <Button id="overview-profile" variant="outline" className="status-profile" title={activeProfile?.name ?? "Set up profile"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
-          <span>{activeProfile?.name ?? "Set up profile"}</span>
+          <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        </Field>
+        <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
       </div>
     </section>
   );
@@ -2880,22 +2880,41 @@ function errorMessage(error: unknown): string {
   return message;
 }
 
-function WindowContent(): React.JSX.Element {
-  // Native child windows and the main window share one component entry point.
+function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");
-  return nativeDialog === "profiles" ? <NativeProfilesWindow repair={query.get("repair") === "1"} />
+  const [request, setRequest] = useState<{ state?: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null } | null>(() => ({
+    state: initialGatewayState, repair: query.get("repair") === "1",
+    recordId: query.get("record"), profileId: query.get("profile"),
+  }));
+  const [generation, setGeneration] = useState(0);
+  useEffect(() => {
+    const opened = desktopApi.onNativeDialogOpen((next) => {
+      setRequest(next);
+      setGeneration((value) => value + 1);
+    });
+    // Unmount forms when hidden so drafts, credentials, and subscriptions do not persist.
+    const dismissed = desktopApi.onNativeDialogDismissed(() => setRequest(null));
+    return () => { opened(); dismissed(); };
+  }, []);
+  if (!request) return null;
+  const content = nativeDialog === "profiles" ? <NativeProfilesWindow repair={request.repair} />
     : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
     : nativeDialog === "local-api-example" ? <NativeLocalApiExampleWindow />
     : nativeDialog === "notifications" ? <NativeNotificationsWindow />
-    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor />
+    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor profileId={request.profileId} />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
-        : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={query.get("record") ?? ""} />
-          : <App />;
+        : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={request.recordId ?? ""} />
+          : null;
+  return <NativeStateContext.Provider key={generation} value={request.state}><NotificationsProvider api={desktopApi}>{content}</NotificationsProvider></NativeStateContext.Provider>;
+}
+
+function WindowContent(): React.JSX.Element {
+  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App /></NotificationsProvider>;
 }
 
 export function Renderer(): React.JSX.Element {
   const [interactionError, setInteractionError] = useState("");
   useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <AppearanceProvider api={desktopApi}><NotificationsProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider></NotificationsProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
+  return <AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
 }

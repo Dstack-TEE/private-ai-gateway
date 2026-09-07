@@ -33,9 +33,8 @@ shadows or typography; choose from the official component variants instead.
 
 Component sources in `src/renderer/components/ui` were obtained from the official
 `https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
-Local changes are import paths, Lucide icon substitution and an explicit large
-switch size for the Overview protection control. Its geometry is 60x28 with
-the existing Base UI switch behavior; other switches use the default 44x20.
+Local changes are import paths and Lucide icon substitution.
+Protection controls use the default 44x20 switch geometry and Base UI behavior.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
 shadcn additions. Use these components for new standard controls; retain semantic
@@ -44,6 +43,20 @@ Product statuses use semantic tokens: success for verified/available/connected, 
 unknown/inactive, warning for caution states, destructive for errors, and chart tokens for usage.
 Primary remains reserved for commands and selection. The default Luma
 appearance is not an AppKit emulation: WebView content is still web content.
+
+Typography uses the platform system font. Sidebar selection uses standard weight
+and fixed control geometry; this prevents control movement, not changes in glyph
+advance widths. CSS cannot add a variation axis missing from a font. Apple's
+SF Pro download inspected on 2026-09-07 (Version 22.0d4e4) exposes only
+`wdth`, `opsz`, and `wght`, not `GRAD`. The inspected `SF-Pro.ttf` SHA-256 was
+`26e2ab7338d25b79276b9363f22bb7576850f7f326a8fb97ba2419cf0f923012`.
+The downloadable font is not a guarantee about every OS-internal font build.
+Strict grade-only emphasis would require a licensed, locally bundled font with
+that axis, such as Roboto Flex, while keeping `font-weight` unchanged.
+We do not simulate grade with outlines, duplicate text, or width compensation.
+Sources: [Apple Fonts](https://developer.apple.com/fonts/),
+[SF Pro download](https://devimages-cdn.apple.com/design/resources/download/SF-Pro.dmg),
+[Roboto Flex axes](https://github.com/google/fonts/blob/main/ofl/robotoflex/METADATA.pb).
 
 Shared product compositions live one layer above `components/ui`:
 
@@ -125,26 +138,31 @@ that limitation without claiming permission is granted. Focus modes may still
 suppress delivery. Installed packages must be tested on each OS; tray state,
 update badges and inline errors remain available without notification delivery.
 
-Native dialogs wait for content, font readiness and image decoding before the
-presentation handshake. Example dialogs also wait for their local key read.
-On macOS presentation has a short transparent preparation stage: the window is
-ordered without becoming key, ignores mouse events, then the renderer waits for
-visible animation frames before beginning the sheet. This uses public AppKit
-APIs, not snapshots or fixed presentation sleeps. Animation frames are not a
-cross-process compositor guarantee; transparent-window visibility and first-frame
-behavior require installed-app acceptance on supported macOS versions. The
-handshake watchdog also removes a stalled transparent window.
+Native dialogs present once required content is mounted; decorative image decoding
+does not block presentation. Example dialogs wait for their local key read.
+Dialog windows are created lazily and reused after closing. Closing unmounts the
+form, clearing drafts, credential inputs, and data subscriptions; reopening mounts
+fresh content from the backend subscription snapshot. Mutations still use fresh
+backend validation. Update dialogs are one-shot, and profile editors on Windows
+and Linux are recreated because their owner is fixed at creation.
+Each dialog kind retains at most one WebView, trading bounded memory for faster
+repeat opens. The first open still pays the platform's WebView creation cost.
 Native dialogs receive the saved appearance with their initial state and apply
 it in a layout effect, avoiding a temporary System-theme render before the async
 preferences read. Recharts is loaded only on Usage; its fixed-height shell stays
 synchronous. Snapshot-based presentation gates are not used: a successful snapshot
 does not guarantee compositor readiness, and a failed snapshot must not block a
 usable dialog. WebKit has no general public first-composited-frame event.
-No sleep is used to delay normal presentation, and no hidden window
-pool retains credentials. A 20-second failed-handshake deadline cleans up an
+No transparent prewarming, animation-frame waits, or presentation sleeps are used.
+A 20-second failed-handshake deadline cleans up an
 unpresented window and reports the failure in the main window. Browser checks
 cover readiness ordering; compositor behavior still requires macOS acceptance.
 SheetActions provides one shared footer divider.
+
+The dstack macOS 26+ icon uses Apple Icon Composer specular highlights, restrained
+translucency, and a layer shadow. Its near-black green background and source mark
+remain unchanged. Legacy ICNS/PNG/ICO assets remain flat; the material is rendered
+by Apple's asset compiler, not baked into the source artwork.
 Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
 unavailable data, pagination boundaries and dependent settings. Development OS
 changes and deleting a profile during protection use explicit stop-and-confirm
