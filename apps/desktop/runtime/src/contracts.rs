@@ -231,6 +231,8 @@ impl CatalogSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_monitor_available: Option<bool>,
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
     /// `blocked`, or `error`.
     pub status: String,
@@ -281,6 +283,7 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             status: "stopped".to_string(),
+            wake_monitor_available: None,
             configuration_verification: false,
             progress: None,
             remote_url: None,

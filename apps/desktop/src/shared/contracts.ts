@@ -179,6 +179,7 @@ export interface ProfileBackup {
 export interface NotificationConfiguration {
   preferences: NotificationPreferences;
   permission: "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
+  alertsEnabled?: boolean;
 }
 
 export interface LocalApiConfig {
@@ -189,6 +190,7 @@ export interface LocalApiConfig {
 }
 
 export interface GatewayState {
+  wakeMonitorAvailable?: boolean;
   /** Unix seconds when the current protection session became verified. */
   protectedSince?: number;
   status: GatewayStatus;
@@ -294,7 +296,7 @@ export interface DesktopApi {
   exportProfiles(path: string): Promise<void>;
   exportDiagnostics(path: string): Promise<void>;
   saveNotificationSettings(config: NotificationPreferences): Promise<void>;
-  requestNotificationPermission(): Promise<NotificationConfiguration["permission"]>;
+  requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
   getState(): Promise<GatewayState>;
   onStateChange(listener: (state: GatewayState) => void): () => void;

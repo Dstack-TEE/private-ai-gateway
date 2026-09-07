@@ -15,7 +15,24 @@ pub enum Permission {
     Unsupported,
 }
 
-pub async fn query(app: &AppHandle) -> Permission {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionStatus {
+    pub permission: Permission,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alerts_enabled: Option<bool>,
+}
+
+impl From<Permission> for PermissionStatus {
+    fn from(permission: Permission) -> Self {
+        Self {
+            permission,
+            alerts_enabled: None,
+        }
+    }
+}
+
+pub async fn query(app: &AppHandle) -> PermissionStatus {
     #[cfg(target_os = "macos")]
     {
         return macos::query(app).await;
@@ -37,12 +54,13 @@ pub async fn query(app: &AppHandle) -> Permission {
             })
         })
         .await
-        .unwrap_or(Permission::Unknown);
+        .map(PermissionStatus::from)
+        .unwrap_or_else(|_| Permission::Unknown.into());
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
-        Permission::Unsupported
+        Permission::Unsupported.into()
     }
 }
 
@@ -69,7 +87,7 @@ mod macos {
     };
     use std::{ptr::NonNull, sync::Mutex, time::Duration};
 
-    pub async fn query(app: &AppHandle) -> Permission {
+    pub async fn query(app: &AppHandle) -> PermissionStatus {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         if app
             .run_on_main_thread(move || {
@@ -82,18 +100,20 @@ mod macos {
                         UNAuthorizationStatus::Denied => Permission::Denied,
                         UNAuthorizationStatus::Authorized
                         | UNAuthorizationStatus::Provisional
-                        | UNAuthorizationStatus::Ephemeral => {
-                            if settings.alertSetting() == UNNotificationSetting::Disabled {
-                                Permission::Denied
-                            } else {
-                                Permission::Granted
-                            }
-                        }
+                        | UNAuthorizationStatus::Ephemeral => Permission::Granted,
                         _ => Permission::Unknown,
+                    };
+                    let alerts_enabled = match settings.alertSetting() {
+                        UNNotificationSetting::Enabled => Some(true),
+                        UNNotificationSetting::Disabled => Some(false),
+                        _ => None,
                     };
                     if let Ok(mut sender) = sender.lock() {
                         if let Some(sender) = sender.take() {
-                            let _ = sender.send(permission);
+                            let _ = sender.send(PermissionStatus {
+                                permission,
+                                alerts_enabled,
+                            });
                         }
                     }
                 });
@@ -102,11 +122,11 @@ mod macos {
             })
             .is_err()
         {
-            return Permission::Unknown;
+            return Permission::Unknown.into();
         }
         match tokio::time::timeout(Duration::from_secs(10), receiver).await {
             Ok(Ok(permission)) => permission,
-            _ => Permission::Unknown,
+            _ => Permission::Unknown.into(),
         }
     }
 

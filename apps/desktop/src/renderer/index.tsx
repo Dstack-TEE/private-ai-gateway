@@ -1761,6 +1761,7 @@ function AgentsView({
   return (
     <div className="page-body">
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
+
       <div className="page-toolbar">
         <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
       </div>
@@ -2138,6 +2139,7 @@ function SettingsView({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <div className="page-body settings-page">
+      {state.wakeMonitorAvailable === false && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">System wake monitoring is unavailable. Reconnect protection manually after sleep until monitoring recovers.</AlertDescription></Alert>}
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
       {state.endpointError && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">{state.endpointError}</AlertDescription></Alert>}

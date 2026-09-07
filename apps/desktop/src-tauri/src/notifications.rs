@@ -16,7 +16,8 @@ pub struct Settings(Mutex<NotificationPreferences>);
 #[derive(serde::Serialize)]
 pub struct Configuration {
     preferences: NotificationPreferences,
-    permission: permission::Permission,
+    #[serde(flatten)]
+    system: permission::PermissionStatus,
 }
 
 pub fn initialize(app: &AppHandle) {
@@ -35,7 +36,7 @@ pub async fn get_notification_settings(app: AppHandle) -> Result<Configuration, 
     let preferences = crate::run_blocking(|| Ok(preferences::load()?.notifications)).await?;
     Ok(Configuration {
         preferences,
-        permission: permission::query(&app).await,
+        system: permission::query(&app).await,
     })
 }
 
@@ -56,7 +57,7 @@ pub async fn save_notification_settings(
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::Permission, String> {
+) -> Result<permission::PermissionStatus, String> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }
