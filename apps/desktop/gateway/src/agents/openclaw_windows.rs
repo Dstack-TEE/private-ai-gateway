@@ -349,6 +349,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let current = current_user_sid().unwrap();
         let private = format!("(A;;FA;;;{current})");
+        // FW includes READ_CONTROL. Deny only FILE_WRITE_DATA when exercising
+        // policy on a readable ACL; separately deny the inspector's read rights.
         for (name, acl, allowed) in [
             ("private", format!("D:P{private}"), true),
             (
@@ -358,10 +360,15 @@ mod tests {
             ),
             ("read", format!("D:P{private}(A;;FR;;;WD)"), true),
             ("write", format!("D:P{private}(A;;FW;;;WD)"), false),
-            ("deny", format!("D:P(D;;FW;;;WD){private}"), true),
+            ("deny", format!("D:P(D;;0x00000002;;;WD){private}"), true),
+            (
+                "deny-inspection",
+                format!("D:P(D;;FRFW;;;WD){private}"),
+                false,
+            ),
             (
                 "deny-and-allow",
-                format!("D:P(D;;FW;;;WD){private}(A;;FW;;;WD)"),
+                format!("D:P(D;;0x00000002;;;WD){private}(A;;0x00000002;;;WD)"),
                 false,
             ),
             ("null", "D:NO_ACCESS_CONTROL".into(), false),
@@ -370,6 +377,22 @@ mod tests {
             fixture(&path, &acl);
             let result = validate_helper(&path);
             assert_eq!(result.is_ok(), allowed, "{name}: {result:?}");
+            if name == "deny-and-allow" {
+                assert!(
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.contains("permits another")),
+                    "{result:?}"
+                );
+            }
+            if name == "deny-inspection" {
+                assert!(
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.contains("Cannot open")),
+                    "{result:?}"
+                );
+            }
         }
     }
 
