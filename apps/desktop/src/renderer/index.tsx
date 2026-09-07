@@ -14,7 +14,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  Laptop,
   LayoutGrid,
   LoaderCircle,
   LockOpen,
@@ -25,7 +24,6 @@ import {
   Settings,
   ShieldCheck,
   ShieldX,
-  SquareTerminal,
   TriangleAlert,
   Trash2,
   Wifi,
@@ -242,19 +240,6 @@ const VIEWS: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-const PLAINTEXT_TRACKS = [
-  'POST /v1/messages   { "model": "demo/verified-chat-01", "max_tokens": 2048, "system": "You summarize public documents.", "stream": true,',
-  'event: content_block_delta   data: { "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "The public compose hash matches the expected value." } }',
-  '"messages": [ { "role": "user", "content": [ { "type": "text", "text": "Inspect the public dstack attestation report." } ] } ],   "tools": [ { "name": "read_attestation_report", "input_schema": { "type": "object", "properties": { "format": { "type": "string" } } } } ] }',
-  'event: message_delta   data: { "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 96 } }',
-  'POST /v1/responses   { "model": "demo/verified-reasoning-01", "instructions": "Return a concise JSON summary.", "store": false, "stream": true, "reasoning": { "effort": "low" },',
-  'event: response.output_text.delta   data: { "type": "response.output_text.delta", "output_index": 0, "delta": "Release notes summarized in three points." }',
-  '"input": [ { "role": "user", "content": [ { "type": "input_text", "text": "Summarize the public release notes." } ] } ],   "tools": [ { "type": "function", "name": "read_public_file", "parameters": { "type": "object", "properties": { "path": { "type": "string" } } } } ] }',
-  'event: response.completed   data: { "type": "response.completed", "response": { "id": "resp_demo_0902", "status": "completed", "usage": { "input_tokens": 384, "output_tokens": 96 } } }',
-  'POST /v1/chat/completions   { "model": "demo/verified-chat-01", "stream": true, "messages": [ { "role": "system", "content": "You compare public hashes." }, { "role": "user", "content": "Compare the tdx_quote digest with compose_hash." } ],',
-  'data: { "id": "chatcmpl_demo_0902", "object": "chat.completion.chunk", "choices": [ { "index": 0, "delta": { "content": "Both digests match." }, "finish_reason": null } ] }',
-  '"tools": [ { "type": "function", "function": { "name": "compare_hash", "parameters": { "type": "object", "properties": { "expected": { "type": "string" } } } } } ],   "tool_choice": "auto" }',
-];
 
 const TLS_TRACKS = [
   "17 03 03 00 f4   9f3a c1e0 7b42 d5a8 0e6f 2c91 4d17 e8b3 5a0c f9d2 61b7 a3e4 b8c5 0f2e 93d1 7a46 e5b0 1c8d",
@@ -846,9 +831,10 @@ function App(): React.JSX.Element {
   };
 
   const changeDevelopmentOs = async (enabled: boolean) => {
+    if (applying) return;
+    setApplying(true);
     try {
       if (!await desktopApi.confirm({ title: enabled ? "Allow development OS?" : "Require production OS?", message: "Protection will stop before changing this policy.", confirmLabel: "Stop and Change" })) return;
-      setApplying(true);
       setState(await desktopApi.stop());
       setAllowDevelopmentOs(enabled);
     } catch (error) { setActionError(errorMessage(error)); }
@@ -1552,7 +1538,7 @@ function StatusSurface({
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
     <section className={`status-surface status-compact status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
-      <TrackLayer side="right" lines={TLS_TRACKS} active={protectedNow} />
+      <TrackLayer />
       <span className="status-background-mark" aria-hidden="true" style={{ maskImage: `url("${brand.mark.light}")` }} />
       <div className="status-compact-content">
         <Button variant="ghost" className={`status-verdict-button state-${verdict.tone}`} aria-label="Privacy verification" title="View privacy verification" aria-haspopup="dialog" onClick={onPrivacy}>
@@ -1571,10 +1557,10 @@ function StatusSurface({
   );
 }
 
-function TrackLayer({ side, lines, active }: { side: "left" | "right"; lines: string[]; active: boolean }): React.JSX.Element {
+function TrackLayer(): React.JSX.Element {
   return (
-    <div className={`track-layer tracks-${side} ${active ? "is-active" : ""}`} aria-hidden="true">
-      {lines.map((line, index) => <TrackRow key={`${side}-${line}`} text={line} reverse={index % 2 === 1} />)}
+    <div className="track-layer tracks-right" aria-hidden="true">
+      {TLS_TRACKS.map((line, index) => <TrackRow key={line} text={line} reverse={index % 2 === 1} />)}
     </div>
   );
 }
@@ -2210,7 +2196,6 @@ function SettingsView({
   savingPreference: boolean;
   onLaunchPreference(name: keyof LaunchPreferences, enabled: boolean): void;
 }): React.JSX.Element {
-  const frozen = busy || running;
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
@@ -2467,27 +2452,24 @@ function ProfileEditorSheet({
     setError(undefined);
   };
   const removeProfile = async () => {
-    let confirmed: boolean;
-    try {
-      confirmed = await desktopApi.confirm({
-        title: `Delete “${draft.name}”?`,
-        message: "The profile and its saved credential will be permanently removed from this device.",
-        confirmLabel: "Delete Profile",
-      });
-    } catch (confirmError) {
-      setError(errorMessage(confirmError));
-      return;
-    }
-    if (!confirmed) return;
+    if (saving || frozen) return;
     setSaving(true);
     setError(undefined);
-    const message = await onDelete(draft.id);
-    setSaving(false);
-    if (message) {
-      setError(message);
-    } else {
-      onDeleted();
-    }
+    try {
+      const current = await desktopApi.getState();
+      const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
+      const confirmed = await desktopApi.confirm({
+        title: `Delete “${draft.name}”?`,
+        message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile and its saved credential will be permanently deleted." : "The profile and its saved credential will be permanently removed from this device.",
+        confirmLabel: needsStop ? "Stop and Delete" : "Delete Profile",
+      });
+      if (!confirmed) return;
+      if (needsStop) await desktopApi.stop();
+      const message = await onDelete(draft.id);
+      if (message) setError(message);
+      else onDeleted();
+    } catch (error) { setError(errorMessage(error)); }
+    finally { setSaving(false); }
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -2524,7 +2506,7 @@ function ProfileEditorSheet({
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
-          <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving || draft.provider !== "custom"} spellCheck={false} /></FormField>
+          <FormField id="profile-endpoint" label="Service endpoint"><Input id="profile-endpoint" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || saving} readOnly={draft.provider !== "custom"} spellCheck={false} /></FormField>
           <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || saving} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
@@ -2533,7 +2515,7 @@ function ProfileEditorSheet({
         </FieldGroup>
         </div>
         <FieldError className="mt-3">{error}</FieldError>
-        <SheetActions leading={!isNew && <Button type="button" variant="destructive" title={running ? "Stop protection before deleting a profile" : undefined} disabled={saving || frozen || running} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
+        <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={saving || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving || busy || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || (!savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
         </SheetActions>

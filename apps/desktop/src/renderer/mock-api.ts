@@ -541,6 +541,7 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     stop: async () => {
+      if (name === "stop-protection-error") throw new Error("Could not stop protection");
       verifyRun += 1;
       state = { ...state, status: "stopped", protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
       publish();

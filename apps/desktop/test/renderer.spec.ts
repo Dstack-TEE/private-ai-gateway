@@ -65,6 +65,32 @@ test("startup requests undetermined notification permission and proof content re
   expect(await proof.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
 });
 
+test("deleting a live profile confirms stop and aborts if stopping fails", async ({ page }) => {
+  await page.goto("/?mock=ready&native-dialog=profiles");
+  const profiles = page.getByRole("dialog", { name: "Profiles" });
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit profile" });
+  const remove = editor.getByRole("button", { name: "Delete Profile" });
+  await expect(remove).toBeEnabled();
+  page.once("dialog", async (dialog) => { expect(dialog.message()).toContain("Protection will stop"); await dialog.dismiss(); });
+  await remove.click();
+  await expect(editor).toBeVisible();
+  await expect(remove).toBeEnabled();
+  page.once("dialog", (dialog) => dialog.accept());
+  await remove.click();
+  await expect(editor).toHaveCount(0);
+  await expect(profiles.locator(".profile-select")).toHaveCount(0);
+
+  await page.goto("/?mock=stop-protection-error&native-dialog=profiles");
+  await profiles.getByRole("button", { name: "Edit RedPill" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await remove.click();
+  await expect(editor.getByRole("alert")).toHaveText("Could not stop protection");
+  await expect(remove).toBeEnabled();
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(profiles.getByRole("button", { name: "Edit RedPill" })).toBeVisible();
+});
+
 test("CLI registration and explicit backend recovery are reachable", async ({ page }) => {
   await page.goto("/?mock=ready");
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: "Settings" }).click();
@@ -1518,7 +1544,8 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   let editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor.getByRole("button", { name: "RedPill" })).toHaveAttribute("aria-pressed", "true");
   await expect(editor.getByLabel("Service endpoint")).toHaveValue("https://tee.redpill.ai");
-  await expect(editor.getByLabel("Service endpoint")).toBeDisabled();
+  await expect(editor.getByLabel("Service endpoint")).toHaveAttribute("readonly", "");
+  await expect(editor.getByLabel("Service endpoint")).toBeEnabled();
 
   await editor.getByRole("button", { name: "Phala" }).click();
   await expect(editor.getByText("Provider", { exact: true })).toBeVisible();

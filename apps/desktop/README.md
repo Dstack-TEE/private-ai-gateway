@@ -145,6 +145,12 @@ pool retains credentials. A 20-second failed-handshake deadline cleans up an
 unpresented window and reports the failure in the main window. Browser checks
 cover readiness ordering; compositor behavior still requires macOS acceptance.
 SheetActions provides one shared footer divider.
+Disabled controls are reserved for in-flight mutations, missing/invalid inputs,
+unavailable data, pagination boundaries and dependent settings. Development OS
+changes and deleting a profile during protection use explicit stop-and-confirm
+flows. Deletion aborts if stopping fails; backend lifecycle checks remain in
+force if a concurrent client starts protection again. Preset service endpoints
+are read-only and copyable, not disabled merely because they are preset values.
 Proof and privacy scroll content reserve an overlay-scrollbar lane; scrollable
 surfaces use scrollbar-gutter while non-scrolling native dialog roots do not.
 
