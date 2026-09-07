@@ -71,9 +71,10 @@ mod platform {
     }
     impl Drop for Observer {
         fn drop(&mut self) {
+            let token: &ProtocolObject<dyn NSObjectProtocol> = &self.token;
             // Both retained objects live on the AppKit thread for the registration lifetime.
             unsafe {
-                self.center.removeObserver(self.token.as_ref().as_ref());
+                self.center.removeObserver(token.as_ref());
             }
         }
     }
