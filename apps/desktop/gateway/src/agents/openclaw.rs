@@ -383,15 +383,15 @@ fn validate_command_text(command: &str) -> Result<(), String> {
 pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), String> {
     let command = helper_path(source, token_path)?;
     validate_command_text(path_text(&command)?)?;
-    let metadata = fs::symlink_metadata(&command).map_err(|_| {
-        "The staged OpenClaw helper is missing or unreadable; restart the desktop app"
-    })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("The OpenClaw helper must be a regular file, not a symlink".into());
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&command).map_err(|_| {
+            "The staged OpenClaw helper is missing or unreadable; restart the desktop app"
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err("The OpenClaw helper must be a regular file, not a symlink".into());
+        }
         // getuid has no preconditions and matches OpenClaw's process.getuid().
         let uid = unsafe { libc::getuid() };
         if metadata.uid() != uid || metadata.mode() & 0o022 != 0 || metadata.mode() & 0o100 == 0 {
@@ -399,7 +399,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
         }
     }
     #[cfg(windows)]
-    validate_windows_helper(&command)?;
+    windows::validate_helper(&command)?;
     if source != command
         && !same_content(source, &command)
             .map_err(|_| "Cannot verify the staged OpenClaw helper against this installation")?
@@ -465,8 +465,8 @@ pub(super) fn stale_helper(record: &Connection, source: &Path, token_path: &Path
 // can_write (257-269), read_owner_and_dacl (354-440). Owner trust is not an
 // exec-provider requirement. Unsupported ACEs cannot be treated as empty ACLs.
 #[cfg(any(windows, test))]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(test, derive(Deserialize))]
+#[cfg_attr(test, serde(rename_all = "camelCase", deny_unknown_fields))]
 struct WindowsAcl {
     owner_sid: String,
     current_user_sid: String,
@@ -476,8 +476,8 @@ struct WindowsAcl {
 }
 
 #[cfg(any(windows, test))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(Deserialize))]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 struct WindowsAce {
     sid: String,
     kind: u8,
@@ -486,9 +486,7 @@ struct WindowsAce {
 }
 
 #[cfg(any(windows, test))]
-fn validate_windows_acl(bytes: &[u8]) -> Result<(), String> {
-    let acl: WindowsAcl =
-        serde_json::from_slice(bytes).map_err(|_| "Cannot parse the OpenClaw helper ACL")?;
+fn validate_windows_acl(acl: &WindowsAcl) -> Result<(), String> {
     let valid_sid = |sid: &str| {
         let parts: Vec<_> = sid.split('-').collect();
         parts.len() >= 4
@@ -505,7 +503,7 @@ fn validate_windows_acl(bytes: &[u8]) -> Result<(), String> {
     {
         return Err("Cannot verify a local DACL for the OpenClaw helper".into());
     }
-    for ace in acl.aces {
+    for ace in &acl.aces {
         if !valid_sid(&ace.sid) || !matches!(ace.kind, 0 | 1) {
             return Err("The OpenClaw helper has an unsupported ACL entry".into());
         }
@@ -524,121 +522,8 @@ fn validate_windows_acl(bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn validate_windows_helper(path: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::{
-        io::Read,
-        process::Stdio,
-        sync::mpsc,
-        time::{Duration, Instant},
-    };
-
-    // The path travels only in an environment value, never in executable text.
-    // PowerShell reconstructs PSModulePath even after env_clear; constrain
-    // discovery inside the script before resolving any inspection cmdlets.
-    const QUERY: &str = r#"
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
-$p = $env:PRIVATE_AI_GATEWAY_ACL_PATH
-$item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $p -Force
-if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse point' }
-$acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $p
-$raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
-$entries = @()
-foreach ($ace in $raw.DiscretionaryAcl) {
-    if ($ace.AceType -ne 0 -and $ace.AceType -ne 1) { throw 'Unsupported ACE' }
-    $entries += @{sid=$ace.SecurityIdentifier.Value;kind=[int]$ace.AceType;flags=[int]$ace.AceFlags;mask=([int64]$ace.AccessMask -band 4294967295)}
-    if ($entries.Count -gt 256) { throw 'Too many ACEs' }
-}
-$root = [IO.Path]::GetPathRoot($p)
-$extendedDrive = $p.Length -ge 7 -and $p.StartsWith('\\?\') -and [char]::IsLetter($p[4]) -and $p[5] -eq ':' -and $p[6] -eq '\'
-$driveRoot = if ($extendedDrive) { $p.Substring(4,3) } else { $root }
-$local = (-not $p.StartsWith('\\') -or $extendedDrive) -and [IO.DriveInfo]::new($driveRoot).DriveType -ne [IO.DriveType]::Network
-@{ownerSid=$raw.Owner.Value;currentUserSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;local=$local;daclPresent=(($raw.ControlFlags -band 4) -ne 0 -and $null -ne $raw.DiscretionaryAcl);aces=$entries} | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4 -Compress
-"#;
-    let root = env_path("SystemRoot")
-        .filter(|p| p.is_absolute())
-        .ok_or("Cannot locate the Windows ACL inspector")?;
-    let executable = root
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    let mut child = Command::new(executable)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            QUERY,
-        ])
-        .env_clear()
-        .env("SystemRoot", root)
-        .env("PRIVATE_AI_GATEWAY_ACL_PATH", path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(0x08000000)
-        .spawn()
-        .map_err(|_| "Cannot inspect the OpenClaw helper ACL")?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("Cannot read the OpenClaw helper ACL".into());
-    };
-    const LIMIT: u64 = 65536;
-    std::thread::scope(|scope| {
-        let (sender, receiver) = mpsc::channel();
-        scope.spawn(move || {
-            let mut bytes = Vec::new();
-            let result = stdout
-                .take(LIMIT + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes);
-            let _ = sender.send(result);
-        });
-        let start = Instant::now();
-        let mut output = None;
-        loop {
-            if let Ok(result) = receiver.try_recv() {
-                output = Some(result);
-            }
-            let failure = match output.as_ref() {
-                Some(Err(_)) => Some("Cannot read the OpenClaw helper ACL inspector output"),
-                Some(Ok(bytes)) if bytes.len() as u64 > LIMIT => {
-                    Some("The OpenClaw helper ACL inspector output exceeded 64 KiB")
-                }
-                _ if start.elapsed() >= Duration::from_secs(5) => {
-                    Some("The OpenClaw helper ACL inspector did not finish within 5 seconds")
-                }
-                _ => None,
-            };
-            if let Some(failure) = failure {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(failure.into());
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        return Err("Cannot verify the OpenClaw helper ACL".into());
-                    }
-                    if let Some(Ok(bytes)) = output {
-                        return validate_windows_acl(&bytes);
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("Cannot complete the OpenClaw helper ACL inspection".into());
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    })
-}
+#[path = "openclaw_windows.rs"]
+mod windows;
 
 #[cfg(test)]
 mod tests {
@@ -835,6 +720,10 @@ mod tests {
 
     #[test]
     fn windows_acl_matches_native_basic_ace_rules() {
+        let validate_windows_acl = |bytes: &[u8]| {
+            let acl = serde_json::from_slice(bytes).map_err(|_| "Invalid fixture".to_string())?;
+            super::validate_windows_acl(&acl)
+        };
         let current = "S-1-5-21-100-200-300-1001";
         let acl = |aces: Value| {
             serde_json::to_vec(&json!({
@@ -865,10 +754,19 @@ mod tests {
             json!([{"sid":"S-1-1-0","kind":0,"flags":0,"mask":0x120089}])
         ))
         .is_ok());
-        assert!(
-            validate_windows_acl(&acl(json!([{"sid":current,"kind":5,"flags":0,"mask":0}])))
-                .is_err()
-        );
+        for kind in [5, 6, 9, 10, 17, 255] {
+            for flags in [0, 8] {
+                assert!(validate_windows_acl(&acl(
+                    json!([{"sid":current,"kind":kind,"flags":flags,"mask":0}])
+                ))
+                .is_err());
+            }
+        }
+        assert!(validate_windows_acl(&acl(json!([{
+            "sid":"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            "kind":0,"flags":0,"mask":2
+        }])))
+        .is_err()); // TrustedInstaller is not an exception.
         let mut missing: Value = serde_json::from_slice(&acl(json!([]))).unwrap();
         missing["daclPresent"] = json!(false);
         assert!(validate_windows_acl(&serde_json::to_vec(&missing).unwrap()).is_err());

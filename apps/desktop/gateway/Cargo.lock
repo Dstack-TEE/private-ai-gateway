@@ -1227,6 +1227,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml_edit",
+ "windows-sys 0.61.2",
  "yaml-edit",
 ]
 
