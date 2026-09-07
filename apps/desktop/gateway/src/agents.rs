@@ -3031,7 +3031,14 @@ mod tests {
         let sandbox = sandbox("codex-model-preference");
         let agent = Agent::Codex;
         let path = agent.config_path(&sandbox.home, false);
-        write(&sandbox.home.join(".local/bin/codex"), "test cli");
+        write(
+            &sandbox.home.join(".local/bin").join(if cfg!(windows) {
+                "codex.exe"
+            } else {
+                "codex"
+            }),
+            "test cli",
+        );
         let options = claude_options();
         let catalog = catalog();
         let preview = sandbox
