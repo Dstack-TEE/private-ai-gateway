@@ -477,11 +477,6 @@ fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn prepare_native_dialog(window: tauri::WebviewWindow) -> Result<bool, String> {
-    native_dialog::prepare(&window)
-}
-
-#[tauri::command]
 fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
     native_dialog::close(&window)
 }
@@ -680,7 +675,6 @@ pub fn run() {
             show_edit_menu,
             open_native_dialog,
             native_dialog_ready,
-            prepare_native_dialog,
             open_agent_website,
             close_native_dialog,
             query_usage,

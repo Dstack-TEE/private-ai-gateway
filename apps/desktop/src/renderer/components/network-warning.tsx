@@ -9,7 +9,7 @@ export function NetworkWarning() {
   const [container, setContainer] = useState<HTMLDialogElement | null>(null);
   useLayoutEffect(() => { setContainer(host.current?.closest("dialog") ?? null); }, []);
   return <span ref={host}><TooltipProvider><Tooltip>
-    <TooltipTrigger className={cn(badgeVariants({ variant: "outline" }), "border-warning/30 bg-warning/10 text-warning")} render={<button type="button" aria-label="Network access warning" />}><TriangleAlert aria-hidden="true" />HTTP</TooltipTrigger>
-    <TooltipContent role="tooltip" container={container ?? undefined}>The local API uses unencrypted HTTP. Other devices need the client key. Use a trusted network; never expose this port to the internet.</TooltipContent>
+    <TooltipTrigger className={cn(badgeVariants({ variant: "outline" }), "border-warning/30 bg-warning/10 text-warning")} render={<button type="button" aria-label="Network access warning" />}><TriangleAlert aria-hidden="true" />Non-loopback</TooltipTrigger>
+    <TooltipContent role="tooltip" container={container ?? undefined}>This address allows connections beyond this device. Requests use unencrypted HTTP and require the client key. Use a trusted network; never expose this port to the internet.</TooltipContent>
   </Tooltip></TooltipProvider></span>;
 }

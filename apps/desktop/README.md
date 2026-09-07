@@ -310,6 +310,15 @@ configs are not recreated, and external edits are preserved. Failed restoration
 keeps its journal for retry and prevents backend shutdown from silently discarding it.
 Closing or quitting only the desktop UI leaves protection and the backend running;
 use Stop All and Quit or `pag --yes service stop` to shut down both.
+
+Ordinary CLI output uses short status summaries, lists, and operation results.
+For automation, use `pag --json --non-interactive <command>`. JSON mode never
+prompts; successful results go to stdout, structured errors to stderr.
+`status --watch --json` emits one JSON object per line. Argument errors exit
+with code 2; command failures exit with code 1. Help and version retain Clap's
+standard text output. `--non-interactive` (alias `--no-interactive`) also works
+without JSON and does not grant approval: use `--yes` for changes requiring
+confirmation and `--key-stdin` to supply credentials without a prompt.
 Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
 
 Settings exposes **Open at Login** (the operating system's login item, also

@@ -33,7 +33,7 @@ import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
-import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw.svg";
+import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import phalaServiceIcon from "./assets/service-phala.svg";
 import redpillServiceIcon from "./assets/service-redpill.png";
@@ -55,7 +55,7 @@ import { NotificationsProvider, NotificationsSheet, useNotifications } from "./c
 import ohMyPiIcon from "./assets/oh-my-pi.svg";
 import { ProfileTransfer, ExportDiagnostics } from "./components/maintenance";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { prepareDialogPresentation, waitForDialogFrames } from "./lib/dialog-presentation";
+import { prepareDialogPresentation } from "./lib/dialog-presentation";
 import { DialogCloseProvider, useDialogClose } from "./components/dialog-close";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens, type Tone } from "./lib/usage-presentation";
 import { usageDateBounds, usageDateLabel, type UsageDateSelection } from "./lib/usage-dates";
@@ -272,19 +272,14 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   useEffect(() => {
     if (!loaded || (!contentReady && !loadError) || closed || presented.current) return;
     let active = true;
-    const controller = new AbortController();
     void prepareDialogPresentation().then(async () => {
       if (!active || presented.current) return;
-      const warmup = await desktopApi.prepareNativeDialog();
-      if (!active) return;
-      if (warmup) await waitForDialogFrames(controller.signal);
-      if (!active) return;
       presented.current = true;
       await desktopApi.nativeDialogReady();
     }).catch((error: unknown) => {
       if (active) setLoadError(errorMessage(error));
     });
-    return () => { active = false; controller.abort(); };
+    return () => { active = false; };
   }, [loaded, contentReady, loadError, closed]);
 
   useEffect(() => {
@@ -1619,7 +1614,7 @@ function ProtectedControl({
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
         tone="success"
-        size={compact ? "default" : "lg"}
+        size="default"
         checked={checked}
         label={label}
         disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
@@ -1749,8 +1744,8 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {
   const icon = AGENT_ICONS[agent.id];
   return (
-    <span className="mark" aria-hidden="true">
-      {agent.id === "oh-my-pi" ? <span className="agent-symbol" style={{ maskImage: `url("${ohMyPiIcon}")` }} /> : icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
+    <span className={agent.id === "oh-my-pi" ? "mark mark-oh-my-pi" : "mark"} aria-hidden="true">
+      {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
 }
@@ -1831,7 +1826,7 @@ function AgentRow({
   const note = agent.attention ?? agent.error;
   return (
     <><Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
-      <span className={agent.connected ? "agent-mark-on" : "agent-mark-off"}><AgentMark agent={agent} /></span>
+      <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
           <span className="row-title">{name}</span>
@@ -2608,12 +2603,13 @@ function LocalApiSheet({
           <FieldGroup>
           <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-start gap-4">
           <Field>
-            <div className="flex items-center gap-2"><FieldLabel htmlFor="local-listen-address">Listen address</FieldLabel>{networkAccess && <NetworkWarning />}</div>
+            <div className="flex min-h-5 items-center gap-2"><FieldLabel htmlFor="local-listen-address">Listen address</FieldLabel>{networkAccess && <NetworkWarning />}</div>
             <ListenAddress api={desktopApi} value={draft.listenAddress} disabled={frozen || saving} onChange={(value) => update("listenAddress", value)} />
           </Field>
-          <FormField id="local-port" label="Port">
+          <Field>
+            <FieldLabel className="min-h-5" htmlFor="local-port">Port</FieldLabel>
             <Input id="local-port" title="1024–65535" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
-          </FormField>
+          </Field>
           </div>
           <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
             <Input id="local-client-host" aria-describedby="local-client-host-note" value={draft.clientHost ?? ""} required={addressKind === "unspecified"} placeholder="Same as listen address" disabled={frozen || saving} spellCheck={false} autoComplete="off" onChange={(event) => update("clientHost", event.target.value || undefined)} />

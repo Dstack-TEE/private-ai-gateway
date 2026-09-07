@@ -325,7 +325,6 @@ export interface DesktopApi {
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   openNativeDialog(kind: "profiles" | "profile-editor" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
-  prepareNativeDialog(): Promise<boolean>;
   onNativeCloseRequest(listener: () => void): () => void;
   closeNativeDialog(): Promise<void>;
   /** Open a documented, allowlisted project resource in the system browser. */

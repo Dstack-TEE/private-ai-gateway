@@ -13,6 +13,24 @@ struct Backend {
     child: Child,
 }
 
+#[test]
+fn argument_errors_are_machine_readable_in_json_mode() {
+    for args in [
+        vec!["--json", "--non-interactive", "unknown-command"],
+        vec!["status", "--json", "--no-interactive", "--unknown-option"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_pag"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_arguments");
+    }
+}
+
 impl Backend {
     fn start() -> Self {
         let directory = tempfile::tempdir().unwrap();

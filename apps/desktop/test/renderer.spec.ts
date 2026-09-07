@@ -887,6 +887,22 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await expect(page.locator(".tracks-right")).toHaveCSS("opacity", "0");
 });
 
+test("agent icons remain visible in both themes without connection-state fading", async ({ page }) => {
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.goto("/?mock=all-agent-icons");
+    await nav(page, "Agents").click();
+    const rows = page.locator(".agent-block");
+    const icons = rows.locator(".mark img");
+    await expect(icons).toHaveCount(7);
+    await expect.poll(() => icons.evaluateAll((images) =>
+      images.every((image) => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && getComputedStyle(image).opacity === "1"),
+    )).toBe(true);
+    await expect(rows.filter({ hasText: "OpenClaw" }).locator("img")).toHaveAttribute("src", /openclaw-color/);
+    await expect(rows.filter({ hasText: "Oh My Pi" }).locator(".mark")).toHaveCSS("background-color", "rgb(13, 13, 13)");
+  }
+});
+
 test("five agents connect and disconnect directly from the verified discovered catalog", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=ready");
@@ -1078,8 +1094,8 @@ test("success colors, list separators, control sizes and About alignment are con
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
     await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
     await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
     await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "140px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");

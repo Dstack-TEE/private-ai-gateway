@@ -311,6 +311,10 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "all-agent-icons") agents = [...agents,
+    { ...PI, id: "oh-my-pi", name: "Oh My Pi", configPath: "/Users/dev/.omp/agent/models.json" },
+    { ...OPENCODE, id: "openclaw", name: "OpenClaw", configPath: "/Users/dev/.openclaw/openclaw.json" },
+  ];
   if (name === "wake-monitor-unavailable") state.wakeMonitorAvailable = false;
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
@@ -436,7 +440,6 @@ export function mockApi(name: string | null): DesktopApi {
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => { document.documentElement.dataset.nativePresented = "true"; },
-    prepareNativeDialog: async () => true,
     onNativeCloseRequest: (listener) => {
       window.addEventListener("mock:native-close", listener);
       return () => window.removeEventListener("mock:native-close", listener);

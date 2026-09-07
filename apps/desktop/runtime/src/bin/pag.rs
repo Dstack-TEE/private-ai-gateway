@@ -15,11 +15,21 @@ use desktop_runtime::{
 use serde::Serialize;
 use serde_json::{json, Value};
 
+#[path = "pag/output.rs"]
+mod human;
+
 #[derive(Parser)]
 #[command(name = "pag", version = desktop_runtime::protocol::BUILD_VERSION, about = "Control the Private AI Gateway backend")]
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
+    #[arg(
+        long,
+        visible_alias = "no-interactive",
+        global = true,
+        help = "Never prompt; use --yes to approve changes and --key-stdin for credentials"
+    )]
+    non_interactive: bool,
     #[arg(
         long,
         global = true,
@@ -240,7 +250,23 @@ enum Settings {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    let json_requested = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json");
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) if json_requested && error.use_stderr() => {
+            eprintln!(
+                "{}",
+                json!({"error": {"code": "invalid_arguments", "message": error.to_string()}})
+            );
+            std::process::exit(error.exit_code());
+        }
+        Err(error) => error.exit(),
+    };
     if let Err(error) = execute(&cli) {
         if error == "Output pipe closed" {
             return;
@@ -261,7 +287,7 @@ fn execute(cli: &Cli) -> Result<(), String> {
     let client = Client::new();
     let result = match &cli.command {
         Action::Status { watch: true } => {
-            return Client::watch_connection(|state| output(&state, cli.json).is_ok());
+            return Client::watch_connection(|state| output(&state, cli).is_ok());
         }
         Action::Status { watch: false }
         | Action::Service {
@@ -387,7 +413,7 @@ fn execute(cli: &Cli) -> Result<(), String> {
                     if client.state()?.profiles.iter().any(|saved| saved.id == *id) {
                         return Err("Profile ID already exists. Use profiles verify to update its credential.".into());
                     }
-                    let key = read_key(*key_stdin)?;
+                    let key = read_key(cli, *key_stdin)?;
                     client.request(Command::Verify {
                         profile,
                         require_production_os: !allow_development_os,
@@ -406,7 +432,7 @@ fn execute(cli: &Cli) -> Result<(), String> {
                             .credential_saved
                             .unwrap_or(profile.verified_at.is_some())
                     {
-                        Some(read_key(*key_stdin)?)
+                        Some(read_key(cli, *key_stdin)?)
                     } else {
                         None
                     };
@@ -589,7 +615,7 @@ fn execute(cli: &Cli) -> Result<(), String> {
             json!({"opened": true})
         }
     };
-    output(&result, cli.json)
+    output(&result, cli)
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
@@ -626,12 +652,8 @@ fn agent_change(
     if dry_run {
         return value(preview);
     }
-    if !cli.yes {
-        eprintln!(
-            "{}",
-            serde_json::to_string_pretty(&preview)
-                .map_err(|_| "Cannot show configuration preview")?
-        );
+    if !cli.yes && !cli.json && !cli.non_interactive && io::stdin().is_terminal() {
+        eprintln!("{}", human::details(&value(&preview)?));
     }
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.apply_agent(id.into(), connect, preview.revision, options)?)
@@ -640,7 +662,7 @@ fn confirm(cli: &Cli, prompt: &str) -> Result<(), String> {
     if cli.yes {
         return Ok(());
     }
-    if !io::stdin().is_terminal() || cli.json {
+    if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
         return Err("Confirmation required. Pass --yes for noninteractive changes.".into());
     }
     eprint!("{prompt} [y/N] ");
@@ -657,7 +679,7 @@ fn confirm(cli: &Cli, prompt: &str) -> Result<(), String> {
         Err("Cancelled".into())
     }
 }
-fn read_key(stdin: bool) -> Result<String, String> {
+fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
     let key = if stdin {
         let mut bytes = Vec::new();
         io::stdin()
@@ -669,7 +691,7 @@ fn read_key(stdin: bool) -> Result<String, String> {
         }
         String::from_utf8(bytes).map_err(|_| "Credential must be UTF-8")?
     } else {
-        if !io::stdin().is_terminal() {
+        if !io::stdin().is_terminal() || cli.json || cli.non_interactive {
             return Err("Use --key-stdin for noninteractive credential input".into());
         }
         rpassword::prompt_password("API key: ").map_err(|_| "Cannot read credential")?
@@ -682,16 +704,67 @@ fn parse_bool(value: &str) -> Result<bool, String> {
 fn value(input: impl Serialize) -> Result<Value, String> {
     serde_json::to_value(input).map_err(|_| "Cannot encode output".into())
 }
-fn output(input: &impl Serialize, compact: bool) -> Result<(), String> {
-    let text = if compact {
-        serde_json::to_string(input)
+fn output(input: &impl Serialize, cli: &Cli) -> Result<(), String> {
+    let text = if cli.json {
+        serde_json::to_string(input).map_err(|_| "Cannot encode output")?
     } else {
-        serde_json::to_string_pretty(input)
-    }
-    .map_err(|_| "Cannot encode output")?;
+        human::render(&cli.command, &value(input)?)
+    };
     match writeln!(io::stdout().lock(), "{text}") {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err("Output pipe closed".into()),
         Err(_) => Err("Cannot write output".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_modes_never_prompt_or_imply_consent() {
+        for mode in ["--json", "--non-interactive", "--no-interactive"] {
+            let cli = Cli::try_parse_from(["pag", mode, "status"]).unwrap();
+            assert!(confirm(&cli, "Confirm?").unwrap_err().contains("--yes"));
+            assert!(read_key(&cli, false).unwrap_err().contains("--key-stdin"));
+            let approved = Cli::try_parse_from(["pag", mode, "--yes", "status"]).unwrap();
+            assert!(confirm(&approved, "Confirm?").is_ok());
+        }
+    }
+
+    #[test]
+    fn human_output_is_a_summary_not_a_state_dump() {
+        let state = json!({"gateway": {"status": "verified", "activeProfileId": "work", "proxyUrl": "http://127.0.0.1:4180", "activity": [{"detail": "not part of status"}]}});
+        assert_eq!(
+            human::render(&Action::Status { watch: false }, &state),
+            "Protected\nProfile: work\nLocal API: http://127.0.0.1:4180"
+        );
+        assert_eq!(
+            human::render(
+                &Action::Profiles {
+                    command: Profiles::List
+                },
+                &json!([])
+            ),
+            "No profiles."
+        );
+        assert_eq!(
+            human::render(
+                &Action::Token {
+                    command: Token::Show
+                },
+                &json!({"token":"sk-pag-example"})
+            ),
+            "sk-pag-example"
+        );
+        let agents = human::render(
+            &Action::Agents {
+                command: Agents::List,
+            },
+            &json!([
+                {"id":"codex", "name":"Codex", "installed":true, "connected":false}
+            ]),
+        );
+        assert_eq!(agents, "codex  Codex  Not connected");
     }
 }
