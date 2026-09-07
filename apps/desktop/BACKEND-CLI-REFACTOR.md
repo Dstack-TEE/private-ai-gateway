@@ -21,7 +21,6 @@ native clients or their stdio runtime.
 pag status --json
 pag status --watch --json
 pag service start
-pag service run
 pag start --profile work
 pag stop
 pag service stop --yes

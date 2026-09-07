@@ -127,6 +127,11 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let settings = backend.run(&["settings", "show"]);
     assert_eq!(settings["preferences"]["notifications"]["enabled"], false);
     assert_eq!(settings["preferences"]["appearance"], "dark");
+    backend.run(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
+    assert_eq!(
+        backend.run(&["settings", "show"])["preferences"]["autoCliRegistration"],
+        false
+    );
     backend.run(&["token", "rotate", "--yes"]);
     let state = backend.run(&["status"]);
     assert_eq!(state["gateway"]["clientKeyRevision"], 1);

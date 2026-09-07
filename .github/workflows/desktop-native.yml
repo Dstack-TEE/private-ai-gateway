@@ -295,6 +295,18 @@ jobs:
           fi
           node scripts/cli-package-smoke.mjs "$scratch/$base" "$version"
 
+      - name: Verify Windows installer startup gate
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = @(Get-ChildItem "$env:LOCALAPPDATA/tauri" -Filter makensis.exe -File -Recurse)
+          if ($tools.Count -ne 1) { throw 'Expected one Tauri-managed makensis.exe' }
+          $makensis = $tools[0].FullName
+          node scripts/windows-startup-gate-smoke.mjs $makensis
+          if ($LASTEXITCODE -ne 0) { throw 'Windows startup-gate smoke failed' }
+
       - name: Check CLI-only Linux packages without installation
         if: runner.os == 'Linux'
         working-directory: apps/desktop
@@ -341,6 +353,11 @@ jobs:
           ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
           xcrun notarytool submit "$cli_scratch/cli.zip" \
             --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+
+      - name: Test macOS backend library
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        run: cargo test --release --locked --manifest-path runtime/Cargo.toml --lib
 
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'

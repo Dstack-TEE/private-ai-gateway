@@ -88,7 +88,6 @@ enum Action {
 
 #[derive(Subcommand)]
 enum Service {
-    Run,
     Start,
     Stop,
     Status,
@@ -273,17 +272,6 @@ fn execute(cli: &Cli) -> Result<(), String> {
             } else {
                 json!({"backend": null, "status": "not_running"})
             }
-        }
-        Action::Service {
-            command: Service::Run,
-        } => {
-            let status = std::process::Command::new(desktop_runtime::launch::service_executable()?)
-                .status()
-                .map_err(|_| "Cannot run the backend")?;
-            if !status.success() {
-                return Err("Backend exited unsuccessfully".into());
-            }
-            return Ok(());
         }
         Action::Service {
             command: Service::Start,
@@ -488,6 +476,9 @@ fn execute(cli: &Cli) -> Result<(), String> {
                 Settings::Set { key, value: input } => {
                     confirm(cli, "Change gateway settings?")?;
                     match key.as_str() {
+                    "autoCliRegistration" => value(
+                        client.set_preference(Preference::AutoCliRegistration(parse_bool(input)?))?,
+                    )?,
                     "notifications" => value(client.set_preference(Preference::Notifications(
                         serde_json::from_str(input).map_err(|_| "Expected notification settings as a JSON object with boolean values")?
                     ))?)?,
@@ -569,6 +560,10 @@ fn execute(cli: &Cli) -> Result<(), String> {
             json!({"exported": path})
         }
         Action::App { command: App::Open } => {
+            let data = desktop_gateway::agents::app_data_dir()?;
+            let _startup = desktop_gateway::lock::startup(&data)
+                .map_err(|_| "Cannot acquire app startup lock")?
+                .ok_or("Backend startup or an update is already in progress.")?;
             let backend = desktop_runtime::launch::service_executable()?;
             let app =
                 backend

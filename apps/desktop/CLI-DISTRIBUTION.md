@@ -22,7 +22,9 @@ lookup.
 | Linux | DEB or RPM | `/usr/bin` | The package manager owns all four paths; no registration command is required. |
 
 Windows install, upgrade, and uninstall hooks call `pag --yes service stop`
-before replacing or removing files. They never use `setx`, rewrite an unrelated
+before replacing or removing files. The installer holds the same `startup.lock`
+as CLI startup across stop and file replacement, including after the updater UI
+exits. They never use `setx`, rewrite an unrelated
 PATH entry, kill processes by image name, or elevate themselves. A conflicting
 unrelated `pag.exe` aborts installation. The Windows workflow contains native
 install/status/uninstall checks, but successful execution on the Windows CI
@@ -34,6 +36,9 @@ from a mounted disk image or App Translocation. Registration does not block the
 window or gateway. Settings > Command Line retains startup errors and supports
 retrying after the app is moved. Removing the command there disables automatic
 registration until the user installs it again.
+
+With the backend running, CLI-only users can disable the same preference with
+`pag --yes settings set autoCliRegistration false` before `pag cli uninstall`.
 
 The registration is idempotent and never replaces an unrelated command. To
 register manually without opening the app:
