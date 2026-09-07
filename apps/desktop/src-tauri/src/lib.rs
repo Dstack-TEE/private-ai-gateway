@@ -499,50 +499,107 @@ async fn run_pag_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registrati
 }
 
 #[derive(Default)]
-struct CliStartup(tokio::sync::Mutex<bool>);
+struct CliStartup(tokio::sync::Mutex<CliStartupState>);
 
+#[derive(Default)]
+struct CliStartupState {
+    #[cfg(target_os = "macos")]
+    attempted: bool,
+    last_error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRegistration {
+    #[serde(flatten)]
+    registration: Registration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startup_error: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn transient_macos_app_path(path: &std::path::Path) -> bool {
+    path.starts_with("/Volumes")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "AppTranslocation")
+}
+
+#[cfg(target_os = "macos")]
+fn allow_automatic_cli_registration() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|_| "Cannot locate the installed application".to_string())?;
+    if transient_macos_app_path(&executable) {
+        return Err(
+            "Move Private AI Gateway to a stable location before registering pag".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 async fn register_cli_on_startup(app: &AppHandle) {
     let startup = app.state::<CliStartup>();
-    let mut attempted = startup.0.lock().await;
-    if *attempted {
+    let mut state = startup.0.lock().await;
+    if state.attempted {
         return;
     }
-    *attempted = true;
-    let client = app.state::<Arc<Client>>().inner().clone();
-    let reader = client.clone();
+    state.attempted = true;
+    let reader = app.state::<Arc<Client>>().inner().clone();
     let enabled =
         run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
     let result = match enabled {
-        Ok(true) => run_pag_cli(app, vec!["cli", "install", "--json"])
-            .await
-            .map(|_| ()),
+        Ok(true) => match allow_automatic_cli_registration() {
+            Ok(()) => run_pag_cli(app, vec!["cli", "install", "--json"])
+                .await
+                .map(|_| ()),
+            Err(error) => Err(error),
+        },
         Ok(false) => Ok(()),
         Err(error) => Err(error),
     };
-    if let Err(error) = result {
-        client.report_error(format!("Command-line registration failed: {error}"));
-    }
+    state.last_error = result
+        .err()
+        .map(|error| format!("Command-line registration failed: {error}"));
 }
 
 #[tauri::command]
-async fn get_cli_registration(app: AppHandle) -> Result<Registration, String> {
+async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, String> {
+    #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
-    run_pag_cli(&app, vec!["cli", "status", "--json"]).await
+    let registration = run_pag_cli(&app, vec!["cli", "status", "--json"]).await?;
+    let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
+    Ok(CliRegistration {
+        registration,
+        startup_error,
+    })
 }
 
 #[tauri::command]
-async fn set_cli_registration(app: AppHandle, installed: bool) -> Result<Registration, String> {
+async fn set_cli_registration(app: AppHandle, installed: bool) -> Result<CliRegistration, String> {
+    #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
     let startup = app.state::<CliStartup>();
-    let _guard = startup.0.lock().await;
+    let mut state = startup.0.lock().await;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    if !installed {
+        let writer = client.clone();
+        run_blocking(move || writer.set_preference(Preference::AutoCliRegistration(false))).await?;
+    }
     let registration = if installed {
         run_pag_cli(&app, vec!["cli", "install", "--json"]).await
     } else {
         run_pag_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
     }?;
-    let client = app.state::<Arc<Client>>().inner().clone();
-    run_blocking(move || client.set_preference(Preference::AutoCliRegistration(installed))).await?;
-    Ok(registration)
+    if installed {
+        run_blocking(move || client.set_preference(Preference::AutoCliRegistration(true))).await?;
+    }
+    state.last_error = None;
+    Ok(CliRegistration {
+        registration,
+        startup_error: None,
+    })
 }
 
 #[tauri::command]
@@ -649,7 +706,9 @@ pub fn run() {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());
+            #[cfg(target_os = "macos")]
             let registration_app = app.handle().clone();
+            #[cfg(target_os = "macos")]
             tauri::async_runtime::spawn(async move {
                 register_cli_on_startup(&registration_app).await;
             });
@@ -718,4 +777,22 @@ pub fn run() {
         tauri::RunEvent::Reopen { .. } => tray::show_window(_app),
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod cli_startup_tests {
+    use super::transient_macos_app_path;
+
+    #[test]
+    fn automatic_registration_rejects_transient_macos_locations() {
+        assert!(transient_macos_app_path(std::path::Path::new(
+            "/Volumes/Private AI Gateway/Private AI Gateway.app/Contents/MacOS/app"
+        )));
+        assert!(transient_macos_app_path(std::path::Path::new(
+            "/private/var/folders/x/AppTranslocation/id/d/Private AI Gateway.app/Contents/MacOS/app"
+        )));
+        assert!(!transient_macos_app_path(std::path::Path::new(
+            "/Applications/Private AI Gateway.app/Contents/MacOS/app"
+        )));
+    }
 }

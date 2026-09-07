@@ -1,6 +1,7 @@
 import type {
   AgentPreview,
   AgentStatus,
+  CliRegistration,
   ConfidentialProfile,
   DesktopApi,
   GatewayState,
@@ -334,11 +335,14 @@ export function mockApi(name: string | null): DesktopApi {
   };
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
-  let cliRegistration = {
+  let cliRegistration: CliRegistration = {
     executable: "/Applications/Private AI Gateway.app/Contents/MacOS/pag",
     commandPath: "/Users/dev/.local/bin/pag",
     installed: false,
     onPath: false,
+    ...(name === "cli-startup-error" ? {
+      startupError: "Command-line registration failed: Move Private AI Gateway to a stable location before registering pag",
+    } : {}),
   };
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
@@ -382,7 +386,8 @@ export function mockApi(name: string | null): DesktopApi {
     getCliRegistration: async () => cliRegistration,
     setCliRegistration: async (installed) => {
       cliRegistration = {
-        ...cliRegistration,
+        executable: cliRegistration.executable,
+        commandPath: cliRegistration.commandPath,
         installed,
         onPath: installed,
       };

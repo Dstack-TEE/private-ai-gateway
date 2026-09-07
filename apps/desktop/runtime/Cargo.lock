@@ -1542,6 +1542,7 @@ name = "private-ai-gateway-desktop-runtime"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-util",
  "libc",
  "netwatcher",
  "private-ai-gateway-desktop-gateway",
@@ -1549,11 +1550,13 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tokio",
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
@@ -2103,6 +2106,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -2720,6 +2724,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

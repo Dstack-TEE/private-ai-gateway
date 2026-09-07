@@ -4,7 +4,7 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        io::{AsRawFd, FromRawFd, OwnedFd},
+        io::AsRawFd,
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -12,6 +12,7 @@ use std::{
 };
 
 use desktop_gateway::{lock::InstanceLock, tokens};
+use socket2::{Domain, SockAddr, Socket, Type};
 
 use super::endpoint_hash;
 
@@ -105,7 +106,9 @@ impl Stream {
             io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
         })?;
         validate_private_dir(dir)?;
-        let stream = UnixStream::connect(endpoint)?;
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        socket.connect_timeout(&SockAddr::unix(endpoint)?, Duration::from_secs(5))?;
+        let stream = UnixStream::from(socket);
         authenticate_peer(&stream)?;
         Ok(Self { inner: stream })
     }
@@ -175,9 +178,7 @@ fn runtime_endpoint(base: &Path, hash: u64) -> PathBuf {
 }
 
 fn socket_path_fits(path: &Path) -> bool {
-    // SAFETY: sockaddr_un is plain data and zero is a valid initialization.
-    let address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    path.as_os_str().as_bytes().len() < address.sun_path.len()
+    SockAddr::unix(path).is_ok()
 }
 
 fn ensure_private_dir(dir: &Path) -> io::Result<()> {
@@ -253,84 +254,16 @@ fn remove_stale_socket(path: &Path) -> io::Result<()> {
 }
 
 fn socket_is_live(path: &Path) -> io::Result<bool> {
-    let path = path.as_os_str().as_bytes();
-    if path.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "IPC endpoint contains a null byte",
-        ));
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    match socket.connect(&SockAddr::unix(path)?) {
+        Ok(()) => Ok(true),
+        Err(error) => match error.raw_os_error() {
+            Some(libc::ECONNREFUSED) | Some(libc::ENOENT) => Ok(false),
+            Some(libc::EINPROGRESS) | Some(libc::EAGAIN) => Ok(true),
+            _ => Err(error),
+        },
     }
-
-    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: socket returned a unique owned descriptor.
-    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
-    set_nonblocking_cloexec(&socket)?;
-
-    // SAFETY: sockaddr_un is plain data and zero is a valid initialization.
-    let mut address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    if path.len() >= address.sun_path.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "IPC endpoint exceeds the Unix socket path limit",
-        ));
-    }
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    ))]
-    {
-        address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
-    }
-    // SAFETY: the destination was checked to hold the path plus its existing
-    // zero terminator, and both regions are valid for path.len() bytes.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            path.as_ptr(),
-            address.sun_path.as_mut_ptr().cast(),
-            path.len(),
-        );
-    }
-
-    let result = unsafe {
-        libc::connect(
-            socket.as_raw_fd(),
-            std::ptr::addr_of!(address).cast(),
-            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-        )
-    };
-    if result == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ECONNREFUSED) | Some(libc::ENOENT) => Ok(false),
-        Some(libc::EINPROGRESS) | Some(libc::EAGAIN) => Ok(true),
-        _ => Err(error),
-    }
-}
-
-fn set_nonblocking_cloexec(socket: &OwnedFd) -> io::Result<()> {
-    let descriptor = socket.as_raw_fd();
-    let status = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if status < 0
-        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, status | libc::O_NONBLOCK) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -503,6 +436,33 @@ mod tests {
             Listener::bind_at(&owner, endpoint).unwrap_err().kind(),
             io::ErrorKind::AddrInUse
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_accept_queue_cannot_block_a_client_indefinitely() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join(SOCKET_FILE);
+        let address = SockAddr::unix(&endpoint).unwrap();
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        listener.bind(&address).unwrap();
+        listener.listen(1).unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..16 {
+            let socket = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            match socket.connect(&address) {
+                Ok(()) => queued.push(socket),
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                    let start = Instant::now();
+                    assert!(Stream::connect_at(endpoint).is_err());
+                    assert!(start.elapsed() < Duration::from_secs(6));
+                    return;
+                }
+            }
+        }
+        panic!("The bounded test listener did not fill its accept queue");
     }
 
     #[test]

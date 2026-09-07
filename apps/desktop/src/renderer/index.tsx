@@ -2186,6 +2186,7 @@ function CliRegistrationControl(): React.JSX.Element {
 
   const directory = registration ? parentDirectory(registration.commandPath) : undefined;
   const description = error
+    ?? registration?.startupError
     ?? (registration?.installed
       ? registration.onPath
         ? `Installed at ${directory}. This app can resolve pag; terminal PATH may differ.`

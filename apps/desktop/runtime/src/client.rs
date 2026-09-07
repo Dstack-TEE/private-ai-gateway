@@ -216,12 +216,12 @@ impl Client {
     }
     pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
         self.request(Command::ExportProfiles {
-            path: path.to_string_lossy().into_owned(),
+            path: export_path(&path)?,
         })
     }
     pub fn export_diagnostics(&self, path: PathBuf) -> Result<(), String> {
         self.request(Command::ExportDiagnostics {
-            path: path.to_string_lossy().into_owned(),
+            path: export_path(&path)?,
         })
     }
     pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, String> {
@@ -235,7 +235,7 @@ impl Client {
     pub fn export_usage_csv(&self, query: UsageQuery, path: PathBuf) -> Result<usize, String> {
         self.request(Command::ExportUsage {
             query,
-            path: path.to_string_lossy().into_owned(),
+            path: export_path(&path)?,
         })
     }
     pub fn clear_usage(&self) -> Result<u64, String> {
@@ -393,6 +393,12 @@ impl Client {
     }
 }
 
+fn export_path(path: &std::path::Path) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Export paths must be valid Unicode".into())
+}
+
 fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     let stream = Stream::connect()?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -447,5 +453,21 @@ fn connection_error(error: io::Error) -> String {
         }
         _ => "Management connection failed. Run pag doctor; do not automatically retry mutations."
             .into(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::export_path;
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    #[test]
+    fn export_rejects_paths_that_json_cannot_represent() {
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/pag-\xff.csv".to_vec()));
+        assert!(export_path(&path).is_err());
+        assert_eq!(
+            export_path(std::path::Path::new("/tmp/pag.csv")).unwrap(),
+            "/tmp/pag.csv"
+        );
     }
 }

@@ -68,6 +68,8 @@ with a nonzero exit status. No mutation is retried after a lost response.
   during an updater operation or replay an earlier mutation.
 - Connect on launch belongs to backend startup, not opening/reopening a UI.
   Login startup remains an explicit desktop OS preference.
+- Native wake monitoring also belongs to the backend: IOKit on macOS, power
+  callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
 - The service acquires its instance lock before loading or migrating state.
   Client startup and update replacement share an additional pre-spawn gate.
 - Shutdown enters draining before taking the exclusive operation gate, waits
@@ -124,4 +126,8 @@ Official contracts: [Rust file locks](https://doc.rust-lang.org/1.89.0/std/fs/st
 [Tauri NSIS hooks](https://v2.tauri.app/distribute/windows-installer/),
 [Windows pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
 [XDG runtime directories](https://specifications.freedesktop.org/basedir/latest/),
-[Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch01.html).
+[Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch01.html),
+[Apple power notifications](https://developer.apple.com/library/archive/qa/qa1340/_index.html),
+[CoreFoundation run-loop sources](https://github.com/apple-oss-distributions/CF/blob/main/CFRunLoop.h),
+[Windows power callbacks](https://learn.microsoft.com/en-us/windows/win32/api/powerbase/nf-powerbase-powerregistersuspendresumenotification),
+[login1 signals](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html).

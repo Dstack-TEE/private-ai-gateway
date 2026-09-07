@@ -33,21 +33,18 @@ await mkdir(destinationDir, { recursive: true });
 // Executables embedded by the Tauri shell. The helper remains a console
 // process so credential commands work on Windows.
 const sidecars = [
-  { name: "aci", manifestPath: path.join(repoRoot, "Cargo.toml"), targetDir: path.join(repoRoot, "target") },
+  { name: "aci", manifestPath: path.join(repoRoot, "Cargo.toml") },
   {
     name: "pag",
     manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
-    targetDir: path.join(appRoot, "runtime/target"),
   },
   {
     name: "pag-service",
     manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
-    targetDir: path.join(appRoot, "runtime/target"),
   },
   {
     name: "private-ai-gateway-helper",
     manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
-    targetDir: path.join(appRoot, "gateway/target"),
   },
 ];
 
@@ -64,7 +61,10 @@ for (const sidecar of sidecars) {
     throw new Error(`cargo build ${sidecar.name} exited with status ${build.status ?? "unknown"}`);
   }
   const executable = process.platform === "win32" ? `${sidecar.name}.exe` : sidecar.name;
-  const source = path.join(sidecar.targetDir, profile, executable);
+  const metadata = JSON.parse(execFileSync(cargo, [
+    "metadata", "--no-deps", "--format-version", "1", "--manifest-path", sidecar.manifestPath,
+  ], { cwd: repoRoot, env: buildEnv, encoding: "utf8" }));
+  const source = path.join(metadata.target_directory, profile, executable);
   const destinationName = process.platform === "win32"
     ? `${sidecar.name}-${targetTriple}.exe`
     : `${sidecar.name}-${targetTriple}`;

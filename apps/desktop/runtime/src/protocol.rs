@@ -13,7 +13,7 @@ use crate::{
     usage::UsageQuery,
 };
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const BUILD_VERSION: &str = match option_env!("PAG_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),

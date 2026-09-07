@@ -278,6 +278,7 @@ export interface CliRegistration {
   commandPath: string;
   installed: boolean;
   onPath: boolean;
+  startupError?: string;
 }
 
 export interface DesktopApi {

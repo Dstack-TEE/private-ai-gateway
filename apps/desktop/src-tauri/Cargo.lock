@@ -3633,7 +3633,6 @@ dependencies = [
  "auto-launch 0.5.0",
  "auto-launch 0.6.0",
  "block2",
- "futures-util",
  "if-addrs",
  "objc2",
  "objc2-app-kit",
@@ -3659,7 +3658,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "windows 0.61.3",
- "zbus",
 ]
 
 [[package]]
@@ -3690,6 +3688,7 @@ name = "private-ai-gateway-desktop-runtime"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-util",
  "libc",
  "netwatcher",
  "private-ai-gateway-desktop-gateway",
@@ -3697,10 +3696,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]

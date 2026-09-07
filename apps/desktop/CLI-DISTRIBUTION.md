@@ -28,10 +28,12 @@ unrelated `pag.exe` aborts installation. The Windows workflow contains native
 install/status/uninstall checks, but successful execution on the Windows CI
 runner and a fresh interactive-terminal PATH check remain release gates.
 
-On macOS, the app attempts user-level CLI registration asynchronously on startup.
-Registration does not block the window or gateway. Failures appear in app status,
-and Settings > Command Line supports retrying. Removing the command in Settings
-disables automatic registration until the user installs it again.
+On macOS, the app attempts user-level CLI registration asynchronously on startup
+after it is launched from a stable location. It does not register while running
+from a mounted disk image or App Translocation. Registration does not block the
+window or gateway. Settings > Command Line retains startup errors and supports
+retrying after the app is moved. Removing the command there disables automatic
+registration until the user installs it again.
 
 The registration is idempotent and never replaces an unrelated command. To
 register manually without opening the app:

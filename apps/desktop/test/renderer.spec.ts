@@ -25,6 +25,16 @@ test("CLI registration and explicit backend recovery are reachable", async ({ pa
   await expect(page.getByRole("button", { name: "Start backend", exact: true })).toHaveCount(0);
 });
 
+test("CLI startup errors remain visible until a successful retry", async ({ page }) => {
+  await page.goto("/?mock=cli-startup-error");
+  await nav(page, "Settings").click();
+  const cli = page.getByRole("region", { name: "Command Line", exact: true });
+  await expect(cli).toContainText("Move Private AI Gateway to a stable location");
+  await cli.getByRole("button", { name: "Install", exact: true }).click();
+  await expect(cli).not.toContainText("Move Private AI Gateway to a stable location");
+  await expect(cli.getByRole("button", { name: "Remove", exact: true })).toBeVisible();
+});
+
 test("Local API examples safely embed the local client credential", async () => {
   const calls: { url?: string; authorization?: string; body: unknown }[] = [];
   const server = createServer((request, response) => {

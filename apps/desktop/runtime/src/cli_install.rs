@@ -733,7 +733,10 @@ mod platform {
 
     fn normalize_path_text(value: &str) -> String {
         let value = value.trim().trim_matches('"').replace('/', "\\");
-        let value = value.strip_prefix(r"\\?\").unwrap_or(&value);
+        let value = match value.strip_prefix(r"\\?\UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => value.strip_prefix(r"\\?\").unwrap_or(&value).to_string(),
+        };
         value.trim_end_matches('\\').to_lowercase()
     }
 
@@ -827,6 +830,10 @@ mod platform {
             assert_eq!(
                 path_text(std::path::Path::new(r"\\?\UNC\server\tools\pag.exe")).unwrap(),
                 r"\\server\tools\pag.exe"
+            );
+            assert_eq!(
+                normalize_path_text(r"\\?\UNC\server\tools"),
+                normalize_path_text(r"\\server\tools")
             );
         }
 

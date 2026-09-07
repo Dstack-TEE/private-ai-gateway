@@ -88,14 +88,15 @@ dialogs; neither starts a gateway or reads the OS credential store.
 
 Network address changes use [`netwatcher` 0.8](https://docs.rs/netwatcher/0.8.0/),
 which subscribes to native interface events rather than adding a polling loop.
-Sleep recovery uses native wake events: NSWorkspaceDidWakeNotification on macOS,
+The backend owns native wake monitoring: IORegisterForSystemPower on macOS,
 PowerRegisterSuspendResumeNotification on Windows and login1 PrepareForSleep(false)
-on Linux. There is no elapsed-time inference. Registrations are removed on exit;
+on Linux. There is no elapsed-time inference or UI dependency. Registrations are
+removed when the backend exits;
 Linux environments without login1 retain network recovery but cannot report wake.
 Recovery revokes the old session and restores agent configurations before a fresh
 verification. If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
-verification requires user attention, not unlimited retries. Manual stop, exit or
+verification requires user attention, not unlimited retries. Manual stop, backend exit or
 configuration changes cancel pending recovery. Loopback services are exempt.
 Real sleep/wake, VPN changes and per-platform notification delivery still require
 installed-app acceptance tests.
@@ -330,10 +331,12 @@ builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and th
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
 
-The macOS DMG app automatically attempts user-level `pag` registration on startup.
-It does not request administrator privileges or edit shell profiles. Settings >
-Command Line shows the registration status; removing the command there disables
-registration on subsequent launches. No PKG installer is produced.
+The macOS DMG app automatically attempts user-level `pag` registration after it
+is launched from a stable location. Mounted disk images and App Translocation are
+rejected so they cannot leave a broken command link. It does not request
+administrator privileges or edit shell profiles. Settings > Command Line retains
+startup errors for retry; removing the command there disables registration on
+subsequent launches. No PKG installer is produced.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -610,8 +613,10 @@ runtime, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See
 [`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
-upgrade behavior, and automatic registration on app startup. macOS additionally verifies the compiled asset
-catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.
+upgrade behavior, and automatic macOS registration on app startup. macOS additionally
+launches the packaged app with an isolated home to verify the command link, then
+verifies the compiled asset catalog, legacy ICNS fallback, bundle icon name, DMG,
+and zipped app bundle.
 
 ### macOS distribution signing
 

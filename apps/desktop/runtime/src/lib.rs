@@ -11,6 +11,7 @@ pub mod gateway;
 pub mod launch;
 pub mod local_api;
 pub mod maintenance;
+pub mod power;
 pub mod preferences;
 pub mod process;
 pub mod protocol;

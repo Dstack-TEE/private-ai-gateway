@@ -46,5 +46,17 @@ async fn run() -> Result<(), String> {
     let runtime = tokio::task::spawn_blocking(move || DesktopRuntime::launch(options))
         .await
         .map_err(|_| "Backend initialization failed")??;
-    desktop_runtime::server::serve(runtime).await
+    let power_monitor = match desktop_runtime::power::Monitor::start(
+        Arc::downgrade(&runtime),
+        tokio::runtime::Handle::current(),
+    ) {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            eprintln!("System wake monitoring is unavailable: {error}");
+            None
+        }
+    };
+    let result = desktop_runtime::server::serve(runtime).await;
+    drop(power_monitor);
+    result
 }
