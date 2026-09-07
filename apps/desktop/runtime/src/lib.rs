@@ -8,6 +8,8 @@ pub mod client;
 pub mod contracts;
 pub mod controller;
 pub mod gateway;
+#[cfg(unix)]
+mod helper_staging;
 pub mod launch;
 pub mod local_api;
 pub mod maintenance;

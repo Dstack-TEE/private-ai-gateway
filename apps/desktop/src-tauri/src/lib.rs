@@ -374,6 +374,8 @@ async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), Stri
         "opencode" => "https://opencode.ai",
         "pi" => "https://pi.dev",
         "hermes" => "https://hermes-agent.nousresearch.com",
+        "openclaw" => "https://openclaw.ai",
+        "oh-my-pi" => "https://omp.sh",
         _ => return Err("Unknown agent".to_string()),
     };
     run_blocking(move || {

@@ -108,6 +108,12 @@ fn assert_success(output: &Output) {
 #[test]
 fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let backend = Backend::start();
+    #[cfg(unix)]
+    assert!(backend
+        .directory
+        .path()
+        .join("home/.private-ai-gateway/helpers/private-ai-gateway-helper")
+        .is_file());
     let first = backend.run(&["status"]);
     assert_eq!(first["gateway"]["status"], "stopped");
     let second = backend.run(&["service", "start"]);

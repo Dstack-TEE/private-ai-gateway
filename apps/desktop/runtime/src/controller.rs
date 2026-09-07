@@ -207,6 +207,11 @@ impl DesktopRuntime {
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
             .ok_or_else(|| "Another Private AI Gateway instance is already running".to_string())?;
+        #[cfg(unix)]
+        if let Err(error) = crate::helper_staging::stage(&options.helper_path, &data_dir) {
+            // OpenClaw independently rejects an unavailable or mismatched staged copy.
+            eprintln!("Cannot stage the credential helper: {error}");
+        }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
         let (mut settings, mut settings_error, migrated_legacy) = match service_config::load() {
             Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),

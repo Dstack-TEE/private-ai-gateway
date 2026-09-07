@@ -3,19 +3,46 @@
 //! containers along it are created on demand and pruned again when a removal
 //! leaves them empty, so a disconnect leaves no empty shells behind.
 
+use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
-use yaml_edit::{path::YamlPath, YamlFile};
+use yaml_edit::{path::YamlPath, AsYaml, YamlFile};
+
+/// Read-only JSONC inspection. Never render this value back over a user's file:
+/// the regular JSON writer does not preserve comments.
+pub(crate) fn parse_jsonc(text: &str) -> Result<Value, String> {
+    if text.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    let value: Value = jsonc_parser::parse_to_serde_value(
+        text,
+        &jsonc_parser::ParseOptions {
+            allow_comments: true,
+            allow_trailing_commas: true,
+            allow_loose_object_property_names: false,
+            allow_missing_commas: false,
+            allow_single_quoted_strings: false,
+            allow_hexadecimal_numbers: false,
+            allow_unary_plus_numbers: false,
+        },
+    )
+    .map_err(|_| "not valid JSONC".to_string())?;
+    if !value.is_object() {
+        return Err("not a JSONC object".to_string());
+    }
+    Ok(value)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Json,
+    Json5,
     Toml,
     Yaml,
 }
 
-/// The scalar shapes a projection writes.
+/// The scalar and structured values a projection writes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConfigValue {
@@ -113,6 +140,8 @@ impl ConfigValue {
 #[derive(Clone, Debug)]
 pub enum ConfigDoc {
     Json(Value),
+    // Store source, not Rc-backed CST nodes: clones are independent and Send.
+    Json5(String),
     Toml(DocumentMut),
     Yaml(YamlFile),
 }
@@ -121,6 +150,11 @@ impl ConfigDoc {
     /// Parse a config file; a missing or empty file is an empty document.
     pub fn parse(format: Format, text: &str) -> Result<Self, String> {
         match format {
+            Format::Json5 => {
+                let text = if text.trim().is_empty() { "{}\n" } else { text };
+                json5_root(text)?;
+                Ok(Self::Json5(text.to_string()))
+            }
             Format::Json => {
                 if text.trim().is_empty() {
                     return Ok(Self::Json(Value::Object(Map::new())));
@@ -141,31 +175,44 @@ impl ConfigDoc {
                 source
                     .parse::<YamlFile>()
                     .map(Self::Yaml)
-                    .map_err(|error| format!("not valid YAML: {error}"))
+                    .map_err(|_| "not valid YAML".to_string())
             }
         }
     }
 
     pub fn render(&self) -> Result<String, String> {
         match self {
+            Self::Json5(text) => Ok(text.clone()),
             Self::Json(value) => serde_json::to_string_pretty(value)
                 .map(|text| text + "\n")
                 .map_err(|error| error.to_string()),
             Self::Toml(doc) => Ok(doc.to_string()),
-            Self::Yaml(doc) => Ok(doc.to_string()),
+            Self::Yaml(doc) => {
+                let text = doc.to_string();
+                text.parse::<YamlFile>()
+                    .map_err(|_| "YAML edit produced invalid syntax".to_string())?;
+                Ok(text)
+            }
         }
     }
 
     pub fn get_value(&self, path: &[&str]) -> Option<ConfigValue> {
         match self {
+            Self::Json5(text) => {
+                let value = json5_value(text).ok()?;
+                ConfigValue::from_json(json_get(&value, path)?)
+            }
             Self::Json(root) => ConfigValue::from_json(json_get(root, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
-            Self::Yaml(file) => yaml_value(
-                file.documents()
-                    .next()?
-                    .try_get_path(&path.join("."))
-                    .ok()?,
-            ),
+            Self::Yaml(file) => {
+                let document = file.documents().next()?;
+                let node = if path.is_empty() {
+                    yaml_edit::YamlNode::Mapping(document.as_mapping()?)
+                } else {
+                    document.try_get_path(&path.join(".")).ok()?
+                };
+                yaml_value(node)
+            }
         }
     }
 
@@ -176,9 +223,26 @@ impl ConfigDoc {
         }
     }
 
+    pub fn contains(&self, path: &[&str]) -> bool {
+        match self {
+            Self::Json5(text) => json5_value(text)
+                .ok()
+                .is_some_and(|root| json_get(&root, path).is_some()),
+            Self::Json(root) => json_get(root, path).is_some(),
+            Self::Toml(doc) => toml_get(doc.as_item(), path).is_some(),
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .is_some_and(|doc| doc.try_get_path(&path.join(".")).is_ok()),
+        }
+    }
+
     pub fn set_value(&mut self, path: &[&str], value: &ConfigValue) -> Result<(), String> {
         let (leaf, parents) = split_leaf(path)?;
         match self {
+            Self::Json5(text) => {
+                *text = edit_json5(text, path, Some(value.to_json()))?;
+            }
             Self::Json(root) => {
                 json_container(root, parents)?.insert(leaf.to_string(), value.to_json());
             }
@@ -200,10 +264,10 @@ impl ConfigDoc {
                     }
                     ConfigValue::Bool(value) => doc.try_set_path(&path, *value),
                     ConfigValue::List(_) | ConfigValue::Json(_) => {
-                        return Err("complex values are not used in YAML projections".to_string())
+                        doc.try_set_path(&path, yaml_input(value.to_json())?)
                     }
                 }
-                .map_err(|error| format!("cannot edit YAML path {path}: {error}"))?;
+                .map_err(|_| format!("cannot edit YAML path {path}"))?;
             }
         }
         Ok(())
@@ -215,6 +279,9 @@ impl ConfigDoc {
 
     pub fn is_table(&self, path: &[&str]) -> bool {
         match self {
+            Self::Json5(text) => json5_value(text)
+                .ok()
+                .is_some_and(|root| json_get(&root, path).is_some_and(Value::is_object)),
             Self::Json(root) => json_get(root, path).is_some_and(Value::is_object),
             Self::Toml(doc) => {
                 toml_get(doc.as_item(), path).is_some_and(|item| item.as_table_like().is_some())
@@ -227,11 +294,16 @@ impl ConfigDoc {
     }
 
     /// Remove the key at `path`, then prune containers left empty above it.
-    pub fn remove(&mut self, path: &[&str]) {
+    pub fn remove(&mut self, path: &[&str]) -> Result<(), String> {
         let Ok((leaf, parents)) = split_leaf(path) else {
-            return;
+            return Ok(());
         };
         let emptied = match self {
+            Self::Json5(text) => {
+                // Do not prune JSON5 parents: an empty object may contain user comments.
+                *text = edit_json5(text, path, None)?;
+                None
+            }
             Self::Json(root) => json_get_mut(root, parents)
                 .and_then(Value::as_object_mut)
                 .map(|map| {
@@ -246,7 +318,7 @@ impl ConfigDoc {
                 }),
             Self::Yaml(file) => {
                 let Some(doc) = file.documents().next() else {
-                    return;
+                    return Ok(());
                 };
                 let full = path.join(".");
                 let removed = doc.try_remove_path(&full).is_ok();
@@ -257,7 +329,14 @@ impl ConfigDoc {
                             .try_get_path(&parent)
                             .ok()
                             .and_then(|node| node.as_mapping().cloned())
-                            .is_some_and(|mapping| mapping.is_empty());
+                            .is_some_and(|mapping| {
+                                mapping.is_empty()
+                                    && !mapping.as_node().is_some_and(|node| {
+                                        node.descendants_with_tokens().any(|element| {
+                                            element.kind() == yaml_edit::SyntaxKind::COMMENT
+                                        })
+                                    })
+                            });
                         if empty {
                             let _ = doc.try_remove_path(&parent);
                         } else {
@@ -269,20 +348,191 @@ impl ConfigDoc {
             }
         };
         if emptied == Some(true) && !parents.is_empty() {
-            self.remove(parents);
+            self.remove(parents)?;
         }
+        Ok(())
     }
 }
 
+fn json5_options() -> jsonc_parser::ParseOptions {
+    jsonc_parser::ParseOptions {
+        allow_missing_commas: false,
+        ..Default::default()
+    }
+}
+
+fn json5_value(text: &str) -> Result<Value, String> {
+    let value: Value = jsonc_parser::parse_to_serde_value(text, &json5_options())
+        .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
+    if !value.is_object() {
+        return Err("not a JSON5 object".to_string());
+    }
+    Ok(value)
+}
+
+fn json5_root(text: &str) -> Result<CstRootNode, String> {
+    json5_value(text)?;
+    let root = CstRootNode::parse(text, &json5_options())
+        .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
+    if let Some(value) = root.value() {
+        validate_unique_keys(&value)?;
+    }
+    Ok(root)
+}
+
+fn validate_unique_keys(node: &jsonc_parser::cst::CstNode) -> Result<(), String> {
+    if let Some(object) = node.as_object() {
+        let mut keys = std::collections::HashSet::new();
+        for property in object.properties() {
+            let name = property
+                .name()
+                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+            let key = name
+                .decoded_value()
+                .ok()
+                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+            // The CST parser's loose-word mode is wider than JSON5. Accept a
+            // conservative identifier subset; quoted Unicode keys remain valid.
+            if matches!(name, jsonc_parser::cst::ObjectPropName::Word(_))
+                && (key.is_empty()
+                    || !key.bytes().enumerate().all(|(index, byte)| {
+                        byte == b'_'
+                            || byte == b'$'
+                            || byte.is_ascii_alphabetic()
+                            || (index > 0 && byte.is_ascii_digit())
+                    }))
+            {
+                return Err(
+                    "unsupported JSON5 unquoted property name; quote the name explicitly"
+                        .to_string(),
+                );
+            }
+            if !keys.insert(key) {
+                return Err("duplicate JSON5 property names are unsafe to edit".to_string());
+            }
+        }
+    }
+    for child in node.children() {
+        validate_unique_keys(&child)?;
+    }
+    Ok(())
+}
+
+fn cst_input(value: Value) -> CstInputValue {
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(value) => CstInputValue::Bool(value),
+        Value::Number(value) => CstInputValue::Number(value.to_string()),
+        Value::String(value) => CstInputValue::String(value),
+        Value::Array(values) => CstInputValue::Array(values.into_iter().map(cst_input).collect()),
+        Value::Object(values) => CstInputValue::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, cst_input(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String, String> {
+    let (leaf, parents) = split_leaf(path)?;
+    let root = json5_root(text)?;
+    let mut object = root
+        .object_value()
+        .ok_or_else(|| "not a JSON5 object".to_string())?;
+    for key in parents {
+        object = if value.is_some() {
+            object
+                .object_value_or_create(key)
+                .ok_or_else(|| not_a_table(parents))?
+        } else {
+            let Some(child) = object.object_value(key) else {
+                return Ok(text.to_string());
+            };
+            child
+        };
+    }
+    match (object.get(leaf), value) {
+        (Some(property), Some(value)) => property.set_value(cst_input(value)),
+        (None, Some(value)) => {
+            object.append(leaf, cst_input(value));
+        }
+        (Some(property), None) => property.remove(),
+        (None, None) => {}
+    }
+    let updated = root.to_string();
+    json5_value(&updated)?;
+    Ok(updated)
+}
+
 fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
-    if let Some(value) = node.to_bool() {
-        return Some(ConfigValue::Bool(value));
+    ConfigValue::from_json(&yaml_json(&node)?)
+}
+
+/// Inspect structured YAML without resolving aliases, tags or merge keys.
+fn yaml_json(node: &yaml_edit::YamlNode) -> Option<Value> {
+    use yaml_edit::{ScalarType, ScalarValue, YamlNode};
+    match node {
+        YamlNode::Mapping(mapping) => {
+            let mut values = Map::new();
+            for (key, value) in mapping {
+                let key = key.as_scalar()?;
+                if ScalarValue::from_scalar(key).scalar_type() != ScalarType::String {
+                    return None;
+                }
+                let key = key.as_string();
+                if key == "<<" || values.insert(key, yaml_json(&value)?).is_some() {
+                    return None;
+                }
+            }
+            Some(Value::Object(values))
+        }
+        YamlNode::Sequence(sequence) => sequence
+            .into_iter()
+            .map(|value| yaml_json(&value))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        YamlNode::Scalar(scalar) => {
+            let value = ScalarValue::from_scalar(scalar);
+            match value.scalar_type() {
+                ScalarType::String => Some(Value::String(scalar.as_string())),
+                ScalarType::Null => Some(Value::Null),
+                ScalarType::Boolean => value.to_bool().map(Value::Bool),
+                ScalarType::Integer => value.to_i64().map(|number| Value::Number(number.into())),
+                ScalarType::Float => value
+                    .to_f64()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number),
+                _ => None,
+            }
+        }
+        _ => None,
     }
-    if let Some(value) = node.to_i64().and_then(|value| u64::try_from(value).ok()) {
-        return Some(ConfigValue::Number(value));
+}
+
+/// Construct only a new value subtree. The surrounding document stays a CST.
+fn yaml_input(value: Value) -> Result<yaml_edit::YamlNode, String> {
+    use yaml_edit::YamlNode;
+    // JSON is a YAML flow value, valid beneath either block or flow parents.
+    // Encode only the newly supplied value, never the existing user document.
+    let fragment = serde_json::to_string(&value).map_err(|_| "Cannot encode YAML value")?;
+    let file = fragment
+        .parse::<YamlFile>()
+        .map_err(|_| "Cannot construct YAML value")?;
+    let doc = file
+        .documents()
+        .next()
+        .ok_or("Cannot construct YAML value")?;
+    let node = doc
+        .as_mapping()
+        .map(YamlNode::Mapping)
+        .or_else(|| doc.as_sequence().map(YamlNode::Sequence))
+        .or_else(|| doc.as_scalar().map(YamlNode::Scalar))
+        .ok_or_else(|| "Cannot construct YAML value".to_string())?;
+    if yaml_json(&node).as_ref() != Some(&value) {
+        return Err("The YAML value cannot be represented without semantic loss".to_string());
     }
-    node.as_scalar()
-        .map(|scalar| ConfigValue::Str(scalar.as_string()))
+    Ok(node)
 }
 
 fn split_leaf<'a>(path: &'a [&'a str]) -> Result<(&'a str, &'a [&'a str]), String> {
@@ -347,6 +597,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn json5_cst_preserves_unrelated_syntax_and_rejects_ambiguous_edits() {
+        let source = "{\n // keep this comment\n untouched: 'single quoted',\n nested: { /* keep inside */ flag: true, },\n}\n";
+        let original = ConfigDoc::parse(Format::Json5, source).unwrap();
+        let mut doc = original.clone();
+        doc.set_value(
+            &["models", "providers", "gateway"],
+            &ConfigValue::Json(serde_json::json!({"api":"openai-completions"})),
+        )
+        .unwrap();
+        let output = doc.render().unwrap();
+        assert!(output.contains("untouched: 'single quoted',"));
+        assert!(output.contains("nested: { /* keep inside */ flag: true, }"));
+        assert!(output.contains("// keep this comment"));
+        assert_eq!(original.render().unwrap(), source);
+        assert!(matches!(doc.get_value(&[]), Some(ConfigValue::Json(_))));
+        doc.remove(&["models", "providers", "gateway"]).unwrap();
+        assert!(doc.get_value(&["models", "providers", "gateway"]).is_none());
+        let before = doc.render().unwrap();
+        assert!(doc.set_str(&["untouched", "bad"], "bad").is_err());
+        assert_eq!(doc.render().unwrap(), before);
+        for source in [
+            "{bad-key:1}",
+            "{1:2}",
+            "{a:1,a:2}",
+            "{nested:{a:1,a:2}}",
+            "{a:Infinity}",
+            "{a:NaN}",
+            "{a:1 b:2}",
+        ] {
+            assert!(ConfigDoc::parse(Format::Json5, source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn jsonc_inspection_accepts_comments_not_json5_or_malformed_json() {
+        assert_eq!(
+            parse_jsonc("{/* keep */\"url\":\"https://host/a//b\", // keep too\n}").unwrap(),
+            serde_json::json!({"url": "https://host/a//b"}),
+        );
+        for invalid in [
+            "{unquoted:1}",
+            "{'single':1}",
+            "{\"a\":1 \"b\":2}",
+            "{\"a\":0xff}",
+            "{\"a\":+1}",
+            "{",
+            "[]",
+            "null",
+            "// comment only",
+            " \n",
+        ] {
+            assert!(parse_jsonc(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn toml_lists_and_numbers_round_trip_and_prune() {
         let mut doc = ConfigDoc::parse(Format::Toml, "model = \"x\"\n").unwrap();
         let args = ConfigValue::List(vec!["--agent-token".into(), "codex".into()]);
@@ -364,8 +670,10 @@ mod tests {
             doc.get_value(&["model_providers", "p", "auth", "args"]),
             Some(args)
         );
-        doc.remove(&["model_providers", "p", "auth", "args"]);
-        doc.remove(&["model_providers", "p", "auth", "timeout_ms"]);
+        doc.remove(&["model_providers", "p", "auth", "args"])
+            .unwrap();
+        doc.remove(&["model_providers", "p", "auth", "timeout_ms"])
+            .unwrap();
         assert_eq!(doc.render().unwrap(), "model = \"x\"\n");
     }
 
@@ -396,7 +704,8 @@ mod tests {
             doc.get_value(&["providers", "private-ai-gateway", "discover_models"]),
             Some(ConfigValue::Bool(true))
         );
-        doc.remove(&["providers", "private-ai-gateway", "discover_models"]);
+        doc.remove(&["providers", "private-ai-gateway", "discover_models"])
+            .unwrap();
         let text = doc.render().unwrap();
         assert!(text.contains("# user comment"));
         assert!(text.contains("theme: dark"));

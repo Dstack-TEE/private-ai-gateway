@@ -2597,6 +2597,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0560e3f9a9a03ea6b6e90b41138c5db9e21526c99eb192c1a26c68176593285"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jsonptr"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3670,7 +3679,9 @@ dependencies = [
  "bytes",
  "fd-lock",
  "futures-util",
+ "jsonc-parser",
  "keyring",
+ "libc",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
@@ -3680,6 +3691,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml_edit 0.25.13+spec-1.1.0",
+ "windows-sys 0.61.2",
  "yaml-edit",
 ]
 
@@ -3694,9 +3706,11 @@ dependencies = [
  "private-ai-gateway-desktop-gateway",
  "rpassword",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "socket2",
+ "tempfile",
  "tokio",
  "url",
  "uuid",

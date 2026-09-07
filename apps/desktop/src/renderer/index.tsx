@@ -35,6 +35,7 @@ import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
+import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import phalaServiceIcon from "./assets/service-phala.svg";
 import redpillServiceIcon from "./assets/service-redpill.png";
@@ -152,6 +153,7 @@ const AGENT_ICONS: Record<string, string> = {
   opencode: openCodeIcon,
   pi: piIcon,
   hermes: hermesIcon,
+  openclaw: openClawIcon,
 };
 
 type ServicePreset = "phala" | "redpill" | "custom";
@@ -2856,7 +2858,7 @@ function displayAgentName(agent: Pick<AgentStatus, "id" | "name">): string {
 }
 
 function sortAgents(agents: AgentStatus[]): AgentStatus[] {
-  const order = ["claude-code", "codex", "hermes", "pi", "opencode"];
+  const order = ["claude-code", "codex", "hermes", "pi", "oh-my-pi", "opencode", "openclaw"];
   return [...agents].sort((left, right) => {
     const leftIndex = order.indexOf(left.id);
     const rightIndex = order.indexOf(right.id);
