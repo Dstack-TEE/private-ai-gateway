@@ -62,11 +62,11 @@ export function useNotifications() {
 
 function NotificationPermissionNotice() {
   const { data, busy, permissionAction } = useNotifications();
-  if (!data || !data.preferences.enabled || data.permission === "granted") return null;
+  if (!data || !data.preferences.enabled || (data.permission === "granted" && data.alertsEnabled !== false)) return null;
   const supported = data.permission !== "unsupported";
   return <Alert className="border-warning/30 bg-warning/10">
     <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-warning">
-      <span>{data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</span>
+      <span>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</span>
       {supported && <Button variant="outline" size="sm" disabled={busy} onClick={() => void permissionAction()}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>}
     </AlertDescription>
   </Alert>;

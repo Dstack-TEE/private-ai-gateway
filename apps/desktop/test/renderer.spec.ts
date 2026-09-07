@@ -150,6 +150,18 @@ test("Notifications defaults on, preserves category choices and reports permissi
   await expect(sheet.getByRole("alert")).toHaveCount(0);
 });
 
+test("notification authorization and banner settings remain distinct", async ({ page }) => {
+  await page.goto("/?mock=notifications-no-banners&native-dialog=notifications");
+  const sheet = page.getByRole("dialog", { name: "Notifications" });
+  await expect(sheet.getByRole("alert")).toContainText("Notifications are allowed, but banner alerts are disabled");
+  await expect(sheet.getByRole("button", { name: "Allow Notifications", exact: true })).toHaveCount(0);
+  await sheet.getByRole("button", { name: "System Settings", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-notification-settings-opened", "true");
+  await page.goto("/?mock=wake-monitor-unavailable");
+  await nav(page, "Settings").click();
+  await expect(page.getByRole("alert")).toContainText("System wake monitoring is unavailable");
+});
+
 test("appearance defaults to system, persists and settings shortcut navigates", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/?mock=ready");

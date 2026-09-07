@@ -307,6 +307,7 @@ export function mockApi(name: string | null): DesktopApi {
   const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
+  if (name === "wake-monitor-unavailable") state.wakeMonitorAvailable = false;
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
@@ -540,6 +541,7 @@ export function mockApi(name: string | null): DesktopApi {
         verification: localStorage.getItem("mock:notifications:verification") !== "false",
       },
       permission: name === "notifications-denied" ? "denied" : name === "notifications-prompt" && localStorage.getItem("mock:notifications:permission") !== "granted" ? "notDetermined" : "granted",
+      alertsEnabled: name !== "notifications-no-banners",
     }),
     readProfileBackup: async () => ({ version: 1, profiles: [{ name: "Imported Phala", provider: "phala", remoteUrl: "https://inference.phala.com" }] }),
     importProfiles: async (backup) => {
@@ -556,7 +558,7 @@ export function mockApi(name: string | null): DesktopApi {
       if (name === "notification-save-error") throw new Error("Preference unavailable");
       for (const [key, value] of Object.entries(config)) localStorage.setItem(`mock:notifications:${key}`, String(value));
     },
-    requestNotificationPermission: async () => { localStorage.setItem("mock:notifications:permission", "granted"); return "granted"; },
+    requestNotificationPermission: async () => { localStorage.setItem("mock:notifications:permission", "granted"); return { permission: "granted", alertsEnabled: true }; },
     openNotificationSettings: async () => { document.documentElement.dataset.notificationSettingsOpened = "true"; },
     queryUsage: async (query: UsageQuery) => {
       if (name === "usage-query-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-usage-query", () => resolve(), { once: true }));

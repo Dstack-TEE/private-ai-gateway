@@ -343,9 +343,8 @@ impl DesktopRuntime {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut previous = None;
             loop {
-                let mut network_event = false;
                 tokio::select! {
-                    _ = network_changed.notified() => { network_event = true; },
+                    _ = network_changed.notified() => {},
                     result = states.changed() => {
                         if result.is_err() { break; }
                         let state = states.borrow();
@@ -357,7 +356,7 @@ impl DesktopRuntime {
                 }
                 let Some(runtime) = weak.upgrade() else { break };
                 let result = tokio::task::spawn_blocking(move || {
-                    if network_event {
+                    if runtime.recovery.needs_check() {
                         if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
                     }
                     if let Err(error) = runtime.reconcile_agents() {
@@ -392,7 +391,10 @@ impl DesktopRuntime {
     }
 
     pub fn system_resumed(&self) {
-        self.recovery.changed.notify_one();
+        self.recovery.request();
+    }
+    pub fn set_wake_monitor_available(&self, available: bool) -> bool {
+        self.manager.set_wake_monitor_available(available)
     }
 
     pub fn state(&self) -> Result<GatewayState, String> {
@@ -464,7 +466,6 @@ impl DesktopRuntime {
         if self.exiting.load(Ordering::Acquire) {
             return Err("The app is closing".to_string());
         }
-        self.recovery.cancel();
         Ok(operation)
     }
 
@@ -476,6 +477,10 @@ impl DesktopRuntime {
             return Ok(());
         }
         let state = self.manager.snapshot()?;
+        if state.status == "verifying" {
+            return Ok(());
+        }
+        self.recovery.clear_request();
         if !crate::recovery::should_recover(
             &state.status,
             state.configuration_verification,
@@ -494,7 +499,7 @@ impl DesktopRuntime {
         if local_service {
             return Ok(());
         }
-        self.recovery.cancel();
+        self.recovery.clear_wait();
         self.stop_inner()?;
         if !self.recovery.online() {
             self.recovery.wait();
@@ -507,6 +512,7 @@ impl DesktopRuntime {
 
     pub fn prepare_exit(&self) -> Result<(), String> {
         let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         self.stop_inner()?;
         self.exiting.store(true, Ordering::Release);
         Ok(())
@@ -514,6 +520,7 @@ impl DesktopRuntime {
 
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         self.start_inner(config)
     }
 
@@ -549,6 +556,7 @@ impl DesktopRuntime {
 
     pub fn stop(&self) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         self.stop_inner()
     }
 
@@ -558,6 +566,7 @@ impl DesktopRuntime {
         install: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         self.stop_inner()?;
         install()
     }
@@ -603,6 +612,7 @@ impl DesktopRuntime {
 
     pub async fn shutdown(&self) -> Result<(), String> {
         let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         let gateway = self.stop_inner().map(|_| ());
         let endpoint = self.endpoint.stop().await;
         gateway.and(endpoint)
@@ -703,14 +713,11 @@ impl DesktopRuntime {
                 .ok_or_else(|| "Enter an API key".to_string())?,
             None => return Err("Enter an API key for this profile".to_string()),
         };
-        if reconnect {
-            self.stop_inner()?;
-        }
-        let previous = self.manager.snapshot()?;
+        let current = self.manager.snapshot()?;
         let mut settings = service_config::settings_from_state(
-            previous.profiles.clone(),
-            previous.active_profile_id.clone(),
-            previous.config.require_production_os,
+            current.profiles,
+            current.active_profile_id,
+            current.config.require_production_os,
         )?;
         let config = StartGatewayConfig {
             remote_url: candidate.remote_url.clone(),
@@ -720,6 +727,11 @@ impl DesktopRuntime {
         settings.upsert(candidate.clone())?;
         settings.active_profile_id = candidate.id.clone();
         settings.require_production_os = require_production_os;
+
+        if reconnect {
+            self.stop_inner()?;
+        }
+        let previous = self.manager.snapshot()?;
 
         self.codex_sync.reset()?;
         self.proxy.set_api_key(Some(candidate_key.clone()));
@@ -788,6 +800,7 @@ impl DesktopRuntime {
                 });
             }
         };
+        self.recovery.cancel();
         self.manager.set_service_configuration(
             config.clone(),
             settings.profiles,
@@ -833,6 +846,7 @@ impl DesktopRuntime {
             .active_profile()
             .is_ok_and(service_config::profile_has_credential);
         self.proxy.set_api_key(None);
+        self.recovery.cancel();
         self.manager.set_service_configuration(
             config.clone(),
             settings.profiles,
@@ -853,6 +867,7 @@ impl DesktopRuntime {
             return Err("Stop protection before deleting a profile".to_string());
         }
         let previous = self.manager.snapshot()?;
+        let affects_active = previous.active_profile_id == profile_id;
         let mut settings = service_config::settings_from_state(
             previous.profiles,
             previous.active_profile_id,
@@ -891,6 +906,9 @@ impl DesktopRuntime {
             .active_profile()
             .is_ok_and(service_config::profile_has_credential);
         self.proxy.set_api_key(None);
+        if affects_active {
+            self.recovery.cancel();
+        }
         self.manager.set_service_configuration(
             config,
             settings.profiles,
@@ -935,6 +953,7 @@ impl DesktopRuntime {
             });
         }
         self.proxy.set_api_key(None);
+        self.recovery.cancel();
         self.manager
             .set_profile_credential_saved(&state.active_profile_id, false);
         self.manager.snapshot()
@@ -1429,7 +1448,20 @@ mod tests {
             ..Default::default()
         });
         runtime.recovery.available.store(false, Ordering::Release);
+        runtime.system_resumed();
+        let operation = runtime.lifecycle.try_lock().unwrap();
         runtime.recover_network().unwrap();
+        assert!(runtime.recovery.needs_check());
+        drop(operation);
+        let mut verifying = runtime.state().unwrap();
+        verifying.status = "verifying".into();
+        runtime.manager.restore_snapshot(verifying.clone());
+        runtime.recover_network().unwrap();
+        assert!(runtime.recovery.needs_check());
+        verifying.status = "verified".into();
+        runtime.manager.restore_snapshot(verifying);
+        runtime.recover_network().unwrap();
+        assert!(!runtime.recovery.needs_check());
         assert!(!runtime.proxy.session().verified);
         assert_eq!(runtime.state().unwrap().status, "stopped");
         assert!(runtime.recovery.pending());
@@ -1438,6 +1470,45 @@ mod tests {
         runtime.recovery.available.store(true, Ordering::Release);
         runtime.recover_network().unwrap();
         assert_eq!(runtime.state().unwrap().status, "stopped");
+    }
+
+    #[test]
+    fn failed_and_noop_imports_preserve_recovery_and_monitor_state() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        runtime.recovery.wait();
+        runtime.system_resumed();
+        assert!(runtime
+            .import_profiles(crate::maintenance::ProfileBackup {
+                version: 99,
+                profiles: vec![]
+            })
+            .is_err());
+        assert!(runtime.recovery.pending());
+        assert!(runtime.recovery.needs_check());
+        assert_eq!(
+            runtime
+                .import_profiles(crate::maintenance::ProfileBackup {
+                    version: 1,
+                    profiles: vec![]
+                })
+                .unwrap()
+                .imported,
+            0
+        );
+        assert!(runtime.recovery.pending());
+        assert!(runtime.recovery.needs_check());
+        let snapshot = runtime.state().unwrap();
+        assert!(runtime.set_wake_monitor_available(false));
+        assert!(!runtime.set_wake_monitor_available(false));
+        runtime.manager.restore_snapshot(snapshot);
+        assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+        runtime.stop().unwrap();
+        assert!(!runtime.recovery.needs_check());
+        assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+        assert!(runtime.set_wake_monitor_available(true));
+        assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(true));
     }
 
     #[test]
