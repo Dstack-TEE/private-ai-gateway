@@ -62,7 +62,7 @@ try {
 
   const tokens = path.join(home, ".private-ai-gateway", "agent-tokens");
   await mkdir(tokens, { recursive: true, mode: 0o700 });
-  for (const agent of ["codex", "claude-code", "opencode", "pi", "hermes"]) {
+  for (const agent of ["codex", "claude-code", "opencode", "pi", "hermes", "openclaw", "oh-my-pi"]) {
     await run("private-ai-gateway-helper", ["--agent-token", agent], 1);
     // Synthetic local token fixture, not a provider credential or a claim that
     // a verified agent connection has been established.
@@ -75,7 +75,7 @@ try {
     await run("private-ai-gateway-helper", ["--agent-token", agent], 1);
   }
   await run("private-ai-gateway-helper", ["--agent-token", "unknown-agent"], 1);
-  console.log("Installed helper: five isolated token reads and missing/deleted/unknown-agent failures passed");
+  console.log("Installed helper: seven isolated token reads and missing/deleted/unknown-agent failures passed");
 } finally {
   server.closeAllConnections();
   await new Promise((resolve, reject) => server.close((error) => {

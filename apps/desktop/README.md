@@ -1,7 +1,8 @@
 # Private AI Gateway Desktop
 
 Cross-platform Tauri desktop app that turns the bundled `aci serve` verifier
-into a local gateway for Codex, Claude Code, OpenCode, Pi, and Hermes. One Rust
+into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
+Oh My Pi. One Rust
 runtime owns policy, persistence, credentials, usage, agent projection, and
 process lifecycle. A shared React renderer owns the dense product UI, while
 Tauri delegates windows, menus, tray integration, file dialogs, confirmation
@@ -475,6 +476,37 @@ protocol is the service's own response, shown as such.
   catalog model (both protocols require `model`).
 
 ## Agents
+
+OpenClaw integration targets the native host's default configuration and its
+OpenAI Chat Completions provider contract. It adds a separate `openclaw` token
+and an executable SecretRef, not the upstream provider key. Unix installations
+stage a private user-owned helper; scans verify that it matches the bundled
+helper. Windows checks the helper's ACL without changing it. Configuration
+edits preserve JSON5 comments and unrelated fields. An explicit model selection
+changes only `agents.defaults.model.primary`; existing fallback lists stay intact.
+
+OpenClaw 2026.9.2 was checked offline with a real generated configuration and
+exec-secret audit. This is not real inference or a guarantee for older releases.
+Remote gateways, non-default profiles, ambiguous legacy paths, `$include`, and
+unsafe helper/configuration conflicts are refused rather than rewritten. WSL and
+remote hosts do not implicitly share this desktop's loopback endpoint or token.
+
+Connections now remember their absolute config path. Legacy records without
+that path, or containing potentially sensitive structured plaintext backups,
+require explicit manual recovery instead of guessing a restore target. New
+unmanaged same-name provider collisions are refused without exposing nested
+secrets in previews or ordinary connection records.
+
+Oh My Pi is a separate integration: it detects `omp` and manages
+`~/.omp/agent/models.yml` or `models.yaml` with its own `oh-my-pi` token and
+connection record. YAML comments and unrelated providers are preserved. It uses
+Chat Completions; Pi keeps its independent Responses configuration. Select the
+provider/model in Oh My Pi and restart it after reconnecting, because command
+credentials can be cached by the CLI process. Named profiles and pending legacy
+JSON migration are refused rather than silently redirected or rewritten.
+Official Oh My Pi v18.1.12 was checked offline on Linux for generated configuration
+loading, helper success/failure and YAML file priority. Windows/macOS CLI shell
+execution and real inference are not claimed by those checks.
 
 | Agent | Config written | Credential reference |
 | --- | --- | --- |

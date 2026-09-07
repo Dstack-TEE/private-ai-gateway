@@ -1,4 +1,6 @@
 mod autostart;
+#[cfg(unix)]
+mod helper_staging;
 mod menu;
 mod native_dialog;
 mod notifications;
@@ -357,6 +359,8 @@ async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), Stri
         "opencode" => "https://opencode.ai",
         "pi" => "https://pi.dev",
         "hermes" => "https://hermes-agent.nousresearch.com",
+        "openclaw" => "https://openclaw.ai",
+        "oh-my-pi" => "https://omp.sh",
         _ => return Err("Unknown agent".to_string()),
     };
     run_blocking(move || {
@@ -558,6 +562,27 @@ pub fn run() {
                 .parent()
                 .ok_or_else(|| "Cannot locate the app directory".to_string())?
                 .join(helper_binary_name());
+            #[cfg(unix)]
+            let helper_path = {
+                #[cfg(target_os = "linux")]
+                let required = app.env().appimage.is_some();
+                #[cfg(not(target_os = "linux"))]
+                let required = false;
+                let staged = desktop_gateway::agents::app_data_dir().and_then(|directory| {
+                    helper_staging::stage(&helper_path, &directory)
+                        .map_err(|error| format!("Cannot stage the credential helper: {error}"))
+                });
+                match staged {
+                    Ok(path) if required => path,
+                    Ok(_) => helper_path,
+                    Err(error) if required => return Err(error.into()),
+                    Err(error) => {
+                        // OpenClaw independently validates the staged copy before use.
+                        eprintln!("{error}");
+                        helper_path
+                    }
+                }
+            };
             let runtime = DesktopRuntime::launch(RuntimeOptions {
                 launcher: launcher_for_setup.clone(),
                 helper_path,
