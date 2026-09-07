@@ -130,6 +130,7 @@ pub fn diagnostics(state: &GatewayState, version: &str) -> serde_json::Value {
     };
     serde_json::json!({
         "formatVersion": 1, "appVersion": version, "os": std::env::consts::OS, "architecture": std::env::consts::ARCH,
+        "wakeMonitorAvailable": state.wake_monitor_available,
         "gateway": { "status": status, "hasError": state.error.is_some(), "configurationVerification": state.configuration_verification, "productionOsRequired": state.config.require_production_os },
         "localApi": { "bound": state.proxy_url.is_some(), "hasError": state.endpoint_error.is_some(), "networkAccessAllowed": state.local_api.allow_network_access },
         "profiles": { "count": state.profiles.len(), "activeCredentialAvailable": state.api_key_saved },

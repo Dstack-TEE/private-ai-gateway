@@ -91,13 +91,19 @@ which subscribes to native interface events rather than adding a polling loop.
 The backend owns native wake monitoring: IORegisterForSystemPower on macOS,
 PowerRegisterSuspendResumeNotification on Windows and login1 PrepareForSleep(false)
 on Linux. There is no elapsed-time inference or UI dependency. Registrations are
-removed when the backend exits;
-Linux environments without login1 retain network recovery but cannot report wake.
+removed when the backend exits.
+Linux reconnects and re-subscribes every five seconds after subscription failure
+or stream termination, with cancellation on backend exit. Monitor availability is
+visible in Settings and redacted diagnostics. Environments without login1 retain
+network recovery but cannot report wake until the service becomes available.
 Recovery revokes the old session and restores agent configurations before a fresh
 verification. If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
-verification requires user attention, not unlimited retries. Manual stop, backend exit or
-configuration changes cancel pending recovery. Loopback services are exempt.
+verification requires user attention, not unlimited retries. Events survive a busy
+lifecycle lock or in-progress verification and are revisited by the existing
+reconciliation loop without busy-waiting. Manual start/stop, backend exit/install and
+successful active-profile changes cancel recovery intent; failed and no-op imports
+do not. Loopback services are exempt.
 Real sleep/wake, VPN changes and per-platform notification delivery still require
 installed-app acceptance tests.
 
@@ -111,6 +117,8 @@ Authorization is checked on launch and focus, but permission warnings appear
 only in Notifications. macOS uses UNUserNotificationCenter settings and Windows
 uses ToastNotifier.Setting. Enabling the master switch automatically requests
 undetermined permission; denied permission offers system settings instead.
+macOS notification authorization and banner availability are separate fields;
+disabled banners are not reported as denied authorization.
 Linux has no portable per-app authorization query, so the dialog reports
 that limitation without claiming permission is granted. Focus modes may still
 suppress delivery. Installed packages must be tested on each OS; tray state,

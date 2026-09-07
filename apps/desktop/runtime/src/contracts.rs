@@ -240,6 +240,8 @@ pub struct GatewayState {
     /// Client connection state; the backend leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_connected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_monitor_available: Option<bool>,
     /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
     /// `blocked`, or `error`.
     pub status: String,
@@ -294,6 +296,7 @@ impl Default for GatewayState {
             backend_instance: None,
             client_key_revision: 0,
             client_key_available: None,
+            wake_monitor_available: None,
             configuration_verification: false,
             progress: None,
             remote_url: None,

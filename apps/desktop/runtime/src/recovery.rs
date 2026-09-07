@@ -6,6 +6,7 @@ use std::sync::{
 pub struct Recovery {
     pub changed: Arc<tokio::sync::Notify>,
     pub available: Arc<AtomicBool>,
+    requested: Arc<AtomicBool>,
     pending: AtomicBool,
     watcher: Mutex<Option<netwatcher::WatchHandle>>,
 }
@@ -15,6 +16,7 @@ impl Default for Recovery {
         Self {
             changed: Arc::new(tokio::sync::Notify::new()),
             available: Arc::new(AtomicBool::new(true)),
+            requested: Arc::new(AtomicBool::new(false)),
             pending: AtomicBool::new(false),
             watcher: Mutex::new(None),
         }
@@ -25,10 +27,14 @@ impl Recovery {
     pub fn start(&self) -> Result<(), String> {
         let changed = self.changed.clone();
         let available = self.available.clone();
+        let requested = self.requested.clone();
         let watcher = netwatcher::watch_interfaces_with_callback(move |update| {
             let online = update.interfaces.values().any(|interface| interface.ips.iter().any(|record| !record.ip.is_loopback() && !record.ip.is_unspecified()));
             available.store(online, Ordering::Release);
-            if !update.is_initial && (update.addrs_added().next().is_some() || update.addrs_removed().next().is_some()) { changed.notify_one(); }
+            if !update.is_initial && (update.addrs_added().next().is_some() || update.addrs_removed().next().is_some()) {
+                requested.store(true, Ordering::Release);
+                changed.notify_one();
+            }
         }).map_err(|_| "Network changes could not be monitored. Reconnect protection manually after changing networks.".to_string())?;
         *self
             .watcher
@@ -37,6 +43,20 @@ impl Recovery {
         Ok(())
     }
     pub fn cancel(&self) {
+        self.pending.store(false, Ordering::Release);
+        self.clear_request();
+    }
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.changed.notify_one();
+    }
+    pub fn needs_check(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+    pub fn clear_request(&self) {
+        self.requested.store(false, Ordering::Release);
+    }
+    pub fn clear_wait(&self) {
         self.pending.store(false, Ordering::Release);
     }
     pub fn wait(&self) {

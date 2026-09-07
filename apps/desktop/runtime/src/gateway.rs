@@ -238,7 +238,7 @@ impl GatewayManager {
         .map_err(|_| "Configuration verification timed out".to_string())?
     }
 
-    pub fn restore_snapshot(&self, state: GatewayState) {
+    pub fn restore_snapshot(&self, mut state: GatewayState) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
@@ -247,6 +247,7 @@ impl GatewayManager {
             .clone()
             .unwrap_or_else(|| "unscoped".to_string());
         runtime.last_catalog = state.catalog.clone();
+        state.wake_monitor_available = runtime.state.wake_monitor_available;
         runtime.state = state;
         drop(runtime);
         self.publish();
@@ -290,6 +291,7 @@ impl GatewayManager {
     /// belongs to a verified session.
     fn carried(previous: &GatewayState) -> GatewayState {
         GatewayState {
+            wake_monitor_available: previous.wake_monitor_available,
             config: previous.config.clone(),
             client_key_revision: previous.client_key_revision,
             client_key_available: previous.client_key_available,
@@ -334,6 +336,19 @@ impl GatewayManager {
             state.client_key_revision = state.client_key_revision.saturating_add(1);
             state.client_key_available = Some(available);
         });
+    }
+
+    pub fn set_wake_monitor_available(&self, available: bool) -> bool {
+        let Ok(mut runtime) = self.lock() else {
+            return false;
+        };
+        if runtime.state.wake_monitor_available == Some(available) {
+            return false;
+        }
+        runtime.state.wake_monitor_available = Some(available);
+        drop(runtime);
+        self.publish();
+        true
     }
 
     pub fn set_profile_credential_saved(&self, profile_id: &str, saved: bool) {

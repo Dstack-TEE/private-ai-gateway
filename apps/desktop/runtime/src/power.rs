@@ -6,14 +6,38 @@ use crate::controller::DesktopRuntime;
 
 /// Keeps native system wake notifications registered for its lifetime.
 pub struct Monitor {
-    _platform: platform::Monitor,
+    platform: Option<platform::Monitor>,
+    runtime: Weak<DesktopRuntime>,
 }
 
 impl Monitor {
     pub fn start(runtime: Weak<DesktopRuntime>, task_runtime: Handle) -> Result<Self, String> {
-        platform::Monitor::start(runtime, task_runtime).map(|platform| Self {
-            _platform: platform,
+        let platform = match platform::Monitor::start(runtime.clone(), task_runtime) {
+            Ok(platform) => platform,
+            Err(error) => {
+                set_available(&runtime, false);
+                return Err(error);
+            }
+        };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        set_available(&runtime, true);
+        Ok(Self {
+            platform: Some(platform),
+            runtime,
         })
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.platform.take();
+        set_available(&self.runtime, false);
+    }
+}
+
+fn set_available(runtime: &Weak<DesktopRuntime>, available: bool) {
+    if let Some(runtime) = runtime.upgrade() {
+        runtime.set_wake_monitor_available(available);
     }
 }
 
@@ -25,34 +49,69 @@ mod platform {
 
     pub struct Monitor(JoinHandle<()>);
 
+    struct AvailabilityGuard(Weak<DesktopRuntime>);
+
+    impl Drop for AvailabilityGuard {
+        fn drop(&mut self) {
+            set_available(&self.0, false);
+        }
+    }
+
     impl Monitor {
         pub fn start(runtime: Weak<DesktopRuntime>, task_runtime: Handle) -> Result<Self, String> {
             let task = task_runtime.spawn(async move {
-                let result: Result<(), zbus::Error> = async {
-                    let connection = zbus::Connection::system().await?;
-                    let proxy = zbus::Proxy::new(
-                        &connection,
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1",
-                        "org.freedesktop.login1.Manager",
-                    )
-                    .await?;
-                    let mut signals = proxy.receive_signal("PrepareForSleep").await?;
-                    while let Some(signal) = signals.next().await {
-                        let (sleeping,): (bool,) = signal.body().deserialize()?;
-                        let Some(runtime) = runtime.upgrade() else {
-                            break;
-                        };
-                        if !sleeping {
-                            runtime.system_resumed();
+                let _availability = AvailabilityGuard(runtime.clone());
+                supervise(move || {
+                    let runtime = runtime.clone();
+                    async move {
+                        let result: Result<(), zbus::Error> = async {
+                            let connection = zbus::Connection::system().await?;
+                            let proxy = zbus::Proxy::new(
+                                &connection,
+                                "org.freedesktop.login1",
+                                "/org/freedesktop/login1",
+                                "org.freedesktop.login1.Manager",
+                            )
+                            .await?;
+                            let mut owners = proxy.receive_owner_changed().await?;
+                            let bus = zbus::fdo::DBusProxy::new(&connection).await?;
+                            if !bus.name_has_owner(proxy.destination().clone()).await? {
+                                return Err(zbus::Error::Failure("login1 is unavailable".into()));
+                            }
+                            let mut signals = proxy.receive_signal("PrepareForSleep").await?;
+                            set_available(&runtime, true);
+                            loop {
+                                tokio::select! {
+                                    signal = signals.next() => {
+                                        let Some(signal) = signal else { break; };
+                                        let (sleeping,): (bool,) = signal.body().deserialize()?;
+                                        let Some(runtime) = runtime.upgrade() else { break; };
+                                        if !sleeping { runtime.system_resumed(); }
+                                    },
+                                    owner = owners.next() => {
+                                        let Some(owner) = owner else { break; };
+                                        set_available(&runtime, owner.is_some());
+                                    },
+                                }
+                            }
+                            Ok(())
+                        }
+                        .await;
+                        if let Some(runtime) = runtime.upgrade() {
+                            if runtime.set_wake_monitor_available(false) {
+                                match result {
+                                    Err(error) => {
+                                        eprintln!("System wake monitoring will reconnect: {error}")
+                                    }
+                                    Ok(()) => eprintln!(
+                                        "System wake monitoring stream ended; reconnecting"
+                                    ),
+                                }
+                            }
                         }
                     }
-                    Ok(())
-                }
+                })
                 .await;
-                if let Err(error) = result {
-                    eprintln!("System wake monitoring stopped: {error}");
-                }
             });
             Ok(Self(task))
         }
@@ -61,6 +120,52 @@ mod platform {
     impl Drop for Monitor {
         fn drop(&mut self) {
             self.0.abort();
+        }
+    }
+
+    async fn supervise<F, Fut>(mut subscribe: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        loop {
+            subscribe().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        #[tokio::test(start_paused = true)]
+        async fn ended_subscriptions_retry_without_spinning_and_can_be_cancelled() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let task = tokio::spawn(supervise(move || {
+                let attempts = observed.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+
+            tokio::task::yield_now().await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            tokio::time::advance(std::time::Duration::from_secs(4)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
         }
     }
 }
