@@ -1442,6 +1442,7 @@ function Overview({
   const recent = protectedNow ? state.activity.slice(0, 4) : [];
   return (
     <div className="overview-page">
+      <div className="overview-top">
       <StatusSurface
         state={state}
         agents={agents}
@@ -1453,6 +1454,8 @@ function Overview({
         onSettings={onSettings}
         onPrivacy={onPrivacy}
       />
+      <SessionSummary summary={state.sessionUsage} active={protectedNow} />
+      </div>
       {problem && (
         <p className="banner overview-banner" role="alert">
           <TriangleAlert size={15} aria-hidden="true" /> {problem}
@@ -1470,9 +1473,6 @@ function Overview({
             onSettings={onLocalSettings}
             onToggleKey={onToggleClientKey}
           />
-        </OverviewModule>
-        <OverviewModule title="Usage in this session">
-          <SessionSummary summary={state.sessionUsage} active={protectedNow} />
         </OverviewModule>
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
           <div className="preview-list">
@@ -1531,10 +1531,8 @@ function StatusSurface({
 }): React.JSX.Element {
   const verdict = presentation(state);
   const protectedNow = isProtected(state);
-  const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const activeProfileAvailable = profileIsAvailable(activeProfile, state);
-  const localApiAvailable = protectedNow && Boolean(state.proxyUrl) && !endpointDown;
   const liveVerified = hasLiveVerification(state);
   const profileStatus = !activeProfile
     ? "Not configured"
@@ -1550,56 +1548,23 @@ function StatusSurface({
         ? "Verification required"
         : "Credential unavailable";
   return (
-    <section className={`status-surface status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
-      <TrackLayer side="left" lines={PLAINTEXT_TRACKS} active={protectedNow} />
+    <section className={`status-surface status-compact status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer side="right" lines={TLS_TRACKS} active={protectedNow} />
-      <div className="status-glow" aria-hidden="true" />
-      <div className="status-edge status-edge-left" aria-hidden="true" />
-      <div className="status-edge status-edge-right" aria-hidden="true" />
-
-      <div className="status-segment status-local">
-        <div className="status-heading"><Laptop size={18} aria-hidden="true" /><span>This Mac</span></div>
-        <div className={`status-fact ${localApiAvailable ? "state-success" : ""}`}>
-          <span className="status-icon" aria-hidden="true"><span className="dot" /></span>
-          <span>Local API {localApiAvailable ? "available" : "unavailable"}</span>
+      <span className="status-background-mark" aria-hidden="true" style={{ maskImage: `url("${brand.mark.light}")` }} />
+      <div className="status-compact-content">
+        <div className="status-heading">AI service
+          {liveVerified && <Badge variant="outline" className="border-success/20 bg-success/10 text-success" render={<button type="button" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy} />}><ShieldCheck aria-hidden="true" />Verified</Badge>}
         </div>
-        <div className={`status-fact ${connected > 0 ? "state-success" : "state-neutral"}`}><Bot size={14} aria-hidden="true" /><span>{connected} {connected === 1 ? "agent" : "agents"} connected</span></div>
-        <div className="status-agent-icons" role="group" aria-label="Installed agents">
-          {sortAgents(agents.filter((agent) => agent.installed)).sort((a, b) => Number(b.connected) - Number(a.connected)).map((agent) => (
-            <span className={`status-agent-icon${agent.connected ? "" : " is-disconnected"}`} key={agent.id} title={`${agent.name} · ${agent.connected ? "Connected" : "Not connected"}`}>
-              {AGENT_ICONS[agent.id] ? <img src={AGENT_ICONS[agent.id]} alt={agent.name} /> : agent.name.slice(0, 1)}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="status-segment status-gateway">
-        <div className="gateway-core">
-          <BrandMark className="gateway-mark" busy={busy} />
-          <strong>{brand.productName}</strong>
-          <span className={`gateway-verdict state-${verdict.tone}`}><ProtectionStatus state={state} label={verdict.title} /></span>
-          <ProtectedControl
-            state={state}
-            busy={busy}
-            running={running}
-            endpointDown={endpointDown}
-            developmentMode={developmentMode}
-            onToggle={onToggle}
-            iconOnly
-          />
-        </div>
-      </div>
-
-      <div className="status-segment status-remote">
-        <div className="status-heading"><ShieldCheck size={18} aria-hidden="true" /><span>AI service</span></div>
         <Button variant="outline" className="status-profile" title={activeProfile?.name ?? "Setup provider"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Setup provider"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Setup provider"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {liveVerified
-          ? <Button variant="outline" size="sm" className="text-success" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Verified</Button>
-          : <div className="status-fact status-profile-state state-neutral"><ShieldX size={13} aria-hidden="true" /><span>{profileStatus}</span></div>}
+        {!liveVerified && <div className="status-fact status-profile-state state-neutral"><ShieldX size={13} aria-hidden="true" /><span>{profileStatus}</span></div>}
+        <div className="status-compact-protection">
+          <span className={`gateway-verdict state-${verdict.tone}`}><ProtectionStatus state={state} label={verdict.title} /></span>
+          <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
+        </div>
       </div>
     </section>
   );
@@ -1764,7 +1729,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
-    <div className="session-summary">
+    <div className="session-summary" role="group" aria-label="Usage in this session">
       <div><span>Requests</span><strong>{active ? summary.requests.toLocaleString() : "—"}</strong></div>
       <div><span>Tokens</span><strong>{active ? formatTokens(totalTokens) : "—"}</strong></div>
       <div><span>Cost</span><strong>{active ? currency(summary.costUsd) : "—"}</strong></div>
