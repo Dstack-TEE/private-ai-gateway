@@ -330,12 +330,10 @@ builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and th
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
 
-The DMG leaves CLI registration explicit. An optional signed PKG installs the
-same app and owns `/usr/local/bin/pag`; enable it with `build_macos_pkg=true` and
-provision a Developer ID Installer PKCS#12/password plus
-`APPLE_INSTALLER_SIGN_IDENTITY`. Normal macOS CI always builds and expands an
-unsigned PKG to inspect its payload and preinstall conflict checks. Signed PKG
-acceptance, notarization, and installation remain pending native CI evidence.
+The macOS DMG app automatically attempts user-level `pag` registration on startup.
+It does not request administrator privileges or edit shell profiles. Settings >
+Command Line shows the registration status; removing the command there disables
+registration on subsequent launches. No PKG installer is produced.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -612,7 +610,7 @@ runtime, renderer, and Tauri backend, then compiles and bundles the same app on
 macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
 platforms and CLI-only DEB/RPM packages on Linux. See
 [`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
-upgrade behavior, and the explicit macOS registration step. macOS additionally verifies the compiled asset
+upgrade behavior, and automatic registration on app startup. macOS additionally verifies the compiled asset
 catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.
 
 ### macOS distribution signing

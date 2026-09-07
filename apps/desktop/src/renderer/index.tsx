@@ -2189,7 +2189,7 @@ function CliRegistrationControl(): React.JSX.Element {
     ?? (registration?.installed
       ? registration.onPath
         ? `Installed at ${directory}. This app can resolve pag; terminal PATH may differ.`
-        : `Installed at ${directory}. Open a new terminal to refresh PATH.`
+        : `Installed at ${directory}. Ensure this directory is in your terminal PATH.`
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.");
   return <Item>
     <ItemContent>

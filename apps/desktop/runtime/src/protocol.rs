@@ -111,6 +111,7 @@ pub enum Command {
     deny_unknown_fields
 )]
 pub enum Preference {
+    AutoCliRegistration(bool),
     Notifications(NotificationPreferences),
     ConnectOnLaunch(bool),
     Appearance(Appearance),

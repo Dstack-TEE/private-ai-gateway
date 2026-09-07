@@ -498,18 +498,51 @@ async fn run_pag_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registrati
         .map_err(|_| "The pag command returned an invalid response".to_string())
 }
 
+#[derive(Default)]
+struct CliStartup(tokio::sync::Mutex<bool>);
+
+async fn register_cli_on_startup(app: &AppHandle) {
+    let startup = app.state::<CliStartup>();
+    let mut attempted = startup.0.lock().await;
+    if *attempted {
+        return;
+    }
+    *attempted = true;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    let reader = client.clone();
+    let enabled =
+        run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
+    let result = match enabled {
+        Ok(true) => run_pag_cli(app, vec!["cli", "install", "--json"])
+            .await
+            .map(|_| ()),
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        client.report_error(format!("Command-line registration failed: {error}"));
+    }
+}
+
 #[tauri::command]
 async fn get_cli_registration(app: AppHandle) -> Result<Registration, String> {
+    register_cli_on_startup(&app).await;
     run_pag_cli(&app, vec!["cli", "status", "--json"]).await
 }
 
 #[tauri::command]
 async fn set_cli_registration(app: AppHandle, installed: bool) -> Result<Registration, String> {
-    if installed {
+    register_cli_on_startup(&app).await;
+    let startup = app.state::<CliStartup>();
+    let _guard = startup.0.lock().await;
+    let registration = if installed {
         run_pag_cli(&app, vec!["cli", "install", "--json"]).await
     } else {
         run_pag_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
-    }
+    }?;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    run_blocking(move || client.set_preference(Preference::AutoCliRegistration(installed))).await?;
+    Ok(registration)
 }
 
 #[tauri::command]
@@ -550,6 +583,7 @@ pub fn run() {
                 .build(),
         )
         .manage(updates::PendingUpdate::default())
+        .manage(CliStartup::default())
         .manage(updates::UpdateProgress::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
@@ -615,6 +649,10 @@ pub fn run() {
                 apply_appearance(app.handle(), preferences.appearance);
             }
             app.manage(client.clone());
+            let registration_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                register_cli_on_startup(&registration_app).await;
+            });
             notifications::initialize(app.handle());
 
             let window = app

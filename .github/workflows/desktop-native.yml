@@ -12,11 +12,6 @@ on:
         required: true
         default: false
         type: boolean
-      build_macos_pkg:
-        description: Build the optional signed macOS PKG with /usr/local/bin/pag registration
-        required: true
-        default: false
-        type: boolean
       release_version:
         description: 'Optional update version matching the channel (for example 0.1.2-beta.1)'
         required: false
@@ -283,70 +278,6 @@ jobs:
             --target-triple "$target_triple" \
             --output release "${source_args[@]}"
 
-      - name: Build and inspect unsigned macOS PKG
-        if: runner.os == 'macOS'
-        working-directory: apps/desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          app_count="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' | wc -l | tr -d ' ')"
-          test "$app_count" -eq 1
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
-          app_name="$(basename "$app_bundle")"
-          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
-          identifier="$(node -e 'const fs = require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("src-tauri/tauri.brand.conf.json", "utf8")).identifier)')"
-          package="$RUNNER_TEMP/Private-AI-Gateway-${version}-macos-arm64-unsigned.pkg"
-          expanded="$RUNNER_TEMP/pag-pkg-expanded"
-          scripts/package-macos-pkg.sh --unsigned "$app_bundle" "$package" "$version" "$identifier"
-          pkgutil --expand-full "$package" "$expanded"
-          payload_pag="$(find "$expanded" -type l -path '*/usr/local/bin/pag' -print -quit)"
-          preinstall="$(find "$expanded" -type f -name preinstall -print -quit)"
-          test -n "$payload_pag"
-          test "$(readlink "$payload_pag")" = "/Applications/$app_name/Contents/MacOS/pag"
-          test -n "$preinstall"
-          grep -Fq 'for binary in private-ai-gateway-desktop pag pag-service aci private-ai-gateway-helper' "$preinstall"
-          grep -Fq "app=/Applications/" "$preinstall"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_bundle/Contents/Info.plist")" = "$version"
-
-      - name: Build optional macOS PKG
-        if: runner.os == 'macOS' && inputs.build_macos_pkg
-        working-directory: apps/desktop
-        shell: bash
-        env:
-          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
-          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
-          PAG_INSTALLER_SIGN_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGN_IDENTITY }}
-        run: |
-          set -euo pipefail
-          test '${{ inputs.production_macos }}' = true
-          test -n "$APPLE_INSTALLER_CERTIFICATE"
-          test -n "$APPLE_INSTALLER_CERTIFICATE_PASSWORD"
-          test -n "$PAG_INSTALLER_SIGN_IDENTITY"
-
-          certificate="$RUNNER_TEMP/pag-installer.p12"
-          keychain="$RUNNER_TEMP/pag-installer.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
-          cleanup() {
-            security delete-keychain "$keychain" 2>/dev/null || true
-            rm -f "$certificate"
-          }
-          trap cleanup EXIT
-          printf '%s' "$APPLE_INSTALLER_CERTIFICATE" | /usr/bin/base64 -D > "$certificate"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
-
-          app_count="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' | wc -l | tr -d ' ')"
-          test "$app_count" -eq 1
-          app_bundle="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
-          version="${DESKTOP_RELEASE_VERSION:-0.1.0}"
-          identifier="$(node -e 'const fs = require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("src-tauri/tauri.brand.conf.json", "utf8")).identifier)')"
-          package="$PWD/release/Private-AI-Gateway-${version}-macos-arm64.pkg"
-          PAG_INSTALLER_KEYCHAIN="$keychain" scripts/package-macos-pkg.sh "$app_bundle" "$package" "$version" "$identifier"
-          pkgutil --check-signature "$package"
-
       - name: Check CLI-only archive without UI
         working-directory: apps/desktop
         shell: bash
@@ -410,13 +341,6 @@ jobs:
           ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
           xcrun notarytool submit "$cli_scratch/cli.zip" \
             --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
-          packages=(release/*.pkg)
-          if [[ -e "${packages[0]}" ]]; then
-            test "${#packages[@]}" -eq 1
-            xcrun notarytool submit "${packages[0]}" \
-              --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
-            xcrun stapler staple "${packages[0]}"
-          fi
 
       - name: Test Windows desktop libraries
         if: runner.os == 'Windows'
@@ -540,13 +464,6 @@ jobs:
             xcrun stapler validate "$dmg"
             spctl --assess --type execute --verbose=4 "$app_bundle"
             spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
-            packages=(release/*.pkg)
-            if [[ -e "${packages[0]}" ]]; then
-              test "${#packages[@]}" -eq 1
-              pkgutil --check-signature "${packages[0]}"
-              xcrun stapler validate "${packages[0]}"
-              spctl --assess --type install --verbose=4 "${packages[0]}"
-            fi
           else
             grep -q '^Signature=adhoc$' <<<"$codesign_details"
           fi
@@ -581,7 +498,6 @@ jobs:
           retention-days: 14
           path: |
             apps/desktop/release/*.dmg
-            apps/desktop/release/*.pkg
             apps/desktop/release/*.zip
             apps/desktop/release/private-ai-gateway-cli-*
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
@@ -629,7 +545,7 @@ jobs:
         run: |
           set -euo pipefail
           node apps/desktop/scripts/create-update-manifest.mjs release-artifacts "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
-          mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name '*.sig' -o -name '*.exe' -o -name '*.dmg' -o -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name 'latest.json' \) -print0)
+          mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name '*.sig' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name 'latest.json' \) -print0)
           release_args=()
           if [[ "$CHANNEL" == beta ]]; then release_args+=(--prerelease); fi
           gh release create "desktop-v$VERSION" "${assets[@]}" "${release_args[@]}" --draft --latest=false --target "$GITHUB_SHA" --title "Private AI Gateway $VERSION" --generate-notes

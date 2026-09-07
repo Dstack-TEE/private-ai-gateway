@@ -110,7 +110,7 @@ on an unattended machine; there is no plaintext fallback.
 ## Distribution and Verification
 
 See [CLI distribution](CLI-DISTRIBUTION.md) for package layouts, PATH ownership,
-PKG versus DMG registration, and the stable-path requirement that excludes
+automatic app-start registration, and the stable-path requirement that excludes
 AppImage from this backend model. CLI-only distributions contain no UI.
 
 Verification uses the existing gateway/runtime suites, a small set of real-binary

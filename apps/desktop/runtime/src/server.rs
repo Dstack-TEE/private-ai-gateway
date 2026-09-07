@@ -390,6 +390,9 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
             Command::Preferences => value(preferences::load()?),
             Command::SetPreference(change) => {
                 preferences::update(|saved| match change {
+                    Preference::AutoCliRegistration(enabled) => {
+                        saved.auto_cli_registration = Some(enabled)
+                    }
                     Preference::Notifications(config) => saved.notifications = config,
                     Preference::ConnectOnLaunch(enabled) => saved.connect_on_launch = enabled,
                     Preference::Appearance(appearance) => saved.appearance = appearance,

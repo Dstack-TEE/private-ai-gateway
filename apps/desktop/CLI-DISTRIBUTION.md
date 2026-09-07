@@ -18,8 +18,7 @@ lookup.
 | Platform | Desktop package | Executable location | CLI registration |
 | --- | --- | --- | --- |
 | Windows | NSIS | The four executables are siblings in the selected app directory | The installer calls `pag cli install`. It records ownership only when it inserts a current-user PATH entry. |
-| macOS | DMG app | `Private AI Gateway.app/Contents/MacOS` | The DMG does not change PATH. Run the bundled `pag cli install` explicitly. |
-| macOS | Optional signed PKG | The app is installed under `/Applications`; all four executables remain siblings inside it | The package owns `/usr/local/bin/pag`, linked to the bundled CLI. |
+| macOS | DMG app | `Private AI Gateway.app/Contents/MacOS` | The app registers the bundled CLI automatically on startup without elevation. |
 | Linux | DEB or RPM | `/usr/bin` | The package manager owns all four paths; no registration command is required. |
 
 Windows install, upgrade, and uninstall hooks call `pag --yes service stop`
@@ -29,7 +28,13 @@ unrelated `pag.exe` aborts installation. The Windows workflow contains native
 install/status/uninstall checks, but successful execution on the Windows CI
 runner and a fresh interactive-terminal PATH check remain release gates.
 
-On macOS, register the DMG-installed command for the current user with:
+On macOS, the app attempts user-level CLI registration asynchronously on startup.
+Registration does not block the window or gateway. Failures appear in app status,
+and Settings > Command Line supports retrying. Removing the command in Settings
+disables automatic registration until the user installs it again.
+
+The registration is idempotent and never replaces an unrelated command. To
+register manually without opening the app:
 
 ```bash
 "/Applications/Private AI Gateway.app/Contents/MacOS/pag" cli install
@@ -41,25 +46,6 @@ must add `~/.local/bin` to PATH if needed. `--directory` accepts an existing,
 current-user-owned directory that is not writable by other users.
 `/usr/local/bin` on macOS is reserved for an already-authorized installer or
 administrator context; `pag` never requests elevation itself.
-
-The optional PKG is built with `pkgbuild` and `productbuild`. Its preinstall
-script rejects an unrelated `/usr/local/bin/pag` and refuses to replace an app
-whose exact bundled executable paths are in use. It does not invoke `pag`, read
-the user's keyring, terminate another user's process, or request privileges;
-Installer supplies the authorization. Stop the backend as the signed-in user
-and quit the app before an upgrade. Ordinary macOS CI constructs an unsigned
-PKG and inspects its expanded payload and registration script without installing
-it. Production PKG signing is separately gated by
-`build_macos_pkg=true`, `production_macos=true`, and these secrets:
-
-- `APPLE_INSTALLER_CERTIFICATE`: base64 PKCS#12 containing a Developer ID Installer identity.
-- `APPLE_INSTALLER_CERTIFICATE_PASSWORD`: password for that PKCS#12.
-- `APPLE_INSTALLER_SIGN_IDENTITY`: the identity selected by `productbuild`.
-
-The signed/notarized PKG path remains pending native CI evidence. For prerelease
-builds such as `0.1.2-beta.9`, the app and PKG filename retain the exact release
-version while the package receipt uses the numeric base `0.1.2`; release tooling
-must not rely on the receipt alone to order beta packages.
 
 ## Standalone CLI
 

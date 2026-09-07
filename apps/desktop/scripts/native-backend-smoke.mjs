@@ -70,6 +70,13 @@ try {
     await delay(100);
   }
   assert.match(windows, /Private AI Gateway/, ui.diagnostic);
+  let registration;
+  for (let count = 0; count < 50; count++) {
+    registration = await cli("cli", "status");
+    if (registration.installed) break;
+    await delay(100);
+  }
+  assert.equal(registration.installed, true, "App startup did not register the bundled CLI");
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
   ui = start("private-ai-gateway-desktop");
