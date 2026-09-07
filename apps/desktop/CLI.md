@@ -29,6 +29,13 @@ start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 
+Human `status` summarizes the backend PID/version, active profile and service,
+saved credential presence (not unlock status), Local API exposure, production OS
+policy, TEE identity/checks, catalog size and current-session usage. Retained
+catalogs are labeled cached when protection is inactive. Reported costs are
+session totals, not a billing reconciliation. Request contents and tokens are
+never included in this summary. `--json` retains the full existing state shape.
+
 Read-only commands do not start a missing backend. A successful `status` means
 the query succeeded, not that protection is active: inspect `gateway.status`
 and `gateway.configurationVerification` in JSON. Connection and configuration

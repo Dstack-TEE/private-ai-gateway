@@ -113,20 +113,159 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.".into();
+        return "Backend not running.\nStart backend: pag service start\nStart protection: pag start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
-        Some("verified") if state["configurationVerification"] != true => "Protected",
+        _ if state["backendConnected"] == false => "Backend disconnected (protection unknown)",
+        _ if state["configurationVerification"] == true => {
+            "Verifying profile (not protecting traffic)"
+        }
+        Some("verified") => "Protected",
         Some("verifying") => "Verifying",
         Some("blocked") => "Not protected (blocked)",
         Some("error") => "Not protected (error)",
         _ => "Not protected",
     };
     let mut lines = vec![status.to_string()];
+    if let Some(backend) = value.get("backend").filter(|backend| backend.is_object()) {
+        lines.push(format!(
+            "Backend: running (PID {}, version {})",
+            text(&backend["processId"]),
+            text(&backend["version"])
+        ));
+    }
+    let profile = state["profiles"].as_array().and_then(|profiles| {
+        profiles
+            .iter()
+            .find(|profile| profile["id"] == state["activeProfileId"])
+    });
+    if let Some(profile) = profile {
+        lines.push(format!(
+            "Profile: {} ({})",
+            text(&profile["name"]),
+            text(&profile["id"])
+        ));
+        lines.push(format!(
+            "Service: {} | {}",
+            text(&profile["provider"]),
+            text(&profile["remoteUrl"])
+        ));
+    } else if let Some(id) = state["activeProfileId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+    {
+        lines.push(format!("Profile: {}", safe(id)));
+    } else if state["profiles"].is_array() {
+        lines.push("Profile: None selected".into());
+    }
+    if let Some(saved) = state["apiKeySaved"].as_bool() {
+        lines.push(format!(
+            "Service credential: {}",
+            if saved {
+                "Saved (OS credential store)"
+            } else {
+                "Not saved"
+            }
+        ));
+    }
+    if state.get("localApi").is_some() {
+        lines.push(format!(
+            "Local API: {}",
+            state["proxyUrl"]
+                .as_str()
+                .map(safe)
+                .unwrap_or_else(|| "Not listening".into())
+        ));
+        if let Some(network) = state["localApi"]["allowNetworkAccess"].as_bool() {
+            lines.push(format!(
+                "Network access: {}",
+                if network { "Allowed" } else { "Loopback only" }
+            ));
+        }
+    } else if let Some(endpoint) = state["proxyUrl"].as_str() {
+        lines.push(format!("Local API: {}", safe(endpoint)));
+    }
+    if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
+        lines.push(format!(
+            "Production OS: {}",
+            if required {
+                "Required"
+            } else {
+                "Development images allowed"
+            }
+        ));
+    }
+    if let Some(identity) = state
+        .get("identity")
+        .filter(|identity| identity.is_object())
+    {
+        lines.push(format!(
+            "Identity: {} | {}",
+            text(&identity["teeType"]),
+            text(&identity["trustLevel"])
+        ));
+    }
+    if let Some(checks) = state["checks"]
+        .as_array()
+        .filter(|checks| !checks.is_empty())
+    {
+        let count = |status: &str| {
+            checks
+                .iter()
+                .filter(|check| check["status"] == status)
+                .count()
+        };
+        lines.push(format!(
+            "Checks: {} passed, {} failed, {} skipped",
+            count("pass"),
+            count("fail"),
+            count("skip")
+        ));
+        for check in checks
+            .iter()
+            .filter(|check| check["status"] == "fail")
+            .take(3)
+        {
+            lines.push(format!("  Failed: {}", text(&check["title"])));
+        }
+    }
+    if let Some(models) = state["catalog"]["models"].as_array() {
+        let label = if state["status"] == "verified"
+            && state["configurationVerification"] != true
+            && state["backendConnected"] != false
+        {
+            "Models"
+        } else {
+            "Cached models"
+        };
+        lines.push(format!("{label}: {}", models.len()));
+    } else if state.get("config").is_some() {
+        lines.push("Models: No verified catalog".into());
+    }
+    if let Some(session) = state["sessionId"].as_str() {
+        lines.push(format!("Session: {}", safe(session)));
+        if let Some(usage) = state.get("sessionUsage").filter(|usage| usage.is_object()) {
+            lines.push(format!(
+                "Requests: {} total | {} protected | {} blocked locally | {} failed proof",
+                text(&usage["requests"]),
+                text(&usage["protected"]),
+                text(&usage["blockedLocally"]),
+                text(&usage["failedProof"])
+            ));
+            lines.push(format!(
+                "Tokens: {} input | {} output | {} cache read | {} cache write",
+                text(&usage["inputTokens"]),
+                text(&usage["outputTokens"]),
+                text(&usage["cacheReadTokens"]),
+                text(&usage["cacheWriteTokens"])
+            ));
+            if let Some(cost) = usage["costUsd"].as_f64() {
+                lines.push(format!("Reported cost: ${cost:.6} USD"));
+            }
+        }
+    }
     for (key, label) in [
-        ("activeProfileId", "Profile"),
-        ("proxyUrl", "Local API"),
         ("progress", "Progress"),
         ("error", "Error"),
         ("endpointError", "Warning"),
@@ -260,6 +399,51 @@ fn label(key: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_includes_operational_context_without_credentials_or_activity() {
+        assert!(status(&json!({"status":"not_running"})).contains("pag service start"));
+        let value = json!({
+            "backend": {"processId":42,"version":"0.1.0"},
+            "gateway": {
+                "status":"verified", "activeProfileId":"work", "apiKeySaved":true,
+                "profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],
+                "proxyUrl":"http://127.0.0.1:4180", "localApi":{"allowNetworkAccess":false},
+                "config":{"requireProductionOs":true},
+                "identity":{"teeType":"tdx","trustLevel":"production"},
+                "checks":[{"title":"Identity","status":"pass"}],
+                "catalog":{"models":[{"id":"model"}]}, "sessionId":"session-1",
+                "sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},
+                "activity":[{"detail":"private request detail"}], "token":"never-print-token"
+            }
+        });
+        let output = status(&value);
+        for expected in [
+            "Backend: running (PID 42, version 0.1.0)",
+            "Profile: Work (work)",
+            "Service: redpill | https://tee.redpill.ai",
+            "Production OS: Required",
+            "Identity: tdx | production",
+            "Checks: 1 passed, 0 failed, 0 skipped",
+            "Models: 1",
+            "Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof",
+            "Tokens: 100 input | 20 output | 5 cache read | 0 cache write",
+            "Reported cost: $0.001200 USD",
+        ] {
+            assert!(output.contains(expected), "missing {expected}: {output}");
+        }
+        assert!(!output.contains("private request detail"));
+        assert!(!output.contains("never-print-token"));
+        let mut state = value["gateway"].clone();
+        state["status"] = json!("stopped");
+        assert!(status(&state).contains("Cached models: 1"));
+        state["status"] = json!("verified");
+        state["backendConnected"] = json!(false);
+        assert!(status(&state).starts_with("Backend disconnected (protection unknown)"));
+        state["backendConnected"] = json!(true);
+        state["configurationVerification"] = json!(true);
+        assert!(status(&state).starts_with("Verifying profile (not protecting traffic)"));
+    }
 
     #[test]
     fn status_and_nested_details_do_not_emit_terminal_controls() {
