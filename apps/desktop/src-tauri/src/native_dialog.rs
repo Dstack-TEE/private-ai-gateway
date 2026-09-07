@@ -184,10 +184,12 @@ pub fn open(
         .state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
         .state()?;
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
-    let initial_appearance =
-        serde_json::to_string(&desktop_runtime::preferences::load()?.appearance)
-            .map_err(window_error)?;
     let theme = main.theme().map_err(window_error)?;
+    let initial_appearance = if theme == tauri::Theme::Dark {
+        "\"dark\""
+    } else {
+        "\"light\""
+    };
     if spec.label == UPDATE_PROGRESS_LABEL {
         crate::updates::reset_progress(app);
     }
