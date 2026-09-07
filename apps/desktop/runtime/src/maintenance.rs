@@ -53,6 +53,14 @@ impl ProfileBackup {
     }
 
     pub fn read(path: &Path) -> Result<Self, String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|_| "Could not inspect the profile configuration file")?;
+        if !metadata.is_file() {
+            return Err("Select a regular JSON file".into());
+        }
+        if metadata.len() > MAX_BACKUP_BYTES as u64 {
+            return Err("Profile configuration file is too large".into());
+        }
         let file = File::open(path).map_err(|_| "Could not open the profile configuration file")?;
         let mut bytes = Vec::new();
         file.take((MAX_BACKUP_BYTES + 1) as u64)
@@ -174,6 +182,7 @@ mod tests {
         assert!(incoming.merge(&mut settings).is_err());
         assert_eq!(settings.profiles.len(), 49);
         let directory = tempfile::tempdir().unwrap();
+        assert!(ProfileBackup::read(directory.path()).is_err());
         let path = directory.path().join("profiles.json");
         std::fs::write(&path, vec![b' '; MAX_BACKUP_BYTES + 1]).unwrap();
         assert!(ProfileBackup::read(&path)

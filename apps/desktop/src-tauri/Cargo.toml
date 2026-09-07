@@ -37,15 +37,16 @@ tokio = { version = "1", features = ["sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 auto-launch = "0.6"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["UI_Notifications"] }
+windows = { version = "0.61", features = ["UI_Notifications", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 auto-launch-windows = { package = "auto-launch", version = "0.5.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-user-notifications = "0.3"
-objc2-web-kit = "0.3"
 objc2-foundation = "0.3"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }

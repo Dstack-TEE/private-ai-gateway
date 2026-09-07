@@ -2166,9 +2166,9 @@ function SettingsView({
       {anyRecorded && <SettingsSection title="Agents"><Item><ItemContent><ItemTitle>Restore all agent configs</ItemTitle><ItemDescription>Restore the original configuration for every connected agent.</ItemDescription></ItemContent><ItemActions><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></ItemActions></Item></SettingsSection>}
 
       <SettingsSection title="About">
-          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
           <UpdateControl updates={updates} productName={brand.productName} />
           {([ ["documentation", "Documentation"], ["github", "GitHub"] ] as const).map(([target, label]) => <SettingsLink key={target} title={label} external onClick={() => onAboutLink(target)} />)}
+          <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
       </SettingsSection>
       {diagnosticMessage && <p role="status" className="text-sm text-muted-foreground">{diagnosticMessage}</p>}
     </div>

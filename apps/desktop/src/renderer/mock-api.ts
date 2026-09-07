@@ -337,6 +337,7 @@ export function mockApi(name: string | null): DesktopApi {
   return {
     showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
     getAppearance: async () => {
+      if (name === "appearance-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-appearance", () => resolve(), { once: true }));
       const value = localStorage.getItem("pag-preview-appearance");
       return value === "light" || value === "dark" ? value : "system";
     },

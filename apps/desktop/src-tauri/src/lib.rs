@@ -2,6 +2,7 @@ mod autostart;
 mod menu;
 mod native_dialog;
 mod notifications;
+mod power;
 mod runtime_adapter;
 mod tray;
 mod updates;
@@ -449,8 +450,8 @@ fn open_native_dialog(
 }
 
 #[tauri::command]
-async fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
-    native_dialog::ready(&window).await
+fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    native_dialog::ready(&window)
 }
 
 #[tauri::command]
@@ -563,6 +564,7 @@ pub fn run() {
                 task_runtime: tauri::async_runtime::handle().inner().clone(),
             })?;
             app.manage(runtime.clone());
+            power::setup(app.handle(), &runtime);
 
             let window = app
                 .get_webview_window("main")
@@ -621,6 +623,7 @@ pub fn run() {
         .expect("error while building Tauri application");
 
     app.run(|app, event| match event {
+        tauri::RunEvent::Exit => power::shutdown(),
         tauri::RunEvent::ExitRequested { api, code, .. } => {
             // The updater already restores configurations before restart,
             // and Tauri restart requests cannot be deferred.

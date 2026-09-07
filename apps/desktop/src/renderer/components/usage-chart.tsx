@@ -1,10 +1,10 @@
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { lazy, Suspense } from "react";
 import { differenceInCalendarDays, eachDayOfInterval, eachMonthOfInterval, format, parseISO, startOfDay, subDays } from "date-fns";
 import type { UsagePage } from "../../shared/contracts";
-import { ChartContainer, ChartTooltip, ChartTooltipContent, ChartLegend, ChartLegendContent, type ChartConfig } from "./ui/chart";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 
 export type UsageMetric = "tokens" | "cost" | "requests";
+const UsagePlot = lazy(() => import("./usage-chart-plot"));
 
 export function modelChartData(page: Pick<UsagePage, "modelSeries" | "series"> & Partial<Pick<UsagePage, "models">>, range: string, metric: UsageMetric, bounds?: { start?: Date; end?: Date }) {
   const amount = (point: UsagePage["modelSeries"][number]) => metric === "cost" ? point.costUsd : metric === "tokens" ? point.tokens : point.requests;
@@ -41,9 +41,6 @@ export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
   page?: UsagePage; loading: boolean; range: string; bounds?: { start?: Date; end?: Date }; metric: UsageMetric; onMetric(metric: UsageMetric): void;
 }): React.JSX.Element {
   const { rows, series, monthly } = modelChartData(page ?? { modelSeries: [], series: [] }, range, metric, bounds);
-  // Labels only: colors use existing CSS variables on Bars. ChartStyle emits no
-  // dynamic style tag, preserving the desktop's restrictive production CSP.
-  const config: ChartConfig = Object.fromEntries(series.map(({ key, label }) => [key, { label }]));
   const formatValue = (value: number) => metric === "cost"
     ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 6 }).format(value)
     : value.toLocaleString();
@@ -53,16 +50,7 @@ export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
         <TabsTrigger value="tokens">Tokens</TabsTrigger><TabsTrigger value="cost">Cost</TabsTrigger><TabsTrigger value="requests">Requests</TabsTrigger>
       </TabsList>
       <TabsContent value={metric}>
-        {!page ? <div className="h-72 flex items-center justify-center text-sm text-muted-foreground" role="status">{loading ? null : "Usage data unavailable."}</div> : <ChartContainer config={config} className="h-72 w-full aspect-auto">
-          <BarChart accessibilityLayer data={rows} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
-            <CartesianGrid vertical={false} />
-            <XAxis dataKey="period" tickLine={false} axisLine={false} minTickGap={28} tickFormatter={(value: string) => monthly ? value : value.slice(5)} />
-            <YAxis width={48} tickLine={false} axisLine={false} tickFormatter={(value: number) => metric === "cost" ? `$${new Intl.NumberFormat(undefined, { notation: "compact" }).format(value)}` : new Intl.NumberFormat(undefined, { notation: "compact" }).format(value)} />
-            <ChartTooltip content={<ChartTooltipContent className="max-w-72" formatter={(value, name, item) => <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"><span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: item.color }} /><span className="truncate text-muted-foreground" title={String(config[String(name)]?.label ?? name)}>{config[String(name)]?.label}</span><span className="font-mono">{formatValue(Number(value))}</span></div>} />} />
-            <ChartLegend content={<ChartLegendContent className="max-h-24 flex-wrap justify-start overflow-y-auto [&>div]:max-w-full [&>div]:break-all" />} />
-            {series.map(({ key, color }) => <Bar key={key} dataKey={key} name={key} stackId="models" fill={color} maxBarSize={48} isAnimationActive={false} />)}
-          </BarChart>
-        </ChartContainer>}
+        {!page ? <div className="h-72 flex items-center justify-center text-sm text-muted-foreground" role="status">{loading ? null : "Usage data unavailable."}</div> : <Suspense fallback={<div className="h-72" aria-busy="true" />}><UsagePlot rows={rows} series={series} monthly={monthly} metric={metric} formatValue={formatValue} /></Suspense>}
         {page?.summary.requests === 0 && <p className="text-sm text-muted-foreground">No usage in this range.</p>}
         <table className="sr-only" aria-label="Usage by model">
           <thead><tr><th>Period</th>{series.map((entry) => <th key={entry.key}>{entry.label}</th>)}</tr></thead>

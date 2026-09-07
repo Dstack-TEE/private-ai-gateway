@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useState, type PropsWithChildren } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useState, type PropsWithChildren } from "react";
+import { initialAppearance } from "../desktop-api";
 import type { Appearance, DesktopApi } from "../../shared/contracts";
 import { Item, ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { FieldLabel, FieldError } from "./ui/field";
@@ -8,7 +9,7 @@ import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, error: "", change: (_value: Appearance) => {} });
 
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
-  const [value, setValue] = useState<Appearance>("system");
+  const [value, setValue] = useState<Appearance>(initialAppearance ?? "system");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -18,7 +19,7 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     void api.getAppearance().then((next) => { if (active && !received) setValue(next); }).catch(() => { if (active) setError("Could not read appearance settings."); });
     return () => { active = false; unsubscribe(); };
   }, [api]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.dataset.appearance = value;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => { document.documentElement.dataset.theme = value === "system" ? media.matches ? "dark" : "light" : value; };
