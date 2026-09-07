@@ -540,6 +540,17 @@ export function mockApi(name: string | null): DesktopApi {
       },
       permission: name === "notifications-denied" ? "denied" : name === "notifications-prompt" && localStorage.getItem("mock:notifications:permission") !== "granted" ? "notDetermined" : "granted",
     }),
+    readProfileBackup: async () => ({ version: 1, profiles: [{ name: "Imported Phala", provider: "phala", remoteUrl: "https://inference.phala.com" }] }),
+    importProfiles: async (backup) => {
+      let imported = 0;
+      for (const profile of backup.profiles) {
+        if (state.profiles.some((item) => item.name === profile.name && item.provider === profile.provider && item.remoteUrl === profile.remoteUrl)) continue;
+        state = { ...state, profiles: [...state.profiles, { ...profile, id: crypto.randomUUID(), auth: { kind: "apiKey" }, credentialSaved: false }] }; imported++;
+      }
+      publish(); return { imported, skipped: backup.profiles.length - imported };
+    },
+    exportProfiles: async () => { if (name === "export-error") throw new Error("Could not save the export file"); },
+    exportDiagnostics: async () => { if (name === "export-error") throw new Error("Could not save the export file"); },
     saveNotificationSettings: async (config) => {
       if (name === "notification-save-error") throw new Error("Preference unavailable");
       for (const [key, value] of Object.entries(config)) localStorage.setItem(`mock:notifications:${key}`, String(value));

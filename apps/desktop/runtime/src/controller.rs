@@ -45,6 +45,7 @@ pub struct DesktopRuntime {
     agent_policy: Mutex<()>,
     lifecycle: tokio::sync::Mutex<()>,
     exiting: AtomicBool,
+    recovery: crate::recovery::Recovery,
     helper_path: PathBuf,
     instance: Option<lock::InstanceLock>,
 }
@@ -296,6 +297,7 @@ impl DesktopRuntime {
             agent_policy: Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
+            recovery: crate::recovery::Recovery::default(),
             helper_path: options.helper_path,
             instance,
         });
@@ -328,15 +330,23 @@ impl DesktopRuntime {
         }
         if runtime.instance.is_some() {
             runtime.initialize_startup_tokens();
+            if let Err(error) = runtime.recovery.start() {
+                runtime.report_error(error);
+            }
         }
 
         let weak = Arc::downgrade(&runtime);
         let mut states = runtime.subscribe();
+        let network_changed = runtime.recovery.changed.clone();
         task_runtime.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_check = std::time::SystemTime::now();
             let mut previous = None;
             loop {
+                let mut network_event = false;
                 tokio::select! {
+                    _ = network_changed.notified() => { network_event = true; },
                     result = states.changed() => {
                         if result.is_err() { break; }
                         let state = states.borrow();
@@ -347,7 +357,12 @@ impl DesktopRuntime {
                     _ = interval.tick() => {},
                 }
                 let Some(runtime) = weak.upgrade() else { break };
+                let resumed = last_check.elapsed().map_or(true, |elapsed| elapsed > std::time::Duration::from_secs(30));
+                last_check = std::time::SystemTime::now();
                 let result = tokio::task::spawn_blocking(move || {
+                    if network_event || resumed {
+                        if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
+                    }
                     if let Err(error) = runtime.reconcile_agents() {
                         if runtime
                             .state()
@@ -448,7 +463,45 @@ impl DesktopRuntime {
         if self.exiting.load(Ordering::Acquire) {
             return Err("The app is closing".to_string());
         }
+        self.recovery.cancel();
         Ok(operation)
+    }
+
+    fn recover_network(self: &Arc<Self>) -> Result<(), String> {
+        let Ok(_operation) = self.lifecycle.try_lock() else {
+            return Ok(());
+        };
+        if self.exiting.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let state = self.manager.snapshot()?;
+        if !crate::recovery::should_recover(
+            &state.status,
+            state.configuration_verification,
+            self.recovery.pending(),
+        ) {
+            return Ok(());
+        }
+        let remote = url::Url::parse(&state.config.remote_url)
+            .map_err(|_| "The active service URL is invalid")?;
+        let local_service = match remote.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+        if local_service {
+            return Ok(());
+        }
+        self.recovery.cancel();
+        self.stop_inner()?;
+        if !self.recovery.online() {
+            self.recovery.wait();
+            self.manager.report_error("Network unavailable. Protection will be verified again when a network address returns.".into());
+            return Ok(());
+        }
+        self.start_inner(state.config)?;
+        Ok(())
     }
 
     pub fn prepare_exit(&self) -> Result<(), String> {
@@ -890,6 +943,39 @@ impl DesktopRuntime {
         self.usage.page(&query)
     }
 
+    pub fn import_profiles(
+        &self,
+        backup: crate::maintenance::ProfileBackup,
+    ) -> Result<crate::maintenance::ImportResult, String> {
+        let _operation = self.configuration_change()?;
+        let state = self.manager.snapshot()?;
+        let mut settings = service_config::settings_from_state(
+            state.profiles,
+            state.active_profile_id,
+            state.config.require_production_os,
+        )?;
+        let result = backup.merge(&mut settings)?;
+        if result.imported > 0 {
+            let settings = service_config::save(settings)?;
+            let config = settings.runtime_config()?;
+            self.manager
+                .update_profile_list(settings.profiles, settings.active_profile_id, config);
+        }
+        Ok(result)
+    }
+
+    pub fn export_profiles(&self, path: PathBuf) -> Result<(), String> {
+        let backup = crate::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
+        crate::maintenance::write_json(&path, &backup)
+    }
+
+    pub fn export_diagnostics(&self, path: PathBuf, version: &str) -> Result<(), String> {
+        crate::maintenance::write_json(
+            &path,
+            &crate::maintenance::diagnostics(&self.state()?, version),
+        )
+    }
+
     pub fn usage_record(&self, record_id: &str) -> Result<Option<RequestActivity>, String> {
         self.usage.get(record_id)
     }
@@ -1290,6 +1376,7 @@ mod tests {
             lifecycle: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
             helper_path: directory.join("helper"),
+            recovery: crate::recovery::Recovery::default(),
             instance: None,
         })
     }
@@ -1321,6 +1408,35 @@ mod tests {
                 .unwrap_err(),
             "The app is closing"
         );
+    }
+
+    #[test]
+    fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&executor, directory.path());
+        runtime.manager.restore_snapshot(GatewayState {
+            status: "verified".into(),
+            config: StartGatewayConfig {
+                remote_url: "https://inference.phala.com".into(),
+                require_production_os: true,
+            },
+            ..Default::default()
+        });
+        runtime.proxy.publish(proxy::Session {
+            verified: true,
+            ..Default::default()
+        });
+        runtime.recovery.available.store(false, Ordering::Release);
+        runtime.recover_network().unwrap();
+        assert!(!runtime.proxy.session().verified);
+        assert_eq!(runtime.state().unwrap().status, "stopped");
+        assert!(runtime.recovery.pending());
+        runtime.stop().unwrap();
+        assert!(!runtime.recovery.pending());
+        runtime.recovery.available.store(true, Ordering::Release);
+        runtime.recover_network().unwrap();
+        assert_eq!(runtime.state().unwrap().status, "stopped");
     }
 
     #[test]

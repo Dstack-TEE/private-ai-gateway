@@ -373,6 +373,19 @@ impl GatewayManager {
         self.publish(&state);
     }
 
+    pub fn update_profile_list(
+        &self,
+        profiles: Vec<ConfidentialProfile>,
+        active_profile_id: String,
+        config: StartGatewayConfig,
+    ) {
+        self.update(|state| {
+            state.profiles = profiles;
+            state.active_profile_id = active_profile_id;
+            state.config = config;
+        });
+    }
+
     /// Record whether the stable local endpoint is bound. A failure blocks
     /// starting and connecting until the listener is successfully rebound.
     pub fn set_endpoint(&self, config: LocalApiConfig, bound: Result<String, String>) {

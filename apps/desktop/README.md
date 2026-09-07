@@ -73,6 +73,32 @@ not clipped. Continuous bordered lists keep edge-to-edge hover backgrounds
 and use an inset focus ring on full-row actions. Image clipping and actual
 scroll viewports remain intact.
 
+Profiles offers native file-picker import/export of a versioned JSON configuration
+backup. It contains only profile names, provider IDs and service URLs, not keys,
+OAuth accounts, verification state, active selection or security policy. Imports
+are limited to 256 KiB and 50 profiles, validate every entry before writing, skip
+exact normalized duplicates, allocate new IDs and never overwrite an existing
+profile. Imported entries need credentials and fresh verification before use.
+Exported configurations may still reveal private service names and endpoints.
+
+About offers a redacted diagnostics export. It uses a strict field allowlist of
+build/platform metadata, boolean gateway state and numeric counts. It excludes
+raw stderr, error messages, URLs, profile names, paths, request bodies, model IDs
+and credentials. Both exports use the existing atomic writer and native file
+dialogs; neither starts a gateway or reads the OS credential store.
+
+Network address changes use [`netwatcher` 0.8](https://docs.rs/netwatcher/0.8.0/),
+which subscribes to native interface events rather than adding a polling loop.
+The existing reconciliation timer detects scheduling gaps longer than 30 seconds
+(including sleep) and conservatively re-verifies an active remote session.
+Recovery revokes the old session and restores agent configurations before a fresh
+verification. If all non-loopback addresses disappear it waits for an address to
+return. Address presence is not a claim of internet reachability; a failed fresh
+verification requires user attention, not unlimited retries. Manual stop, exit or
+configuration changes cancel pending recovery. Loopback services are exempt.
+Real sleep/wake, VPN changes and per-platform notification delivery still require
+installed-app acceptance tests.
+
 Notifications has its own native dialog with a master switch and gateway,
 Local API and response-verification categories. All default to enabled; saved
 choices are never reset on launch. Delivery uses the official Tauri notification

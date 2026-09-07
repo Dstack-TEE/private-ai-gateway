@@ -150,6 +150,42 @@ async fn get_gateway_state(
 }
 
 #[tauri::command]
+async fn read_profile_backup(
+    path: PathBuf,
+) -> Result<desktop_runtime::maintenance::ProfileBackup, String> {
+    run_blocking(move || desktop_runtime::maintenance::ProfileBackup::read(&path)).await
+}
+
+#[tauri::command]
+async fn import_profiles(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    backup: desktop_runtime::maintenance::ProfileBackup,
+) -> Result<desktop_runtime::maintenance::ImportResult, String> {
+    let runtime = runtime.inner().clone();
+    run_blocking(move || runtime.import_profiles(backup)).await
+}
+
+#[tauri::command]
+async fn export_profiles(
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    path: PathBuf,
+) -> Result<(), String> {
+    let runtime = runtime.inner().clone();
+    run_blocking(move || runtime.export_profiles(path)).await
+}
+
+#[tauri::command]
+async fn export_diagnostics(
+    app: AppHandle,
+    runtime: State<'_, Arc<DesktopRuntime>>,
+    path: PathBuf,
+) -> Result<(), String> {
+    let version = app.package_info().version.to_string();
+    let runtime = runtime.inner().clone();
+    run_blocking(move || runtime.export_diagnostics(path, &version)).await
+}
+
+#[tauri::command]
 async fn start_gateway(
     runtime: State<'_, Arc<DesktopRuntime>>,
     config: StartGatewayConfig,
@@ -464,6 +500,10 @@ pub fn run() {
         .manage(notifications::Settings::default())
         .invoke_handler(tauri::generate_handler![
             get_gateway_state,
+            read_profile_backup,
+            import_profiles,
+            export_profiles,
+            export_diagnostics,
             notifications::get_notification_settings,
             notifications::save_notification_settings,
             notifications::request_notification_permission,
