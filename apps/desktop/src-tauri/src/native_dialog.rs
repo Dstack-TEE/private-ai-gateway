@@ -185,14 +185,18 @@ pub fn open(
         .state()?;
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
     let theme = main.theme().map_err(window_error)?;
+    let initial_appearance = if theme == tauri::Theme::Dark {
+        "\"dark\""
+    } else {
+        "\"light\""
+    };
     if spec.label == UPDATE_PROGRESS_LABEL {
         crate::updates::reset_progress(app);
     }
     let mut builder =
         WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.query.into()))
             .initialization_script(format!(
-                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};document.documentElement?.setAttribute('data-theme','{}');",
-                if theme == tauri::Theme::Dark { "dark" } else { "light" }
+                "window.__GATEWAY_INITIAL_STATE__ = {initial_state};window.__GATEWAY_INITIAL_APPEARANCE__ = {initial_appearance};"
             ))
             .background_color(if theme == tauri::Theme::Dark { tauri::webview::Color(10, 10, 10, 255) } else { tauri::webview::Color(255, 255, 255, 255) })
             .title(spec.title)
@@ -288,7 +292,7 @@ fn focus_if_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+pub fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     if !DIALOG_LABELS.contains(&window.label()) {
         return Err("Only native dialogs can present themselves".to_string());
     }
@@ -302,13 +306,6 @@ pub async fn ready(window: &tauri::WebviewWindow) -> Result<(), String> {
     .ok_or("The parent window is unavailable")?;
     #[cfg(target_os = "macos")]
     {
-        if let Err(error) = macos::render(window).await {
-            let _ = window.destroy();
-            app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
-                .report_error(error.clone());
-            crate::tray::show_window(app);
-            return Err(error);
-        }
         macos::present(parent, window.clone())?;
     }
     #[cfg(not(target_os = "macos"))]
@@ -353,47 +350,6 @@ mod macos {
     use objc2::{rc::Retained, MainThreadMarker};
     use objc2_app_kit::{NSWindow, NSWindowButton};
     use tauri::WebviewWindow;
-
-    pub async fn render(window: &WebviewWindow) -> Result<(), String> {
-        use block2::RcBlock;
-        use objc2_app_kit::NSImage;
-        use objc2_foundation::NSError;
-        use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        window
-            .with_webview(move |webview| {
-                let Some(mtm) = MainThreadMarker::new() else {
-                    let _ = sender.send(false);
-                    return;
-                };
-                // Tauri owns this WKWebView; the callback receives a transient image
-                // after WebKit incorporates screen updates. No image leaves memory.
-                let view = unsafe { Retained::retain(webview.inner().cast::<WKWebView>()) };
-                let Some(view) = view else {
-                    let _ = sender.send(false);
-                    return;
-                };
-                let sender = std::sync::Mutex::new(Some(sender));
-                let completed = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
-                    if let Ok(mut sender) = sender.lock() {
-                        if let Some(sender) = sender.take() {
-                            let _ = sender.send(!image.is_null() && error.is_null());
-                        }
-                    }
-                });
-                // Public WebKit API, called on its owning main thread with valid objects.
-                unsafe {
-                    let config = WKSnapshotConfiguration::new(mtm);
-                    config.setAfterScreenUpdates(true);
-                    view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &completed);
-                }
-            })
-            .map_err(window_error)?;
-        match tokio::time::timeout(std::time::Duration::from_secs(10), receiver).await {
-            Ok(Ok(true)) => Ok(()),
-            _ => Err("The dialog could not render. Please try opening it again.".into()),
-        }
-    }
 
     pub fn present(parent: WebviewWindow, window: WebviewWindow) -> Result<(), String> {
         let dispatcher = window.clone();

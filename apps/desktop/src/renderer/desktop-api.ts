@@ -21,12 +21,15 @@ import type {
 declare global {
   interface Window {
     __GATEWAY_INITIAL_STATE__?: GatewayState;
+    __GATEWAY_INITIAL_APPEARANCE__?: "system" | "light" | "dark";
   }
 }
 
 // Native windows receive this non-secret snapshot before the renderer starts.
 export const initialGatewayState = window.__GATEWAY_INITIAL_STATE__;
 delete window.__GATEWAY_INITIAL_STATE__;
+export const initialAppearance = window.__GATEWAY_INITIAL_APPEARANCE__;
+delete window.__GATEWAY_INITIAL_APPEARANCE__;
 
 export const desktopApi: DesktopApi = {
   showEditMenu: (editable) => invoke("show_edit_menu", { editable }),

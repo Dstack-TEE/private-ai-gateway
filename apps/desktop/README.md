@@ -89,8 +89,10 @@ dialogs; neither starts a gateway or reads the OS credential store.
 
 Network address changes use [`netwatcher` 0.8](https://docs.rs/netwatcher/0.8.0/),
 which subscribes to native interface events rather than adding a polling loop.
-The existing reconciliation timer detects scheduling gaps longer than 30 seconds
-(including sleep) and conservatively re-verifies an active remote session.
+Sleep recovery uses native wake events: NSWorkspaceDidWakeNotification on macOS,
+PowerRegisterSuspendResumeNotification on Windows and login1 PrepareForSleep(false)
+on Linux. There is no elapsed-time inference. Registrations are removed on exit;
+Linux environments without login1 retain network recovery but cannot report wake.
 Recovery revokes the old session and restores agent configurations before a fresh
 verification. If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
@@ -116,11 +118,12 @@ update badges and inline errors remain available without notification delivery.
 
 Native dialogs wait for content, font readiness and image decoding before the
 presentation handshake. Example dialogs also wait for their local key read.
-On macOS a public WKWebView snapshot with afterScreenUpdates waits for WebKit's
-pending visual updates before the sheet animation. The snapshot is transient,
-never saved or substituted for the live view. Snapshot failure closes the pending
-window and reports an actionable error. This is separate from React resource
-readiness and still needs macOS first-frame acceptance testing.
+Native dialogs receive the saved appearance with their initial state and apply
+it in a layout effect, avoiding a temporary System-theme render before the async
+preferences read. Recharts is loaded only on Usage; its fixed-height shell stays
+synchronous. Snapshot-based presentation gates are not used: a successful snapshot
+does not guarantee compositor readiness, and a failed snapshot must not block a
+usable dialog. WebKit has no general public first-composited-frame event.
 No sleep is used to delay normal presentation, and no hidden window
 pool retains credentials. A 20-second failed-handshake deadline cleans up an
 unpresented window and reports the failure in the main window. Browser checks

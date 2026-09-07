@@ -475,6 +475,22 @@ test("fixed sidebar does not consume Cmd+B or Ctrl+B", async ({ page }) => {
   expect(prevented).toEqual([false, false]);
 });
 
+test("dialog theme is initialized before presentation without loading the chart engine", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.addInitScript(() => {
+    window.__GATEWAY_INITIAL_APPEARANCE__ = "light";
+    localStorage.setItem("pag-preview-appearance", "light");
+  });
+  const chartRequests: string[] = [];
+  page.on("request", (request) => { if (request.url().includes("usage-chart-plot")) chartRequests.push(request.url()); });
+  await page.goto("/?mock=appearance-pending&native-dialog=profile-editor");
+  await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(chartRequests).toEqual([]);
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-appearance")));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
 test("native presentation waits for example credentials and image decoding", async ({ page }) => {
   await page.goto("/?mock=example-key-pending&native-dialog=local-api-example");
   await expect(page.getByRole("dialog", { name: "Local API examples" })).toBeVisible();

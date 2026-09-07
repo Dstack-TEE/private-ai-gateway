@@ -341,7 +341,6 @@ impl DesktopRuntime {
         task_runtime.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_check = std::time::SystemTime::now();
             let mut previous = None;
             loop {
                 let mut network_event = false;
@@ -357,10 +356,8 @@ impl DesktopRuntime {
                     _ = interval.tick() => {},
                 }
                 let Some(runtime) = weak.upgrade() else { break };
-                let resumed = last_check.elapsed().map_or(true, |elapsed| elapsed > std::time::Duration::from_secs(30));
-                last_check = std::time::SystemTime::now();
                 let result = tokio::task::spawn_blocking(move || {
-                    if network_event || resumed {
+                    if network_event {
                         if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
                     }
                     if let Err(error) = runtime.reconcile_agents() {
@@ -392,6 +389,10 @@ impl DesktopRuntime {
 
     pub fn subscribe(&self) -> watch::Receiver<GatewayState> {
         self.manager.subscribe()
+    }
+
+    pub fn system_resumed(&self) {
+        self.recovery.changed.notify_one();
     }
 
     pub fn state(&self) -> Result<GatewayState, String> {
