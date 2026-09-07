@@ -117,9 +117,29 @@ fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String
 }
 
 pub fn write_json(path: &Path, data: &impl Serialize) -> Result<(), String> {
+    use std::io::Write;
     let text = serde_json::to_string_pretty(data).map_err(|_| "Could not encode the export")?;
-    desktop_gateway::agents::write_atomic(path, &text, None)
-        .map_err(|_| "Could not save the export file".to_string())
+    let write = || -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(text.as_bytes())?;
+        file.as_file().sync_all()?;
+        // Publish only the completed file, and atomically refuse any existing destination.
+        file.persist_noclobber(path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    };
+    write().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "Export target already exists; choose a new path.".to_string()
+        } else {
+            "Could not save the export file".to_string()
+        }
+    })
 }
 
 /// An allowlist of typed fields; never serialize state, raw errors or stderr.
@@ -143,6 +163,22 @@ pub fn diagnostics(state: &GatewayState, version: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_never_replaces_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("profiles.json");
+        write_json(&destination, &serde_json::json!({"original":true})).unwrap();
+        let original = std::fs::read(&destination).unwrap();
+        assert!(write_json(&destination, &serde_json::json!({"replacement":true})).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("link.json");
+            std::os::unix::fs::symlink(&destination, &link).unwrap();
+            assert!(write_json(&link, &serde_json::json!({})).is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), original);
+        }
+    }
     fn backup() -> ProfileBackup {
         ProfileBackup {
             version: 1,

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser};
 use desktop_runtime::{
     client::Client,
     contracts::*,
@@ -13,241 +13,16 @@ use desktop_runtime::{
     usage::UsageQuery,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+#[path = "pag/args.rs"]
+mod args;
 #[path = "pag/output.rs"]
 mod human;
+#[path = "pag/schema.rs"]
+mod schema;
 
-#[derive(Parser)]
-#[command(name = "pag", version = desktop_runtime::protocol::BUILD_VERSION, about = "Control the Private AI Gateway backend")]
-struct Cli {
-    #[arg(long, global = true)]
-    json: bool,
-    #[arg(
-        long,
-        visible_alias = "no-interactive",
-        global = true,
-        help = "Never prompt; use --yes to approve changes and --key-stdin for credentials"
-    )]
-    non_interactive: bool,
-    #[arg(
-        long,
-        global = true,
-        help = "Confirm configuration changes without prompting"
-    )]
-    yes: bool,
-    #[command(subcommand)]
-    command: Action,
-}
-
-#[derive(Subcommand)]
-enum Action {
-    Status {
-        #[arg(long)]
-        watch: bool,
-    },
-    Start {
-        #[arg(long)]
-        profile: Option<String>,
-        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=300))]
-        timeout: u64,
-    },
-    Stop,
-    Service {
-        #[command(subcommand)]
-        command: Service,
-    },
-    Profiles {
-        #[command(subcommand)]
-        command: Profiles,
-    },
-    Agents {
-        #[command(subcommand)]
-        command: Agents,
-    },
-    Models {
-        #[command(subcommand)]
-        command: Models,
-    },
-    Usage {
-        #[command(subcommand)]
-        command: Usage,
-    },
-    Settings {
-        #[command(subcommand)]
-        command: Settings,
-    },
-    Token {
-        #[command(subcommand)]
-        command: Token,
-    },
-    Cli {
-        #[command(subcommand)]
-        command: Registration,
-    },
-    App {
-        #[command(subcommand)]
-        command: App,
-    },
-    Doctor,
-    Diagnostics {
-        #[arg(long)]
-        output: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
-enum Service {
-    Start,
-    Stop,
-    Status,
-}
-#[derive(Subcommand)]
-enum App {
-    Open,
-}
-#[derive(Subcommand)]
-enum Registration {
-    Status,
-    Install {
-        #[arg(long)]
-        directory: Option<PathBuf>,
-    },
-    Uninstall {
-        #[arg(long)]
-        directory: Option<PathBuf>,
-    },
-}
-#[derive(Subcommand)]
-enum Token {
-    Rotate,
-    Show,
-    ClearCredential,
-}
-#[derive(Subcommand)]
-enum Models {
-    List {
-        #[arg(long)]
-        refresh: bool,
-    },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Provider {
-    Phala,
-    Redpill,
-    Custom,
-}
-#[derive(Subcommand)]
-enum Profiles {
-    List,
-    Import {
-        file: PathBuf,
-    },
-    Export {
-        #[arg(long)]
-        output: PathBuf,
-    },
-    Add {
-        #[arg(long)]
-        id: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        url: String,
-        #[arg(long, value_enum, default_value_t = Provider::Custom)]
-        provider: Provider,
-        #[arg(long)]
-        key_stdin: bool,
-        #[arg(long)]
-        allow_development_os: bool,
-    },
-    Verify {
-        id: String,
-        #[arg(long)]
-        key_stdin: bool,
-    },
-    Use {
-        id: String,
-    },
-    Remove {
-        id: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum Agents {
-    List,
-    Connect {
-        id: String,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    Disconnect {
-        id: String,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    DisconnectAll,
-}
-
-#[derive(Args)]
-struct Filter {
-    #[arg(long)]
-    agent: Option<String>,
-    #[arg(long)]
-    model: Option<String>,
-    #[arg(long)]
-    session: Option<String>,
-    #[arg(long)]
-    since: Option<u64>,
-    #[arg(long)]
-    until: Option<u64>,
-    #[arg(long)]
-    cursor: Option<String>,
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=100))]
-    limit: u64,
-}
-impl From<Filter> for UsageQuery {
-    fn from(filter: Filter) -> Self {
-        Self {
-            agent: filter.agent,
-            model: filter.model,
-            session_id: filter.session,
-            since: filter.since,
-            until: filter.until,
-            cursor: filter.cursor,
-            limit: Some(filter.limit as usize),
-        }
-    }
-}
-#[derive(Subcommand)]
-enum Usage {
-    List {
-        #[command(flatten)]
-        filter: Filter,
-    },
-    Show {
-        id: String,
-    },
-    Export {
-        #[command(flatten)]
-        filter: Filter,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, default_value = "csv", value_parser = ["csv"])]
-        format: String,
-    },
-    Clear,
-}
-
-#[derive(Subcommand)]
-enum Settings {
-    Show,
-    Set { key: String, value: String },
-}
+use args::*;
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
@@ -268,26 +43,66 @@ fn main() {
         Err(error) => error.exit(),
     };
     if let Err(error) = execute(&cli) {
-        if error == "Output pipe closed" {
-            return;
-        }
         if cli.json {
             eprintln!(
                 "{}",
                 json!({"error": {"code": "command_failed", "message": error}})
             );
         } else {
-            eprintln!("pag: {error}");
+            eprintln!("pag: {}", human::safe(&error));
         }
         std::process::exit(1);
     }
 }
 
 fn execute(cli: &Cli) -> Result<(), String> {
+    match &cli.command {
+        Action::Completions { shell } => {
+            let mut command = Cli::command();
+            let name = command.get_name().to_owned();
+            let mut completion = Vec::new();
+            clap_complete::generate(*shell, &mut command, name, &mut completion);
+            return finish_output(write_bytes(&completion));
+        }
+        Action::Schema => {
+            let mut command = Cli::command();
+            command.build();
+            return finish_output(write_text(
+                &serde_json::to_string(&schema::command(&command))
+                    .map_err(|_| "Cannot encode command schema")?,
+            ));
+        }
+        _ => {}
+    }
     let client = Client::new();
     let result = match &cli.command {
         Action::Status { watch: true } => {
-            return Client::watch_connection(|state| output(&state, cli).is_ok());
+            let mut previous = None;
+            let mut output_error = None;
+            let watched = Client::watch_connection(|state| {
+                let text = match render_output(&state, cli) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        output_error = Some(OutputError::Message(error));
+                        return false;
+                    }
+                };
+                if !cli.json && previous.as_ref() == Some(&text) {
+                    return true;
+                }
+                previous = Some(text.clone());
+                match write_text(&text) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        output_error = Some(error);
+                        false
+                    }
+                }
+            });
+            return match output_error {
+                Some(error) => finish_output(Err(error)),
+                None => watched,
+            };
         }
         Action::Status { watch: false }
         | Action::Service {
@@ -367,6 +182,14 @@ fn execute(cli: &Cli) -> Result<(), String> {
         Action::Profiles { command } => {
             match command {
                 Profiles::List => value(client.state()?.profiles)?,
+                Profiles::Show { id } => value(
+                    client
+                        .state()?
+                        .profiles
+                        .into_iter()
+                        .find(|profile| profile.id == *id)
+                        .ok_or("Profile not found")?,
+                )?,
                 Profiles::Import { file } => {
                     let backup = desktop_runtime::maintenance::ProfileBackup::read(file)?;
                     confirm(
@@ -409,6 +232,10 @@ fn execute(cli: &Cli) -> Result<(), String> {
                     };
                     // Validate before reading a credential or making a request.
                     desktop_runtime::service_config::resolve_profile(profile.clone(), None)?;
+                    confirm(
+                        cli,
+                        "Verify and save this profile? This selects it as active and may restart protection.",
+                    )?;
                     Client::ensure_service()?;
                     if client.state()?.profiles.iter().any(|saved| saved.id == *id) {
                         return Err("Profile ID already exists. Use profiles verify to update its credential.".into());
@@ -427,6 +254,10 @@ fn execute(cli: &Cli) -> Result<(), String> {
                         .into_iter()
                         .find(|profile| profile.id == *id)
                         .ok_or("Profile not found")?;
+                    confirm(
+                        cli,
+                        "Verify and save this profile? This selects it as active and may restart protection.",
+                    )?;
                     let key = if *key_stdin
                         || !profile
                             .credential_saved
@@ -447,16 +278,81 @@ fn execute(cli: &Cli) -> Result<(), String> {
                         key,
                     })?
                 }
+                Profiles::Edit {
+                    id,
+                    name,
+                    url,
+                    provider,
+                    key_stdin,
+                    allow_development_os,
+                    require_production_os,
+                } => {
+                    let state = client.state()?;
+                    let saved = state
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == *id)
+                        .ok_or("Profile not found")?;
+                    let profile = ConfidentialProfileInput {
+                        id: saved.id.clone(),
+                        name: name.clone().unwrap_or_else(|| saved.name.clone()),
+                        provider: provider
+                            .map(service_provider)
+                            .unwrap_or_else(|| saved.provider.clone()),
+                        remote_url: url.clone().unwrap_or_else(|| saved.remote_url.clone()),
+                    };
+                    let resolved =
+                        desktop_runtime::service_config::resolve_profile(profile.clone(), None)?;
+                    let target_changed = resolved.provider != saved.provider
+                        || resolved.remote_url != saved.remote_url;
+                    let credential_saved = saved
+                        .credential_saved
+                        .unwrap_or(saved.verified_at.is_some());
+                    confirm(
+                        cli,
+                        "Verify and save these profile changes? This selects the profile as active and may restart protection.",
+                    )?;
+                    let key = if *key_stdin || target_changed || !credential_saved {
+                        Some(read_key(cli, *key_stdin)?)
+                    } else {
+                        None
+                    };
+                    let production_os = if *allow_development_os {
+                        false
+                    } else if *require_production_os {
+                        true
+                    } else {
+                        state.config.require_production_os
+                    };
+                    client.request(Command::Verify {
+                        profile,
+                        require_production_os: production_os,
+                        key,
+                    })?
+                }
             }
         }
         Action::Agents { command } => match command {
             Agents::List => value(client.list_agents()?)?,
-            Agents::Connect { id, model, dry_run } => {
-                agent_change(&client, cli, id, true, model.clone(), *dry_run)?
-            }
-            Agents::Disconnect { id, dry_run } => {
-                agent_change(&client, cli, id, false, None, *dry_run)?
-            }
+            Agents::Connect {
+                id,
+                model,
+                dry_run,
+                revision,
+            } => agent_change(
+                &client,
+                cli,
+                id,
+                true,
+                model.clone(),
+                *dry_run,
+                revision.as_deref(),
+            )?,
+            Agents::Disconnect {
+                id,
+                dry_run,
+                revision,
+            } => agent_change(&client, cli, id, false, None, *dry_run, revision.as_deref())?,
             Agents::DisconnectAll => {
                 confirm(
                     cli,
@@ -480,14 +376,14 @@ fn execute(cli: &Cli) -> Result<(), String> {
             )?
         }
         Action::Usage { command } => match command {
-            Usage::List { filter } => value(client.query_usage(query(filter))?)?,
+            Usage::List { filter, page } => value(client.query_usage(query(filter, Some(page)))?)?,
             Usage::Show { id } => value(client.usage_record(id)?.ok_or("Usage record not found")?)?,
             Usage::Export { filter, output, .. } => {
                 let path = std::path::absolute(output).map_err(|_| "Cannot resolve export path")?;
                 if path.exists() {
                     return Err("Export target already exists; choose a new path.".into());
                 }
-                value(json!({"rows": client.export_usage_csv(query(filter), path)?}))?
+                value(json!({"rows": client.export_usage_csv(query(filter, None), path)?}))?
             }
             Usage::Clear => {
                 confirm(cli, "Permanently clear all usage history?")?;
@@ -501,17 +397,17 @@ fn execute(cli: &Cli) -> Result<(), String> {
                 }
                 Settings::Set { key, value: input } => {
                     confirm(cli, "Change gateway settings?")?;
-                    match key.as_str() {
-                    "autoCliRegistration" => value(
+                    match key {
+                    SettingsKey::AutoCliRegistration => value(
                         client.set_preference(Preference::AutoCliRegistration(parse_bool(input)?))?,
                     )?,
-                    "notifications" => value(client.set_preference(Preference::Notifications(
+                    SettingsKey::Notifications => value(client.set_preference(Preference::Notifications(
                         serde_json::from_str(input).map_err(|_| "Expected notification settings as a JSON object with boolean values")?
                     ))?)?,
-                    "connectOnLaunch" => value(
+                    SettingsKey::ConnectOnLaunch => value(
                         client.set_preference(Preference::ConnectOnLaunch(parse_bool(input)?))?,
                     )?,
-                    "appearance" => value(client.set_preference(Preference::Appearance(
+                    SettingsKey::Appearance => value(client.set_preference(Preference::Appearance(
                         match input.as_str() {
                             "system" => Appearance::System,
                             "light" => Appearance::Light,
@@ -519,28 +415,31 @@ fn execute(cli: &Cli) -> Result<(), String> {
                             _ => return Err("Expected system, light, or dark".into()),
                         },
                     ))?)?,
-                    "updateChannel" => value(client.set_preference(Preference::UpdateChannel(
+                    SettingsKey::UpdateChannel => value(client.set_preference(Preference::UpdateChannel(
                         match input.as_str() {
                             "beta" => UpdateChannel::Beta,
                             "stable" => UpdateChannel::Stable,
                             _ => return Err("Expected beta or stable".into()),
                         },
                     ))?)?,
-                    _ => {
+                    SettingsKey::ListenAddress
+                    | SettingsKey::AllowNetworkAccess
+                    | SettingsKey::Port
+                    | SettingsKey::ClientHost => {
                         let mut config = client.state()?.local_api;
-                        match key.as_str() {
-                            "listenAddress" => config.listen_address = input.clone(),
-                            "allowNetworkAccess" => {
+                        match key {
+                            SettingsKey::ListenAddress => config.listen_address = input.clone(),
+                            SettingsKey::AllowNetworkAccess => {
                                 config.allow_network_access = parse_bool(input)?
                             }
-                            "port" => {
+                            SettingsKey::Port => {
                                 config.port =
                                     input.parse().map_err(|_| "Expected a valid port number")?
                             }
-                            "clientHost" => {
+                            SettingsKey::ClientHost => {
                                 config.client_host = (!input.is_empty()).then(|| input.clone())
                             }
-                            _ => return Err("Unknown setting".into()),
+                            _ => unreachable!(),
                         }
                         desktop_runtime::local_api::resolve(config.clone())?;
                         client.request(Command::SaveLocalApi(config))?
@@ -578,7 +477,15 @@ fn execute(cli: &Cli) -> Result<(), String> {
             }
         },
         Action::Doctor => {
-            json!({"version": desktop_runtime::protocol::BUILD_VERSION, "backendRunning": client.is_running()?, "cli": desktop_runtime::cli_install::status()?, "backendExecutable": desktop_runtime::launch::service_executable()?, "endpoint": desktop_runtime::transport::endpoint_path().map_err(|_| "Cannot resolve management endpoint")?, "credentialPolicy": "OS credential store; no plaintext fallback"})
+            let report = doctor(&client);
+            if report["errors"]
+                .as_object()
+                .is_some_and(|errors| !errors.is_empty())
+            {
+                finish_output(output(&report, cli))?;
+                return Err("One or more diagnostic checks failed.".into());
+            }
+            report
         }
         Action::Diagnostics { output } => {
             let path = new_export_path(output)?;
@@ -614,8 +521,9 @@ fn execute(cli: &Cli) -> Result<(), String> {
             });
             json!({"opened": true})
         }
+        Action::Completions { .. } | Action::Schema => unreachable!(),
     };
-    output(&result, cli)
+    finish_output(output(&result, cli))
 }
 
 fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
@@ -626,17 +534,26 @@ fn new_export_path(path: &std::path::Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn query(filter: &Filter) -> UsageQuery {
+fn query(filter: &UsageFilter, page: Option<&Pagination>) -> UsageQuery {
     UsageQuery {
         agent: filter.agent.clone(),
         model: filter.model.clone(),
         session_id: filter.session.clone(),
         since: filter.since,
         until: filter.until,
-        cursor: filter.cursor.clone(),
-        limit: Some(filter.limit as usize),
+        cursor: page.and_then(|page| page.cursor.clone()),
+        limit: page.map(|page| page.limit as usize),
     }
 }
+
+fn service_provider(provider: Provider) -> ServiceProvider {
+    match provider {
+        Provider::Phala => ServiceProvider::Phala,
+        Provider::Redpill => ServiceProvider::Redpill,
+        Provider::Custom => ServiceProvider::Custom,
+    }
+}
+
 fn agent_change(
     client: &Client,
     cli: &Cli,
@@ -644,10 +561,18 @@ fn agent_change(
     connect: bool,
     model: Option<String>,
     dry_run: bool,
+    revision: Option<&str>,
 ) -> Result<Value, String> {
     let options = ConnectOptions {
         default_model: model,
     };
+    if let Some(revision) = revision {
+        confirm(
+            cli,
+            "Apply this previously previewed agent configuration revision?",
+        )?;
+        return value(client.apply_agent(id.into(), connect, revision.into(), options)?);
+    }
     let preview = client.preview_agent(id.into(), connect, options.clone())?;
     if dry_run {
         return value(preview);
@@ -658,6 +583,50 @@ fn agent_change(
     confirm(cli, "Apply these agent configuration changes?")?;
     value(client.apply_agent(id.into(), connect, preview.revision, options)?)
 }
+
+fn doctor(client: &Client) -> Value {
+    let mut errors = Map::new();
+    let backend_running = doctor_check(&mut errors, "backendRunning", client.is_running());
+    let cli = doctor_check(&mut errors, "cli", desktop_runtime::cli_install::status());
+    let backend_executable = doctor_check(
+        &mut errors,
+        "backendExecutable",
+        desktop_runtime::launch::service_executable(),
+    );
+    let endpoint = doctor_check(
+        &mut errors,
+        "endpoint",
+        desktop_runtime::transport::endpoint_path()
+            .map_err(|_| "Cannot resolve management endpoint".to_string()),
+    );
+    json!({
+        "version": desktop_runtime::protocol::BUILD_VERSION,
+        "backendRunning": backend_running,
+        "cli": cli,
+        "backendExecutable": backend_executable,
+        "endpoint": endpoint,
+        "credentialPolicy": "OS credential store; no plaintext fallback",
+        "errors": errors,
+    })
+}
+
+fn doctor_check<T: Serialize>(
+    errors: &mut Map<String, Value>,
+    name: &str,
+    result: Result<T, String>,
+) -> Value {
+    match result {
+        Ok(value) => serde_json::to_value(value).unwrap_or_else(|_| {
+            errors.insert(name.into(), json!("Cannot encode diagnostic result"));
+            Value::Null
+        }),
+        Err(error) => {
+            errors.insert(name.into(), json!(error));
+            Value::Null
+        }
+    }
+}
+
 fn confirm(cli: &Cli, prompt: &str) -> Result<(), String> {
     if cli.yes {
         return Ok(());
@@ -681,6 +650,12 @@ fn confirm(cli: &Cli, prompt: &str) -> Result<(), String> {
 }
 fn read_key(cli: &Cli, stdin: bool) -> Result<String, String> {
     let key = if stdin {
+        if io::stdin().is_terminal() {
+            return Err(
+                "Refusing to read a credential from a terminal with --key-stdin; omit the flag for a hidden prompt."
+                    .into(),
+            );
+        }
         let mut bytes = Vec::new();
         io::stdin()
             .take(514)
@@ -704,16 +679,46 @@ fn parse_bool(value: &str) -> Result<bool, String> {
 fn value(input: impl Serialize) -> Result<Value, String> {
     serde_json::to_value(input).map_err(|_| "Cannot encode output".into())
 }
-fn output(input: &impl Serialize, cli: &Cli) -> Result<(), String> {
+
+enum OutputError {
+    BrokenPipe,
+    Message(String),
+}
+
+fn render_output(input: &impl Serialize, cli: &Cli) -> Result<String, String> {
     let text = if cli.json {
         serde_json::to_string(input).map_err(|_| "Cannot encode output")?
     } else {
         human::render(&cli.command, &value(input)?)
     };
-    match writeln!(io::stdout().lock(), "{text}") {
+    Ok(text)
+}
+
+fn output(input: &impl Serialize, cli: &Cli) -> Result<(), OutputError> {
+    write_text(&render_output(input, cli).map_err(OutputError::Message)?)
+}
+
+fn write_text(text: &str) -> Result<(), OutputError> {
+    let mut output = io::stdout().lock();
+    match writeln!(output, "{text}") {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err("Output pipe closed".into()),
-        Err(_) => Err("Cannot write output".into()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(OutputError::BrokenPipe),
+        Err(_) => Err(OutputError::Message("Cannot write output".into())),
+    }
+}
+
+fn write_bytes(bytes: &[u8]) -> Result<(), OutputError> {
+    match io::stdout().lock().write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(OutputError::BrokenPipe),
+        Err(_) => Err(OutputError::Message("Cannot write output".into())),
+    }
+}
+
+fn finish_output(result: Result<(), OutputError>) -> Result<(), String> {
+    match result {
+        Ok(()) | Err(OutputError::BrokenPipe) => Ok(()),
+        Err(OutputError::Message(error)) => Err(error),
     }
 }
 
