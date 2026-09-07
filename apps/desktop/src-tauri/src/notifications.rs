@@ -1,10 +1,10 @@
 mod permission;
 use desktop_runtime::{
-    contracts::GatewayState,
-    preferences::{self, NotificationPreferences},
+    client::Client, contracts::GatewayState, preferences::NotificationPreferences,
+    protocol::Preference,
 };
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
@@ -21,7 +21,7 @@ pub struct Configuration {
 }
 
 pub fn initialize(app: &AppHandle) {
-    match preferences::load() {
+    match app.state::<Arc<Client>>().preferences() {
         Ok(preferences) => {
             if let Ok(mut current) = app.state::<Settings>().0.lock() {
                 *current = preferences.notifications;
@@ -33,7 +33,8 @@ pub fn initialize(app: &AppHandle) {
 
 #[tauri::command]
 pub async fn get_notification_settings(app: AppHandle) -> Result<Configuration, String> {
-    let preferences = crate::run_blocking(|| Ok(preferences::load()?.notifications)).await?;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    let preferences = crate::run_blocking(move || Ok(client.preferences()?.notifications)).await?;
     Ok(Configuration {
         preferences,
         system: permission::query(&app).await,
@@ -45,8 +46,8 @@ pub async fn save_notification_settings(
     app: AppHandle,
     config: NotificationPreferences,
 ) -> Result<(), String> {
-    crate::run_blocking(move || preferences::update(|settings| settings.notifications = config))
-        .await?;
+    let client = app.state::<Arc<Client>>().inner().clone();
+    crate::run_blocking(move || client.set_preference(Preference::Notifications(config))).await?;
     *app.state::<Settings>()
         .0
         .lock()

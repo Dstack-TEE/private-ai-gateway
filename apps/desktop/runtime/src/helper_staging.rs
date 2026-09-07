@@ -1,4 +1,4 @@
-//! A durable, current-user-owned helper for AppImage launches and OpenClaw.
+//! A durable, current-user-owned helper for Unix agent integrations.
 
 use std::fs::{self, File};
 use std::io;

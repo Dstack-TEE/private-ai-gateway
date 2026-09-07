@@ -89,11 +89,12 @@ dialogs; neither starts a gateway or reads the OS credential store.
 
 Network address changes use [`netwatcher` 0.8](https://docs.rs/netwatcher/0.8.0/),
 which subscribes to native interface events rather than adding a polling loop.
-Sleep recovery uses native wake events: NSWorkspaceDidWakeNotification on macOS,
+The backend owns native wake monitoring: IORegisterForSystemPower on macOS,
 PowerRegisterSuspendResumeNotification on Windows and login1 PrepareForSleep(false)
-on Linux. There is no elapsed-time inference. Registrations are removed on exit;
+on Linux. There is no elapsed-time inference or UI dependency. Registrations are
+removed when the backend exits.
 Linux reconnects and re-subscribes every five seconds after subscription failure
-or stream termination, with cancellation on app exit. Monitor availability is
+or stream termination, with cancellation on backend exit. Monitor availability is
 visible in Settings and redacted diagnostics. Environments without login1 retain
 network recovery but cannot report wake until the service becomes available.
 Recovery revokes the old session and restores agent configurations before a fresh
@@ -101,7 +102,7 @@ verification. If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
 verification requires user attention, not unlimited retries. Events survive a busy
 lifecycle lock or in-progress verification and are revisited by the existing
-reconciliation loop without busy-waiting. Manual start/stop, exit/install and
+reconciliation loop without busy-waiting. Manual start/stop, backend exit/install and
 successful active-profile changes cancel recovery intent; failed and no-op imports
 do not. Loopback services are exempt.
 Real sleep/wake, VPN changes and per-platform notification delivery still require
@@ -209,9 +210,9 @@ existing lifecycle locks.
 
 ### Publishing Updates
 
-The pipeline uses official Tauri CLI signing/updater artifacts, Apple notarytool,
-and GitHub Actions/CLI. Rust setup/cache actions are third-party, not GitHub
-official actions. All external actions are pinned to commit SHAs; checkout does
+The pipeline uses official Tauri CLI signing/updater artifacts for macOS,
+Windows, and Linux DEB/RPM packages, Apple notarytool, and GitHub Actions/CLI. Rust setup/cache actions are
+third-party, not GitHub official actions. All external actions are pinned to commit SHAs; checkout does
 not persist credentials, and signing/publishing secrets are scoped to their steps.
 Release-only npm installs skip lifecycle scripts. PRs and main pushes run CI;
 manual dispatch publishes releases. Feed updates serialize separately by channel.
@@ -227,8 +228,10 @@ to publish signed updates. Leave publication disabled to create a draft.
 | beta (default) | `0.1.2-beta.1` | Pre-release | `desktop-updates-beta` |
 | stable (explicit) | `0.1.2` | Release | `desktop-updates-stable` |
 
-Each feed hosts its own `latest.json`. Canonical SemVer, channel, manifest and
-GitHub Pre-release metadata must agree. Feed advancement uses SemVer comparison,
+Each feed hosts its own `latest.json` with macOS, Windows, and installer-specific
+Linux DEB/RPM targets. Canonical SemVer, channel, manifest and GitHub Pre-release
+metadata must agree. Feed advancement uses
+SemVer comparison,
 including numeric beta sequence numbers, and never falls back to another channel.
 Release tooling uses `node-semver`; clients use the official Tauri updater's
 default version comparator, signature verification and installer. No custom
@@ -282,11 +285,13 @@ runtime operations as the main window, including profile reconnection and config
 
 Agent connections are saved preferences, not permanent config rewrites. Only
 connected agents under active protection receive gateway settings. Stopping,
-verification failure, or quitting restores the owned settings while retaining
+verification failure, or stopping the backend restores the owned settings while retaining
 the connection choices. Startup recovers unfinished restoration before any
 automatic connection. Uninstalled agents stay linked but inactive; deleted
 configs are not recreated, and external edits are preserved. Failed restoration
-keeps its journal for retry and prevents a normal quit from silently discarding it.
+keeps its journal for retry and prevents backend shutdown from silently discarding it.
+Closing or quitting only the desktop UI leaves protection and the backend running;
+use Stop All and Quit or `pag --yes service stop` to shut down both.
 Force-kill and power loss cannot run cleanup; recovery runs on the next launch.
 
 Settings exposes **Open at Login** (the operating system's login item, also
@@ -302,11 +307,15 @@ Requests in flight can be interrupted. Saving identical settings is a no-op.
 
 ## Application Updates
 
-The main window checks once at launch; Settings also supports manual checks.
-Installation requires confirmation. The official Tauri updater downloads and
-verifies the signed archive before the runtime restores agent configurations
-and allows installation. Failed download/signature verification leaves running
-protection untouched; failed installation leaves protection stopped.
+On macOS, Windows, and installed Linux DEB/RPM builds, the main window checks once at launch; Settings also
+supports manual checks. Installation requires confirmation. The official Tauri
+updater downloads and verifies the signed archive before the runtime restores
+agent configurations and allows installation. Failed download/signature
+verification leaves running protection untouched; failed installation leaves
+protection stopped. Linux updater manifests use separate
+`linux-x86_64-deb` and `linux-x86_64-rpm` entries, and the locked updater invokes
+the matching native installer with user authorization. AppImage is not shipped;
+existing AppImage users must manually migrate to DEB or RPM.
 
 Update signatures are separate from Apple Developer ID signing/notarization.
 Release administrators must provision these repository settings:
@@ -317,7 +326,8 @@ Release administrators must provision these repository settings:
 
 Dispatch `desktop-native.yml` with `production_macos=true`, `release_channel`
 (`beta` by default), and a matching `release_version`. CI requires signing
-settings and creates all three platform signatures and `latest.json`.
+settings and creates macOS, Windows, Linux DEB, and Linux RPM signatures plus
+`latest.json`.
 Publishing requires `publish_release=true` or explicitly publishing the draft.
 The selected channel's feed advances only to a newer version. Its public URL is
 `releases/download/desktop-updates-beta/latest.json` or
@@ -329,6 +339,13 @@ The first updater-enabled app must be installed manually. For local distribution
 builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and the
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
+
+The macOS DMG app automatically attempts user-level `pag` registration after it
+is launched from a stable location. Mounted disk images and App Translocation are
+rejected so they cannot leave a broken command link. It does not request
+administrator privileges or edit shell profiles. Settings > Command Line retains
+startup errors for retry; removing the command there disables registration on
+subsequent launches. No PKG installer is produced.
 
 > Every request goes to a hardware-verified private AI service, and every
 > response is checked against its signed receipt.
@@ -479,8 +496,8 @@ protocol is the service's own response, shown as such.
 
 OpenClaw integration targets the native host's default configuration and its
 OpenAI Chat Completions provider contract. It adds a separate `openclaw` token
-and an executable SecretRef, not the upstream provider key. Unix installations
-stage a private user-owned helper; scans verify that it matches the bundled
+and an executable SecretRef, not the upstream provider key. On Unix, the backend
+stages a private user-owned helper at startup; scans verify that it matches the bundled
 helper. Windows checks the helper's ACL without changing it. Configuration
 edits preserve JSON5 comments and unrelated fields. An explicit model selection
 changes only `agents.defaults.model.primary`; existing fallback lists stay intact.
@@ -587,11 +604,14 @@ npm ci
 npm run dev
 ```
 
-Tauri launches the target-triple-specific `aci` binary as an external sidecar.
+The persistent backend launches the target-triple-specific bundled `aci`
+binary as an external sidecar.
 The development command builds debug sidecars; packaged builds compile release
 sidecars from this repository. `npm run dist` produces the native bundle for
 the current platform. CI builds the same Tauri application as a macOS DMG and
-app, a Windows NSIS installer, and Linux DEB and AppImage packages.
+app, a Windows NSIS installer, and Linux DEB and RPM packages. AppImage is
+excluded because its temporary mount cannot own a persistent backend after the
+UI exits.
 
 Tests sit at the boundaries. `cargo test --manifest-path gateway/Cargo.toml`
 covers the proxy (token scope, fail-closed session, revocation gate, and a
@@ -600,7 +620,7 @@ body, status, and streamed bytes through unchanged), the projections
 (round-trip per agent, stale revision, restore all), and the catalog.
 `npm run test:renderer` first builds the production renderer, then runs
 Playwright against the stateful in-page mock. It covers protection start/stop,
-five-agent discovery and reversible config previews, current-session Overview
+agent discovery and reversible config previews, current-session Overview
 usage, persistent-history filters and cursor pagination, CSV/clear flows,
 proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
@@ -609,26 +629,34 @@ media, 200% zoom, and
 workflow input and are disabled on ordinary PR builds. TypeScript, release
 manifest tests, and Rust checks still run. Windows package jobs also execute
 the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
-ACI and helper without opening the app, then uninstall the package; temporary
+CLI, backend, ACI and helper without opening the app, then uninstall the package; temporary
 credential-store fixtures are separate from real provider credentials.
 
 ## Packaging
 
 `npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
 newer is required to package the adaptive macOS app icon. The platform bundle
-contains the shared renderer, Rust runtime, `aci`, and the credential helper;
-there is no second GUI or management service process.
+contains the shared renderer, `pag`, the persistent `pag-service`, `aci`, and
+the credential helper. The UI and CLI are clients of the same per-user backend;
+there is no second GUI process.
 
-`scripts/bundle-sidecars.mjs` builds two sidecars with `--locked`: the `aci`
-verifier and `private-ai-gateway-helper`, a console binary from the gateway
-crate that prints an agent's local token (kept separate from the GUI app so
-stdout works on Windows). The desktop gateway and Tauri crates declare
+`scripts/bundle-sidecars.mjs` builds four executables with `--locked`: `pag`,
+`pag-service`, the `aci` verifier, and `private-ai-gateway-helper`, a console
+binary from the gateway crate that prints an agent's local token (kept separate
+from the GUI app so stdout works on Windows). A release build passes
+`DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAG_BUILD_VERSION`; ordinary
+builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.
 The root `aci` follows the root workspace toolchain. CI tests the gateway,
 runtime, renderer, and Tauri backend, then compiles and bundles the same app on
-macOS, Windows, and Linux. macOS additionally verifies the compiled asset
-catalog, legacy ICNS fallback, bundle icon name, DMG, and zipped app bundle.
+macOS, Windows, and Linux. It also publishes UI-free CLI archives on all three
+platforms and CLI-only DEB/RPM packages on Linux. See
+[`CLI-DISTRIBUTION.md`](CLI-DISTRIBUTION.md) for installed paths, PATH ownership,
+upgrade behavior, and automatic macOS registration on app startup. macOS additionally
+launches the packaged app with an isolated home to verify the command link, then
+verifies the compiled asset catalog, legacy ICNS fallback, bundle icon name, DMG,
+and zipped app bundle.
 
 ### macOS distribution signing
 

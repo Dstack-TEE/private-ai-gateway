@@ -21,7 +21,7 @@ pub struct ProfileBackup {
     pub profiles: Vec<ProfileConfiguration>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ImportResult {
     pub imported: usize,
     pub skipped: usize,

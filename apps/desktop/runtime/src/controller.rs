@@ -202,6 +202,16 @@ impl DesktopRuntime {
         if !options.helper_path.is_absolute() {
             return Err("The credential helper path must be absolute".to_string());
         }
+        // Establish ownership before settings migration, storage, or listeners.
+        let data_dir = app_data_dir()?;
+        let instance = lock::instance(&data_dir)
+            .map_err(|error| format!("Cannot take the instance lock: {error}"))?
+            .ok_or_else(|| "Another Private AI Gateway instance is already running".to_string())?;
+        #[cfg(unix)]
+        if let Err(error) = crate::helper_staging::stage(&options.helper_path, &data_dir) {
+            // OpenClaw independently rejects an unavailable or mismatched staged copy.
+            eprintln!("Cannot stage the credential helper: {error}");
+        }
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
         let (mut settings, mut settings_error, migrated_legacy) = match service_config::load() {
             Ok(loaded) => (loaded.settings, None, loaded.migrated_legacy),
@@ -235,22 +245,9 @@ impl DesktopRuntime {
                 Some(error),
             ),
         };
-        let data_dir = app_data_dir()?;
-        let (instance, listener, launch_error) = match lock::instance(&data_dir) {
-            Ok(Some(instance)) => match proxy::bind_std(local.bind) {
-                Ok(listener) => (Some(instance), Some(listener), None),
-                Err(error) => (Some(instance), None, Some(error)),
-            },
-            Ok(None) => (
-                None,
-                None,
-                Some("Another Private AI Gateway instance is already running".to_string()),
-            ),
-            Err(error) => (
-                None,
-                None,
-                Some(format!("Cannot take the instance lock: {error}")),
-            ),
+        let (listener, launch_error) = match proxy::bind_std(local.bind) {
+            Ok(listener) => (Some(listener), None),
+            Err(error) => (None, Some(error)),
         };
         let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
         let proxy = ProxyState::new(proxy_events_tx)?;
@@ -299,7 +296,7 @@ impl DesktopRuntime {
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
             helper_path: options.helper_path,
-            instance,
+            instance: Some(instance),
         });
 
         match (listener, launch_error) {
@@ -395,6 +392,12 @@ impl DesktopRuntime {
     }
     pub fn set_wake_monitor_available(&self, available: bool) -> bool {
         self.manager.set_wake_monitor_available(available)
+    }
+
+    pub fn instance_lock(&self) -> Result<&lock::InstanceLock, String> {
+        self.instance
+            .as_ref()
+            .ok_or_else(|| "The backend does not own its instance lock".to_string())
     }
 
     pub fn state(&self) -> Result<GatewayState, String> {
@@ -510,14 +513,6 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    pub fn prepare_exit(&self) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
-        self.recovery.cancel();
-        self.stop_inner()?;
-        self.exiting.store(true, Ordering::Release);
-        Ok(())
-    }
-
     pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
@@ -560,17 +555,6 @@ impl DesktopRuntime {
         self.stop_inner()
     }
 
-    /// Keep configuration mutations out of the restore/install boundary, including Windows exit.
-    pub fn install_update(
-        &self,
-        install: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
-        self.recovery.cancel();
-        self.stop_inner()?;
-        install()
-    }
-
     fn stop_inner(&self) -> Result<GatewayState, String> {
         let _guard = self
             .agent_policy
@@ -611,11 +595,17 @@ impl DesktopRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let _operation = self.configuration_change()?;
+        // Shutdown waits for a configuration transaction to commit or roll back.
+        // Cancelling that future midway could split credential and config state.
+        let _operation = self.lifecycle.lock().await;
+        if self.exiting.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.recovery.cancel();
-        let gateway = self.stop_inner().map(|_| ());
-        let endpoint = self.endpoint.stop().await;
-        gateway.and(endpoint)
+        self.stop_inner()?;
+        self.endpoint.stop().await?;
+        self.exiting.store(true, Ordering::Release);
+        Ok(())
     }
 
     fn projector(&self, endpoint: &str) -> Result<Projector, String> {
@@ -1015,16 +1005,24 @@ impl DesktopRuntime {
     }
 
     pub fn rotate_client_key(&self) -> Result<String, String> {
+        let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
             .lock()
             .map_err(|_| "Agent state unavailable")?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
-        let token = self.credentials.rotate()?;
+        let token = match self.credentials.rotate() {
+            Ok(token) => token,
+            Err(error) => {
+                self.manager.client_key_changed(false);
+                return Err(error);
+            }
+        };
         let mut tokens = self.proxy.tokens();
         tokens.insert(token.clone(), LOCAL_TOOLS_AGENT.to_string());
         self.proxy.set_tokens(tokens);
+        self.manager.client_key_changed(true);
         Ok(token)
     }
 
@@ -1369,6 +1367,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn launch_requires_instance_ownership_before_initialization() {
+        const CASE_ENV: &str = "PAG_TEST_INSTANCE_OWNERSHIP";
+        if let Ok(case) = std::env::var(CASE_ENV) {
+            let executor = tokio::runtime::Runtime::new().unwrap();
+            let result = DesktopRuntime::launch(RuntimeOptions {
+                launcher: Arc::new(NoSidecar),
+                helper_path: app_data_dir().unwrap().join("helper"),
+                task_runtime: executor.handle().clone(),
+            });
+            let error = result
+                .err()
+                .expect("Launch must refuse an unavailable lock");
+            match case.as_str() {
+                "held" => assert_eq!(
+                    error,
+                    "Another Private AI Gateway instance is already running"
+                ),
+                "invalid" => assert!(error.starts_with("Cannot take the instance lock:")),
+                _ => panic!("Unknown instance ownership test case"),
+            }
+            return;
+        }
+
+        for case in ["held", "invalid"] {
+            let home = tempfile::tempdir().unwrap();
+            let data = home.path().join(".private-ai-gateway");
+            std::fs::create_dir(&data).unwrap();
+            let _owner = if case == "held" {
+                Some(lock::instance(&data).unwrap().unwrap())
+            } else {
+                std::fs::create_dir(data.join("instance.lock")).unwrap();
+                None
+            };
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "controller::tests::launch_requires_instance_ownership_before_initialization",
+                    "--nocapture",
+                ])
+                .env(CASE_ENV, case)
+                .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let entries: Vec<_> = std::fs::read_dir(&data)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(entries, vec![std::ffi::OsString::from("instance.lock")]);
+        }
+    }
+
     fn test_runtime(
         executor: &tokio::runtime::Runtime,
         directory: &std::path::Path,
@@ -1402,15 +1458,11 @@ mod tests {
     }
 
     #[test]
-    fn preparing_exit_blocks_later_configuration_changes_and_can_retry_if_busy() {
+    fn shutdown_blocks_later_configuration_changes() {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let runtime = test_runtime(&executor, directory.path());
-        let operation = runtime.lifecycle.try_lock().unwrap();
-        assert!(runtime.prepare_exit().is_err());
-        assert!(!runtime.exiting.load(Ordering::Acquire));
-        drop(operation);
-        runtime.prepare_exit().unwrap();
+        executor.block_on(runtime.shutdown()).unwrap();
         let state = runtime.state().unwrap();
         assert_eq!(state.status, "stopped");
         assert_eq!(
@@ -1523,6 +1575,12 @@ mod tests {
         runtime.proxy.set_tokens(tokens);
 
         let rotated = runtime.rotate_client_key().unwrap();
+        // Subscribers arriving after rotation must see the new non-secret revision.
+        assert_eq!(runtime.subscribe().borrow().client_key_revision, 1);
+        assert_eq!(
+            runtime.subscribe().borrow().client_key_available,
+            Some(true)
+        );
         assert_ne!(rotated, original);
         assert_eq!(runtime.client_key().unwrap(), rotated);
         assert_eq!(runtime.proxy.tokens().agent_for(&original), None);
@@ -1539,6 +1597,11 @@ mod tests {
         std::fs::remove_file(&token_path).unwrap();
         std::fs::create_dir(&token_path).unwrap();
         assert!(runtime.rotate_client_key().is_err());
+        assert_eq!(runtime.subscribe().borrow().client_key_revision, 2);
+        assert_eq!(
+            runtime.subscribe().borrow().client_key_available,
+            Some(false)
+        );
         assert_eq!(runtime.proxy.tokens().agent_for(&rotated), None);
         assert_eq!(
             runtime.proxy.tokens().agent_for("agent-token"),

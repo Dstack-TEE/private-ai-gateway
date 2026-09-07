@@ -387,7 +387,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
     {
         use std::os::unix::fs::MetadataExt;
         let metadata = fs::symlink_metadata(&command).map_err(|_| {
-            "The staged OpenClaw helper is missing or unreadable; restart the desktop app"
+            "The staged OpenClaw helper is missing or unreadable; restart the PAG backend"
         })?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err("The OpenClaw helper must be a regular file, not a symlink".into());
@@ -405,7 +405,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
             .map_err(|_| "Cannot verify the staged OpenClaw helper against this installation")?
     {
         return Err(
-            "The staged OpenClaw helper differs from this installation; restart the desktop app"
+            "The staged OpenClaw helper differs from this installation; restart the PAG backend"
                 .into(),
         );
     }

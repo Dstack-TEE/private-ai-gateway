@@ -32,6 +32,7 @@ export const initialAppearance = window.__GATEWAY_INITIAL_APPEARANCE__;
 delete window.__GATEWAY_INITIAL_APPEARANCE__;
 
 export const desktopApi: DesktopApi = {
+  startBackendService: () => invoke("start_backend_service"),
   showEditMenu: (editable) => invoke("show_edit_menu", { editable }),
   getAppearance: () => invoke("get_appearance"),
   setAppearance: (appearance) => invoke("set_appearance", { appearance }),
@@ -63,6 +64,10 @@ export const desktopApi: DesktopApi = {
   getLaunchPreferences: () => invoke("get_launch_preferences"),
   setLaunchPreference: (name, enabled) => invoke("set_launch_preference", { name, enabled }),
   onLaunchPreferencesChange: (listener) => subscribe("gateway://launch-preferences", listener),
+  getCliRegistration: () => invoke("get_cli_registration"),
+  setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
+  onStopAllRequest: (listener) => subscribe("gateway://confirm-stop-all", listener),
+  stopAllAndQuit: () => invoke("stop_all_and_quit"),
   copyText(text: string): Promise<void> {
     return invoke("copy_text", { text });
   },

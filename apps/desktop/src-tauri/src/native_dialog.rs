@@ -181,7 +181,7 @@ pub fn open(
         )
         .ok_or_else(|| "The main window is unavailable".to_string())?;
     let state = app
-        .state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+        .state::<std::sync::Arc<desktop_runtime::client::Client>>()
         .state()?;
     let initial_state = serde_json::to_string(&state).map_err(window_error)?;
     let theme = main.theme().map_err(window_error)?;

@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use desktop_runtime::controller::DesktopRuntime;
-use desktop_runtime::preferences::{self, UpdateChannel};
+use desktop_runtime::{client::Client, preferences::UpdateChannel, protocol::Preference};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -20,9 +19,15 @@ fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
 }
 
 #[tauri::command]
-pub async fn get_update_channel(app: AppHandle) -> Result<UpdateChannel, String> {
+pub async fn get_update_channel(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+) -> Result<UpdateChannel, String> {
+    let client = client.inner().clone();
     crate::run_blocking(move || {
-        let saved = preferences::load().map_err(|_| "Could not read update preferences")?;
+        let saved = client
+            .preferences()
+            .map_err(|_| "Could not read update preferences")?;
         Ok(saved.update_channel.unwrap_or_else(|| {
             if app.package_info().version.pre.is_empty() {
                 UpdateChannel::Stable
@@ -38,13 +43,17 @@ pub async fn get_update_channel(app: AppHandle) -> Result<UpdateChannel, String>
 pub async fn set_update_channel(
     channel: UpdateChannel,
     pending: State<'_, PendingUpdate>,
+    client: State<'_, Arc<Client>>,
 ) -> Result<UpdateChannel, String> {
     let mut pending = pending
         .0
         .try_lock()
         .map_err(|_| "An update operation is already in progress")?;
+    let client = client.inner().clone();
     crate::run_blocking(move || {
-        preferences::update(|preferences| preferences.update_channel = Some(channel))
+        client
+            .set_preference(Preference::UpdateChannel(channel))
+            .map(|_| ())
             .map_err(|_| "Could not save update channel".to_string())
     })
     .await?;
@@ -121,7 +130,8 @@ pub async fn check_update(
         return Ok(info);
     }
     *pending = None;
-    let channel = get_update_channel(app.clone()).await?;
+    let client = app.state::<Arc<Client>>();
+    let channel = get_update_channel(app.clone(), client).await?;
     let channel_name = match channel {
         UpdateChannel::Beta => "beta",
         UpdateChannel::Stable => "stable",
@@ -176,9 +186,9 @@ pub async fn check_update(
 pub async fn install_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
 ) -> Result<(), String> {
-    let result = install(app.clone(), pending, runtime).await;
+    let result = install(app.clone(), pending, client).await;
     if let Err(error) = &result {
         publish_progress(
             &app,
@@ -194,7 +204,7 @@ pub async fn install_update(
 async fn install(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
-    runtime: State<'_, Arc<DesktopRuntime>>,
+    client: State<'_, Arc<Client>>,
 ) -> Result<(), String> {
     let mut pending = pending
         .0
@@ -209,9 +219,9 @@ async fn install(
         downloaded = downloaded.saturating_add(chunk as u64);
         publish_progress(&app, DownloadProgress { downloaded, total, error: None });
     }, || {}).await.map_err(|_| "The update could not be downloaded or its signature could not be verified. Check for updates to retry.")?;
-    let runtime = runtime.inner().clone();
+    let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        runtime.install_update(|| {
+        client.install_update(|| {
             update.install(bytes).map_err(|_| {
                 "Installation failed. Protection is stopped; check for updates to retry."
                     .to_string()

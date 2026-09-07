@@ -23,9 +23,11 @@ pub enum Appearance {
     Dark,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
+    #[serde(default)]
+    pub auto_cli_registration: Option<bool>,
     #[serde(default)]
     pub notifications: NotificationPreferences,
     #[serde(default)]
@@ -49,7 +51,7 @@ pub fn load() -> Result<Preferences, String> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct NotificationPreferences {
     pub enabled: bool,
     pub gateway: bool,
@@ -112,6 +114,16 @@ mod tests {
 
     #[test]
     fn startup_connection_is_opt_in_and_requires_a_boolean() {
+        let mut preferences: Preferences = serde_json::from_str("{}").unwrap();
+        assert!(preferences.auto_cli_registration.unwrap_or(true));
+        preferences.auto_cli_registration = Some(false);
+        let saved = serde_json::to_string(&preferences).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Preferences>(&saved)
+                .unwrap()
+                .auto_cli_registration,
+            Some(false)
+        );
         assert!(!Preferences::default().connect_on_launch);
         assert!(
             !serde_json::from_str::<Preferences>("{}")

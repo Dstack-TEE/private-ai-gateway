@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
@@ -11,9 +11,9 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
 use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
-use desktop_runtime::{contracts::GatewayState, controller::DesktopRuntime};
+use desktop_runtime::{client::Client, contracts::GatewayState};
 
-/// Native menu handles mirror runtime state; actions use the same controller as the window.
+/// Native menu handles mirror backend state; actions use the same client as the window.
 pub struct TrayMenu {
     toggle: MenuItem<Wry>,
     status: MenuItem<Wry>,
@@ -78,6 +78,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .item(&autostart)
         .separator()
         .text("quit", format!("Quit {APP_NAME}"))
+        .text("stop-all-quit", "Stop All and Quit…")
         .build()?;
     app.manage(TrayMenu {
         toggle,
@@ -108,6 +109,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "quit" => {
                 app.exit(0);
             }
+            "stop-all-quit" => {
+                show_window(app);
+                let _ = app.emit("gateway://confirm-stop-all", ());
+            }
             id if matches!(id, "profiles" | "copy-key" | "copy-endpoint")
                 || id.starts_with("profile:")
                 || id.starts_with("agent:") =>
@@ -117,44 +122,20 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
-    let handle = app.clone();
-    // Keep installation status and elapsed time current while the window is closed.
-    tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let app = handle.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                let runtime = app.state::<Arc<DesktopRuntime>>();
-                if let Ok(state) = runtime.state() {
-                    sync(&app, &state);
-                }
-                if let Ok(agents) = runtime.list_agents() {
-                    sync_agents(&app, &agents);
-                }
-            })
-            .await;
-        }
-    });
     Ok(())
 }
 
 fn perform_action(app: &AppHandle, id: String) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let runtime = app.state::<Arc<DesktopRuntime>>().inner().clone();
+        let client = app.state::<Arc<Client>>().inner().clone();
         let result = (|| -> Result<(), String> {
             match id.as_str() {
                 "toggle" => {
-                    let state = runtime.state()?;
-                    if should_stop(&state) {
-                        runtime.stop()?;
-                    } else {
-                        runtime.start(state.config)?;
-                    }
+                    client.toggle();
                 }
                 "copy-endpoint" => {
-                    let endpoint = runtime
+                    let endpoint = client
                         .state()?
                         .proxy_url
                         .ok_or("Local API is unavailable")?;
@@ -164,7 +145,7 @@ fn perform_action(app: &AppHandle, id: String) {
                 }
                 "copy-key" => {
                     app.clipboard()
-                        .write_text(runtime.client_key()?)
+                        .write_text(client.client_key()?)
                         .map_err(|_| "Cannot copy the client key")?;
                 }
                 "profiles" => {
@@ -172,11 +153,11 @@ fn perform_action(app: &AppHandle, id: String) {
                     crate::native_dialog::open_profiles(&app, false)?;
                 }
                 _ if id.starts_with("profile:") => {
-                    runtime.activate_profile(id[8..].to_string())?;
+                    client.activate_profile(id[8..].to_string())?;
                 }
                 _ if id.starts_with("agent:") => {
                     let agent_id = &id[6..];
-                    let agent = runtime
+                    let agent = client
                         .list_agents()?
                         .into_iter()
                         .find(|agent| agent.id == agent_id)
@@ -187,7 +168,7 @@ fn perform_action(app: &AppHandle, id: String) {
                     let connect = !agent.recorded;
                     let options = ConnectOptions {
                         default_model: if connect && agent_id == "codex" {
-                            runtime.state()?.catalog.and_then(|catalog| {
+                            client.state()?.catalog.and_then(|catalog| {
                                 catalog.models.first().map(|model| model.id.clone())
                             })
                         } else {
@@ -195,22 +176,22 @@ fn perform_action(app: &AppHandle, id: String) {
                         },
                     };
                     let preview =
-                        runtime.preview_agent(agent.id.clone(), connect, options.clone())?;
-                    runtime.apply_agent(agent.id, connect, preview.revision, options)?;
+                        client.preview_agent(agent.id.clone(), connect, options.clone())?;
+                    client.apply_agent(agent.id, connect, preview.revision, options)?;
                 }
                 _ => return Ok(()),
             }
             Ok(())
         })();
         if let Err(error) = result {
-            runtime.report_error(error);
+            client.report_error(error);
             show_window(&app);
         }
-        if let Ok(state) = runtime.state() {
+        if let Ok(state) = client.state() {
             sync(&app, &state);
         }
         if id.starts_with("agent:") {
-            if let Ok(agents) = runtime.list_agents() {
+            if let Ok(agents) = client.list_agents() {
                 sync_agents(&app, &agents);
             }
             let _ = app.emit("gateway://agents-changed", ());
@@ -301,23 +282,30 @@ fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> taur
 }
 
 fn toggle_or_open_settings(app: &AppHandle) {
-    let runtime = app.state::<std::sync::Arc<DesktopRuntime>>();
-    let Ok(state) = runtime.state() else {
-        return;
-    };
-    if !protection_action_enabled(&state) {
-        sync(app, &state);
-        return;
-    }
-    if !should_stop(&state) && !active_profile_ready(&state) {
-        sync(app, &state);
-        show_window(app);
-        if let Err(error) = crate::native_dialog::open_profiles(app, true) {
-            runtime.report_error(error);
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = app.state::<std::sync::Arc<Client>>();
+        let Ok(state) = client.state() else {
+            show_window(&app);
+            return;
+        };
+        if !protection_action_enabled(&state) {
+            sync(&app, &state);
+            return;
         }
-        return;
-    }
-    perform_action(app, "toggle".to_string());
+        if !should_stop(&state) && !active_profile_ready(&state) {
+            sync(&app, &state);
+            show_window(&app);
+            if let Err(error) = crate::native_dialog::open_profiles(&app, true) {
+                client.report_error(error);
+            }
+            return;
+        }
+        client.toggle();
+        if let Ok(state) = client.state() {
+            sync(&app, &state);
+        }
+    });
 }
 
 fn sync_autostart(app: &AppHandle) {
@@ -329,10 +317,11 @@ fn sync_autostart(app: &AppHandle) {
         let result = set_open_at_login(&app, checked);
         if let Err(error) = result {
             let _ = menu.autostart.set_checked(!checked);
-            app.state::<std::sync::Arc<DesktopRuntime>>()
+            app.state::<std::sync::Arc<Client>>()
                 .report_error(format!("Open at Login could not be changed: {error}"));
         }
-        if let Ok(preferences) = crate::load_launch_preferences(&app) {
+        let client = app.state::<std::sync::Arc<Client>>();
+        if let Ok(preferences) = crate::load_launch_preferences(&app, &client) {
             let _ = app.emit("gateway://launch-preferences", preferences);
         }
     });

@@ -107,7 +107,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 .find(|window| window.is_focused().unwrap_or(false))
             {
                 if let Err(error) = crate::native_dialog::request_close(&window) {
-                    app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                    app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
                         .report_error(error);
                 }
             }
@@ -122,7 +122,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = crate::open_about_link(app.clone(), target).await {
                     use tauri::Manager;
-                    app.state::<std::sync::Arc<desktop_runtime::controller::DesktopRuntime>>()
+                    app.state::<std::sync::Arc<desktop_runtime::client::Client>>()
                         .report_error(error);
                 }
             });

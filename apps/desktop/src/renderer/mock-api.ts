@@ -1,6 +1,7 @@
 import type {
   AgentPreview,
   AgentStatus,
+  CliRegistration,
   ConfidentialProfile,
   DesktopApi,
   GatewayState,
@@ -17,6 +18,7 @@ import type {
  * browser test without a backend.
  */
 export type MockScenario =
+  | "backend-disconnected"
   | "configuration-verifying"
   | "ready"
   | "no-profiles"
@@ -244,6 +246,8 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
       };
     case "configuration-verifying":
       return { state: { ...BASE, status: "verifying", configurationVerification: true }, agents: STOPPED_AGENTS };
+    case "backend-disconnected":
+      return { state: { ...BASE, status: "error", backendConnected: false, endpointError: "Backend disconnected" }, agents: STOPPED_AGENTS };
     case "error":
       return {
         state: { ...BASE, status: "error", remoteUrl: BASE.config.remoteUrl, error: "Cannot read the verified model list: The verified gateway did not answer the model list request" },
@@ -304,7 +308,7 @@ function scenario(name: MockScenario): { state: GatewayState; agents: AgentStatu
 }
 
 export function mockApi(name: string | null): DesktopApi {
-  const known: MockScenario[] = ["ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
+  const known: MockScenario[] = ["backend-disconnected", "ready", "no-profiles", "no-key", "verifying", "configuration-verifying", "error", "empty-catalog", "blocked", "needs-attention", "endpoint-busy", "interactive"];
   const picked = known.find((candidate) => candidate === name) ?? "ready";
   let { state, agents } = scenario(picked);
   if (name === "wake-monitor-unavailable") state.wakeMonitorAvailable = false;
@@ -332,10 +336,20 @@ export function mockApi(name: string | null): DesktopApi {
   };
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
+  let cliRegistration: CliRegistration = {
+    executable: "/Applications/Private AI Gateway.app/Contents/MacOS/pag",
+    commandPath: "/Users/dev/.local/bin/pag",
+    installed: false,
+    onPath: false,
+    ...(name === "cli-startup-error" ? {
+      startupError: "Command-line registration failed: Move Private AI Gateway to a stable location before registering pag",
+    } : {}),
+  };
   let updateChannel: "beta" | "stable" = "stable";
   let updateAttempts = 0;
   let keyRotations = 0;
   return {
+    startBackendService: async () => { state = { ...BASE, backendConnected: true }; publish(); return structuredClone(state); },
     showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
     getAppearance: async () => {
       if (name === "appearance-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-appearance", () => resolve(), { once: true }));
@@ -370,6 +384,18 @@ export function mockApi(name: string | null): DesktopApi {
       return launchPreferences;
     },
     onLaunchPreferencesChange: () => () => undefined,
+    getCliRegistration: async () => cliRegistration,
+    setCliRegistration: async (installed) => {
+      cliRegistration = {
+        executable: cliRegistration.executable,
+        commandPath: cliRegistration.commandPath,
+        installed,
+        onPath: installed,
+      };
+      return cliRegistration;
+    },
+    onStopAllRequest: () => () => undefined,
+    stopAllAndQuit: async () => undefined,
     copyText: async () => undefined,
     getClientKey: async () => {
       if (name === "example-key-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-example-key", () => resolve(), { once: true }));

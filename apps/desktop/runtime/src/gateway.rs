@@ -205,7 +205,7 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        self.publish(&state);
+        self.publish();
         spawn_event_reader(Arc::clone(self), generation, receiver);
         Ok(state)
     }
@@ -249,9 +249,8 @@ impl GatewayManager {
         runtime.last_catalog = state.catalog.clone();
         state.wake_monitor_available = runtime.state.wake_monitor_available;
         runtime.state = state;
-        let state = runtime.state.clone();
         drop(runtime);
-        self.publish(&state);
+        self.publish();
     }
 
     /// Stop the sidecar in any state, including while verifying. Requests
@@ -283,7 +282,7 @@ impl GatewayManager {
                 .kill()
                 .map_err(|error| format!("Cannot stop ACI executable: {error}"))?;
         }
-        self.publish(&state);
+        self.publish();
         Ok(state)
     }
 
@@ -294,6 +293,8 @@ impl GatewayManager {
         GatewayState {
             wake_monitor_available: previous.wake_monitor_available,
             config: previous.config.clone(),
+            client_key_revision: previous.client_key_revision,
+            client_key_available: previous.client_key_available,
             profiles: previous.profiles.clone(),
             active_profile_id: previous.active_profile_id.clone(),
             local_api: previous.local_api.clone(),
@@ -330,6 +331,13 @@ impl GatewayManager {
         self.update(|state| state.api_key_saved = saved);
     }
 
+    pub fn client_key_changed(&self, available: bool) {
+        self.update(|state| {
+            state.client_key_revision = state.client_key_revision.saturating_add(1);
+            state.client_key_available = Some(available);
+        });
+    }
+
     pub fn set_wake_monitor_available(&self, available: bool) -> bool {
         let Ok(mut runtime) = self.lock() else {
             return false;
@@ -338,9 +346,8 @@ impl GatewayManager {
             return false;
         }
         runtime.state.wake_monitor_available = Some(available);
-        let state = runtime.state.clone();
         drop(runtime);
-        self.publish(&state);
+        self.publish();
         true
     }
 
@@ -384,9 +391,8 @@ impl GatewayManager {
             runtime.last_catalog = None;
             runtime.state.catalog = None;
         }
-        let state = runtime.state.clone();
         drop(runtime);
-        self.publish(&state);
+        self.publish();
     }
 
     pub fn update_profile_list(
@@ -551,9 +557,8 @@ impl GatewayManager {
                 }
             }
         };
-        let state = runtime.state.clone();
         drop(runtime);
-        self.publish(&state);
+        self.publish();
         outcome
     }
 
@@ -562,13 +567,14 @@ impl GatewayManager {
             return;
         };
         change(&mut runtime.state);
-        let state = runtime.state.clone();
         drop(runtime);
-        self.publish(&state);
+        self.publish();
     }
 
-    fn publish(&self, state: &GatewayState) {
-        let _ = self.state_tx.send(state.clone());
+    fn publish(&self) {
+        if let Ok(runtime) = self.lock() {
+            self.state_tx.send_replace(runtime.state.clone());
+        }
     }
 
     fn handle_stdout(self: &Arc<Self>, generation: u64, bytes: &[u8]) -> Result<(), String> {
@@ -667,9 +673,8 @@ impl GatewayManager {
             _ => return Ok(()),
         }
 
-        let mut state = runtime.state.clone();
         let epoch = runtime.epoch;
-        if state.status != "verified" {
+        if runtime.state.status != "verified" {
             // Any state other than verified revokes the session at once.
             self.proxy.publish(Session {
                 generation,
@@ -698,10 +703,9 @@ impl GatewayManager {
                     Err(error) => runtime.state.error = Some(error),
                     _ => {}
                 }
-                state = runtime.state.clone();
             }
         }
-        self.publish(&state);
+        self.publish();
         if load_catalog {
             let manager = Arc::clone(self);
             self.task_runtime.spawn(async move {
@@ -749,7 +753,6 @@ impl GatewayManager {
                 format!("ACI stopped unexpectedly: {diagnostic}")
             });
         }
-        let state = runtime.state.clone();
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
         drop(runtime);
@@ -759,7 +762,7 @@ impl GatewayManager {
             session_id: Some(session_id),
             ..Session::default()
         });
-        self.publish(&state);
+        self.publish();
         Ok(())
     }
 
@@ -777,7 +780,6 @@ impl GatewayManager {
         runtime.state.progress = None;
         runtime.state.catalog = None;
         runtime.state.error = Some(message);
-        let state = runtime.state.clone();
         let epoch = runtime.epoch;
         let session_id = runtime.session_id.clone();
         drop(runtime);
@@ -790,7 +792,7 @@ impl GatewayManager {
         if let Some(mut child) = child {
             let _ = child.kill();
         }
-        self.publish(&state);
+        self.publish();
         Ok(())
     }
 

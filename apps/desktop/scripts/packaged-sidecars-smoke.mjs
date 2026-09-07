@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,9 @@ import { fileURLToPath } from "node:url";
 const [directory] = process.argv.slice(2);
 assert.ok(directory && path.isAbsolute(directory), "Supply the installed binary directory");
 const binary = (name) => path.join(directory, `${name}${process.platform === "win32" ? ".exe" : ""}`);
+for (const name of ["pag", "pag-service", "aci", "private-ai-gateway-helper"]) {
+  await access(binary(name), process.platform === "win32" ? constants.F_OK : constants.X_OK);
+}
 const home = await mkdtemp(path.join(os.tmpdir(), "tauri-sidecars-"));
 const env = { ...process.env, PRIVATE_AI_GATEWAY_HOME: home, ACI_API_KEY: "", NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" };
 const requests = [];
