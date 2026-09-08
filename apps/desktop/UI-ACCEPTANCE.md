@@ -83,7 +83,7 @@ Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.m
 ### UI Consistency Follow-up (2026-09-06)
 
 - Warning uses amber independently of destructive errors; primary uses Neutral.
-  Overview decoration uses neutral primary; protection switches use success,
+  Overview decoration stays neutral; protection switches use primary,
   with warning taking precedence in development mode.
 - Live Verified is a small, right-aligned button opening Privacy Verification.
 - Forms use standard FieldSet/FieldSeparator and a shared footer divider.
