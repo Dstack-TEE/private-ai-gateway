@@ -86,6 +86,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+          cache-on-failure: true
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -133,6 +134,7 @@ jobs:
           cargo test --locked --test aci_cli
 
   package:
+    name: Package (${{ matrix.platform }})
     needs: verify
     env:
       DESKTOP_RELEASE_VERSION: ${{ inputs.release_version }}
@@ -199,6 +201,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+          cache-on-failure: true
       - name: Install macOS Universal targets
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -272,7 +275,7 @@ jobs:
           app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
           test -n "$app_bundle"
           for binary in private-ai-proxy-desktop pap pap-service private-ai-proxy-helper; do
-            xcrun lipo -verify_arch arm64 x86_64 "$app_bundle/Contents/MacOS/$binary"
+            xcrun lipo "$app_bundle/Contents/MacOS/$binary" -verify_arch arm64 x86_64
           done
           if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             softwareupdate --install-rosetta --agree-to-license
@@ -452,7 +455,9 @@ jobs:
           scratch=$(mktemp -d "$RUNNER_TEMP/tauri-installed.XXXXXX")
           cleanup() {
             local status=$?
-            sudo apt-get remove -y "$package" || status=1
+            if dpkg-query -W "$package" >/dev/null 2>&1; then
+              sudo apt-get remove -y "$package" || status=1
+            fi
             for binary in private-ai-proxy-desktop pap pap-service private-ai-proxy-helper; do
               if [[ -e "/usr/bin/$binary" ]]; then status=1; fi
             done
@@ -460,7 +465,7 @@ jobs:
             return "$status"
           }
           trap cleanup EXIT
-          sudo apt-get install -y "./${packages[0]}"
+          sudo apt-get install -y "${packages[0]}"
           node scripts/packaged-sidecars-smoke.mjs /usr/bin
           export TAURI_CHECK_KEYRING_HOME="$scratch"
           export XDG_RUNTIME_DIR="$scratch/runtime"

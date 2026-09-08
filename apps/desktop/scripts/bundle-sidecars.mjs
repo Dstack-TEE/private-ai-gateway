@@ -73,7 +73,7 @@ for (const sidecar of sidecars) {
     const staged = path.join(scratch, executable);
     if (universal) {
       execFileSync("xcrun", ["lipo", "-create", ...sources, "-output", staged], { stdio: "inherit" });
-      execFileSync("xcrun", ["lipo", "-verify_arch", "arm64", "x86_64", staged], { stdio: "inherit" });
+      execFileSync("xcrun", ["lipo", staged, "-verify_arch", "arm64", "x86_64"], { stdio: "inherit" });
       // tauri-build also needs each thin binary during its two Cargo builds.
       for (const [index, target] of targets.entries()) {
         const name = `${sidecar.name}-${target}`;
