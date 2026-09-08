@@ -63,7 +63,7 @@ export function LocalApiExamples({ endpoint, models, api, onCopy, onClose, onRea
     <Tabs value={language} className="mt-4 min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
       <div className="flex items-center justify-between gap-2">
         <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
-        <IconButton label="Copy example" disabled={!code || copying} onClick={() => void copy()}>{copied === code && code ? <Check className="text-success" /> : <Copy />}</IconButton>
+        <IconButton label="Copy example" disabled={!code || copying} onClick={() => void copy()}>{copied === code && code ? <Check /> : <Copy />}</IconButton>
       </div>
       <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
         <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>

@@ -16,13 +16,14 @@ type SwitchControlProps = {
   checked: boolean;
   disabled?: boolean;
   developmentMode?: boolean;
-  tone?: "default" | "success";
   size?: "sm" | "default" | "lg";
   "aria-describedby"?: string;
   "aria-busy"?: boolean;
   onToggle(): void;
 };
 
-export function SwitchControl({ label, developmentMode = false, tone = "default", onToggle, ...props }: SwitchControlProps): React.JSX.Element {
-  return <Switch className={developmentMode ? "is-development" : tone === "success" ? "is-success" : undefined} aria-label={label} onCheckedChange={onToggle} {...props} />;
+export function SwitchControl({ label, developmentMode = false, onToggle, ...props }: SwitchControlProps): React.JSX.Element {
+  return <Switch className={developmentMode
+    ? "data-checked:border-warning data-checked:bg-warning group-has-[:focus-visible]/field-label:data-checked:border-warning"
+    : undefined} aria-label={label} onCheckedChange={onToggle} {...props} />;
 }

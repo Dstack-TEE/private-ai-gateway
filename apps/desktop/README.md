@@ -66,12 +66,25 @@ operating system's native dialogs directly.
 ### Renderer Components
 
 The renderer uses the official shadcn/ui **Base Luma** style with Base UI,
-Tailwind CSS 4, Lucide, and the official Neutral light/dark primary palette.
-Success uses green-700/green-400, warnings use amber-700/amber-400, and errors
-use the destructive token. Overview decoration uses the neutral primary palette.
-Protection switches use success when enabled, with warning taking precedence in
+Tailwind CSS 4, Lucide, and the official shadcn Emerald light/dark action palette
+over Neutral surfaces. Successful states reuse primary; status badges use
+neutral text and borders with only their leading dot colored. Model charts retain
+distinct categorical colors rather than the Emerald theme's monochrome scale.
+SidebarMenuButton uses Luma's unmodified rounded-xl geometry. Buttons and card/dialog
+surfaces use their respective Luma radius tokens, not a single shared radius.
+Continuous list rows keep square internal edges inside their rounded group.
+Source: https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/themes.ts
+
+Update the theme with `npx shadcn apply b1VnI5nk --only theme --yes` in this
+directory. `theme.css` is CLI-managed; application status colors and categorical
+chart colors live in `semantic.css`. Appearance uses shadcn's `.dark` convention;
+a local blocking bootstrap applies the native/system appearance before styles
+and React load. Do not duplicate generated theme or radius definitions.
+There is no separate success palette. Warnings use Tailwind amber and errors
+use the destructive token. Overview decoration remains neutral.
+Protection switches use primary when enabled, with warning taking precedence in
 development mode; preference and agent switches retain the default theme.
-`src/renderer/theme.css` defines the palette and aliases for existing page layouts.
+`semantic.css` contains application aliases and warning/chart tokens.
 `styles.css` owns product layout, not a second button/switch implementation.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
 their browser/platform picker. Do not override component dimensions, radii,
@@ -85,7 +98,7 @@ Overview aligns the switch with the status text at the top right;
 the profile and info actions sit below. The Agents card reserves four standard
 item rows even when fewer agents are installed; it does not create placeholder
 agents. Elapsed time is visible only while protected, independent of whether a
-session remains resumable. The initial window is 1052x720; saved user window geometry takes
+session remains resumable. The initial window is 1052x820; saved user window geometry takes
 precedence on later launches.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent

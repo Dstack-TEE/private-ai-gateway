@@ -68,6 +68,7 @@ import { Badge } from "./components/ui/badge";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./components/ui/item";
+import { Card, CardHeader, CardTitle, CardAction, CardContent } from "./components/ui/card";
 import { Separator } from "./components/ui/separator";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
@@ -1500,7 +1501,7 @@ function Overview({
               <EmptyState text={running ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
             {recent.map((item) => (
-              <UsageRow key={item.id} activity={item} onOpen={() => onInspect(item)} />
+              <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => onInspect(item)} /><Separator className="last:hidden" /></React.Fragment>
             ))}
           </div>
         </OverviewModule>
@@ -1601,7 +1602,6 @@ function ProtectedControl({
       {!iconOnly && <span>Protected</span>}
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
-        tone="success"
         size="default"
         checked={checked}
         label={label}
@@ -1628,15 +1628,13 @@ function OverviewModule({
   onAction?(): void;
 }>): React.JSX.Element {
   return (
-    <section className="overview-module">
-      <header className="overview-module-title">
-        <h2>{title}</h2>
-        {titleAdornment}
-        {status}
-        {action && onAction && <Button variant="ghost" size="xs" className="module-action" onClick={onAction}>{action}</Button>}
-      </header>
-      <div className="module inset">{children}</div>
-    </section>
+    <Card size="sm" className="overview-module">
+      <CardHeader className="items-center">
+        <CardTitle className="overview-module-title"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
+        {action && onAction && <CardAction><Button variant="outline" size="sm" onClick={onAction}>{action}</Button></CardAction>}
+      </CardHeader>
+      <CardContent className="module min-h-0 flex-1">{children}</CardContent>
+    </Card>
   );
 }
 
@@ -1663,7 +1661,7 @@ function LocalApiPanel({
   const keyLabel = "Client key";
   return (
     <div className="copy-rows">
-      <div className="copy-row">
+      <Item variant="muted" size="xs" className="copy-row overflow-hidden">
         <Button variant="ghost"
           className="copy-surface h-full w-full rounded-none"
           disabled={!proxyUrl}
@@ -1677,8 +1675,8 @@ function LocalApiPanel({
           <span className={`copy-feedback ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
         </Button>
         <IconButton className="row-action" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
-      </div>
-      <div className="copy-row">
+      </Item>
+      <Item variant="muted" size="xs" className="copy-row overflow-hidden">
         <Button variant="ghost" className="copy-surface h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
           <span className="row-title-line">
             <span className="row-title">Client key</span>
@@ -1687,7 +1685,7 @@ function LocalApiPanel({
           <span className={`copy-feedback ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
         </Button>
         <IconButton className="row-action" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
-      </div>
+      </Item>
       {endpointError && <p className="inline-error">{endpointError}</p>}
     </div>
   );
@@ -1718,7 +1716,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
     <ActionItem size="xs" className="usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
       <span className="row-main">
         <span className="row-title">{agentName(activity.agent)}</span>
-        <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />
+        <StateLabel tone={outcome.tone} text={outcome.label} />
         <code className="row-note">{activity.model ?? activity.path}</code>
       </span>
       <span className="usage-amount"><strong>{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
@@ -1819,7 +1817,7 @@ function AgentRow({
           <span className="row-title">{name}</span>
           {note && pendingConnection === undefined
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
-            : <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />}
+            : <StateLabel tone={presence.tone} text={presence.label} />}
         </ItemTitle>
         {agent.installed && !compact && <Hint content={agent.configPath}><ItemDescription>{homePath(agent.configPath)}</ItemDescription></Hint>}
       </ItemContent>

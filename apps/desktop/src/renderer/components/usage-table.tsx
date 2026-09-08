@@ -31,7 +31,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
     { accessorKey: "model", header: "Model", cell: ({ row }) => <Hint content={row.original.model ?? row.original.path}><span className="block max-w-48 truncate font-mono text-xs">{row.original.model ?? row.original.path}</span></Hint> },
     { id: "tokens", header: "Tokens", cell: ({ row }) => <TokenDetails item={row.original} /> },
     { accessorKey: "costUsd", header: "Cost", cell: ({ row }) => <span className="block text-right tabular-nums">{row.original.costUsd === undefined ? "—" : currency(row.original.costUsd)}</span> },
-    { id: "outcome", header: "Result", cell: ({ row }) => { const outcome = outcomeOf(row.original); return <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />; } },
+    { id: "outcome", header: "Result", cell: ({ row }) => { const outcome = outcomeOf(row.original); return <StateLabel tone={outcome.tone} text={outcome.label} />; } },
   ], [onInspect]);
   const table = useTable({ features, data: items, columns, getRowId: (item) => item.id, manualPagination: true, rowCount: total, state: { pagination: { pageIndex, pageSize } } });
   return <div className="overflow-hidden rounded-2xl border" aria-busy={loading}>

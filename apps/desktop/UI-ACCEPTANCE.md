@@ -10,7 +10,7 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
 - Beta.19 (`c03eec2`) passed 66 renderer tests and all three native CI jobs.
   macOS Developer ID signing, notarization and package inspection passed in
   https://github.com/Dstack-TEE/private-ai-gateway/actions/runs/34182726717.
-- At the default 1052x720 content size, Overview's content scroll height equals
+- At the default 1052x820 content size, Overview's content scroll height equals
   its client height (670px); all four agent rows fit. This is browser layout
   evidence, not native multi-monitor restoration evidence.
 - Main `c2d31a8` was subsequently merged into the candidate branch. It includes

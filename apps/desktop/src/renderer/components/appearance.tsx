@@ -27,7 +27,11 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
   useLayoutEffect(() => {
     document.documentElement.dataset.appearance = value;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => { document.documentElement.dataset.theme = value === "system" ? media.matches ? "dark" : "light" : value; };
+    const apply = () => {
+      const theme = value === "system" ? media.matches ? "dark" : "light" : value;
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.dataset.theme = theme;
+    };
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
