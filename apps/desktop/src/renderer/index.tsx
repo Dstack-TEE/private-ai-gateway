@@ -1696,17 +1696,17 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
-    <section className="session-overview" aria-labelledby="session-usage-heading">
+    <Card size="sm" role="region" className="session-overview" aria-labelledby="session-usage-heading">
       <h2 className="sr-only" id="session-usage-heading">Current session</h2>
-    <div className="session-summary" role="group" aria-label="Usage in this session">
+    <CardContent className="session-summary" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],
         ["Estimated cost", active ? currency(summary.costUsd) : "—"],
         ["Verified answers", active && forwarded ? `${protectedRate}%` : "—"],
-      ].map(([label, value]) => <Card key={label} size="sm"><CardContent className="grid gap-2"><span className="text-xs text-muted-foreground">{label}</span><strong className="text-xl font-semibold tabular-nums">{value}</strong></CardContent></Card>)}
-    </div>
-    </section>
+      ].map(([label, value]) => <Item key={label} variant="muted" size="xs"><ItemContent className="min-w-0"><span className="text-xs text-muted-foreground">{label}</span><strong className="text-xl font-semibold tabular-nums">{value}</strong></ItemContent></Item>)}
+    </CardContent>
+    </Card>
   );
 }
 
@@ -1812,7 +1812,7 @@ function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <><Item size={compact ? "xs" : "default"} className="agent-block">
+    <><Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
@@ -1832,7 +1832,7 @@ function AgentRow({
         onToggle={() => onSelect(!disconnecting)}
       /> : <AgentWebsite agent={agent} />}
       </ItemActions>
-    </Item><Separator className="last:hidden" /></>
+    </Item>{!compact && <Separator className="last:hidden" />}</>
   );
 }
 

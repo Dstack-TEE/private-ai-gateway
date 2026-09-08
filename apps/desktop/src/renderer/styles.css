@@ -168,7 +168,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .is-icon-only { margin-top: 3px; }
 
 .overview-banner { margin-top: 12px; }
-.overview-grid { flex: 1; margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(220px, 1fr) auto; gap: 16px; }
+.overview-grid { flex: 1; margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(212px, 1fr) auto; gap: 16px; }
 .overview-module { min-width: 0; }
 @container overview (max-width: 540px) {
   .overview-grid { grid-template-columns: 1fr; }
@@ -177,7 +177,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .module { min-width: 0; container-type: inline-size; }
 .overview-grid > .overview-module:first-child { grid-column: 1; grid-row: 1; }
 .overview-grid > .overview-module:nth-child(2) { grid-column: 1; grid-row: 2; }
-.overview-agent-list { --agent-row-height: calc(2rem + 1.25rem + 2px); display: grid; grid-template-rows: repeat(3, minmax(var(--agent-row-height), auto) 1px) minmax(var(--agent-row-height), auto); }
+.overview-agent-list { --agent-row-height: calc(2rem + 1.25rem + 2px); display: grid; grid-template-rows: repeat(4, minmax(var(--agent-row-height), auto)); gap: 12px; }
 .overview-agent-list > .empty-state { grid-row: 1 / -1; }
 .overview-grid > .overview-module:nth-child(3) { grid-column: 2; grid-row: 1 / span 2; }
 @container overview (max-width: 600px) {
@@ -209,11 +209,11 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .credential-row > span:last-child { color: var(--muted-foreground); font-size: var(--text-xs); font-weight: 600; }
 .inline-error { padding: 8px 13px; color: var(--danger); background: var(--danger-bg); font-size: var(--text-xs); }
 
-.session-overview { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.session-overview { min-width: 0; }
 .session-overview-heading { display: flex; align-items: center; justify-content: space-between; min-height: 20px; gap: 8px; }
 .session-overview-heading h2 { font-size: var(--font-body); font-weight: 600; }
 .session-summary { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.session-summary > [data-slot=card] { min-width: 0; }
+.session-summary > [data-slot=item] { min-width: 0; }
 .session-summary strong { display: block; max-width: 100%; overflow: hidden; font-size: var(--text-xl); line-height: var(--text-xl--line-height); font-weight: 600; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .group { margin-top: 20px; }
 .group:first-child { margin-top: 0; }

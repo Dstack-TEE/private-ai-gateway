@@ -35,7 +35,10 @@ test("compact overview separates provider verification from current-session usag
     return [content.left - frame.left, frame.right - content.right, frame.bottom - content.bottom];
   });
   expect(margins).toEqual([24, 24, 24]);
-  await expect(page.locator(".overview-page [data-slot=card]")).toHaveCount(8);
+  await expect(page.locator(".overview-page [data-slot=card]")).toHaveCount(5);
+  await expect(agentCard.locator('[data-slot="separator"]')).toHaveCount(0);
+  await expect(agentCard.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(4);
+  await expect(page.locator('.session-summary > [data-slot="item"][data-variant="muted"]')).toHaveCount(4);
   await expect(page.locator(".page-header")).toHaveCSS("border-bottom-width", "0px");
   await expect(page.locator(".session-summary")).toHaveCSS("gap", "16px");
   await expect(page.locator(".overview-top")).toHaveCSS("gap", "16px");
