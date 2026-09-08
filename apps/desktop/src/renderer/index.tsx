@@ -68,7 +68,7 @@ import { Badge } from "./components/ui/badge";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { SidebarProvider, SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
 import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "./components/ui/item";
-import { Card, CardHeader, CardTitle, CardAction, CardContent } from "./components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "./components/ui/card";
 import { Separator } from "./components/ui/separator";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./components/ui/collapsible";
 import { Input } from "./components/ui/input";
@@ -1476,7 +1476,7 @@ function Overview({
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule title="Agents" action="View all" onAction={onAgents}>
+        <OverviewModule title="Agents" description="Installed on this device." action="View all" onAction={onAgents}>
           <div className="preview-list overview-agent-list">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
@@ -1493,6 +1493,7 @@ function Overview({
         </OverviewModule>
         <OverviewModule
           title="Recent usage"
+          description="Latest requests in this session."
           action="View all"
           onAction={onUsage}
         >
@@ -1615,6 +1616,7 @@ function ProtectedControl({
 
 function OverviewModule({
   title,
+  description,
   titleAdornment,
   status,
   action,
@@ -1622,6 +1624,7 @@ function OverviewModule({
   children,
 }: React.PropsWithChildren<{
   title: string;
+  description?: string;
   titleAdornment?: React.ReactNode;
   status?: React.ReactNode;
   action?: string;
@@ -1631,6 +1634,7 @@ function OverviewModule({
     <Card size="sm" className="overview-module">
       <CardHeader className="items-center">
         <CardTitle className="overview-module-title"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
+        {description && <CardDescription>{description}</CardDescription>}
         {action && onAction && <CardAction><Button variant="outline" size="sm" onClick={onAction}>{action}</Button></CardAction>}
       </CardHeader>
       <CardContent className="module min-h-0 flex-1">{children}</CardContent>
@@ -1697,7 +1701,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
     <Card size="sm" role="region" className="session-overview" aria-labelledby="session-usage-heading">
-      <h2 className="sr-only" id="session-usage-heading">Current session</h2>
+      <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
     <CardContent className="session-summary" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
