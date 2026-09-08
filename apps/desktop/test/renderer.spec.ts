@@ -714,7 +714,23 @@ test("Agents reserves four rows and elapsed time only appears while protected", 
     await expect(page.getByLabel("Protection status").locator(".protection-duration")).toHaveCount(0);
   }
   await page.goto("/?mock=ready");
-  await expect(page.getByLabel("Protection status").locator(".protection-duration")).toBeVisible();
+  const duration = page.getByLabel("Protection status").locator(".protection-duration");
+  await expect(duration).toBeVisible();
+  await page.clock.install();
+  const initial = await duration.getAttribute("datetime");
+  if (!initial) throw new Error("Missing session duration");
+  const visibility = (hidden: boolean) => page.evaluate((value) => {
+    Object.defineProperty(document, "hidden", { configurable: true, value });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+  await visibility(true);
+  await page.clock.fastForward(300_000);
+  await expect(duration).toHaveAttribute("datetime", initial);
+  await visibility(false);
+  await expect(duration).not.toHaveAttribute("datetime", initial);
+  const resumed = await duration.getAttribute("datetime");
+  if (!resumed) throw new Error("Missing resumed session duration");
+  expect(Number(resumed.slice(2, -1)) - Number(initial.slice(2, -1))).toBeGreaterThanOrEqual(300);
 });
 
 test("reconnection preserves visible session totals and can be cancelled", async ({ page }) => {
