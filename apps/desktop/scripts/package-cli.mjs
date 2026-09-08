@@ -209,6 +209,7 @@ async function copyInstallerScript(name, destination) {
 async function rpmScriptlet(name) {
   const script = await readFile(path.join(appRoot, "src-tauri/installer", name), "utf8");
   return script.replace(/^#![^\n]*\n/, "")
+    .replaceAll('"@PACKAGE_NAME@"', '"private-ai-gateway-cli"')
     .replaceAll('"private-ai-gateway"', '"private-ai-gateway-cli"')
     .replaceAll("%", "%%").trimEnd();
 }
