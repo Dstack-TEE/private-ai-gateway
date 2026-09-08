@@ -12,11 +12,11 @@ const [binaries] = process.argv.slice(2);
 assert.equal(process.platform, "linux");
 assert.ok(binaries && path.isAbsolute(binaries), "Supply an absolute installed binary directory");
 const exec = promisify(execFile);
-const home = await mkdtemp(path.join(tmpdir(), "pag-native-"));
+const home = await mkdtemp(path.join(tmpdir(), "pap-native-"));
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"), XDG_CACHE_HOME: path.join(home, "cache"), PRIVATE_AI_GATEWAY_HOME: home };
 const children = [];
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "pag"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
+const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "pap"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
 
 function start(name) {
   const child = spawn(path.join(binaries, name), [], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -66,10 +66,10 @@ try {
   for (let count = 0; count < 150; count++) {
     assert.equal(ui.exitCode, null, `UI exited before creating a window: ${ui.diagnostic}`);
     windows = (await exec("xwininfo", ["-root", "-tree"], { env, timeout: 5_000 })).stdout;
-    if (windows.includes("Private AI Gateway")) break;
+    if (windows.includes("Private AI Proxy")) break;
     await delay(100);
   }
-  assert.match(windows, /Private AI Gateway/, ui.diagnostic);
+  assert.match(windows, /Private AI Proxy/, ui.diagnostic);
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
   ui = start("private-ai-gateway-desktop");

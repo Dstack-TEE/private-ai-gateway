@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Resvg } from "@resvg/resvg-js";
+import bmp from "bmp-js";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const brandId = process.env.PRIVATE_AI_GATEWAY_BRAND ?? "dstack";
@@ -131,6 +132,24 @@ const trayTemplateSvg = composeTrayTemplate(traySource, appIconWhiteAsCutout);
 const generatedDir = path.join(appRoot, "src/renderer/generated");
 await mkdir(generatedDir, { recursive: true });
 await writeFile(path.join(generatedDir, "app-icon.svg"), appIconSvg);
+// Standard NSIS artwork dimensions; keep its native wizard and controls.
+for (const [name, width, height, x, y, size] of [
+  ["header", 150, 57, 93, 0, 57],
+  ["sidebar", 164, 314, 12, 45, 140],
+]) {
+  const background = name === "header" ? "#ffffff" : brand.theme.iconBackground;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="${background}"/><svg x="${x}" y="${y}" width="${size}" height="${size}" viewBox="0 0 1024 1024">${appIconSvg.replace(/^.*?<svg[^>]*>/s, "").replace(/<\/svg>$/, "")}</svg></svg>`;
+  const rendered = new Resvg(svg).render();
+  const pixels = rendered.pixels;
+  const data = Buffer.alloc(pixels.length);
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    data[offset] = pixels[offset + 3];
+    data[offset + 1] = pixels[offset + 2];
+    data[offset + 2] = pixels[offset + 1];
+    data[offset + 3] = pixels[offset];
+  }
+  await writeFile(path.join(appRoot, "src-tauri/installer", `brand-${name}.bmp`), bmp.encode({ data, width, height }).data);
+}
 await rm(path.join(generatedDir, "app-icon-light.svg"), { force: true });
 await rm(path.join(generatedDir, "app-icon-dark.svg"), { force: true });
 await writeFile(path.join(generatedDir, "brand-mark-light.svg"), standaloneMark(uiMarkLight, appIconWhiteAsCutout, brand.theme.markLight));

@@ -354,7 +354,7 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
   );
 }
 
-function NativeProfilesWindow({ repair, editor = false, profileId }: { repair: boolean; editor?: boolean; profileId?: string | null }): React.JSX.Element {
+function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSave = false }: { repair: boolean; editor?: boolean; profileId?: string | null; startAfterSave?: boolean }): React.JSX.Element {
   const native = useNativeGatewayWindow(editor ? profileId ? "Edit Profile" : "New Profile" : "Profiles");
   const [actionError, setActionError] = useState<string>();
   const [repairRequest, setRepairRequest] = useState(repair ? 1 : 0);
@@ -381,7 +381,10 @@ function NativeProfilesWindow({ repair, editor = false, profileId }: { repair: b
   if (editor) return <main className="native-dialog-host"><ProfileEditorSheet
     state={native.state} busy={busy} running={running}
     profile={editingProfile}
-    onVerify={(profile, key) => run(() => desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key))}
+    onVerify={(profile, key) => run(async () => {
+      const saved = await desktopApi.verifyConfiguration(profile, native.state.config.requireProductionOs, key);
+      return startAfterSave ? desktopApi.start(saved.config) : saved;
+    })}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
     onComplete={native.close} onDeleted={native.close} onClose={native.close}
   /></main>;
@@ -558,7 +561,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
-  const [stateLoaded, setStateLoaded] = useState(false);
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
   const [savingPreference, setSavingPreference] = useState(false);
@@ -579,7 +581,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
-  const firstUsePresented = useRef(false);
+  const [startAfterSetup, setStartAfterSetup] = useState(false);
   const agentScan = useRef(0);
   const busy = state.status === "verifying";
   const running = !state.configurationVerification && (state.status === "verified" || state.status === "blocked");
@@ -659,7 +661,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     const unsubscribe = desktopApi.onStateChange((nextState) => {
       if (active) {
         setState(nextState);
-        setStateLoaded(true);
       }
     });
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
@@ -673,12 +674,10 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
       (nextState) => {
         if (!active) return;
         setState(nextState);
-        setStateLoaded(true);
       },
       (error: unknown) => {
         if (!active) return;
         setState(unavailableState(error));
-        setStateLoaded(true);
         setActionError(errorMessage(error));
       },
     );
@@ -718,17 +717,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
       unsubscribeClientKey();
     };
   }, []);
-
-  useEffect(() => {
-    if (!stateLoaded || state.profiles.length > 0 || firstUsePresented.current) return;
-    firstUsePresented.current = true;
-    if (previewMode) {
-      setProfileEditorId(undefined);
-      setSettingsTarget("confidential");
-    } else {
-      void desktopApi.openNativeDialog("profiles").catch((error: unknown) => setActionError(errorMessage(error)));
-    }
-  }, [stateLoaded, state.profiles.length]);
 
   // The form mirrors the configuration the backend will start with, so a
   // start from the tray switch shows up here too.
@@ -823,7 +811,12 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const toggleGateway = () => {
     const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
     if (!running && !busy && !state.reconnecting && !profileIsAvailable(activeProfile, state)) {
-      showProfiles(Boolean(activeProfile));
+      if (state.profiles.length === 0 && !previewMode) {
+        void desktopApi.openNativeDialog("setup-profile").catch((error: unknown) => setActionError(errorMessage(error)));
+      } else {
+        setStartAfterSetup(state.profiles.length === 0);
+        showProfiles(Boolean(activeProfile));
+      }
       return;
     }
     void run(() =>
@@ -845,11 +838,9 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const verifyConfiguration = async (profile: ConfidentialProfileInput, key?: string): Promise<string | undefined> => {
     setActionError(undefined);
     try {
-      setState(await desktopApi.verifyConfiguration(
-        profile,
-        !allowDevelopmentOs,
-        key,
-      ));
+      const saved = await desktopApi.verifyConfiguration(profile, !allowDevelopmentOs, key);
+      setState(startAfterSetup ? await desktopApi.start(saved.config) : saved);
+      setStartAfterSetup(false);
       setNotice({ id: Date.now(), text: `${profile.name.trim()} verified and saved` });
       return undefined;
     } catch (error) {
@@ -965,7 +956,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     try {
       confirmed = await desktopApi.confirm({
         title: "Reset settings?",
-        message: "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the pag command.",
+        message: "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the pap command.",
         confirmLabel: "Reset settings",
       });
     } catch (error) {
@@ -1118,6 +1109,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           onActivate={activateProfile}
           onDelete={deleteProfile}
           onClose={() => {
+            setStartAfterSetup(false);
             setProfileEditorId(undefined);
             setSettingsTarget(undefined);
           }}
@@ -1220,7 +1212,7 @@ function Sidebar({
     (event.currentTarget.querySelector(`#nav-${next}`) as HTMLElement | null)?.focus();
   };
   return (
-    <aside className="sidebar">
+    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar" : "sidebar sidebar-standard"}>
       <div className="sidebar-drag" data-tauri-drag-region>
         {previewControls && (
           <span className="traffic-lights" aria-hidden="true">
@@ -1282,7 +1274,7 @@ function MacMenuBar({ protected: isProtected, trayOpen, onTray }: { protected: b
         <span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span>
       </div>
       <div className="mac-menu-right">
-        <Button variant="ghost" className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Gateway menu" aria-expanded={trayOpen} onClick={onTray}>
+        <Button variant="ghost" className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Proxy menu" aria-expanded={trayOpen} onClick={onTray}>
           <span className={`tray-template-icon${isProtected ? " is-protected" : ""}`} aria-hidden="true" />
         </Button>
         <Wifi size={15} strokeWidth={1.8} aria-hidden="true" />
@@ -1326,7 +1318,7 @@ function PreviewTrayMenu({
   const action = verifying ? "Cancel verification" : running ? "Stop protection"
     : profileIsAvailable(activeProfile, state) ? "Start protection" : "Set Up Profile…";
   return (
-    <div className="preview-tray" role="menu" aria-label="Private AI Gateway">
+    <div className="preview-tray" role="menu" aria-label="Private AI Proxy">
       <div className="preview-tray-heading">
         <BrandMark />
         <span><strong>{brand.productName}</strong><small>{serviceHost(state.remoteUrl ?? state.config.remoteUrl)}</small></span>
@@ -2146,12 +2138,12 @@ function CliRegistrationControl(): React.JSX.Element {
     ?? registration?.startupError
     ?? (registration?.installed
       ? registration.onPath
-        ? `Installed at ${directory}. This app can resolve pag; terminal PATH may differ.`
+        ? `Installed at ${directory}. This app can resolve pap; terminal PATH may differ.`
         : `Installed at ${directory}. Ensure this directory is in your terminal PATH.`
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.");
   return <Item>
     <ItemContent>
-      <ItemTitle>pag command</ItemTitle>
+      <ItemTitle>pap command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
     </ItemContent>
     <ItemActions>
@@ -2887,9 +2879,9 @@ function errorMessage(error: unknown): string {
 
 function NativeWindowContent(): React.JSX.Element | null {
   const nativeDialog = query.get("native-dialog");
-  const [request, setRequest] = useState<{ state?: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null } | null>(() => ({
+  const [request, setRequest] = useState<{ state?: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean } | null>(() => ({
     state: initialGatewayState, repair: query.get("repair") === "1",
-    recordId: query.get("record"), profileId: query.get("profile"),
+    recordId: query.get("record"), profileId: query.get("profile"), startAfterSave: query.get("start") === "1",
   }));
   const [generation, setGeneration] = useState(0);
   useEffect(() => {
@@ -2906,7 +2898,7 @@ function NativeWindowContent(): React.JSX.Element | null {
     : nativeDialog === "update-progress" ? <NativeUpdateProgressWindow />
     : nativeDialog === "local-api-example" ? <NativeLocalApiExampleWindow />
     : nativeDialog === "notifications" ? <NativeNotificationsWindow />
-    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor profileId={request.profileId} />
+    : nativeDialog === "profile-editor" ? <NativeProfilesWindow repair={false} editor profileId={request.profileId} startAfterSave={request.startAfterSave} />
     : nativeDialog === "privacy" ? <NativePrivacyWindow />
       : nativeDialog === "local-api" ? <NativeLocalApiWindow />
         : nativeDialog === "usage-proof" ? <NativeUsageProofWindow initialRecordId={request.recordId ?? ""} />

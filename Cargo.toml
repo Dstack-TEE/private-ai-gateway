@@ -13,7 +13,16 @@ path = "src/lib.rs"
 name = "private-ai-gateway"
 path = "src/main.rs"
 
+[[bin]]
+name = "pap"
+path = "src/bin/pap/main.rs"
+required-features = ["desktop-client"]
+
+[features]
+desktop-client = ["dep:desktop_runtime"]
+
 [dependencies]
+desktop_runtime = { package = "private-ai-gateway-desktop-runtime", path = "apps/desktop/runtime", optional = true }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

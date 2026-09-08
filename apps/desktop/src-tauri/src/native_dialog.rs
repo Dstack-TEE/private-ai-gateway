@@ -94,7 +94,7 @@ pub fn open(
             min_height: 240.0,
             query: "index.html?native-dialog=update-progress".to_string(),
         },
-        "profile-editor" => DialogSpec {
+        "profile-editor" | "setup-profile" => DialogSpec {
             label: PROFILE_EDITOR_LABEL,
             title: if profile_id.is_some() {
                 "Edit Profile"
@@ -106,8 +106,9 @@ pub fn open(
             min_width: 520.0,
             min_height: 460.0,
             query: format!(
-                "index.html?native-dialog=profile-editor&profile={}",
-                encode_query_component(profile_id.unwrap_or_default())
+                "index.html?native-dialog=profile-editor&profile={}&start={}",
+                encode_query_component(profile_id.unwrap_or_default()),
+                u8::from(kind == "setup-profile")
             ),
         },
         "profiles" => DialogSpec {
@@ -190,7 +191,7 @@ pub fn open(
                 .clone();
             let request = serde_json::json!({
                 "state": state, "repair": repair,
-                "recordId": record_id, "profileId": profile_id
+                "recordId": record_id, "profileId": profile_id, "startAfterSave": kind == "setup-profile"
             });
             if let Err(error) = window.emit_to(window.label(), "gateway://dialog-open", request) {
                 let _ = window.destroy();

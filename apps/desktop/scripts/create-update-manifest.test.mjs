@@ -34,6 +34,15 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
       assert.equal((await readFile(path.join(directory, `${filename}.sig`), "utf8")).trim(), entry.signature);
     }
     assert.equal(manifest.platforms["darwin-aarch64"].signature, "test-signature");
+    await writeFile(path.join(directory, "duplicate-app.zip"), "duplicate");
+    await writeFile(path.join(directory, "private-ai-gateway-cli-0.1.2-linux-x64.tar.gz"), "cli archive");
+    const selected = (await promisify(execFile)(process.execPath, ["scripts/release-assets.mjs", directory])).stdout.split("\0").filter(Boolean).map((file) => path.basename(file));
+    for (const entry of Object.values(manifest.platforms)) {
+      assert.ok(selected.includes(path.basename(new URL(entry.url).pathname)));
+    }
+    assert.ok(selected.includes("private-ai-gateway-cli-0.1.2-linux-x64.tar.gz"));
+    assert.ok(selected.includes("SHA256SUMS"));
+    assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip" || file.startsWith("private-ai-gateway-cli_")));
     await rm(path.join(directory, `linux-x86_64-rpm-${version}.rpm.sig`));
     await assert.rejects(run);
   } finally {

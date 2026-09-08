@@ -145,7 +145,7 @@ impl Backend {
         fs::copy(env!("CARGO_BIN_EXE_pag"), binary("pag")).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_pag-service"), binary("pag-service")).unwrap();
         // These must exist for bundle validation but no test starts inference.
-        fs::copy(env!("CARGO_BIN_EXE_pag"), binary("aci")).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_pag"), binary("pap")).unwrap();
         fs::copy(
             env!("CARGO_BIN_EXE_pag"),
             binary("private-ai-gateway-helper"),
@@ -397,7 +397,7 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
     let home = backend.directory.path().join("diagnostic-home");
     let command_dir = home.join(".local/bin");
     fs::create_dir_all(&command_dir).unwrap();
-    fs::write(command_dir.join("pag"), "unrelated command").unwrap();
+    fs::write(command_dir.join("pap"), "unrelated command").unwrap();
     let diagnostic = backend
         .command(&["doctor", "--json"])
         .env("HOME", &home)

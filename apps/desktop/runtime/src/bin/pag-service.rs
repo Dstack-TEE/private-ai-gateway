@@ -36,7 +36,7 @@ async fn run() -> Result<(), String> {
             name.to_string()
         }
     };
-    let launcher = Arc::new(TokioSidecarLauncher::new(directory.join(name("aci")))?);
+    let launcher = Arc::new(TokioSidecarLauncher::new(directory.join(name("pap")))?);
     let options = RuntimeOptions {
         launcher,
         helper_path: directory.join(name("private-ai-gateway-helper")),

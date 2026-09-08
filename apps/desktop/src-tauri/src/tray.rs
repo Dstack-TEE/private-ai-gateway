@@ -296,7 +296,12 @@ fn toggle_or_open_settings(app: &AppHandle) {
         if !should_stop(&state) && !active_profile_ready(&state) {
             sync(&app, &state);
             show_window(&app);
-            if let Err(error) = crate::native_dialog::open_profiles(&app, true) {
+            let opened = if state.profiles.is_empty() {
+                crate::native_dialog::open(&app, "setup-profile", false, None, None)
+            } else {
+                crate::native_dialog::open_profiles(&app, true)
+            };
+            if let Err(error) = opened {
                 client.report_error(error);
             }
             return;

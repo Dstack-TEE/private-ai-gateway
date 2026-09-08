@@ -344,12 +344,12 @@ export function mockApi(name: string | null): DesktopApi {
   const claude = () => agents.find((agent) => agent.id === "claude-code") ?? CLAUDE_OFF;
   let launchPreferences = { openAtLogin: false, connectOnLaunch: false };
   let cliRegistration: CliRegistration = {
-    executable: "/Applications/Private AI Gateway.app/Contents/MacOS/pag",
-    commandPath: "/Users/dev/.local/bin/pag",
+    executable: "/Applications/Private AI Proxy.app/Contents/MacOS/pap",
+    commandPath: "/Users/dev/.local/bin/pap",
     installed: false,
     onPath: false,
     ...(name === "cli-startup-error" ? {
-      startupError: "Command-line registration failed: Move Private AI Gateway to a stable location before registering pag",
+      startupError: "Command-line registration failed: Move Private AI Proxy to a stable location before registering pap",
     } : {}),
   };
   let updateChannel: "beta" | "stable" = "stable";
@@ -717,7 +717,7 @@ export function mockApi(name: string | null): DesktopApi {
         revision: "mock",
         note: connect
           ? `${agent.name} uses the selected verified model through the local gateway with a machine-local token.`
-          : "Only fields written by Private AI Gateway are restored; the agent's local token is revoked.",
+          : "Only fields written by Private AI Proxy are restored; the agent's local token is revoked.",
         changes: connect
           ? [
               { key: agentId === "codex" ? "model_providers.private_ai_gateway.base_url" : "env.ANTHROPIC_BASE_URL", before: null, after: "http://127.0.0.1:4180", sensitive: false },

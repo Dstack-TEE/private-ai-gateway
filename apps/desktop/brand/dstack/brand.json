@@ -1,7 +1,7 @@
 {
   "id": "dstack",
-  "productName": "Private AI Gateway",
-  "shortName": "Gateway",
+  "productName": "Private AI Proxy",
+  "shortName": "Proxy",
   "organizationName": "Dstack TEE",
   "tagline": "The open framework for confidential AI",
   "homepageUrl": "https://dstack.org",
@@ -14,16 +14,16 @@
   "bundle": {
     "identifier": "org.dstack.private-ai-gateway",
     "category": "DeveloperTool",
-    "shortDescription": "Verified local AI gateway",
+    "shortDescription": "Verified local AI proxy",
     "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."
   },
   "theme": {
     "accentLight": "#2c6e49",
     "accentDark": "#7fd3a2",
     "brandColor": "#C6EB3D",
-    "iconBackground": "#101C18",
+    "iconBackground": "#0B211A",
     "iconGlass": true,
-    "iconForeground": "#f2f3f5",
+    "iconForeground": "#D5E6DB",
     "markLight": "#303236",
     "markDark": "#e8e9eb"
   },

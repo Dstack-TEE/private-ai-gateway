@@ -119,9 +119,9 @@ test("CLI startup errors remain visible until a successful retry", async ({ page
   await nav(page, "Settings").click();
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
   const cli = page.locator(".settings-advanced");
-  await expect(cli).toContainText("Move Private AI Gateway to a stable location");
+  await expect(cli).toContainText("Move Private AI Proxy to a stable location");
   await cli.getByRole("button", { name: "Install", exact: true }).click();
-  await expect(cli).not.toContainText("Move Private AI Gateway to a stable location");
+  await expect(cli).not.toContainText("Move Private AI Proxy to a stable location");
   await expect(cli.getByRole("button", { name: "Remove", exact: true })).toBeVisible();
 });
 
@@ -446,11 +446,11 @@ test("public preview frames the Tauri renderer as a macOS window and exposes the
   expect(frameBox!.width).toBeLessThan(1100);
   await expect(page.locator(".traffic-lights > span")).toHaveCount(3);
 
-  await page.getByRole("button", { name: "Private AI Gateway menu" }).click();
-  const tray = page.getByRole("menu", { name: "Private AI Gateway" });
+  await page.getByRole("button", { name: "Private AI Proxy menu" }).click();
+  const tray = page.getByRole("menu", { name: "Private AI Proxy" });
   await expect(tray.getByRole("switch")).toHaveCount(0);
   await expect(tray.getByRole("menuitem", { name: "Stop protection" })).toBeVisible();
-  for (const name of ["Open Private AI Gateway", "Settings…", "Quit Private AI Gateway"]) {
+  for (const name of ["Open Private AI Proxy", "Settings…", "Quit Private AI Proxy"]) {
     await expect(tray.getByRole("menuitem", { name })).toBeVisible();
   }
   const openAtLogin = tray.getByRole("menuitemcheckbox", { name: "Open at Login" });
@@ -1055,24 +1055,23 @@ test("protection flow, page headers, and focus follow the native desktop contrac
   await page.setViewportSize({ width: 940, height: 720 });
   await page.goto("/?mock=no-profiles");
 
-  await expect(page).toHaveTitle("Private AI Gateway");
+  await expect(page).toHaveTitle("Private AI Proxy");
   await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
   await expect(page.locator(".status-heading")).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
   let editor = page.getByRole("dialog", { name: "New profile" });
-  await expect(editor).toBeVisible();
-  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
-  await editor.getByRole("button", { name: "Cancel" }).click();
+  await expect(editor).toHaveCount(0);
   await page.getByRole("switch", { name: "Start protection" }).click();
   editor = page.getByRole("dialog", { name: "New profile" });
   await expect(editor).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Phala" })).toHaveAttribute("aria-pressed", "true");
   await editor.getByLabel("Phala AI API key").fill("sk-test-123");
   await editor.getByRole("button", { name: "Verify and Save" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "Profiles" })).toHaveCount(0);
 
-  await expect(page.getByLabel("Protection status").getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.getByRole("switch", { name: "Start protection" })).toBeVisible();
+  await expect(page.getByLabel("Protection status").getByText("Protected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
 
   await nav(page, "Overview").focus();
   await page.keyboard.press("ArrowDown");
@@ -1082,8 +1081,7 @@ test("protection flow, page headers, and focus follow the native desktop contrac
 
   await nav(page, "Settings").click();
   await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeFocused();
-  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toContainText("Ready");
-  await page.getByRole("switch", { name: "Start protection" }).click();
+  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toContainText("Protected");
   await expect(page.getByRole("switch", { name: "Stop protection" })).toBeVisible();
 
   await nav(page, "Overview").click();

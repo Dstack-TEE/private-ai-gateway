@@ -17,7 +17,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const binaries = ["pag", "pag-service", "aci", "private-ai-gateway-helper"];
+export const binaries = ["pap", "pag", "pag-service", "private-ai-gateway-helper"];
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -66,13 +66,14 @@ export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
     await chmod(target, 0o755);
   }
   await symlink("../libexec/private-ai-gateway/pag", path.join(bin, "pag"));
+  await symlink("../libexec/private-ai-gateway/pap", path.join(bin, "pap"));
 }
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   await mkdir(options.output, { recursive: true });
   const scratch = await mkdtemp(path.join(options.output, ".pag-cli-"));
-  const artifactBase = `private-ai-gateway-cli-${options.version}-${options.platform}-${options.arch}`;
+  const artifactBase = `private-ai-proxy-cli-${options.version}-${options.platform}-${options.arch}`;
   const portable = path.join(scratch, artifactBase);
   const artifacts = [];
 
@@ -186,7 +187,7 @@ async function createRpm(options, scratch, portable) {
   const spec = path.join(specs, "private-ai-gateway-cli.spec");
   await writeFile(
     spec,
-    `Name: private-ai-gateway-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Gateway command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Gateway CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-gateway %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/pag %{buildroot}/usr/libexec/private-ai-gateway/pag\ninstall -m 0755 %{_sourcedir}/pag-service %{buildroot}/usr/libexec/private-ai-gateway/pag-service\ninstall -m 0755 %{_sourcedir}/aci %{buildroot}/usr/libexec/private-ai-gateway/aci\ninstall -m 0755 %{_sourcedir}/private-ai-gateway-helper %{buildroot}/usr/libexec/private-ai-gateway/private-ai-gateway-helper\nln -s ../libexec/private-ai-gateway/pag %{buildroot}/usr/bin/pag\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/pag\n/usr/libexec/private-ai-gateway/aci\n/usr/libexec/private-ai-gateway/pag\n/usr/libexec/private-ai-gateway/pag-service\n/usr/libexec/private-ai-gateway/private-ai-gateway-helper\n`,
+    `Name: private-ai-gateway-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Gateway command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Gateway CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-gateway %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/pag %{buildroot}/usr/libexec/private-ai-gateway/pag\ninstall -m 0755 %{_sourcedir}/pag-service %{buildroot}/usr/libexec/private-ai-gateway/pag-service\ninstall -m 0755 %{_sourcedir}/pap %{buildroot}/usr/libexec/private-ai-gateway/pap\ninstall -m 0755 %{_sourcedir}/private-ai-gateway-helper %{buildroot}/usr/libexec/private-ai-gateway/private-ai-gateway-helper\nln -s ../libexec/private-ai-gateway/pag %{buildroot}/usr/bin/pag\nln -s ../libexec/private-ai-gateway/pap %{buildroot}/usr/bin/pap\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/pap\n/usr/bin/pag\n/usr/libexec/private-ai-gateway/pap\n/usr/libexec/private-ai-gateway/pag\n/usr/libexec/private-ai-gateway/pag-service\n/usr/libexec/private-ai-gateway/private-ai-gateway-helper\n`,
   );
   execFileSync("rpmbuild", ["-bb", "--define", `_topdir ${topDir}`, "--target", architecture, spec], {
     stdio: "inherit",
