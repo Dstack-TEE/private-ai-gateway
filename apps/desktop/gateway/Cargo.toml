@@ -29,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 shlex = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
 yaml-edit = { version = "0.3.1", default-features = false }
