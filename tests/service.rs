@@ -302,18 +302,21 @@ async fn verified_upstream_binding_creates_attested_session() {
     );
 }
 
+/// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
+/// changes every round even when an instance's own material does not. That
+/// bundle must stay out of the per-instance session: sealing it in mints a
+/// fresh session per instance per round, so the store grows without bound
+/// relative to the live set.
 #[tokio::test]
-async fn chutes_instance_session_retains_verification_evidence() {
+async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
-    let evidence_data = "data:application/json;base64,YWJj";
-    let evidence_digest = private_ai_gateway::aci::digest::sha256_hex(b"abc");
-    let event = UpstreamVerifiedEvent {
+    let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": evidence_digest,
-            "data": evidence_data,
+            "digest": private_ai_gateway::aci::digest::sha256_hex(round.as_bytes()),
+            "data": format!("data:application/json;base64,{}", round),
         })),
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),
@@ -323,28 +326,43 @@ async fn chutes_instance_session_retains_verification_evidence() {
         }],
         ..verified_event("stub-upstream", "x")
     };
+    let session_for = |result: &private_ai_gateway::aggregator::service::ForwardResult| {
+        payload_event(&result.receipt, "upstream.verified")["session_id"]
+            .as_str()
+            .expect("verified Chutes binding should produce a session id")
+            .to_string()
+    };
 
-    let result = svc
-        .forward_chat_completion(br#"{"model":"x","messages":[]}"#, None, false, Some(event))
+    let first = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            false,
+            Some(chutes_event("YWJj")),
+        )
         .await
         .unwrap();
-    let session_id = payload_event(&result.receipt, "upstream.verified")["session_id"]
-        .as_str()
-        .expect("verified Chutes binding should produce a session id")
-        .to_string();
+    let second = svc
+        .forward_chat_completion(
+            br#"{"model":"x","messages":[]}"#,
+            None,
+            false,
+            Some(chutes_event("ZGVm")),
+        )
+        .await
+        .unwrap();
+
+    let session_id = session_for(&first);
+    assert_eq!(
+        session_for(&second),
+        session_id,
+        "a new evidence round must resolve to the existing instance session"
+    );
     let session = svc
         .get_attested_session(&session_id)
         .expect("Chutes session should be queryable");
-
-    assert_eq!(
-        session.document().evidence.digest.as_deref(),
-        Some(evidence_digest.as_str())
-    );
-    assert_eq!(
-        session.document().evidence.data_uri.as_deref(),
-        Some(evidence_data)
-    );
-    assert!(session.document().evidence.digest_matches_data());
+    assert!(session.document().evidence.digest.is_none());
+    assert!(session.document().evidence.data_uri.is_none());
 }
 
 #[tokio::test]
