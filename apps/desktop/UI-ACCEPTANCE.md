@@ -25,12 +25,17 @@ runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
   tests passed, including stable Chutes sessions across evidence rounds.
 - The two tenant identity compatibility tests passed. Shared runtime validation:
   45 passed, two installation-dependent tests ignored.
+- Candidate `476e448` passed all three native jobs, renderer and Rust checks in
+  https://github.com/Dstack-TEE/private-ai-gateway/actions/runs/34190041787.
+  The new macOS package passed Developer ID signing, notarization, backend tests
+  and package inspection. This run produced test artifacts without publishing a
+  release or advancing an update channel.
 
 Stable acceptance remains open for the new candidate:
 
 | Required evidence | Current status |
 | --- | --- |
-| Fresh native builds after the main merge and timeout fix | Pending |
+| Fresh native builds after the main merge and timeout fix | Passed for `476e448`; see the run above |
 | Installed beta.18 to beta.19 upgrade, restart and profile preservation | Requires a real installed-app test |
 | Sleep/wake, login launch, notification permission denial/regrant, forced exit and recovery | Requires native platform acceptance |
 | Windows Authenticode installer/executable signing | Not configured in the current workflow; Tauri update signatures do not satisfy this |
