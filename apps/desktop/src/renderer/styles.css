@@ -234,7 +234,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .row-main { min-width: 0; flex: 1 1 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
 .row-title-line { max-width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .row-chevron { flex: 0 0 auto; color: var(--text-tertiary); }
-.row-title { font-weight: 600; }
+.row-title { font-weight: 500; }
 .row-note { flex: 1 0 100%; display: block; color: var(--text-secondary); font-size: var(--font-caption); line-height: var(--text-xs--line-height); overflow-wrap: anywhere; }
 .row-note code, code.row-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-side { flex: 0 0 auto; color: var(--text-secondary); font-size: var(--font-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -397,7 +397,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
   .usage-row .usage-amount { width: 52px; }
 }
 .usage-amount { width: 74px; flex: 0 0 auto; display: grid; justify-items: end; font-variant-numeric: tabular-nums; }
-.usage-amount strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-amount strong { max-width: 100%; overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .usage-amount small { color: var(--text-tertiary); font-size: var(--font-caption); }
 .pagination { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; }
 .pagination > span { min-width: 128px; color: var(--text-secondary); text-align: center; }
