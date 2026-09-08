@@ -7,7 +7,7 @@ if [ ! -e "$pag" ] && [ ! -L "$pag" ]; then
 fi
 
 owner=$(rpm -qf --qf '%{NAME}\n' "$pag" 2>/dev/null || true)
-if [ "$owner" != "private-ai-gateway" ] && [ "$owner" != "private-ai-proxy" ]; then
+if [ "$owner" != "@PACKAGE_NAME@" ] && [ "$owner" != "private-ai-gateway" ]; then
   echo "Refusing to replace unrelated $pag${owner:+ owned by $owner}." >&2
   exit 1
 fi
