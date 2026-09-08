@@ -145,8 +145,16 @@ impl Backend {
         };
         fs::copy(env!("CARGO_BIN_EXE_pap"), binary("pap")).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_pap-service"), binary("pap-service")).unwrap();
-        // The helper must exist for bundle validation; no test starts inference.
-        fs::copy(env!("CARGO_BIN_EXE_pap"), binary("private-ai-proxy-helper")).unwrap();
+        // No test requests agent credentials. Keep this unused helper tiny:
+        // startup durably stages it, so copying a debug CLI would fsync hundreds
+        // of megabytes per backend before its management endpoint becomes ready.
+        let helper = binary("private-ai-proxy-helper");
+        fs::write(&helper, b"#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let home = directory.path().join("home");
         let data = home.join(".private-ai-proxy");
         desktop_gateway::tokens::create_private_dir(&data).unwrap();
@@ -164,7 +172,7 @@ impl Backend {
             .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
             .spawn()
             .unwrap();
         let mut backend = Self { directory, child };
@@ -179,12 +187,26 @@ impl Backend {
             }
             assert!(
                 backend.child.try_wait().unwrap().is_none(),
-                "Backend exited during startup"
+                "Backend exited during startup: {}",
+                backend.startup_diagnostics(&output)
             );
-            assert!(Instant::now() < deadline, "Backend readiness timed out");
+            assert!(
+                Instant::now() < deadline,
+                "Backend readiness timed out: {}",
+                backend.startup_diagnostics(&output)
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         backend
+    }
+    fn startup_diagnostics(&self, output: &Output) -> String {
+        format!(
+            "status: {}; stdout: {}; stderr: {}; backend: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(self.directory.path().join("backend.log")).unwrap()
+        )
     }
     fn cli(&self) -> PathBuf {
         self.directory
