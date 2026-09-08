@@ -34,6 +34,10 @@ Tauri's `darwin-aarch64` and `darwin-x86_64` updater entries reference the same
 signed Universal archive. CI shares one Cargo target directory across the
 manifests, uses the same distribution entry point as local builds, and avoids
 generating a redundant desktop ZIP.
+GitHub's official cache restore/save actions cache registry sources and Cargo
+dependency/build/fingerprint directories across all manifests. Cache keys cover
+the toolchain and all four manifests and lockfiles; final bundles are excluded.
+Failed builds save a separate partial key so they cannot replace a complete cache.
 
 Launching with no profiles stays on Overview. Starting protection without a
 profile opens New Profile and resumes protection after successful verification
