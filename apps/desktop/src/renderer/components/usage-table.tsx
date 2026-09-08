@@ -4,7 +4,7 @@ import type { RequestActivity } from "../../shared/contracts";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { StateLabel } from "./state-label";
 import { Button } from "./ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { Hint } from "./hint";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 const features = tableFeatures({ rowPaginationFeature });
@@ -12,16 +12,11 @@ const features = tableFeatures({ rowPaginationFeature });
 function TokenDetails({ item }: { item: RequestActivity }) {
   const total = usageTokens(item);
   const counts = [["Input", item.inputTokens], ["Output", item.outputTokens], ["Cache read", item.cacheReadTokens], ["Cache write", item.cacheWriteTokens]] as const;
-  return <Popover>
-    <PopoverTrigger render={<Button variant="ghost" size="sm" className="h-auto px-0 tabular-nums underline decoration-dotted underline-offset-4" aria-label="Token details" title="Token details" />}>
-      {total === undefined ? "—" : formatTokens(total)}
-    </PopoverTrigger>
-    <PopoverContent align="end" aria-label="Token details">
-      <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm tabular-nums">
-        {counts.map(([label, count]) => <div key={label} className="contents"><dt className="text-muted-foreground">{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
+  return <Hint content={
+      <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
+        {counts.map(([label, count]) => <div key={label} className="contents"><dt>{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
       </dl>
-    </PopoverContent>
-  </Popover>;
+  }><span tabIndex={0} aria-label="Token details" className="tabular-nums underline decoration-dotted underline-offset-4">{total === undefined ? "—" : formatTokens(total)}</span></Hint>;
 }
 
 export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspect }: {
@@ -30,10 +25,10 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
   const columns = useMemo<ColumnDef<typeof features, RequestActivity>[]>(() => [
     { id: "time", header: "Time", cell: ({ row }) => {
       const date = new Date(row.original.at * 1000);
-      return <time dateTime={date.toISOString()} title={date.toLocaleString()} className="block tabular-nums"><span className="block">{date.toLocaleTimeString()}</span><span className="block text-xs text-muted-foreground">{date.toLocaleDateString()}</span></time>;
+      return <Hint content={date.toLocaleString()}><time dateTime={date.toISOString()} className="block tabular-nums"><span className="block">{date.toLocaleTimeString()}</span><span className="block text-xs text-muted-foreground">{date.toLocaleDateString()}</span></time></Hint>;
     } },
     { id: "agent", header: "Agent", cell: ({ row }) => <Button variant="link" className="h-auto p-0 text-left" onClick={() => onInspect(row.original)} aria-label={`${agentName(row.original.agent)}, ${outcomeOf(row.original).label}, ${row.original.model ?? row.original.path}. View proof`}>{agentName(row.original.agent)}</Button> },
-    { accessorKey: "model", header: "Model", cell: ({ row }) => <span className="block max-w-48 truncate font-mono text-xs" title={row.original.model ?? row.original.path}>{row.original.model ?? row.original.path}</span> },
+    { accessorKey: "model", header: "Model", cell: ({ row }) => <Hint content={row.original.model ?? row.original.path}><span className="block max-w-48 truncate font-mono text-xs">{row.original.model ?? row.original.path}</span></Hint> },
     { id: "tokens", header: "Tokens", cell: ({ row }) => <TokenDetails item={row.original} /> },
     { accessorKey: "costUsd", header: "Cost", cell: ({ row }) => <span className="block text-right tabular-nums">{row.original.costUsd === undefined ? "—" : currency(row.original.costUsd)}</span> },
     { id: "outcome", header: "Result", cell: ({ row }) => { const outcome = outcomeOf(row.original); return <StateLabel tone={outcome.tone} icon={outcome.icon} text={outcome.label} />; } },

@@ -614,6 +614,34 @@ test("agent attention badges expose the correct recovery action", async ({ page 
   await expect(page.getByRole("button", { name: "OpenCode: Finish disconnecting" })).toHaveCount(0);
 });
 
+test("local rejections explain why token usage is not applicable", async ({ page }) => {
+  await page.goto("/?mock=ready&native-dialog=usage-proof&record=local01");
+  const missing = page.getByText("Not applicable", { exact: true });
+  await expect(missing).toHaveCount(2);
+  await missing.first().focus();
+  await expect(page.getByRole("tooltip")).toContainText("blocked locally before forwarding");
+});
+
+test("help uses hover and focus tooltips in the main window and native dialogs", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  const privacy = page.getByRole("button", { name: "Privacy verification", exact: true });
+  await privacy.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Privacy verification");
+  await expect(privacy).not.toHaveAttribute("title");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await privacy.click();
+  await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
+  await page.goto("/?mock=ready&native-dialog=local-api");
+  const reveal = page.getByRole("button", { name: "Reveal client key", exact: true });
+  await reveal.focus();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("Reveal client key");
+  expect(await tooltip.evaluate((node) => Boolean(node.closest("dialog")))).toBe(true);
+  await reveal.click();
+  await expect(page.getByLabel("Client key", { exact: true })).toHaveAttribute("type", "text");
+});
+
 test("overview profile and setup controls share compact dimensions", async ({ page }) => {
   for (const scenario of ["ready", "no-profiles"]) {
     await page.goto(`/?mock=${scenario}`);
@@ -627,7 +655,7 @@ test("overview profile and setup controls share compact dimensions", async ({ pa
     expect(toggle).not.toBeNull();
     expect(toggle?.y).toBeLessThan(bounds?.y ?? 0);
     expect(toggle?.x).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0));
-    await expect(card.locator(".status-background-mark")).toHaveCSS("width", "128px");
+    await expect(card.locator(".status-background-mark")).toHaveCount(0);
   }
 });
 
@@ -1150,8 +1178,8 @@ test("success colors, list separators, control sizes and About alignment are con
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
     await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
     await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
     await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "120px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
@@ -1269,8 +1297,8 @@ test("model stacks render under production-style CSP without dynamic style tags"
   const picker = page.getByRole("dialog", { name: "Choose date range" });
   await expect(picker.locator('[data-slot="calendar"]')).toBeVisible();
   await picker.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByRole("table", { name: "Usage history", exact: true }).getByRole("button", { name: "Token details", exact: true }).first().click();
-  await expect(page.getByRole("dialog", { name: "Token details", exact: true })).toBeVisible();
+  await page.getByRole("table", { name: "Usage history", exact: true }).getByLabel("Token details", { exact: true }).first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("Cache read");
 });
 
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
@@ -1357,8 +1385,8 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   const history = page.getByRole("table", { name: "Usage history", exact: true });
   await expect(history.locator("tbody tr")).toHaveCount(20);
   await expect(history.getByRole("columnheader")).toHaveText(["Time", "Agent", "Model", "Tokens", "Cost", "Result"]);
-  await history.getByRole("button", { name: "Token details", exact: true }).first().click();
-  await expect(page.getByRole("dialog", { name: "Token details", exact: true })).toContainText("Cache read");
+  await history.getByLabel("Token details", { exact: true }).first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("Cache read");
   await page.keyboard.press("Escape");
   await choose(page, page.getByRole("combobox", { name: "Rows per page" }), "50");
   await expect(history.locator("tbody tr")).not.toHaveCount(20);
@@ -1463,11 +1491,12 @@ test("overview presents local availability and the active profile without sessio
     const profile = node.querySelector(".status-profile")?.getBoundingClientRect();
     const toggle = node.querySelector('[role="switch"]')?.getBoundingClientRect();
     const heading = node.querySelector(".status-heading")?.getBoundingClientRect();
-    return { leftEdges: [heading?.left, verified?.left, profile?.left], positions: [toggle?.top ?? 0, verified?.top ?? 0, profile?.top ?? 0] };
+    return { leftEdges: [heading?.left, profile?.left], positions: [toggle?.top ?? 0, profile?.top ?? 0], bottomEdges: [verified?.bottom, profile?.bottom], infoGap: (verified?.left ?? 0) - (profile?.right ?? 0) };
   });
   expect(new Set(alignment.leftEdges).size).toBe(1);
   expect(alignment.positions[0]).toBeLessThan(alignment.positions[1]);
-  expect(alignment.positions[1]).toBeLessThan(alignment.positions[2]);
+  expect(new Set(alignment.bottomEdges).size).toBe(1);
+  expect(alignment.infoGap).toBe(8);
   await status.getByRole("button", { name: "Privacy verification", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
   await page.getByRole("dialog", { name: "Privacy verification" }).getByRole("button", { name: "Done", exact: true }).click();

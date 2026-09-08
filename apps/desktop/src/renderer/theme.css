@@ -85,9 +85,9 @@
   --chart-10: var(--color-indigo-500);
 
   /* Existing page names alias standard theme tokens, not a second palette. */
-  --font-title: 17px;
-  --font-body: 14px;
-  --font-caption: 13px;
+  --font-title: var(--text-lg);
+  --font-body: var(--text-sm);
+  --font-caption: var(--text-xs);
   --sidebar-width: 196px;
   --text: var(--foreground);
   --text-secondary: var(--muted-foreground);

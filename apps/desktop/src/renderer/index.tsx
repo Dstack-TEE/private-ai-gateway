@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
+  Info,
   Copy,
   Download,
   Eye,
@@ -50,6 +51,8 @@ import { StateLabel } from "./components/state-label";
 import { LocalApiExamples } from "./components/local-api-examples";
 import { ListenAddress, localAddressKind } from "./components/listen-address";
 import { NetworkWarning } from "./components/network-warning";
+import { Hint } from "./components/hint";
+import { TooltipProvider } from "./components/ui/tooltip";
 import { AgentAttention } from "./components/agent-attention";
 import { AppearanceProvider, AppearanceControl, useAppearance } from "./components/appearance";
 import { NotificationsProvider, NotificationsSheet, useNotifications } from "./components/notifications";
@@ -206,7 +209,7 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
     <span className="protection-status">
       {active ? <ShieldCheck size={14} aria-hidden="true" /> : state.reconnecting ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{label}</span>
-      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`} title={`Session started ${formatTimestamp((since ?? 0) * 1_000, true)}`}>{elapsed}</time>}
+      {elapsed !== undefined && <Hint content={`Session started ${formatTimestamp((since ?? 0) * 1_000, true)}`}><time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time></Hint>}
     </span>
   );
 }
@@ -1257,9 +1260,9 @@ function Sidebar({
       </nav>
       </SidebarProvider>
       {updateAvailable && <div className="mt-auto pt-4">
-        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" title="Install update" onClick={onInstallUpdate}>
+        <Hint content="Install update"><Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" onClick={onInstallUpdate}>
           <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
-        </Badge>
+        </Badge></Hint>
       </div>}
     </aside>
   );
@@ -1464,7 +1467,7 @@ function Overview({
         </p>
       )}
       <div className="overview-grid">
-        <OverviewModule title="Local API" titleAdornment={<Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" title="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
+        <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
             endpointError={state.endpointError}
@@ -1537,17 +1540,18 @@ function StatusSurface({
   return (
     <section className={`status-surface status-compact status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer />
-      <span className="status-background-mark" aria-hidden="true" style={{ maskImage: `url("${brand.mark.light}")` }} />
       <div className="status-compact-content">
         <div className={`status-heading state-${verdict.tone}`}>
           <ProtectionStatus state={state} label={verdict.title} />
         </div>
-        <Button variant="outline" size="xs" className="status-privacy" aria-label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><ShieldCheck aria-hidden="true" />Privacy verification</Button>
-        <Button id="overview-profile" variant="outline" size="sm" className="status-profile" title={activeProfile?.name ?? "Set up profile"} aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
+        <div className="status-profile-actions">
+        <Hint content={activeProfile?.name ?? "Set up profile"}><Button id="overview-profile" variant="outline" size="sm" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
-        </Button>
+        </Button></Hint>
+        <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
+        </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
       </div>
     </section>
@@ -1616,7 +1620,7 @@ function ProtectedControl({
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
         tone="success"
-        size="default"
+        size={iconOnly && !compact ? "lg" : "default"}
         checked={checked}
         label={label}
         disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
@@ -1738,7 +1742,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
       </span>
       <span className="usage-amount"><strong>{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
-      <time className="row-side" dateTime={timestamp.toISOString()} title={formatTimestamp(timestamp.getTime(), true)}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
+      <Hint content={formatTimestamp(timestamp.getTime(), true)}><time className="row-side" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time></Hint>
     </ActionItem>
   );
 }
@@ -1827,7 +1831,7 @@ function AgentRow({
   const actionable = disconnecting || !agent.error;
   const note = agent.attention ?? agent.error;
   return (
-    <><Item size={compact ? "xs" : "default"} className="agent-block" title={agent.configPath}>
+    <><Item size={compact ? "xs" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
         <ItemTitle className="row-title-line flex-wrap">
@@ -1836,7 +1840,7 @@ function AgentRow({
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
             : <StateLabel tone={presence.tone} icon={presence.icon} text={presence.label} />}
         </ItemTitle>
-        {agent.installed && !compact && <ItemDescription title={agent.configPath}>{homePath(agent.configPath)}</ItemDescription>}
+        {agent.installed && !compact && <Hint content={agent.configPath}><ItemDescription>{homePath(agent.configPath)}</ItemDescription></Hint>}
       </ItemContent>
       <ItemActions>
       {agent.installed ? <SwitchControl
@@ -2071,8 +2075,8 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       <dt>Usage</dt>
       <dd>
         <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
-          <dt>Input tokens</dt><dd className="text-right">{activity.inputTokens?.toLocaleString() ?? "Not reported"}</dd>
-          <dt>Output tokens</dt><dd className="text-right">{activity.outputTokens?.toLocaleString() ?? "Not reported"}</dd>
+          <dt>Input tokens</dt><dd className="text-right">{activity.inputTokens?.toLocaleString() ?? <MissingUsage activity={activity} />}</dd>
+          <dt>Output tokens</dt><dd className="text-right">{activity.outputTokens?.toLocaleString() ?? <MissingUsage activity={activity} />}</dd>
           {activity.cacheReadTokens !== undefined && <><dt>Cache read</dt><dd className="text-right">{activity.cacheReadTokens.toLocaleString()}</dd></>}
           {activity.cacheWriteTokens !== undefined && <><dt>Cache write</dt><dd className="text-right">{activity.cacheWriteTokens.toLocaleString()}</dd></>}
           {activity.costUsd !== undefined && <><dt>Cost</dt><dd className="text-right">{currency(activity.costUsd)}</dd></>}
@@ -2375,7 +2379,7 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <Button type="button" variant="outline" size="icon-sm" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></Button>
+              <IconButton size="icon-sm" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></IconButton>
             </div>
           );
         })}
@@ -2490,17 +2494,17 @@ function ProfileEditorSheet({
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
         <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
-            <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name} title={service.url}>
+            <Hint key={service.id} content={service.url}><ToggleGroupItem value={service.id} className="service-preset" aria-label={service.name}>
               <ServiceLogo url={service.url} />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
-            </ToggleGroupItem>
+            </ToggleGroupItem></Hint>
           ))}
-          <ToggleGroupItem value="custom" className="service-preset" aria-label="Custom" title="Use another ACI endpoint">
+          <Hint content="Use another ACI endpoint"><ToggleGroupItem value="custom" className="service-preset" aria-label="Custom">
             <ServiceLogo url="custom://service" />
             <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
-          </ToggleGroupItem>
+          </ToggleGroupItem></Hint>
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
@@ -2611,7 +2615,7 @@ function LocalApiSheet({
           </Field>
           <Field>
             <FieldLabel className="min-h-5" htmlFor="local-port">Port</FieldLabel>
-            <Input id="local-port" title="1024–65535" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
+            <Hint content="Port: 1024–65535"><Input id="local-port" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} /></Hint>
           </Field>
           </div>
           <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
@@ -2623,9 +2627,9 @@ function LocalApiSheet({
             <InputGroup>
               <InputGroupInput id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
-                <InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} title={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton>
-                <InputGroupButton size="icon-xs" aria-label="Copy client key" title="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton>
-                <InputGroupButton size="icon-xs" aria-label="Rotate key" title="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton>
+                <Hint content={clientKeyVisible ? "Hide client key" : "Reveal client key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
+                <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
+                <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => void rotateKey()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>
             </InputGroup>
             {copied === "Client key" && <FieldDescription role="status">Copied</FieldDescription>}
@@ -2737,7 +2741,7 @@ function Detail({
   return (
     <div className={wide ? "wide" : undefined}>
       <span>{label}</span>
-      <strong className={mono ? "mono" : undefined} title={value}>{value}</strong>
+      <Hint content={value}><strong className={mono ? "mono" : undefined}>{value}</strong></Hint>
     </div>
   );
 }
@@ -2915,6 +2919,16 @@ function NativeWindowContent(): React.JSX.Element | null {
   return <NativeStateContext.Provider key={generation} value={request.state}><NotificationsProvider api={desktopApi}>{content}</NotificationsProvider></NativeStateContext.Provider>;
 }
 
+function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevice" | "path"> }) {
+  const notApplicable = !activity.leftDevice || activity.path === "/v1/messages/count_tokens";
+  const explanation = !activity.leftDevice
+    ? "This request was blocked locally before forwarding. There is no provider token usage to report."
+    : activity.path === "/v1/messages/count_tokens"
+      ? "This endpoint counts a prompt's tokens; it does not return an inference usage report."
+      : "No token count was recorded. The provider may omit usage, or the response may be incomplete or too large to capture. Missing counts are not estimated.";
+  return <Hint content={explanation}><span tabIndex={0} className="text-muted-foreground underline decoration-dotted underline-offset-4">{notApplicable ? "Not applicable" : "Unavailable"}</span></Hint>;
+}
+
 function WindowContent(): React.JSX.Element {
   return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App /></NotificationsProvider>;
 }
@@ -2922,5 +2936,5 @@ function WindowContent(): React.JSX.Element {
 export function Renderer(): React.JSX.Element {
   const [interactionError, setInteractionError] = useState("");
   useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider>;
+  return <TooltipProvider><AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider>;
 }

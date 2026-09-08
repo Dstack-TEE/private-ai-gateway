@@ -34,7 +34,8 @@ shadows or typography; choose from the official component variants instead.
 Component sources in `src/renderer/components/ui` were obtained from the official
 `https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
 Local changes are import paths and Lucide icon substitution.
-Protection controls use the default 44x20 switch geometry and Base UI behavior.
+The Overview protection control uses the existing 60x28 large switch variant;
+page headers retain the default 44x20 geometry. Both use Base UI behavior.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
 shadcn additions. Use these components for new standard controls; retain semantic
@@ -44,7 +45,13 @@ unknown/inactive, warning for caution states, destructive for errors, and chart 
 Primary remains reserved for commands and selection. The default Luma
 appearance is not an AppKit emulation: WebView content is still web content.
 
-Typography uses the platform system font. Sidebar selection uses standard weight
+Typography uses the platform system font and Tailwind typography tokens:
+text-xs for captions, text-sm for body/list text,
+text-lg for page/dialog headings, text-xl for metrics, and text-2xl for the
+Overview protection status. Product CSS uses these tokens instead of intermediate
+13/17/19/21px sizes. Unmodified upstream component-specific typography, such as
+Calendar's weekday labels, retains the shadcn default.
+Sidebar selection uses standard weight
 and fixed control geometry; this prevents control movement, not changes in glyph
 advance widths. CSS cannot add a variation axis missing from a font. Apple's
 SF Pro download inspected on 2026-09-07 (Version 22.0d4e4) exposes only
@@ -205,10 +212,37 @@ under the production CSP. Chart metric views use Tabs. Date filtering uses the
 official Calendar/Popover with local-day boundaries, presets and an explicit
 Apply/Cancel flow. Query, summary, chart and CSV share the same date bounds.
 Usage details use shadcn Table with TanStack Table v9 manual cursor pagination
-(20/50/100 rows), the shared outcome/number presentation, and token-detail popovers.
+(20/50/100 rows), the shared outcome/number presentation, and token-detail tooltips.
 Rows open the same proof dialog as Overview; no page-local sorting or unmeasured
 latency/throughput fields are exposed. Calendar, table and chart load lazily.
 The generated Calendar forwards its day-button ref to preserve keyboard focus.
+
+Short help uses the shared Hint composition of shadcn Tooltip, TooltipTrigger,
+and TooltipContent. The base-luma colors, spacing, radius, arrow, and animation
+are unchanged. Two integration adaptations remain: TooltipContent accepts a portal
+container for HTML dialogs, and composed triggers preserve the rendered control's
+data-slot rather than replacing a switch/badge slot with tooltip-trigger.
+Tooltips inside HTML dialogs portal into that dialog's top layer. Action menus
+and agent repair actions remain click-open Popovers; chart data uses ChartTooltip.
+Browser title attributes are not used for application help.
+
+| Surface | Hint content | Component / interaction |
+| --- | --- | --- |
+| Protection and preference switches | Current action or unavailable-endpoint reason | Tooltip, hover/focus |
+| Overview privacy info / Local API help | Dialog name | Tooltip; click opens the dialog |
+| Profile selector | Full profile name or setup label | Tooltip; click opens Profiles |
+| Session timer / usage timestamps | Full start time / date and time | Tooltip |
+| Edit, copy, reveal, rotate, export and other icon actions | Action name | Tooltip; click executes the action |
+| Sidebar update badge | Install update | Tooltip; click follows update confirmation |
+| Theme icon toggles | System / Light / Dark | Tooltip; click selects the theme |
+| Provider presets | Endpoint or custom-provider explanation | Tooltip; click selects the provider |
+| Agent configuration path / usage model / evidence values | Full text | Tooltip |
+| Local API port / non-loopback warning | Valid range / network exposure explanation | Tooltip |
+| Usage table token count | Input, output, cache counts | Tooltip, hover/focus |
+| Missing usage in proof | Why unavailable or not applicable | Tooltip, hover/focus |
+| Usage chart | Model and metric at the hovered date | shadcn ChartTooltip (Recharts) |
+| Agent attention badge | Explanation and repair command | Popover, click; includes an action |
+| Date-range picker | Calendar and Apply/Cancel | Popover, click; includes controls |
 
 Profile saves continue to verify the endpoint/key before persisting or
 reconnecting. No separate verified-configuration badge or credential-delete
@@ -517,7 +551,19 @@ protocol is the service's own response, shown as such.
   across app restarts, supports agent/model/time filters and cursor pagination,
   and deletes records only after explicit confirmation. CSV cells that could
   be interpreted as spreadsheet formulas are escaped. Token and cost fields
-  remain absent when the provider did not report them.
+  remain absent when no compatible usage was captured; missing counts are never
+  replaced by estimates or zero. Capture is bounded to 16 MiB per JSON response
+  or SSE line, matching the server's SSE line limit. Large output fields are
+  skipped during deserialization rather than copied into a second response tree.
+  Captured counts are published when the response body is dropped, including
+  downstream cancellation before EOF. Event delivery remains best-effort when
+  the activity queue is saturated. Oversized lines are discarded, not parsed
+  as valid truncated JSON. Response bytes and proof handling remain unchanged.
+  Local rejections and count_tokens requests without inference usage are marked
+  not applicable. Providers may omit streaming usage (Chat Completions commonly
+  requires stream_options.include_usage); the proxy does not rewrite requests to
+  add it. Old missing counts cannot be backfilled because response bodies are not
+  retained.
 - **The Local API client key** uses `sk-pag-` followed by 64 lowercase hex
   characters generated from 32 random bytes. Existing beta `pag_` keys remain
   valid so upgrades do not silently break configured clients; newly created or

@@ -31,7 +31,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -50,8 +50,9 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle limit between upstream bytes; matches Claude Code's stream watchdog.
 const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_USAGE_CAPTURE_BYTES: usize = 1024 * 1024;
-const MAX_SSE_LINE_BYTES: usize = 128 * 1024;
+// Match the gateway's SSE limit: Responses terminal events repeat the full output.
+const MAX_USAGE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SSE_LINE_BYTES: usize = MAX_USAGE_CAPTURE_BYTES;
 /// Attribution (the agent id) added on the way to the sidecar, which copies
 /// it into the receipt event and strips it before forwarding.
 pub const TAG_HEADER: &str = "x-aci-tag";
@@ -809,11 +810,36 @@ async fn forward(
     let event_model = model;
     let event_receipt_id = receipt_id;
     let body = async_stream::stream! {
-        let mut capture = UsageCapture::new(streamed);
+        let mut report = UsageReport {
+            capture: Some(UsageCapture::new(streamed)),
+            state: event_state,
+            event: ProxyEvent {
+                request_id: event_request_id,
+                session_id: event_session_id,
+                agent: Some(event_agent),
+                method: "POST".to_string(),
+                path: event_path,
+                model: event_model,
+                status,
+                streamed,
+                receipt_id: event_receipt_id,
+                verified: None,
+                detail: String::new(),
+                at: now_secs(),
+                locally_constrained: None,
+                rewritten: None,
+                left_device: true,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: None,
+            },
+        };
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    capture.push(&bytes);
+                    if let Some(capture) = &mut report.capture { capture.push(&bytes); }
                     yield Ok::<Bytes, reqwest::Error>(bytes);
                 }
                 Err(error) => {
@@ -822,29 +848,6 @@ async fn forward(
                 }
             }
         }
-        let usage = capture.finish();
-        event_state.emit(ProxyEvent {
-            request_id: event_request_id,
-            session_id: event_session_id,
-            agent: Some(event_agent),
-            method: "POST".to_string(),
-            path: event_path,
-            model: event_model,
-            status,
-            streamed,
-            receipt_id: event_receipt_id,
-            verified: None,
-            detail: String::new(),
-            at: now_secs(),
-            locally_constrained: None,
-            rewritten: None,
-            left_device: true,
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            cache_write_tokens: usage.cache_write_tokens,
-            cost_usd: usage.cost_usd,
-        });
     };
     builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
         error_response(
@@ -1024,6 +1027,28 @@ fn format_tag(request_id: &str, session_id: &str, agent: &str) -> String {
     format!("pag:{request_id}:{session_id}:{agent}")
 }
 
+// A downstream disconnect drops the body without polling it to EOF.
+struct UsageReport {
+    capture: Option<UsageCapture>,
+    state: Arc<ProxyState>,
+    event: ProxyEvent,
+}
+
+impl Drop for UsageReport {
+    fn drop(&mut self) {
+        if let Some(capture) = self.capture.take() {
+            let usage = capture.finish();
+            self.event.input_tokens = usage.input_tokens;
+            self.event.output_tokens = usage.output_tokens;
+            self.event.cache_read_tokens = usage.cache_read_tokens;
+            self.event.cache_write_tokens = usage.cache_write_tokens;
+            self.event.cost_usd = usage.cost_usd;
+            self.event.at = now_secs();
+            self.state.emit(self.event.clone());
+        }
+    }
+}
+
 #[derive(Default)]
 struct UsageValues {
     input_tokens: Option<u64>,
@@ -1059,6 +1084,7 @@ struct UsageCapture {
     line: Vec<u8>,
     latest: UsageValues,
     body_overflow: bool,
+    line_overflow: bool,
 }
 
 impl UsageCapture {
@@ -1069,6 +1095,7 @@ impl UsageCapture {
             line: Vec::new(),
             latest: UsageValues::default(),
             body_overflow: false,
+            line_overflow: false,
         }
     }
 
@@ -1088,10 +1115,18 @@ impl UsageCapture {
     fn push_sse(&mut self, bytes: &[u8]) {
         for byte in bytes {
             if *byte == b'\n' {
-                self.parse_sse_line();
+                if !self.line_overflow {
+                    self.parse_sse_line();
+                }
                 self.line.clear();
-            } else if self.line.len() < MAX_SSE_LINE_BYTES {
-                self.line.push(*byte);
+                self.line_overflow = false;
+            } else if !self.line_overflow {
+                if self.line.len() < MAX_SSE_LINE_BYTES {
+                    self.line.push(*byte);
+                } else {
+                    self.line.clear();
+                    self.line_overflow = true;
+                }
             }
         }
     }
@@ -1106,44 +1141,45 @@ impl UsageCapture {
         if payload == b"[DONE]" {
             return;
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(payload) {
-            if let Some(usage) = find_usage(&value) {
-                self.latest.merge(parse_usage(usage));
-            }
+        if let Some(usage) = decode_usage(payload) {
+            self.latest.merge(usage);
         }
     }
 
     fn finish(mut self) -> UsageValues {
         if self.streamed {
-            if !self.line.is_empty() {
+            if !self.line.is_empty() && !self.line_overflow {
                 self.parse_sse_line();
             }
             self.latest
         } else if self.body_overflow {
             UsageValues::default()
         } else {
-            serde_json::from_slice::<Value>(&self.body)
-                .ok()
-                .and_then(|value| find_usage(&value).map(parse_usage))
-                .unwrap_or_default()
+            decode_usage(&self.body).unwrap_or_default()
         }
     }
 }
 
-fn find_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
-    if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-        return Some(usage);
-    }
-    value
-        .get("response")
-        .and_then(|response| response.get("usage"))
-        .and_then(Value::as_object)
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| message.get("usage"))
-                .and_then(Value::as_object)
-        })
+#[derive(Deserialize)]
+struct UsageNode {
+    usage: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct UsageEnvelope {
+    usage: Option<serde_json::Map<String, Value>>,
+    response: Option<UsageNode>,
+    message: Option<UsageNode>,
+}
+
+fn decode_usage(bytes: &[u8]) -> Option<UsageValues> {
+    // Ignore output/tool payloads without constructing a second in-memory response tree.
+    let envelope: UsageEnvelope = serde_json::from_slice(bytes).ok()?;
+    let usage = envelope
+        .usage
+        .or_else(|| envelope.response.and_then(|response| response.usage))
+        .or_else(|| envelope.message.and_then(|message| message.usage))?;
+    Some(parse_usage(&usage))
 }
 
 fn parse_usage(usage: &serde_json::Map<String, Value>) -> UsageValues {
@@ -1693,6 +1729,106 @@ mod tests {
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, None);
         assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn large_responses_preserve_usage_without_reading_output_as_usage() {
+        let mut stream = UsageCapture::new(true);
+        let event = format!(
+            "data: {}\n\n",
+            json!({
+                "response": {"output": "x".repeat(256 * 1024),
+                    "usage": {"input_tokens": 1200, "output_tokens": 450}}
+            })
+        );
+        for chunk in event.as_bytes().chunks(997) {
+            stream.push(chunk);
+        }
+        let usage = stream.finish();
+        assert_eq!(usage.input_tokens, Some(1200));
+        assert_eq!(usage.output_tokens, Some(450));
+
+        let mut body = UsageCapture::new(false);
+        body.push(
+            json!({"output": "x".repeat(2 * 1024 * 1024),
+            "usage": {"input_tokens": 800, "output_tokens": 400}})
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(body.finish().output_tokens, Some(400));
+        assert!(decode_usage(br#"{"output":{"usage":{"input_tokens":99}}}"#).is_none());
+    }
+
+    #[test]
+    fn oversized_sse_lines_are_discarded_before_the_next_event() {
+        let mut stream = UsageCapture::new(true);
+        stream.push(b"data: {\"usage\":{\"input_tokens\":999}}");
+        stream.push(&vec![b' '; MAX_SSE_LINE_BYTES]);
+        stream.push(b"invalid\n\n");
+        assert!(stream.latest.input_tokens.is_none());
+        stream.push(b"data: {\"usage\":{\"input_tokens\":42}}\n\n");
+        assert_eq!(stream.finish().input_tokens, Some(42));
+    }
+
+    #[tokio::test]
+    async fn usage_is_recorded_when_the_consumer_stops_before_eof() {
+        let (state, mut events) = state();
+        let payload = Bytes::from_static(
+            b"data: {\"response\":{\"usage\":{\"input_tokens\":123,\"output_tokens\":45}}}\n\n",
+        );
+        let expected = payload.clone();
+        let sidecar = spawn(Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let payload = payload.clone();
+                async move {
+                    let stream =
+                        futures_util::stream::once(async move { Ok::<_, std::io::Error>(payload) })
+                            .chain(futures_util::stream::pending());
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(stream))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let response = forward(
+            state,
+            &sidecar,
+            "test-session",
+            "test-key",
+            "codex",
+            Surface::Responses,
+            "/v1/responses",
+            None,
+            &HeaderMap::new(),
+            Bytes::new(),
+            Some("test-model".into()),
+            CancellationToken::new(),
+        )
+        .await;
+        let initial = events.recv().await.unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let received = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut bytes = Vec::new();
+            while bytes.len() < expected.len() {
+                bytes.extend_from_slice(&body.next().await.unwrap().unwrap());
+            }
+            bytes
+        })
+        .await
+        .unwrap();
+        assert_eq!(received.as_slice(), expected.as_ref());
+        drop(body);
+        let recorded = events
+            .try_recv()
+            .expect("Dropping the response must publish captured usage");
+        assert_eq!(recorded.request_id, initial.request_id);
+        assert_eq!(recorded.session_id, initial.session_id);
+        assert_eq!(recorded.input_tokens, Some(123));
+        assert_eq!(recorded.output_tokens, Some(45));
+        assert!(recorded.verified.is_none());
     }
 
     #[test]

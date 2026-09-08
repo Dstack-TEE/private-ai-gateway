@@ -20,8 +20,11 @@ function Tooltip({ ...props }: TooltipPrimitive.Root.Props) {
   return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
 }
 
-function TooltipTrigger({ ...props }: TooltipPrimitive.Trigger.Props) {
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
+function TooltipTrigger({ render, ...props }: TooltipPrimitive.Trigger.Props) {
+  // A composed control owns its slot (for example switch or badge).
+  return render
+    ? <TooltipPrimitive.Trigger render={render} {...props} />
+    : <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
 }
 
 function TooltipContent({
