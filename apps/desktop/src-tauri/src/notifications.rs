@@ -124,7 +124,7 @@ impl Observer {
         self.failed_proof = state.session_usage.failed_proof;
         let allowed = [config.gateway, config.local_api, config.verification];
         let messages = [
-            ("Gateway needs attention", "Protection or a gateway operation encountered a problem. Open Private AI Gateway to review its status."),
+            ("Gateway needs attention", "Protection or a gateway operation encountered a problem. Open Private AI Proxy to review its status."),
             ("Local API unavailable", "The local listener encountered a problem. Open Local API settings to review it."),
             ("Response verification failed", "A response failed proof verification. Open Usage to review the recorded result."),
         ];

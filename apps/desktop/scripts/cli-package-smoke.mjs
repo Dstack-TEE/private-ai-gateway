@@ -14,18 +14,18 @@ assert.ok(directory && path.isAbsolute(directory), "Supply an absolute CLI binar
 assert.match(expectedVersion ?? "", /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, "Supply the package version");
 
 const extension = process.platform === "win32" ? ".exe" : "";
-const pag = path.join(directory, `pag${extension}`);
+const pap = path.join(directory, `pap${extension}`);
 for (const name of binaries) {
   const file = path.join(directory, `${name}${extension}`);
   assert.ok((await stat(file)).isFile(), `Missing ${name}`);
   if (process.platform !== "win32") await access(file, constants.X_OK);
 }
 
-const version = execFileSync(pag, ["--version"], {
+const version = execFileSync(pap, ["--version"], {
   encoding: "utf8",
   timeout: 10_000,
 }).trim();
-assert.equal(version, `pag ${expectedVersion}`);
+assert.equal(version, `pap ${expectedVersion}`);
 
 const execute = promisify(execFile);
 const home = await mkdtemp(path.join(os.tmpdir(), "pag-cli-smoke-"));
@@ -41,7 +41,7 @@ let ownedBackend;
 
 const runJson = async (arguments_, timeout = 20_000) => {
   console.log(`CLI lifecycle: ${arguments_.join(" ")}`);
-  const { stdout } = await execute(pag, ["--json", ...arguments_], {
+  const { stdout } = await execute(pap, ["--json", ...arguments_], {
     cwd: directory,
     env,
     encoding: "utf8",

@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Private AI Gateway",
+  "productName": "Private AI Proxy",
   "version": "0.1.0",
   "identifier": "dev.private-ai-gateway.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Private AI Gateway",
+        "title": "Private AI Proxy",
         "width": 1052,
         "height": 728,
         "minWidth": 720,
@@ -42,7 +42,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Verified local AI gateway",
     "externalBin": [
-      "binaries/aci",
+      "binaries/pap",
       "binaries/pag",
       "binaries/pag-service",
       "binaries/private-ai-gateway-helper"
@@ -60,15 +60,23 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
+        "headerImage": "installer/brand-header.bmp",
+        "sidebarImage": "installer/brand-sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
         "installerHooks": "installer/windows.nsh"
       }
     },
     "linux": {
       "deb": {
+        "replaces": ["private-ai-gateway"],
+        "conflicts": ["private-ai-gateway"],
+        "provides": ["private-ai-gateway"],
         "preInstallScript": "installer/deb-pre-install.sh",
         "preRemoveScript": "installer/deb-pre-remove.sh"
       },
       "rpm": {
+        "obsoletes": ["private-ai-gateway"],
+        "provides": ["private-ai-gateway"],
         "preInstallScript": "installer/rpm-pre-install.sh",
         "preRemoveScript": "installer/rpm-pre-remove.sh"
       }

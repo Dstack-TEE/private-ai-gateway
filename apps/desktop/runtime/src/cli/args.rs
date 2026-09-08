@@ -6,7 +6,7 @@ use clap_complete::Shell;
 #[derive(Parser)]
 #[command(
     name = "pag",
-    version = desktop_runtime::protocol::BUILD_VERSION,
+    version = crate::protocol::BUILD_VERSION,
     about = "Control the Private AI Gateway",
     long_about = "Control the Private AI Gateway backend, protected connection, profiles, and coding-agent integrations. `pag start` explicitly starts protection and waits for verification. `pag service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
 )]
@@ -81,7 +81,7 @@ pub(super) enum Action {
         #[command(subcommand)]
         command: Token,
     },
-    /// Manage installation of the pag command.
+    /// Manage installation of the pap command.
     Cli {
         #[command(subcommand)]
         command: Registration,

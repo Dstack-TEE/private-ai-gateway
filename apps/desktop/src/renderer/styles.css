@@ -66,6 +66,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .app-shell { width: 100%; height: 100%; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); overflow: hidden; background: var(--window); }
 .sidebar { min-width: 0; padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; background: var(--sidebar); border-right: 1px solid var(--separator); }
 .sidebar-drag { position: relative; flex: 0 0 28px; }
+.sidebar-standard .sidebar-drag { display: none; }
 .traffic-lights { position: absolute; inset: 0; padding: 4px; display: flex; align-items: center; gap: 8px; }
 .traffic-lights > span { width: 12px; height: 12px; border: 0.5px solid color-mix(in srgb, var(--color-black) 16%, transparent); border-radius: 50%; box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-white) 18%, transparent); }
 .traffic-close { background: var(--color-red-500); }

@@ -24,10 +24,12 @@ pub fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
 }
 
 fn current_executable() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe().map_err(|_| "Cannot locate pag".to_string())?;
+    let current = std::env::current_exe().map_err(|_| "Cannot locate pap".to_string())?;
+    let sibling = current.with_file_name(if cfg!(windows) { "pap.exe" } else { "pap" });
+    let executable = if sibling.is_file() { sibling } else { current };
     executable
         .canonicalize()
-        .map_err(|_| "Cannot resolve the pag executable path".to_string())
+        .map_err(|_| "Cannot resolve the pap executable path".to_string())
 }
 
 #[cfg(unix)]
@@ -61,20 +63,20 @@ mod platform {
             }
         }
         let directory = prepare_directory(directory)?;
-        let command_path = directory.join("pag");
+        let command_path = directory.join("pap");
 
         match command_state(&executable, &command_path)? {
             CommandState::Missing => {
                 symlink(&executable, &command_path).map_err(|error| {
                     if error.kind() == ErrorKind::AlreadyExists {
-                        "The pag command path changed while it was being registered".to_string()
+                        "The pap command path changed while it was being registered".to_string()
                     } else if error.kind() == ErrorKind::PermissionDenied {
                         format!(
-                            "Cannot register pag in {} without an authorized installer",
+                            "Cannot register pap in {} without an authorized installer",
                             directory.display()
                         )
                     } else {
-                        format!("Cannot register pag in {}", directory.display())
+                        format!("Cannot register pap in {}", directory.display())
                     }
                 })?;
                 sync_directory(&directory)?;
@@ -89,12 +91,12 @@ mod platform {
         let executable = current_executable()?;
         if directory.is_none() && managed_system_directory(&executable).is_some() {
             return Err(
-                "The pag command is owned by a system package; uninstall the package to remove it"
+                "The pap command is owned by a system package; uninstall the package to remove it"
                     .to_string(),
             );
         }
         let directory = resolve_directory(directory)?;
-        let command_path = directory.join("pag");
+        let command_path = directory.join("pap");
 
         match command_state(&executable, &command_path)? {
             CommandState::Missing => {}
@@ -105,7 +107,7 @@ mod platform {
             }
             CommandState::Executable => {
                 return Err(format!(
-                    "{} is the pag executable itself and must be removed by its package or installer",
+                    "{} is the pap executable itself and must be removed by its package or installer",
                     command_path.display()
                 ));
             }
@@ -119,7 +121,7 @@ mod platform {
         directory: &Path,
         path_value: Option<&std::ffi::OsStr>,
     ) -> Result<Registration, String> {
-        let command_path = directory.join("pag");
+        let command_path = directory.join("pap");
         let installed = !matches!(
             command_state(executable, &command_path)?,
             CommandState::Missing
@@ -199,7 +201,7 @@ mod platform {
                 .any(|part| part == Component::ParentDir)
         {
             return Err(
-                "The pag command directory must be an absolute normalized path".to_string(),
+                "The pap command directory must be an absolute normalized path".to_string(),
             );
         }
         let directory = validate_owned_directory(&directory)?;
@@ -209,7 +211,7 @@ mod platform {
         if directory.starts_with(&home) || allowed_system_directory(&directory) {
             Ok(directory)
         } else {
-            Err("The pag command directory must be inside the current user's home".to_string())
+            Err("The pap command directory must be inside the current user's home".to_string())
         }
     }
 
@@ -265,7 +267,7 @@ mod platform {
     #[cfg(target_os = "macos")]
     fn managed_system_directory(executable: &Path) -> Option<PathBuf> {
         let directory = PathBuf::from("/usr/local/bin");
-        match command_state(executable, &directory.join("pag")) {
+        match command_state(executable, &directory.join("pap")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
             Ok(CommandState::Missing) | Err(_) => None,
         }
@@ -274,7 +276,7 @@ mod platform {
     #[cfg(not(target_os = "macos"))]
     fn managed_system_directory(executable: &Path) -> Option<PathBuf> {
         let directory = PathBuf::from("/usr/bin");
-        match command_state(executable, &directory.join("pag")) {
+        match command_state(executable, &directory.join("pap")) {
             Ok(CommandState::ManagedLink | CommandState::Executable) => Some(directory),
             Ok(CommandState::Missing) | Err(_) => None,
         }
@@ -315,9 +317,9 @@ mod platform {
         use super::{command_state, inspect, sync_directory, CommandState};
 
         fn executable(root: &std::path::Path) -> std::path::PathBuf {
-            let executable = root.join("runtime/pag");
+            let executable = root.join("runtime/pap");
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
-            fs::write(&executable, b"pag").unwrap();
+            fs::write(&executable, b"pap").unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
             executable.canonicalize().unwrap()
         }
@@ -328,7 +330,7 @@ mod platform {
             let executable = executable(root.path());
             let directory = root.path().join("bin");
             fs::create_dir(&directory).unwrap();
-            std::os::unix::fs::symlink(&executable, directory.join("pag")).unwrap();
+            std::os::unix::fs::symlink(&executable, directory.join("pap")).unwrap();
             sync_directory(&directory).unwrap();
 
             let registration = inspect(
@@ -340,7 +342,7 @@ mod platform {
             assert!(registration.installed);
             assert!(registration.on_path);
             assert!(matches!(
-                command_state(&executable, &directory.join("pag")).unwrap(),
+                command_state(&executable, &directory.join("pap")).unwrap(),
                 CommandState::ManagedLink
             ));
         }
@@ -351,18 +353,18 @@ mod platform {
             let executable = executable(root.path());
             let directory = root.path().join("bin");
             fs::create_dir(&directory).unwrap();
-            fs::write(directory.join("pag"), b"other").unwrap();
+            fs::write(directory.join("pap"), b"other").unwrap();
 
             let error = inspect(&executable, &directory, None).unwrap_err();
             assert!(error.contains("Refusing to replace unrelated command"));
-            assert_eq!(fs::read(directory.join("pag")).unwrap(), b"other");
+            assert_eq!(fs::read(directory.join("pap")).unwrap(), b"other");
         }
 
         #[test]
         fn broken_link_is_never_replaced() {
             let root = tempdir().unwrap();
             let executable = executable(root.path());
-            let command = root.path().join("pag");
+            let command = root.path().join("pap");
             std::os::unix::fs::symlink(root.path().join("missing"), &command).unwrap();
 
             let error = command_state(&executable, &command).unwrap_err();
@@ -426,7 +428,7 @@ mod platform {
         if let Some(owner) = read_ownership()? {
             if !same_path_text(&owner, &directory) {
                 return Err(format!(
-                    "Another pag installation owns the PATH registration at {owner}"
+                    "Another pap installation owns the PATH registration at {owner}"
                 ));
             }
         }
@@ -442,7 +444,7 @@ mod platform {
         write_user_path(&updated, value_type)?;
         if let Err(error) = write_ownership(&directory_text) {
             write_user_path(&path_value, value_type).map_err(|_| {
-                "Cannot record or roll back pag PATH registration ownership".to_string()
+                "Cannot record or roll back pap PATH registration ownership".to_string()
             })?;
             return Err(error);
         }
@@ -471,7 +473,7 @@ mod platform {
             write_user_path(&updated, value_type)?;
             if let Err(error) = delete_ownership() {
                 write_user_path(&path_value, value_type).map_err(|_| {
-                    "Cannot remove or roll back pag PATH registration ownership".to_string()
+                    "Cannot remove or roll back pap PATH registration ownership".to_string()
                 })?;
                 return Err(error);
             }
@@ -487,7 +489,7 @@ mod platform {
         directory: Option<PathBuf>,
     ) -> Result<Registration, String> {
         let directory = executable_directory(&executable, directory)?;
-        let command_path = directory.join("pag.exe");
+        let command_path = directory.join("pap.exe");
         let (path_value, _) = read_user_path()?;
         let installed = path_entries(&path_value)
             .iter()
@@ -506,34 +508,34 @@ mod platform {
     ) -> Result<PathBuf, String> {
         let actual = executable
             .parent()
-            .ok_or_else(|| "Cannot locate the pag executable directory".to_string())?
+            .ok_or_else(|| "Cannot locate the pap executable directory".to_string())?
             .to_path_buf();
         let Some(requested) = requested else {
             return Ok(actual);
         };
         let requested = requested
             .canonicalize()
-            .map_err(|_| "Cannot resolve the requested pag command directory".to_string())?;
-        let candidate = requested.join("pag.exe");
+            .map_err(|_| "Cannot resolve the requested pap command directory".to_string())?;
+        let candidate = requested.join("pap.exe");
         let candidate = candidate.canonicalize().map_err(|_| {
-            "The requested command directory does not contain this pag executable".to_string()
+            "The requested command directory does not contain this pap executable".to_string()
         })?;
         if candidate != executable {
             return Err(
-                "The requested command directory contains a different pag executable".to_string(),
+                "The requested command directory contains a different pap executable".to_string(),
             );
         }
         Ok(requested)
     }
 
     fn reject_path_conflict(executable: &Path) -> Result<(), String> {
-        if let Some(found) = first_process_path_command("pag.exe") {
+        if let Some(found) = first_process_path_command("pap.exe") {
             let found = found
                 .canonicalize()
-                .map_err(|_| "Cannot resolve the pag command already on PATH".to_string())?;
+                .map_err(|_| "Cannot resolve the pap command already on PATH".to_string())?;
             if found != executable {
                 return Err(format!(
-                    "A different pag executable is already on PATH at {}",
+                    "A different pap executable is already on PATH at {}",
                     found.display()
                 ));
             }
@@ -542,7 +544,7 @@ mod platform {
     }
 
     fn resolves_from_process_path(executable: &Path) -> bool {
-        first_process_path_command("pag.exe")
+        first_process_path_command("pap.exe")
             .and_then(|path| path.canonicalize().ok())
             .is_some_and(|path| path == executable)
     }
@@ -590,10 +592,10 @@ mod platform {
             return Ok(None);
         }
         if queried != ERROR_SUCCESS && queried != ERROR_MORE_DATA {
-            return Err("Cannot read pag registration settings".to_string());
+            return Err("Cannot read pap registration settings".to_string());
         }
         if value_type != REG_SZ && value_type != REG_EXPAND_SZ {
-            return Err("A pag registration setting has an unsupported registry type".to_string());
+            return Err("A pap registration setting has an unsupported registry type".to_string());
         }
         let mut buffer = vec![0_u16; (bytes as usize).div_ceil(2).max(1)];
         // SAFETY: the buffer has the byte capacity reported by the first query.
@@ -608,7 +610,7 @@ mod platform {
             )
         };
         if queried != ERROR_SUCCESS {
-            return Err("Cannot read pag registration settings".to_string());
+            return Err("Cannot read pap registration settings".to_string());
         }
         let length = buffer
             .iter()
@@ -627,7 +629,7 @@ mod platform {
 
     fn write_ownership(value: &str) -> Result<(), String> {
         write_registry_string(OWNERSHIP_KEY, OWNERSHIP_VALUE, value, REG_SZ, true)
-            .map_err(|_| "Cannot record pag PATH registration ownership".to_string())
+            .map_err(|_| "Cannot record pap PATH registration ownership".to_string())
     }
 
     fn write_registry_string(
@@ -662,7 +664,7 @@ mod platform {
             )
         };
         if written != ERROR_SUCCESS {
-            return Err("Cannot update pag registration settings".to_string());
+            return Err("Cannot update pap registration settings".to_string());
         }
         Ok(())
     }
@@ -675,7 +677,7 @@ mod platform {
         // SAFETY: the key and null-terminated value name remain valid for the call.
         let deleted = unsafe { RegDeleteValueW(key.0, value_name.as_ptr()) };
         if deleted != ERROR_SUCCESS && deleted != ERROR_FILE_NOT_FOUND {
-            return Err("Cannot remove pag PATH registration ownership".to_string());
+            return Err("Cannot remove pap PATH registration ownership".to_string());
         }
         Ok(())
     }
@@ -694,7 +696,7 @@ mod platform {
             return Ok(None);
         }
         if opened != ERROR_SUCCESS {
-            return Err("Cannot open pag registration settings".to_string());
+            return Err("Cannot open pap registration settings".to_string());
         }
         Ok(Some(RegistryKey(key)))
     }
@@ -717,7 +719,7 @@ mod platform {
             )
         };
         if created != ERROR_SUCCESS {
-            return Err("Cannot create pag registration settings".to_string());
+            return Err("Cannot create pap registration settings".to_string());
         }
         Ok(RegistryKey(key))
     }
@@ -766,13 +768,13 @@ mod platform {
     fn path_text(path: &Path) -> Result<String, String> {
         let value = path
             .to_str()
-            .ok_or("The pag executable path is not valid Unicode")?;
+            .ok_or("The pap executable path is not valid Unicode")?;
         let value = match value.strip_prefix(r"\\?\UNC\") {
             Some(unc) => format!(r"\\{unc}"),
             None => value.strip_prefix(r"\\?\").unwrap_or(value).to_string(),
         };
         if value.contains(';') {
-            return Err("The pag executable directory cannot contain a semicolon".to_string());
+            return Err("The pap executable directory cannot contain a semicolon".to_string());
         }
         Ok(value)
     }
@@ -821,15 +823,15 @@ mod platform {
         fn path_entries_are_compared_without_case_or_separator_noise() {
             assert_eq!(
                 normalize_path_text(r#""C:/Users/Alice/PAG/""#),
-                normalize_path_text(r"c:\users\alice\pag")
+                normalize_path_text(r"c:\users\alice\pap")
             );
             assert_eq!(
-                path_text(std::path::Path::new(r"\\?\D:\Tools\pag.exe")).unwrap(),
-                r"D:\Tools\pag.exe"
+                path_text(std::path::Path::new(r"\\?\D:\Tools\pap.exe")).unwrap(),
+                r"D:\Tools\pap.exe"
             );
             assert_eq!(
-                path_text(std::path::Path::new(r"\\?\UNC\server\tools\pag.exe")).unwrap(),
-                r"\\server\tools\pag.exe"
+                path_text(std::path::Path::new(r"\\?\UNC\server\tools\pap.exe")).unwrap(),
+                r"\\server\tools\pap.exe"
             );
             assert_eq!(
                 normalize_path_text(r"\\?\UNC\server\tools"),
@@ -856,13 +858,13 @@ mod tests {
     #[test]
     fn registration_uses_the_cli_json_contract() {
         let value = serde_json::to_value(Registration {
-            executable: PathBuf::from("/opt/pag/pag"),
-            command_path: PathBuf::from("/home/user/.local/bin/pag"),
+            executable: PathBuf::from("/opt/pap/pap"),
+            command_path: PathBuf::from("/home/user/.local/bin/pap"),
             installed: true,
             on_path: false,
         })
         .unwrap();
-        assert_eq!(value["commandPath"], "/home/user/.local/bin/pag");
+        assert_eq!(value["commandPath"], "/home/user/.local/bin/pap");
         assert_eq!(value["installed"], true);
         assert_eq!(value["onPath"], false);
         assert!(value.get("command_path").is_none());

@@ -2,6 +2,7 @@ Var PagStartupLockHandle
 Var PagStartupLockOverlapped
 Var PagStartupLockHeld
 Var PagStartupLockPath
+Var PagLegacyInstall
 
 !macro PAG_RELEASE_STARTUP_LOCK
   ${If} $PagStartupLockHeld == 1
@@ -48,7 +49,7 @@ Var PagStartupLockPath
     ClearErrors
     CreateDirectory "$PagStartupLockPath"
     ${If} ${Errors}
-      !insertmacro PAG_FAIL "Cannot create the Private AI Gateway data directory at $PagStartupLockPath."
+      !insertmacro PAG_FAIL "Cannot create the Private AI Proxy data directory at $PagStartupLockPath."
     ${EndIf}
     StrCpy $PagStartupLockPath "$PagStartupLockPath\startup.lock"
 
@@ -81,28 +82,39 @@ Var PagStartupLockPath
       ${EndIf}
       IntOp $R3 $R3 - 1
       ${If} $R3 == 0
-        !insertmacro PAG_FAIL "Another backend startup or update is still in progress. Close Private AI Gateway and retry."
+        !insertmacro PAG_FAIL "Another backend startup or update is still in progress. Close Private AI Proxy and retry."
       ${EndIf}
       Sleep 100
     ${Loop}
-    DetailPrint "Acquired the Private AI Gateway backend startup lock."
+    DetailPrint "Acquired the Private AI Proxy backend startup lock."
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro PAG_ACQUIRE_STARTUP_LOCK
+  ReadRegStr $PagLegacyInstall SHCTX "${MANUKEY}\Private AI Gateway" ""
+  ${If} $PagLegacyInstall != ""
+    ${StrCase} $R1 "$PagLegacyInstall" "L"
+    ${StrCase} $R2 "$INSTDIR" "L"
+    ${If} $R1 != $R2
+      !insertmacro PAG_FAIL "Private AI Gateway is already installed at $PagLegacyInstall. Select that directory to upgrade to Private AI Proxy."
+    ${EndIf}
+  ${EndIf}
 
-  SearchPath $R0 "pag.exe"
+  SearchPath $R0 "pap.exe"
   ${If} $R0 != ""
     ${StrCase} $R1 "$R0" "L"
-    ${StrCase} $R2 "$INSTDIR\pag.exe" "L"
+    ${StrCase} $R2 "$INSTDIR\pap.exe" "L"
     ${If} $R1 != $R2
-      !insertmacro PAG_FAIL "A different pag executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
+      !insertmacro PAG_FAIL "A different pap executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
     ${EndIf}
   ${EndIf}
 
   ${If} ${FileExists} "$INSTDIR\pag.exe"
     ReadRegStr $R0 SHCTX "${MANUPRODUCTKEY}" ""
+    ${If} $R0 == ""
+      StrCpy $R0 "$PagLegacyInstall"
+    ${EndIf}
     ${StrCase} $R1 "$R0" "L"
     ${StrCase} $R2 "$INSTDIR" "L"
     ${If} $R1 != $R2
@@ -110,15 +122,20 @@ Var PagStartupLockPath
     ${EndIf}
     ExecWait '"$INSTDIR\pag.exe" --yes service stop' $R0
     ${If} $R0 != 0
-      !insertmacro PAG_FAIL "The existing Private AI Gateway backend could not be stopped. The installation was not replaced."
+      !insertmacro PAG_FAIL "The existing Private AI Proxy backend could not be stopped. The installation was not replaced."
     ${EndIf}
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ExecWait '"$INSTDIR\pag.exe" cli install' $R0
+  ${If} $PagLegacyInstall != ""
+    Delete "$INSTDIR\aci.exe"
+    DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\Private AI Gateway"
+    DeleteRegKey SHCTX "${MANUKEY}\Private AI Gateway"
+  ${EndIf}
+  ExecWait '"$INSTDIR\pap.exe" cli install' $R0
   ${If} $R0 != 0
-    !insertmacro PAG_FAIL "Private AI Gateway was installed, but pag could not be registered in the current user's PATH."
+    !insertmacro PAG_FAIL "Private AI Proxy was installed, but pap could not be registered in the current user's PATH."
   ${EndIf}
   !insertmacro PAG_RELEASE_STARTUP_LOCK
 !macroend
@@ -129,12 +146,12 @@ Var PagStartupLockPath
   ${If} ${FileExists} "$INSTDIR\pag.exe"
     ExecWait '"$INSTDIR\pag.exe" --yes service stop' $R0
     ${If} $R0 != 0
-      !insertmacro PAG_FAIL "The Private AI Gateway backend could not be stopped. Uninstall was cancelled."
+      !insertmacro PAG_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
     ${EndIf}
     ${If} $UpdateMode != 1
-      ExecWait '"$INSTDIR\pag.exe" --yes cli uninstall' $R0
+      ExecWait '"$INSTDIR\pap.exe" --yes cli uninstall' $R0
       ${If} $R0 != 0
-        !insertmacro PAG_FAIL "pag could not remove its current-user PATH registration. Uninstall was cancelled."
+        !insertmacro PAG_FAIL "pap could not remove its current-user PATH registration. Uninstall was cancelled."
       ${EndIf}
     ${EndIf}
   ${EndIf}

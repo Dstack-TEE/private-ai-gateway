@@ -1,63 +1,55 @@
-# Client naming and CLI boundaries
+# Private AI Proxy architecture
 
-Status: proposal, 2026-09-08. This document does not rename installed apps,
-commands, credential services, application identifiers, or update channels.
+Status: implemented on the desktop feature branch, 2026-09-08.
 
 ## Responsibilities
 
 | Component | Responsibility | Implementation |
 | --- | --- | --- |
-| Remote Private AI Gateway | Attested inference service, routing, provider evidence, signed receipts | `src/aggregator`, `src/middleware` |
-| Desktop client | Profiles, agent connections, local verification status and usage | `apps/desktop/src/renderer` |
-| Local backend | Owns session lifecycle, agent configuration transactions and local API | `apps/desktop/runtime`, `apps/desktop/gateway` |
-| `pag` | Human and machine interface to the local backend | `apps/desktop/runtime/src/bin/pag` |
-| `aci` | Protocol verification, offline audit, sessions, individual requests and verifying proxy | `src/bin/aci` |
+| Private AI Gateway | Remote attested inference service and signed receipts | `src/aggregator`, `src/middleware` |
+| Private AI Proxy | Desktop profiles, agent connections, verification and usage | `apps/desktop/src/renderer` |
+| Local backend | Sessions, configuration transactions, local API and process ownership | `apps/desktop/runtime`, `apps/desktop/gateway` |
+| `pap` | Unified managed-client and ACI protocol commands | `src/bin/pap` |
+| `pag` | Legacy management command | Thin wrapper over `desktop_runtime::cli` |
+| `aci` | Existing standalone protocol reference CLI, unchanged and not bundled | `src/bin/aci` |
 
-The local app is an ACI client and verifying proxy, not the remote inference
-gateway. It also manages state and agent configuration, so "proxy" alone does
-not describe the whole product. The backend already runs the bundled `aci serve`
-with strict receipt verification. CLI packages already contain both binaries;
-this is shared distribution, not a unified command interface.
+## Shared implementation
 
-## Naming recommendation
+`pap` composes the managed CLI's Clap command tree with the existing ACI
+commands. Management command execution and output live in
+`apps/desktop/runtime/src/cli`, shared with `pag`. ACI modules are compiled from
+their existing source paths: no verifier implementation is copied or modified.
+The explicit `desktop-client` Cargo feature keeps desktop dependencies out of
+ordinary service and standalone ACI builds.
 
-Use **Private AI Client** for the user-facing app, with **by dstack TEE** as the
-existing attribution. Describe its Local API as a **local verifying proxy**.
-Keep **Private AI Gateway** for the remote service. "ACI Client" is precise for
-developer documentation but does not explain the product to a new user.
+`pap verify/audit/sessions/send` do not initialize the managed backend or
+credential store. `pap serve` runs the standalone local verifier and always
+enforces receipt verification before response delivery. `pap --json serve`
+emits lifecycle JSON events. The original `aci` interface stays unchanged.
 
-Approve the public name before changing it. A display-name change must preserve
-the application identifier, data paths, credential-store service identifiers,
-update signing keys and feed compatibility. Keep the `pag` command as a
-compatibility entry point even if a new command name is introduced.
+`pap start/stop` retain managed profiles, user-session continuity and reversible
+agent configuration. The backend's supervised verifier process now runs
+`pap serve`, replacing the old ACI executable. Ownership-pipe and child-reaping
+behavior is preserved; a backend crash must not leave a verifier listening.
+Packages contain `pap`, the legacy `pag`, `pag-service` and the credential
+helper. They do not contain an independent `aci` executable.
 
-## CLI recommendation
+## Upgrade compatibility
 
-Unify the user entry point while retaining a reusable ACI implementation:
+The display name is Private AI Proxy, with by dstack TEE attribution.
+Application identifiers, credential service keys, backend protocol, local-token
+prefix, storage paths and update signing keys stay unchanged. Default command
+registration now registers `pap` and refuses unrelated existing commands.
+The bundled `pag` retains existing management scripts.
 
-- `pag verify`, `pag audit`, `pag sessions` and `pag send` can expose the existing
-  protocol operations without starting the managed backend or accessing its
-  credentials by default.
-- Keep `pag start/stop`, profiles, agents, settings and usage as managed-client
-  operations with their existing consent and JSON contracts.
-- Keep `aci serve` as the standalone verifier/proxy interface. It must not be
-  silently replaced by `pag start`: listener ownership, credentials, lifetime,
-  configuration projection and receipt policies differ.
-- Extract ACI command execution from its binary entry point into a shared Rust
-  library. Keep thin Clap frontends for both command names. Do not copy verifier
-  logic into the desktop crate or parse human-readable subprocess output.
-- Preserve existing `aci` flags, exit codes and JSON output for scripts. New
-  client commands must retain `pag`'s non-interactive and machine-output rules;
-  define adapters explicitly where the existing output schemas differ.
+Windows uses the official Tauri NSIS template with branded artwork and an
+explicit legacy-installation check. Linux desktop packages declare replacement
+of the old product package. Beta and stable remain separate; a rename does not
+authorize stable promotion.
 
-Implement this as a separate compatibility change after the naming decision,
-with contract tests for the existing `aci` interface and no mandatory GUI,
-daemon or keychain dependency for offline audit.
+## Sources
 
-## Source snapshot
-
-Reviewed client baseline: `c03eec2ee148aba4e2a4a0e145432675d67aae54`.
-Main integrated into the feature branch: `c2d31a8` (2026-09-08 fetch).
 Repository: https://github.com/Dstack-TEE/private-ai-gateway
-Sources: `src/bin/aci/args.rs`, `apps/desktop/runtime/src/bin/pag/args.rs`,
-`apps/desktop/runtime/src/gateway.rs`, `apps/desktop/scripts/package-cli.mjs`.
+Main integrated before this change: `c2d31a8`.
+Primary contracts: `src/bin/aci/args.rs`, `apps/desktop/runtime/src/cli/args.rs`,
+`apps/desktop/runtime/src/process.rs`, `apps/desktop/scripts/package-cli.mjs`.

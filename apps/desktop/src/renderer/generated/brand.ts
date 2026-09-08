@@ -8,8 +8,8 @@ import wordmarkLight from "./wordmark-light.svg";
 export const brand = {
   ...{
     "id": "dstack",
-    "productName": "Private AI Gateway",
-    "shortName": "Gateway",
+    "productName": "Private AI Proxy",
+    "shortName": "Proxy",
     "organizationName": "Dstack TEE",
     "tagline": "The open framework for confidential AI",
     "homepageUrl": "https://dstack.org",
@@ -23,9 +23,9 @@ export const brand = {
       "accentLight": "#2c6e49",
       "accentDark": "#7fd3a2",
       "brandColor": "#C6EB3D",
-      "iconBackground": "#101C18",
+      "iconBackground": "#0B211A",
       "iconGlass": true,
-      "iconForeground": "#f2f3f5",
+      "iconForeground": "#D5E6DB",
       "markLight": "#303236",
       "markDark": "#e8e9eb"
     }

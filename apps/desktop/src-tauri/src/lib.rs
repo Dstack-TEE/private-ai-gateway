@@ -533,20 +533,20 @@ fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
 async fn run_pag_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
     let output = app
         .shell()
-        .sidecar("pag")
-        .map_err(|_| "The bundled pag command is unavailable in this installation")?
+        .sidecar("pap")
+        .map_err(|_| "The bundled pap command is unavailable in this installation")?
         .args(arguments)
         .output()
         .await
-        .map_err(|_| "The pag command could not complete")?;
+        .map_err(|_| "The pap command could not complete")?;
     if !output.status.success() {
-        return Err("The pag command could not update command-line access".to_string());
+        return Err("The pap command could not update command-line access".to_string());
     }
     if output.stdout.len() > 64 * 1024 {
-        return Err("The pag command returned an invalid response".to_string());
+        return Err("The pap command returned an invalid response".to_string());
     }
     serde_json::from_slice(&output.stdout)
-        .map_err(|_| "The pag command returned an invalid response".to_string())
+        .map_err(|_| "The pap command returned an invalid response".to_string())
 }
 
 #[derive(Default)]
@@ -583,7 +583,7 @@ fn allow_automatic_cli_registration() -> Result<(), String> {
         .map_err(|_| "Cannot locate the installed application".to_string())?;
     if transient_macos_app_path(&executable) {
         return Err(
-            "Move Private AI Gateway to a stable location before registering pag".to_string(),
+            "Move Private AI Proxy to a stable location before registering pap".to_string(),
         );
     }
     Ok(())

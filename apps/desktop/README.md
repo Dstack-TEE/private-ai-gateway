@@ -1,6 +1,6 @@
-# Private AI Gateway Desktop
+# Private AI Proxy
 
-Cross-platform Tauri desktop app that turns the bundled `aci serve` verifier
+Cross-platform Tauri desktop app that turns the bundled `pap serve` verifier
 into a local gateway for Codex, Claude Code, OpenCode, Pi, Hermes, OpenClaw, and
 Oh My Pi. One Rust
 runtime owns policy, persistence, credentials, usage, agent projection, and
@@ -8,6 +8,29 @@ process lifecycle. A shared React renderer owns the dense product UI, while
 Tauri delegates windows, menus, tray integration, file dialogs, confirmation
 dialogs, clipboard, autostart, and application lifecycle to each operating
 system.
+
+The app is now Private AI Proxy; the remote inference service remains Private AI
+Gateway. Existing application identifiers, credential-store keys, user data and
+update feeds stay compatible. The installed CLI is `pap`; `pag` remains a legacy
+management entry point. `pap` combines local management with ACI's `verify`,
+`audit`, `sessions`, `send` and `serve` commands using the same Rust source.
+The existing standalone `aci` binary is unchanged in the repository but is no
+longer bundled. The backend launches `pap serve` with strict receipt enforcement.
+Build the unified CLI with `cargo build --features desktop-client --bin pap`;
+ordinary server and standalone ACI builds do not acquire desktop dependencies.
+
+Launching with no profiles stays on Overview. Starting protection without a
+profile opens New Profile and resumes protection after successful verification
+and saving; opening profile settings manually never opts into protection.
+Windows and Linux sidebars do not reserve a macOS traffic-light region.
+
+Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
+sidebar artwork. Renamed installers recognize the previous installation
+directory; Linux packages declare replacement of the old desktop package.
+Published releases keep installers, required updater archives, three portable CLI
+archives, `latest.json` and one `SHA256SUMS`. Detached updater signatures remain
+embedded in the manifest; duplicate archives and CLI DEB/RPM builds remain CI
+artifacts rather than additional release downloads.
 
 Profiles, Local API settings, Privacy verification, and Usage proof open as
 document-modal AppKit sheets on macOS, without traffic lights or an independent
@@ -433,7 +456,7 @@ builds, set `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINT` (HTTPS), and th
 Tauri signing secret; the brand overlay enables updater artifacts only when
 both public settings are present. No signing secrets are embedded in the app.
 
-The macOS DMG app automatically attempts user-level `pag` registration after it
+The macOS DMG app automatically attempts user-level `pap` registration after it
 is launched from a stable location. Mounted disk images and App Translocation are
 rejected so they cannot leave a broken command link. It does not request
 administrator privileges or edit shell profiles. Settings > Advanced retains
@@ -452,7 +475,7 @@ Codex / Claude Code / OpenCode / Pi / Hermes
 configured Local API    in-process Rust proxy: agent tokens, catalog check,
         │               limits, revocation gate, activity; relays unchanged
         ▼
-127.0.0.1:<dynamic>     bundled `aci serve`: TEE identity, pinned channel,
+127.0.0.1:<dynamic>     bundled `pap serve`: TEE identity, pinned channel,
         │               policy, forwarding, receipt verification
         ▼
 https://tee.redpill.ai
@@ -530,8 +553,8 @@ protocol is the service's own response, shown as such.
   check to the final rename.
 - **AI service profiles** are verified before they are saved. A profile
   combines a user-visible name, provider, endpoint, and authentication method.
-  A fresh install starts without a profile and opens New Profile as soon as the
-  initial state loads; every profile can be deleted, including the last one.
+  A fresh install starts without a profile and stays on Overview. The protection
+  switch opens New Profile when needed; every profile can be deleted, including the last one.
   Settings offers local, self-hosted branding for the Phala and RedPill
   presets plus a custom HTTPS endpoint. New providers or endpoints require a
   new key, so a credential is never silently reused. Profile metadata is
@@ -727,8 +750,8 @@ npm ci
 npm run dev
 ```
 
-The persistent backend launches the target-triple-specific bundled `aci`
-binary as an external sidecar.
+The persistent backend launches the target-triple-specific bundled `pap serve`
+process. No independent ACI executable is included.
 The development command builds debug sidecars; packaged builds compile release
 sidecars from this repository. `npm run dist` produces the native bundle for
 the current platform. CI builds the same Tauri application as a macOS DMG and
