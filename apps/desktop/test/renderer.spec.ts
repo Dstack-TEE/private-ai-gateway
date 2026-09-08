@@ -344,7 +344,7 @@ test("form focus rings have space on all four sides of their scroll viewport", a
 
 test("system dark styling is present before React initializes", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
-  await page.route("**/*.js", (route) => route.abort());
+  await page.route("**/*.js", (route) => route.request().url().endsWith("/appearance-init.js") ? route.continue() : route.abort());
   await page.goto("/?mock=ready&native-dialog=profiles");
   await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
   await expect(page.locator("body")).toHaveCSS("background-color", "oklch(0.145 0 0)");
@@ -1067,7 +1067,7 @@ test("rotating the client key requires an explicit native confirmation", async (
   await expect(page.locator(".sheet-card")).toHaveCount(0);
   const keyGroup = page.locator('[data-slot="input-group"]', { has: key });
   await expect(keyGroup).toHaveCSS("height", "36px");
-  await expect(keyGroup).toHaveCSS("border-radius", "32px");
+  await expect(keyGroup).toHaveCSS("border-radius", "26px");
   await expect(keyGroup.getByRole("button")).toHaveCount(3);
   await keyGroup.getByRole("button", { name: "Reveal client key" }).click();
   await expect(key).toHaveAttribute("type", "text");
@@ -1248,7 +1248,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localApi.locator(".overview-module-title").getByText("Available", { exact: true })).toBeVisible();
   await expect(localApi.locator(".copy-rows").getByText("Available", { exact: true })).toHaveCount(0);
   await expect(localApi.getByText("for your own tools", { exact: true })).toHaveCount(0);
-  await expect(localApi.locator(".module")).toHaveCSS("min-height", "136px");
+  await expect(localApi.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(2);
   await expect(session.locator(".session-summary > div")).toHaveCount(4);
 
   const endpoint = localApi.getByRole("button", { name: /Local endpoint/ });
@@ -1356,10 +1356,16 @@ test("success colors, list separators, control sizes and About alignment are con
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
     await page.goto("/?mock=ready");
-    const success = await themeColor(page, "--success");
-    expect(success).not.toBe(await themeColor(page, "--primary"));
+    const success = await themeColor(page, "--primary");
+    for (const action of await page.getByRole("button", { name: "View all", exact: true }).all()) {
+      await expect(action).toHaveCSS("color", await themeColor(page, "--foreground"));
+    }
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
-    await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
+    const available = local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ });
+    await expect(available).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
+    await expect(available).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(available.locator('[data-slot="status-dot"]')).toHaveCSS("background-color", success);
+    await expect(nav(page, "Agents")).toHaveCSS("border-radius", "14px");
     await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
@@ -1374,7 +1380,7 @@ test("success colors, list separators, control sizes and About alignment are con
     const installed = page.getByRole("region", { name: /^Installed/ });
     const separators = installed.locator('[data-slot="separator"]:visible');
     expect(await separators.count()).toBe((await installed.locator(".agent-block").count()) - 1);
-    await expect(installed.locator('[data-slot="badge"]', { hasText: /^Connected$/ }).first()).toHaveCSS("color", success);
+    await expect(installed.locator('[data-slot="badge"]', { hasText: /^Connected$/ }).first().locator('[data-slot="status-dot"]')).toHaveCSS("background-color", success);
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("width", "44px");
     await expect(page.locator(".page-header").getByRole("switch")).toHaveCSS("background-color", success);
     await nav(page, "Usage").click();
@@ -1409,10 +1415,9 @@ test("availability and connection badges render visible status dots", async ({ p
     const dot = badge.locator('[data-slot="status-dot"]');
     await expect(dot).toHaveCSS("width", "6px");
     await expect(dot).toHaveCSS("height", "6px");
-    await expect.poll(() => badge.evaluate((node) => {
-      const dot = node.querySelector('[data-slot="status-dot"]');
-      return dot !== null && getComputedStyle(dot).backgroundColor === getComputedStyle(node).color;
-    })).toBe(true);
+    await expect(badge).toHaveCSS("color", await themeColor(page, "--muted-foreground"));
+    await expect(badge).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(dot).toHaveCSS("background-color", await themeColor(page, label === "Not connected" ? "--muted-foreground" : "--primary"));
   }
   await page.getByRole("switch", { name: "Stop protection", exact: true }).click();
   const unavailable = page.locator('[data-slot="badge"]').filter({ hasText: /^Unavailable$/ });
@@ -1517,9 +1522,9 @@ test("local copy hover follows the grouped row shape and profiles open their dia
   await expect(copy).toHaveCSS("border-radius", "0px");
   const shape = await copy.evaluate((button) => {
     const row = button.parentElement;
-    const group = button.closest(".module");
+    const group = button.closest(".copy-row");
     if (!row || !group) throw new Error("Copy row structure missing");
-    return { height: button.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, clipped: getComputedStyle(group).overflow, radius: getComputedStyle(group).borderRadius };
+    return { height: button.getBoundingClientRect().height, rowHeight: row.clientHeight, clipped: getComputedStyle(group).overflow, radius: getComputedStyle(group).borderRadius };
   });
   expect(Math.abs(shape.height - shape.rowHeight)).toBeLessThanOrEqual(1);
   expect(shape.clipped).toBe("hidden");
@@ -1813,7 +1818,7 @@ test("Confidential AI presets keep provider credentials scoped and settings stay
   page.once("dialog", (dialog) => dialog.accept());
   await devMode.click();
   await expect(page.getByText("Dev mode", { exact: true })).toBeVisible();
-  await expect(page.getByRole("switch", { name: "Start protection" })).toHaveClass(/is-development/);
+  await expect(page.getByRole("switch", { name: "Start protection" })).toHaveClass(/data-checked:bg-warning/);
   page.once("dialog", (dialog) => dialog.accept());
   await devMode.click();
 
