@@ -1531,7 +1531,7 @@ function StatusSurface({
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <Card size="sm" role="region" className={`status-surface relative isolate [&.status-compact]:transition-colors [&.status-compact]:duration-200 [&.status-compact]:ease-out @max-[600px]/overview:[&.status-compact]:w-full max-[780px]:h-52 max-[620px]:h-auto max-[620px]:grid-cols-1 motion-reduce:[&.status-compact]:transition-none status-compact [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.tracks-right]:inset-0 [&_.tracks-right]:[mask-image:linear-gradient(to_right,_transparent,_#000_12%,_#000_88%,_transparent)] [&_.tracks-right]:text-[color-mix(in_srgb,_var(--muted-foreground)_5%,_var(--card))] [&.status-ready_.tracks-right]:opacity-100 [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none status-${state.status} ${protectedNow ? developmentMode ? "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] ring-warning dark:ring-warning" : "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] ring-primary dark:ring-primary" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
+    <Card size="sm" role="region" className={`status-surface relative isolate border border-border shadow-none ring-0 [&.status-compact]:transition-colors [&.status-compact]:duration-200 [&.status-compact]:ease-out @max-[600px]/overview:[&.status-compact]:w-full max-[780px]:h-52 max-[620px]:h-auto max-[620px]:grid-cols-1 motion-reduce:[&.status-compact]:transition-none status-compact [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.tracks-right]:inset-0 [&_.tracks-right]:[mask-image:linear-gradient(to_right,_transparent,_#000_12%,_#000_88%,_transparent)] [&_.tracks-right]:text-[color-mix(in_srgb,_var(--muted-foreground)_5%,_var(--card))] [&.status-ready_.tracks-right]:opacity-100 [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none status-${state.status} ${protectedNow ? developmentMode ? "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] border-warning dark:border-warning" : "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] border-primary dark:border-primary" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer />
       <CardContent className="status-compact-content relative z-2 grid grid-cols-[minmax(0,_1fr)_44px] grid-rows-[auto_1fr] gap-y-2 gap-x-3 flex-1 w-full">
         <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal state-${verdict.tone}`}>
@@ -1691,19 +1691,22 @@ function LocalApiPanel({
 }
 
 function SessionSummary({ summary, active }: { summary: UsageSummary; active: boolean }): React.JSX.Element {
-  const forwarded = Math.max(0, summary.requests - summary.blockedLocally);
   const totalTokens = summary.inputTokens + summary.outputTokens;
-  const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
     <Card size="sm" role="region" className="session-overview min-w-0" aria-labelledby="session-usage-heading">
       <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
-    <CardContent className="session-summary flex-1 min-w-0 grid grid-cols-2 gap-4 [&_>_[data-slot=item]]:min-w-0 [&_strong]:block [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-xl [&_strong]:font-semibold [&_strong]:tabular-nums [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap" role="group" aria-label="Usage in this session">
+    <CardContent className="session-summary flex min-w-0 flex-1 items-start gap-3" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],
         ["Estimated cost", active ? currency(summary.costUsd) : "—"],
-        ["Verified responses", active && forwarded ? `${protectedRate}%` : "—"],
-      ].map(([label, value]) => <Item key={label} variant="muted" size="xs"><ItemContent className="min-w-0"><span className="text-xs text-muted-foreground">{label}</span><strong className="text-xl font-semibold tabular-nums">{value}</strong></ItemContent></Item>)}
+      ].map(([label, value], index) => <React.Fragment key={label}>
+        {index > 0 && <Separator orientation="vertical" className="h-auto self-stretch" />}
+        <div data-slot="session-metric" className="grid min-w-0 flex-1 gap-2">
+          <span className="text-xs text-muted-foreground">{label}</span>
+          <strong className="truncate text-xl font-semibold tabular-nums">{value}</strong>
+        </div>
+      </React.Fragment>)}
     </CardContent>
     </Card>
   );

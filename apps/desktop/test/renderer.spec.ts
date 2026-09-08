@@ -38,9 +38,10 @@ test("compact overview separates provider verification from current-session usag
   await expect(page.locator(".overview-page [data-slot=card]")).toHaveCount(5);
   await expect(agentCard.locator('[data-slot="separator"]')).toHaveCount(0);
   await expect(agentCard.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(4);
-  await expect(page.locator('.session-summary > [data-slot="item"][data-variant="muted"]')).toHaveCount(4);
+  await expect(page.locator('.session-summary > [data-slot="session-metric"]')).toHaveCount(3);
+  await expect(page.locator('.session-summary > [data-slot="separator"]')).toHaveCount(2);
   await expect(page.locator(".page-header")).toHaveCSS("border-bottom-width", "0px");
-  await expect(page.locator(".session-summary")).toHaveCSS("gap", "16px");
+  await expect(page.locator(".session-summary")).toHaveCSS("gap", "12px");
   await expect(page.locator(".overview-top")).toHaveCSS("gap", "16px");
   await expect(page.locator(".overview-grid")).toHaveCSS("gap", "16px");
   await expect(page.locator("html")).toHaveAttribute("data-main-presented", "true");
@@ -51,7 +52,7 @@ test("compact overview separates provider verification from current-session usag
   await expect(session.getByRole("heading", { name: "Current session" })).toBeVisible();
   await expect(agentCard.locator('[data-slot="card-description"]')).toHaveText("Use private AI in your agents.");
   await expect(page.getByText("Latest requests in this session.", { exact: true })).toBeVisible();
-  await expect(session.locator(".session-summary > div")).toHaveCount(4);
+  await expect(session.locator('[data-slot="session-metric"]')).toHaveCount(3);
   await expect(session.getByText("Active", { exact: true })).toHaveCount(0);
   await protection.getByRole("button", { name: "Privacy verification" }).click();
   await expect(page.getByRole("dialog", { name: "Privacy verification" })).toBeVisible();
@@ -61,7 +62,7 @@ test("compact overview separates provider verification from current-session usag
   await page.keyboard.press("Escape");
   await page.goto("/?mock=interactive");
   await expect(session.getByText("Not active", { exact: true })).toHaveCount(0);
-  await expect(session.locator("strong")).toHaveText(["—", "—", "—", "—"]);
+  await expect(session.locator("strong")).toHaveText(["—", "—", "—"]);
   for (const width of [540, 320]) {
     await page.setViewportSize({ width, height: 780 });
     expect(await page.locator(".content").evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
@@ -753,7 +754,7 @@ test("reconnection preserves visible session totals and can be cancelled", async
   await expect(page.locator(".session-summary strong").first()).not.toHaveText("—");
   await card.getByRole("switch", { name: "Cancel reconnection" }).click();
   await expect(card.getByText("Not protected", { exact: true })).toBeVisible();
-  await expect(page.locator(".session-summary strong")).toHaveText(["—", "—", "—", "—"]);
+  await expect(page.locator(".session-summary strong")).toHaveText(["—", "—", "—"]);
 });
 
 test("agent attention badges expose the correct recovery action", async ({ page }) => {
@@ -1251,7 +1252,7 @@ test("overview shows four agents, four current-session records, truthful copy su
 
   const session = page.getByRole("region", { name: "Current session", exact: true });
   const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
-  for (const label of ["Requests", "Tokens", "Estimated cost", "Verified responses"]) {
+  for (const label of ["Requests", "Tokens", "Estimated cost"]) {
     await expect(session.getByText(label, { exact: true })).toBeVisible();
   }
   await expect(session.locator("small")).toHaveCount(0);
@@ -1260,7 +1261,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localApi.locator(".copy-rows").getByText("Available", { exact: true })).toHaveCount(0);
   await expect(localApi.getByText("for your own tools", { exact: true })).toHaveCount(0);
   await expect(localApi.locator('[data-slot="item"][data-variant="muted"]')).toHaveCount(2);
-  await expect(session.locator(".session-summary > div")).toHaveCount(4);
+  await expect(session.locator('[data-slot="session-metric"]')).toHaveCount(3);
 
   const endpoint = localApi.getByRole("button", { name: /Local endpoint/ });
   await endpoint.hover();
@@ -1299,7 +1300,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localSheet).not.toBeVisible();
   await expect(endpoint).toContainText("4181");
   await page.getByRole("switch", { name: "Stop protection" }).click();
-  await expect(session.locator("strong")).toHaveText(["—", "—", "—", "—"]);
+  await expect(session.locator("strong")).toHaveText(["—", "—", "—"]);
   await expect(usageModule.locator(".usage-row")).toHaveCount(0);
   await expect(page.locator(".protection-duration")).toHaveCount(0);
 });
@@ -1377,7 +1378,8 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(available).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await expect(available.locator('[data-slot="status-dot"]')).toHaveCSS("background-color", success);
     await expect(nav(page, "Agents")).toHaveCSS("border-radius", "14px");
-    expect(await page.locator(".status-compact").evaluate((node) => getComputedStyle(node).boxShadow)).toContain(success);
+    await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
+    await expect(page.locator(".status-compact")).toHaveCSS("--tw-shadow", "0 0 #0000");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
