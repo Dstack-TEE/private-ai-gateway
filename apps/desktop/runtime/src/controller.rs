@@ -1102,8 +1102,18 @@ impl DesktopRuntime {
             return self.manager.snapshot();
         }
 
+        // Different ports can be reserved without releasing the working listener.
+        // Same-port address changes must release the original socket first.
+        let prepared = if current.bind.port() != resolved.bind.port() {
+            Some(proxy::bind_std(resolved.bind)?)
+        } else {
+            None
+        };
         self.endpoint.stop().await?;
-        let listener = match proxy::bind_std(resolved.bind) {
+        let listener = match prepared
+            .map(Ok)
+            .unwrap_or_else(|| proxy::bind_std(resolved.bind))
+        {
             Ok(listener) => listener,
             Err(error) => {
                 if let Err(restore_error) = self.restore_endpoint(current.clone()) {
@@ -1701,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn occupied_listener_restores_previous_endpoint_and_serializes_mutations() {
+    fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
         let executor = tokio::runtime::Runtime::new().unwrap();
         executor.block_on(async {
             let temp = tempfile::tempdir().unwrap();
@@ -1744,7 +1754,7 @@ mod tests {
                 .unwrap_err()
                 .contains("primary"));
             assert!(std::net::TcpStream::connect(original.bind).is_ok());
-            // Exercise rollback directly without a primary instance or user data.
+            // A failed reservation keeps the existing listener alive.
             assert!(runtime
                 .rebind_local_api(
                     candidate.clone(),
