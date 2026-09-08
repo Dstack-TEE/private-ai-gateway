@@ -1157,7 +1157,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   return (
     <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
       <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(928px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
+      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(880px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
           state={state}
