@@ -15,7 +15,7 @@
     "check": "npm run prepare:brand && tsc --noEmit",
     "dev": "npm run prepare:brand && npm run build:sidecars:debug && tauri dev --config src-tauri/tauri.brand.conf.json",
     "dev:web": "npm run prepare:brand && vite --host 127.0.0.1 --port 1420",
-    "dist": "npm run prepare:brand && npm run build:sidecars && tauri build --config src-tauri/tauri.brand.conf.json",
+    "dist": "node scripts/dist.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "test:renderer": "playwright test",

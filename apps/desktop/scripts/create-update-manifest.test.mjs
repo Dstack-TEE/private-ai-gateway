@@ -23,11 +23,13 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     assert.equal(manifest.channel, channel);
     assert.deepEqual(Object.keys(manifest.platforms).sort(), [
       "darwin-aarch64",
+      "darwin-x86_64",
       "linux-x86_64-deb",
       "linux-x86_64-rpm",
       "windows-x86_64",
     ]);
-    assert.ok(manifest.platforms["windows-x86_64"].url.endsWith(`/desktop-v${version}/windows-x86_64-${version}.exe`));
+    assert.ok(manifest.platforms["windows-x86_64"].url.endsWith(`/desktop-v${version}/private-ai-proxy-${version}-windows-x64.exe`));
+    assert.deepEqual(manifest.platforms["darwin-aarch64"], manifest.platforms["darwin-x86_64"]);
     for (const entry of Object.values(manifest.platforms)) {
       const filename = path.basename(new URL(entry.url).pathname);
       assert.equal(await readFile(path.join(directory, filename), "utf8"), "fixture");
@@ -43,10 +45,10 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     }
     assert.ok(selected.includes("private-ai-proxy-cli-0.1.2-linux-x64.tar.gz"));
     assert.ok(selected.includes("SHA256SUMS"));
-    assert.ok(selected.includes("Private.AI.Proxy.dmg"));
-    assert.match(await readFile(path.join(directory, "SHA256SUMS"), "utf8"), /  Private\.AI\.Proxy\.dmg\n/);
+    assert.ok(selected.includes(`private-ai-proxy-${version}-macos-universal.dmg`));
+    assert.ok((await readFile(path.join(directory, "SHA256SUMS"), "utf8")).includes(`  private-ai-proxy-${version}-macos-universal.dmg\n`));
     assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip" || file.startsWith("private-ai-proxy-cli_")));
-    await rm(path.join(directory, `linux-x86_64-rpm-${version}.rpm.sig`));
+    await rm(path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`));
     await assert.rejects(run);
   } finally {
     await rm(directory, { recursive: true, force: true });

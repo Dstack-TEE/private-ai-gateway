@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { artifactName } from "./release-artifacts.mjs";
+import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
 import {
   chmod,
   copyFile,
@@ -49,6 +51,9 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
       throw new Error(`Missing staged CLI binary ${source}`);
     }
     await copyFile(source, target);
+    if (targetTriple === UNIVERSAL_MACOS_TARGET) {
+      execFileSync("xcrun", ["lipo", "-verify_arch", "arm64", "x86_64", target], { stdio: "inherit" });
+    }
     if (platform !== "windows") {
       await chmod(target, 0o755);
     }
@@ -72,7 +77,7 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   await mkdir(options.output, { recursive: true });
   const scratch = await mkdtemp(path.join(options.output, ".pap-cli-"));
-  const artifactBase = `private-ai-proxy-cli-${options.version}-${options.platform}-${options.arch}`;
+  const artifactBase = artifactName({ ...options, cli: true });
   const portable = path.join(scratch, artifactBase);
   const artifacts = [];
 
@@ -112,7 +117,7 @@ function parseArguments(arguments_) {
     const key = arguments_[index];
     const value = arguments_[index + 1];
     if (!key?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: package-cli.mjs --platform <windows|macos|linux> --arch <x64|arm64> --version <semver> --target-triple <triple> [--source <dir>] [--output <dir>]");
+      throw new Error("Usage: package-cli.mjs --platform <windows|macos|linux> --arch <x64|arm64|universal> --version <semver> --target-triple <triple> [--source <dir>] [--output <dir>]");
     }
     values.set(key.slice(2), value);
   }
@@ -123,15 +128,17 @@ function parseArguments(arguments_) {
   if (!["windows", "macos", "linux"].includes(platform)) {
     throw new Error(`Unsupported CLI package platform ${JSON.stringify(platform)}`);
   }
-  if (!["x64", "arm64"].includes(arch)) {
+  if (!["x64", "arm64", "universal"].includes(arch)) {
     throw new Error(`Unsupported CLI package architecture ${JSON.stringify(arch)}`);
   }
   if (!targetTriple || !/^[A-Za-z0-9_.-]+$/.test(targetTriple)) {
     throw new Error("A valid --target-triple is required");
   }
+  const targetArch = targetTriple === UNIVERSAL_MACOS_TARGET ? "universal" : targetTriple.startsWith("x86_64-") ? "x64" : targetTriple.startsWith("aarch64-") ? "arm64" : undefined;
+  const targetPlatform = targetTriple.endsWith("apple-darwin") ? "macos" : targetTriple.includes("-windows-") ? "windows" : targetTriple.includes("-linux-") ? "linux" : undefined;
   releaseVersionParts(version);
-  if ((platform === "windows") !== targetTriple.includes("windows")) {
-    throw new Error("CLI package platform does not match the Rust target triple");
+  if (platform !== targetPlatform || arch !== targetArch) {
+    throw new Error("CLI package platform or architecture does not match the Rust target triple");
   }
   return {
     platform,

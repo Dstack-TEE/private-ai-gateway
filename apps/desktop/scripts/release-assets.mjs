@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { artifactName } from "./release-artifacts.mjs";
+import { releaseChannel } from "./release-channel.mjs";
 
 const [directory] = process.argv.slice(2);
 if (!directory) throw new Error("Supply the release artifact directory");
@@ -11,7 +13,11 @@ const assets = files.filter((file) => {
   if (name.startsWith("private-ai-proxy-cli")) return /\.(tar\.gz|zip)$/.test(name);
   return name === "latest.json" || /\.(dmg|exe|deb|rpm|app\.tar\.gz)$/.test(name);
 }).sort();
-const normalized = assets.map((file) => path.join(path.dirname(file), path.basename(file).replaceAll(" ", ".")));
+const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
+releaseChannel(manifest.version, manifest.channel);
+const normalized = assets.map((file) => path.join(path.dirname(file), file.endsWith(".dmg")
+  ? artifactName({ version: manifest.version, platform: "macos", arch: "universal", suffix: ".dmg" })
+  : path.basename(file).replaceAll(" ", ".")));
 if (new Set(normalized.map((file) => path.basename(file))).size !== assets.length) throw new Error("Duplicate release asset names");
 const sums = [];
 for (const [index, file] of normalized.entries()) {
