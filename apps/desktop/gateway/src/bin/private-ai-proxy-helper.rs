@@ -1,6 +1,6 @@
-//! Console credential helper bundled next to the desktop app. Codex
+//! Console credential helper bundled next to Private AI Proxy. Codex
 //! (`auth.command`) and Claude Code (`apiKeyHelper`) run it as
-//! `private-ai-gateway-helper --agent-token <agent>`; it prints that agent's
+//! `private-ai-proxy-helper --agent-token <agent>`; it prints that agent's
 //! machine-local token and exits. It reads only the private token files the
 //! app issues and never the RedPill key. Being a separate console binary keeps
 //! stdout usable on Windows, where the GUI app has no console.
@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         (Some("--agent-token"), Some(agent)) => agent,
         _ => {
             eprintln!(
-                "usage: private-ai-gateway-helper --agent-token <codex|claude-code|opencode|pi|hermes|openclaw|oh-my-pi>"
+                "usage: private-ai-proxy-helper --agent-token <codex|claude-code|opencode|pi|hermes|openclaw|oh-my-pi>"
             );
             return ExitCode::from(2);
         }

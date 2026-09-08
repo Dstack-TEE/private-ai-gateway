@@ -307,7 +307,7 @@ mod platform {
         pub fn start(runtime: Weak<DesktopRuntime>, _task_runtime: Handle) -> Result<Self, String> {
             let (started_tx, started_rx) = mpsc::sync_channel(1);
             let thread = thread::Builder::new()
-                .name("pag-power-monitor".to_string())
+                .name("pap-power-monitor".to_string())
                 .spawn(move || run(runtime, started_tx))
                 .map_err(|error| format!("Cannot start system wake monitor: {error}"))?;
 

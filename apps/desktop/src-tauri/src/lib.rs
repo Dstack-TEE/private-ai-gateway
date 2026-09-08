@@ -530,7 +530,7 @@ fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
     native_dialog::close(&window)
 }
 
-async fn run_pag_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
+async fn run_pap_cli(app: &AppHandle, arguments: Vec<&str>) -> Result<Registration, String> {
     let output = app
         .shell()
         .sidecar("pap")
@@ -602,7 +602,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
         run_blocking(move || Ok(reader.preferences()?.auto_cli_registration.unwrap_or(true))).await;
     let result = match enabled {
         Ok(true) => match allow_automatic_cli_registration() {
-            Ok(()) => run_pag_cli(app, vec!["cli", "install", "--json"])
+            Ok(()) => run_pap_cli(app, vec!["cli", "install", "--json"])
                 .await
                 .map(|_| ()),
             Err(error) => Err(error),
@@ -619,7 +619,7 @@ async fn register_cli_on_startup(app: &AppHandle) {
 async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, String> {
     #[cfg(target_os = "macos")]
     register_cli_on_startup(&app).await;
-    let registration = run_pag_cli(&app, vec!["cli", "status", "--json"]).await?;
+    let registration = run_pap_cli(&app, vec!["cli", "status", "--json"]).await?;
     let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
     Ok(CliRegistration {
         registration,
@@ -639,9 +639,9 @@ async fn set_cli_registration(app: AppHandle, installed: bool) -> Result<CliRegi
         run_blocking(move || writer.set_preference(Preference::AutoCliRegistration(false))).await?;
     }
     let registration = if installed {
-        run_pag_cli(&app, vec!["cli", "install", "--json"]).await
+        run_pap_cli(&app, vec!["cli", "install", "--json"]).await
     } else {
-        run_pag_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
+        run_pap_cli(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
     }?;
     if installed {
         run_blocking(move || client.set_preference(Preference::AutoCliRegistration(true))).await?;
@@ -839,13 +839,13 @@ mod cli_startup_tests {
     #[test]
     fn automatic_registration_rejects_transient_macos_locations() {
         assert!(transient_macos_app_path(std::path::Path::new(
-            "/Volumes/Private AI Gateway/Private AI Gateway.app/Contents/MacOS/app"
+            "/Volumes/Private AI Proxy/Private AI Proxy.app/Contents/MacOS/app"
         )));
         assert!(transient_macos_app_path(std::path::Path::new(
-            "/private/var/folders/x/AppTranslocation/id/d/Private AI Gateway.app/Contents/MacOS/app"
+            "/private/var/folders/x/AppTranslocation/id/d/Private AI Proxy.app/Contents/MacOS/app"
         )));
         assert!(!transient_macos_app_path(std::path::Path::new(
-            "/Applications/Private AI Gateway.app/Contents/MacOS/app"
+            "/Applications/Private AI Proxy.app/Contents/MacOS/app"
         )));
     }
 }

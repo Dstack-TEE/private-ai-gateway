@@ -24,7 +24,7 @@ use tokio::{
 };
 
 const ACI_BINARY: &str = "pap";
-const SUPERVISOR_ARGUMENT: &str = "--pag-internal-aci-supervisor-v1";
+const SUPERVISOR_ARGUMENT: &str = "--pap-internal-aci-supervisor-v1";
 const EVENT_BUFFER: usize = 256;
 const PIPE_BUFFER: usize = 8 * 1024;
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -388,8 +388,8 @@ mod tests {
     };
 
     const FIXTURE_TEST: &str = "process::tests::supervisor_process_fixture";
-    const FIXTURE_ROLE: &str = "PAG_PROCESS_FIXTURE_ROLE";
-    const FIXTURE_PID_FILE: &str = "PAG_PROCESS_FIXTURE_PID_FILE";
+    const FIXTURE_ROLE: &str = "PAP_PROCESS_FIXTURE_ROLE";
+    const FIXTURE_PID_FILE: &str = "PAP_PROCESS_FIXTURE_PID_FILE";
     const FIXTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]

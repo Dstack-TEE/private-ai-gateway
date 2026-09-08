@@ -414,9 +414,9 @@ mod tests {
     #[test]
     fn unsupported_namespaces_are_rejected_before_opening() {
         for path in [
-            r"\\pag-test.invalid\share\helper.exe",
-            r"\\?\UNC\pag-test.invalid\share\helper.exe",
-            r"\\.\pipe\pag-helper",
+            r"\\pap-test.invalid\share\helper.exe",
+            r"\\?\UNC\pap-test.invalid\share\helper.exe",
+            r"\\.\pipe\pap-helper",
             r"C:relative",
             "relative",
         ] {

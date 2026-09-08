@@ -1,27 +1,27 @@
-# PAG CLI
+# PAP CLI
 
-`pag` manages the same per-user backend as the desktop app. It does not require
-an open window. Installations must keep `pag`, `pag-service`, `aci`, and the
+`pap` manages the same per-user backend as the desktop app. It does not require
+an open window. Installations must keep `pap`, `pap-service`, `aci`, and the
 credential helper together; see [distribution](CLI-DISTRIBUTION.md).
 
 ## Discover Commands
 
-Start with `pag --help` and `<command> --help`. `pag schema` prints the command
+Start with `pap --help` and `<command> --help`. `pap schema` prints the command
 tree as JSON, derived from the same Clap definitions used for parsing. It is a
 discovery document, not an RPC or response JSON Schema.
 
-`pag completions bash` prints shell completion code without installing it or
+`pap completions bash` prints shell completion code without installing it or
 changing shell configuration. Other supported shells are listed in its help.
 
 ## Lifecycle
 
 ```sh
-pag service start
-pag profiles list
-pag start --profile work --timeout 90
-pag status
-pag stop
-pag service stop --yes
+pap service start
+pap profiles list
+pap start --profile work --timeout 90
+pap status
+pap stop
+pap service stop --yes
 ```
 
 `service start` starts the management backend; saved `connectOnLaunch` may also
@@ -36,7 +36,7 @@ restored from disk.
 
 ### Reset Settings
 
-`pag settings reset --yes` stops protection, disconnects managed agents, and
+`pap settings reset --yes` stops protection, disconnects managed agents, and
 restores backend preferences, the default Local API listener, and the production
 OS policy. Profiles, credentials, the local client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop, which
@@ -58,12 +58,12 @@ states do not by themselves establish a verified inference session.
 ## Profiles And Credentials
 
 ```sh
-pag profiles show work
-pag profiles edit work --name "Work gateway"
-pag profiles edit work --require-production-os
-pag profiles verify work
-pag profiles export --output profiles.json
-pag profiles import profiles.json --yes
+pap profiles show work
+pap profiles edit work --name "Work gateway"
+pap profiles edit work --require-production-os
+pap profiles verify work
+pap profiles export --output profiles.json
+pap profiles import profiles.json --yes
 ```
 
 Adding, editing and verifying a profile use the backend's verification and
@@ -87,8 +87,8 @@ one JSON snapshot per line. Human-readable output is not a parsing contract.
 For reviewed agent changes, obtain a preview first:
 
 ```sh
-pag --json agents connect codex --model MODEL --dry-run
-pag --json --yes agents connect codex --model MODEL --revision REVISION
+pap --json agents connect codex --model MODEL --dry-run
+pap --json --yes agents connect codex --model MODEL --revision REVISION
 ```
 
 Use the returned revision with the same agent, direction and options. A changed

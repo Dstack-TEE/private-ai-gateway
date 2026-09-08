@@ -661,7 +661,7 @@ mod tests {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         PathBuf::from(format!(
-            r"\\.\pipe\pag-transport-test-{}-{sequence}",
+            r"\\.\pipe\pap-transport-test-{}-{sequence}",
             std::process::id()
         ))
     }

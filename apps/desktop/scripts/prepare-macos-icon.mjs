@@ -19,7 +19,7 @@ if (process.platform !== "darwin") {
 
 async function prepareMacosIcon() {
   requireActool26();
-  const scratch = await mkdtemp(path.join(tmpdir(), "private-ai-gateway-icon-"));
+  const scratch = await mkdtemp(path.join(tmpdir(), "private-ai-proxy-icon-"));
   try {
     const compilerIcon = path.join(scratch, "Icon.icon");
     const outputDir = path.join(scratch, "out");

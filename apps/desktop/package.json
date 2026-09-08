@@ -1,5 +1,5 @@
 {
-  "name": "private-ai-gateway-desktop",
+  "name": "private-ai-proxy-desktop",
   "version": "0.1.0",
   "private": true,
   "description": "Cross-platform Tauri desktop app for the ACI local verifying proxy",

@@ -18,7 +18,7 @@ const suffixes = {
   "linux-x86_64-rpm": ".rpm",
 };
 for (const [target, suffix] of Object.entries(suffixes)) {
-  const candidates = files.filter((file) => file.endsWith(suffix) && !/^private-ai-(gateway|proxy)-cli/.test(path.basename(file)));
+  const candidates = files.filter((file) => file.endsWith(suffix) && !path.basename(file).startsWith("private-ai-proxy-cli"));
   if (candidates.length !== 1) throw new Error(`Expected one ${target} update package; found ${candidates.length}`);
   const file = candidates[0];
   const signature = (await readFile(`${file}.sig`, "utf8")).trim();

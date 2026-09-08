@@ -10,9 +10,9 @@ dialogs, clipboard, autostart, and application lifecycle to each operating
 system.
 
 The app is now Private AI Proxy; the remote inference service remains Private AI
-Gateway. Existing application identifiers, credential-store keys, user data and
-update feeds stay compatible. The installed CLI is `pap`; `pag` remains a legacy
-management entry point. `pap` combines local management with ACI's `verify`,
+Gateway. This is a fresh application identity (`org.dstack.private-ai-proxy`)
+with its own data and credential namespace; old beta configuration is not migrated.
+The only installed CLI is `pap`. It combines local management with ACI's `verify`,
 `audit`, `sessions`, `send` and `serve` commands using the same Rust source.
 The existing standalone `aci` binary is unchanged in the repository but is no
 longer bundled. The backend launches `pap serve` with strict receipt enforcement.
@@ -25,12 +25,15 @@ and saving; opening profile settings manually never opts into protection.
 Windows and Linux sidebars do not reserve a macOS traffic-light region.
 
 Windows uses Tauri's NSIS template with generated 150x57 header and 164x314
-sidebar artwork. Renamed installers recognize the previous installation
-directory; Linux packages declare replacement of the old desktop package.
+sidebar artwork. There are no legacy installation hooks or compatibility binaries.
 Published releases keep installers, required updater archives, three portable CLI
 archives, `latest.json` and one `SHA256SUMS`. Detached updater signatures remain
 embedded in the manifest; duplicate archives and CLI DEB/RPM builds remain CI
 artifacts rather than additional release downloads.
+
+The CLI archives are independent distributions: no Tauri UI or desktop installation
+is required. Extract all three executables together, then use `pap --help` or
+`pap --json schema`. A working profile can be configured entirely through `pap`.
 
 Profiles, Local API settings, Privacy verification, and Usage proof open as
 document-modal AppKit sheets on macOS, without traffic lights or an independent
@@ -396,12 +399,12 @@ automatic connection. Uninstalled agents stay linked but inactive; deleted
 configs are not recreated, and external edits are preserved. Failed restoration
 keeps its journal for retry and prevents backend shutdown from silently discarding it.
 Closing or quitting only the desktop UI leaves protection and the backend running;
-use Stop All and Quit or `pag --yes service stop` to shut down both.
+use Stop All and Quit or `pap --yes service stop` to shut down both.
 
 Ordinary CLI output uses short status summaries, lists, and operation results.
 See the [CLI guide](CLI.md) for command discovery, profile editing, reviewed
 agent changes and a core-capability coverage matrix.
-For automation, use `pag --json --non-interactive <command>`. JSON mode never
+For automation, use `pap --json --non-interactive <command>`. JSON mode never
 prompts; successful results go to stdout, structured errors to stderr.
 `status --watch --json` emits one JSON object per line. Argument errors exit
 with code 2; command failures exit with code 1. Help and version retain Clap's
@@ -534,7 +537,7 @@ protocol is the service's own response, shown as such.
   defend against other software running as the same OS user, which can read
   the same files or run the helper. Codex and Claude Code obtain their token
   through the bundled console helper
-  (`private-ai-gateway-helper --agent-token <agent>`). OpenCode reads the
+  (`private-ai-proxy-helper --agent-token <agent>`). OpenCode reads the
   token file through its `{file:...}` reference; Pi and Hermes use their
   supported command-backed provider credential mechanisms.
 - **AI service profile credentials** and any credential a connection
@@ -595,10 +598,8 @@ protocol is the service's own response, shown as such.
   requires stream_options.include_usage); the proxy does not rewrite requests to
   add it. Old missing counts cannot be backfilled because response bodies are not
   retained.
-- **The Local API client key** uses `sk-pag-` followed by 64 lowercase hex
-  characters generated from 32 random bytes. Existing beta `pag_` keys remain
-  valid so upgrades do not silently break configured clients; newly created or
-  rotated keys use the current format.
+- **The Local API client key** uses `sk-pap-` followed by 64 lowercase hex
+  characters generated from 32 random bytes.
 - **What a receipt proves.** The verifier applies its ACI policy to inference
   bodies (`provider.aci_verified`, pinned sessions) and re-serializes them;
   the receipt binds those bytes, shown as `Policy applied`, not the agent's
@@ -655,7 +656,7 @@ execution and real inference are not claimed by those checks.
 
 | Agent | Config written | Credential reference |
 | --- | --- | --- |
-| Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_gateway` Responses provider | helper command |
+| Codex | `~/.codex/config.toml`: required verified `model`, `model_provider`, and a `model_providers.private_ai_proxy` Responses provider | helper command |
 | Claude Code | `~/.claude/settings.json`: `env.ANTHROPIC_BASE_URL`, gateway model discovery, `apiKeyHelper`; optional `env.ANTHROPIC_MODEL`; higher-priority exported credentials must be unset | helper command |
 | OpenCode | `opencode.json`: an app-owned `@ai-sdk/openai-compatible` provider whose model map is generated from the verified catalog; optional default | token file |
 | Pi | `~/.pi/agent/models.json`: an app-owned Responses provider whose models, limits, modalities, reasoning flag, and prices come from the verified catalog | helper command |
@@ -686,7 +687,7 @@ window size and position, and refreshes
 all preference controls. Profiles, provider credentials, the local client key,
 usage history, system notification authorization, and installed CLI registration
 are retained. Partial failures are reported and leave the reset retryable; no
-unrelated agent edits are overwritten. The CLI counterpart `pag --yes settings reset`
+unrelated agent edits are overwritten. The CLI counterpart `pap --yes settings reset`
 uses the same backend transaction but does not change the OS login item.
 `Disconnect` tombstones the record (disabled, cleanup pending), deletes the
 token file before any record or config is touched, and syncs the removal to
@@ -712,7 +713,7 @@ names or draws the product: product and organization names, tagline, support
 and homepage URLs, the default service URL and key label, the bundle
 identifier, category, and descriptions, the accent colours, and the official
 asset files next to it. `npm run prepare:brand` (run automatically by
-`check`, `build`, `dev`, and `dist`; `PRIVATE_AI_GATEWAY_BRAND=<id>` selects a
+`check`, `build`, `dev`, and `dist`; `PRIVATE_AI_PROXY_BRAND=<id>` selects a
 brand, default `dstack`) projects it into `src/renderer/generated/` (the
 `brand.ts` module plus the light and dark wordmark SVGs, imported as Vite
 assets so they ship self-hosted under the production CSP),
@@ -782,15 +783,15 @@ credential-store fixtures are separate from real provider credentials.
 
 `npm run dist` builds the release sidecars and runs `tauri build`. Xcode 26 or
 newer is required to package the adaptive macOS app icon. The platform bundle
-contains the shared renderer, `pag`, the persistent `pag-service`, `aci`, and
+contains the shared renderer, `pap`, the persistent `pap-service`, `aci`, and
 the credential helper. The UI and CLI are clients of the same per-user backend;
 there is no second GUI process.
 
-`scripts/bundle-sidecars.mjs` builds four executables with `--locked`: `pag`,
-`pag-service`, the `aci` verifier, and `private-ai-gateway-helper`, a console
+`scripts/bundle-sidecars.mjs` builds four executables with `--locked`: `pap`,
+`pap-service`, the `aci` verifier, and `private-ai-proxy-helper`, a console
 binary from the gateway crate that prints an agent's local token (kept separate
 from the GUI app so stdout works on Windows). A release build passes
-`DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAG_BUILD_VERSION`; ordinary
+`DESKTOP_RELEASE_VERSION` to the CLI/backend as `PAP_BUILD_VERSION`; ordinary
 builds use the runtime crate version. The desktop gateway and Tauri crates declare
 `rust-version = 1.89`, the highest MSRV in their locked dependency graphs
 (`aes` 0.9.3: 1.89; `keyring` 4.2: 1.88), and commit their `Cargo.lock` files.

@@ -10,7 +10,7 @@
 //   src-tauri/icons/                  legacy desktop icons and Icon Composer asset
 //   assets/tray/trayTemplate*.png     monochrome template tray icon
 //
-// The default brand is `dstack`; `PRIVATE_AI_GATEWAY_BRAND=<id>` selects
+// The default brand is `dstack`; `PRIVATE_AI_PROXY_BRAND=<id>` selects
 // another. The renderer module, the Rust module, the desktop icons, and the
 // tray icon are committed for the default brand and CI fails on drift; the
 // Tauri overlay is regenerated on every run and merged by the CLI, so the
@@ -28,11 +28,11 @@ import { Resvg } from "@resvg/resvg-js";
 import bmp from "bmp-js";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const brandId = process.env.PRIVATE_AI_GATEWAY_BRAND ?? "dstack";
+const brandId = process.env.PRIVATE_AI_PROXY_BRAND ?? "dstack";
 /** Cross-platform and legacy icon files listed alongside the native `.icon` asset. */
 const LEGACY_DESKTOP_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.png", "icon.icns", "icon.ico"];
 if (!/^[a-z][a-z0-9-]*$/.test(brandId)) {
-  throw new Error(`PRIVATE_AI_GATEWAY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
+  throw new Error(`PRIVATE_AI_PROXY_BRAND must be a lowercase id, got ${JSON.stringify(brandId)}`);
 }
 const brandDir = path.join(appRoot, "brand", brandId);
 const brand = JSON.parse(await readFile(path.join(brandDir, "brand.json"), "utf8"));

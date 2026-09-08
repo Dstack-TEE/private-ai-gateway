@@ -1,5 +1,5 @@
 [package]
-name = "private-ai-gateway-desktop-gateway"
+name = "private-ai-proxy-gateway"
 version = "0.1.0"
 description = "Desktop-owned local agent gateway: loopback proxy, catalog, secrets, and agent projections"
 license = "Apache-2.0"
@@ -12,8 +12,8 @@ name = "desktop_gateway"
 path = "src/lib.rs"
 
 [[bin]]
-name = "private-ai-gateway-helper"
-path = "src/bin/private-ai-gateway-helper.rs"
+name = "private-ai-proxy-helper"
+path = "src/bin/private-ai-proxy-helper.rs"
 
 [dependencies]
 axum = "0.7"

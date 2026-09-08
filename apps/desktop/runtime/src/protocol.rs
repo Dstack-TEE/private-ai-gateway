@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub const VERSION: u16 = 2;
-pub const BUILD_VERSION: &str = match option_env!("PAG_BUILD_VERSION") {
+pub const BUILD_VERSION: &str = match option_env!("PAP_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };

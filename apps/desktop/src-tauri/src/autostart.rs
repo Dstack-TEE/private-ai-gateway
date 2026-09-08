@@ -134,12 +134,12 @@ mod platform {
         fn escapes_linux_desktop_exec_path() {
             let cases = [
                 (
-                    "/usr/bin/private-ai-gateway-desktop",
-                    r#""/usr/bin/private-ai-gateway-desktop""#,
+                    "/usr/bin/private-ai-proxy-desktop",
+                    r#""/usr/bin/private-ai-proxy-desktop""#,
                 ),
                 (
-                    "/opt/Private AI Gateway/app",
-                    r#""/opt/Private AI Gateway/app""#,
+                    "/opt/Private AI Proxy/app",
+                    r#""/opt/Private AI Proxy/app""#,
                 ),
                 (
                     r#"/opt/$cash/`tick`/back\slash/quo"te/%app"#,
@@ -162,9 +162,9 @@ mod platform {
         fn quotes_windows_startup_path() {
             assert_eq!(
                 windows_launch_path(Path::new(
-                    r"C:\Program Files\Private AI Gateway\private-ai-gateway-desktop.exe"
+                    r"C:\Program Files\Private AI Proxy\private-ai-proxy-desktop.exe"
                 )),
-                r#""C:\Program Files\Private AI Gateway\private-ai-gateway-desktop.exe""#
+                r#""C:\Program Files\Private AI Proxy\private-ai-proxy-desktop.exe""#
             );
         }
 

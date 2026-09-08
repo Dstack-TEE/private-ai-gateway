@@ -1,27 +1,26 @@
-Var PagStartupLockHandle
-Var PagStartupLockOverlapped
-Var PagStartupLockHeld
-Var PagStartupLockPath
-Var PagLegacyInstall
+Var PapStartupLockHandle
+Var PapStartupLockOverlapped
+Var PapStartupLockHeld
+Var PapStartupLockPath
 
-!macro PAG_RELEASE_STARTUP_LOCK
-  ${If} $PagStartupLockHeld == 1
-    System::Call 'kernel32::UnlockFileEx(p $PagStartupLockHandle, i 0, i 1, i 0, p $PagStartupLockOverlapped)'
+!macro PAP_RELEASE_STARTUP_LOCK
+  ${If} $PapStartupLockHeld == 1
+    System::Call 'kernel32::UnlockFileEx(p $PapStartupLockHandle, i 0, i 1, i 0, p $PapStartupLockOverlapped)'
   ${EndIf}
-  ${If} $PagStartupLockHandle != ""
-  ${AndIf} $PagStartupLockHandle != -1
-    System::Call 'kernel32::CloseHandle(p $PagStartupLockHandle)'
+  ${If} $PapStartupLockHandle != ""
+  ${AndIf} $PapStartupLockHandle != -1
+    System::Call 'kernel32::CloseHandle(p $PapStartupLockHandle)'
   ${EndIf}
-  ${If} $PagStartupLockOverlapped != ""
-    System::Free $PagStartupLockOverlapped
+  ${If} $PapStartupLockOverlapped != ""
+    System::Free $PapStartupLockOverlapped
   ${EndIf}
-  StrCpy $PagStartupLockHandle ""
-  StrCpy $PagStartupLockOverlapped ""
-  StrCpy $PagStartupLockHeld 0
+  StrCpy $PapStartupLockHandle ""
+  StrCpy $PapStartupLockOverlapped ""
+  StrCpy $PapStartupLockHeld 0
 !macroend
 
-!macro PAG_FAIL MESSAGE
-  !insertmacro PAG_RELEASE_STARTUP_LOCK
+!macro PAP_FAIL MESSAGE
+  !insertmacro PAP_RELEASE_STARTUP_LOCK
   DetailPrint "${MESSAGE}"
   ${IfNot} ${Silent}
     MessageBox MB_ICONSTOP|MB_OK "${MESSAGE}"
@@ -30,59 +29,59 @@ Var PagLegacyInstall
   Abort
 !macroend
 
-!macro PAG_ACQUIRE_STARTUP_LOCK
-  ${If} $PagStartupLockHeld != 1
-    StrCpy $PagStartupLockHandle ""
-    StrCpy $PagStartupLockOverlapped ""
-    StrCpy $PagStartupLockHeld 0
+!macro PAP_ACQUIRE_STARTUP_LOCK
+  ${If} $PapStartupLockHeld != 1
+    StrCpy $PapStartupLockHandle ""
+    StrCpy $PapStartupLockOverlapped ""
+    StrCpy $PapStartupLockHeld 0
 
-    ReadEnvStr $PagStartupLockPath "PRIVATE_AI_GATEWAY_HOME"
-    ${If} $PagStartupLockPath == ""
-      ReadEnvStr $PagStartupLockPath "APPDATA"
-      ${If} $PagStartupLockPath == ""
-        !insertmacro PAG_FAIL "APPDATA is not set, so the backend startup lock cannot be located."
+    ReadEnvStr $PapStartupLockPath "PRIVATE_AI_PROXY_HOME"
+    ${If} $PapStartupLockPath == ""
+      ReadEnvStr $PapStartupLockPath "APPDATA"
+      ${If} $PapStartupLockPath == ""
+        !insertmacro PAP_FAIL "APPDATA is not set, so the backend startup lock cannot be located."
       ${EndIf}
-      StrCpy $PagStartupLockPath "$PagStartupLockPath\${BUNDLEID}"
+      StrCpy $PapStartupLockPath "$PapStartupLockPath\${BUNDLEID}"
     ${Else}
-      StrCpy $PagStartupLockPath "$PagStartupLockPath\.private-ai-gateway"
+      StrCpy $PapStartupLockPath "$PapStartupLockPath\.private-ai-proxy"
     ${EndIf}
     ClearErrors
-    CreateDirectory "$PagStartupLockPath"
+    CreateDirectory "$PapStartupLockPath"
     ${If} ${Errors}
-      !insertmacro PAG_FAIL "Cannot create the Private AI Proxy data directory at $PagStartupLockPath."
+      !insertmacro PAP_FAIL "Cannot create the Private AI Proxy data directory at $PapStartupLockPath."
     ${EndIf}
-    StrCpy $PagStartupLockPath "$PagStartupLockPath\startup.lock"
+    StrCpy $PapStartupLockPath "$PapStartupLockPath\startup.lock"
 
-    System::Call 'kernel32::CreateFileW(w "$PagStartupLockPath", i 0xC0000000, i 7, p 0, i 4, i 0x80, p 0) p.R0 ?e'
+    System::Call 'kernel32::CreateFileW(w "$PapStartupLockPath", i 0xC0000000, i 7, p 0, i 4, i 0x80, p 0) p.R0 ?e'
     Pop $R2
-    StrCpy $PagStartupLockHandle $R0
-    ${If} $PagStartupLockHandle == -1
-      StrCpy $PagStartupLockHandle ""
-      !insertmacro PAG_FAIL "Cannot open the backend startup lock at $PagStartupLockPath (Windows error $R2)."
+    StrCpy $PapStartupLockHandle $R0
+    ${If} $PapStartupLockHandle == -1
+      StrCpy $PapStartupLockHandle ""
+      !insertmacro PAP_FAIL "Cannot open the backend startup lock at $PapStartupLockPath (Windows error $R2)."
     ${EndIf}
 
     System::Call '*(p 0, p 0, i 0, i 0, p 0) p.R0'
-    StrCpy $PagStartupLockOverlapped $R0
-    ${If} $PagStartupLockOverlapped == 0
-      StrCpy $PagStartupLockOverlapped ""
-      !insertmacro PAG_FAIL "Cannot allocate the backend startup lock state."
+    StrCpy $PapStartupLockOverlapped $R0
+    ${If} $PapStartupLockOverlapped == 0
+      StrCpy $PapStartupLockOverlapped ""
+      !insertmacro PAP_FAIL "Cannot allocate the backend startup lock state."
     ${EndIf}
 
     StrCpy $R3 200
     ${Do}
       ; Byte zero overlaps Rust File::try_lock's whole-file lock. Never delete the lock file.
-      System::Call 'kernel32::LockFileEx(p $PagStartupLockHandle, i 3, i 0, i 1, i 0, p $PagStartupLockOverlapped) i.R0 ?e'
+      System::Call 'kernel32::LockFileEx(p $PapStartupLockHandle, i 3, i 0, i 1, i 0, p $PapStartupLockOverlapped) i.R0 ?e'
       Pop $R2
       ${If} $R0 != 0
-        StrCpy $PagStartupLockHeld 1
+        StrCpy $PapStartupLockHeld 1
         ${ExitDo}
       ${EndIf}
       ${If} $R2 != 33
-        !insertmacro PAG_FAIL "Cannot acquire the backend startup lock (Windows error $R2)."
+        !insertmacro PAP_FAIL "Cannot acquire the backend startup lock (Windows error $R2)."
       ${EndIf}
       IntOp $R3 $R3 - 1
       ${If} $R3 == 0
-        !insertmacro PAG_FAIL "Another backend startup or update is still in progress. Close Private AI Proxy and retry."
+        !insertmacro PAP_FAIL "Another backend startup or update is still in progress. Close Private AI Proxy and retry."
       ${EndIf}
       Sleep 100
     ${Loop}
@@ -91,72 +90,56 @@ Var PagLegacyInstall
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro PAG_ACQUIRE_STARTUP_LOCK
-  ReadRegStr $PagLegacyInstall SHCTX "${MANUKEY}\Private AI Gateway" ""
-  ${If} $PagLegacyInstall != ""
-    ${StrCase} $R1 "$PagLegacyInstall" "L"
-    ${StrCase} $R2 "$INSTDIR" "L"
-    ${If} $R1 != $R2
-      !insertmacro PAG_FAIL "Private AI Gateway is already installed at $PagLegacyInstall. Select that directory to upgrade to Private AI Proxy."
-    ${EndIf}
-  ${EndIf}
+  !insertmacro PAP_ACQUIRE_STARTUP_LOCK
 
   SearchPath $R0 "pap.exe"
   ${If} $R0 != ""
     ${StrCase} $R1 "$R0" "L"
     ${StrCase} $R2 "$INSTDIR\pap.exe" "L"
     ${If} $R1 != $R2
-      !insertmacro PAG_FAIL "A different pap executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
+      !insertmacro PAP_FAIL "A different pap executable is already on PATH at $R0. Remove that installation before installing ${PRODUCTNAME}."
     ${EndIf}
   ${EndIf}
 
-  ${If} ${FileExists} "$INSTDIR\pag.exe"
+  ${If} ${FileExists} "$INSTDIR\pap.exe"
     ReadRegStr $R0 SHCTX "${MANUPRODUCTKEY}" ""
-    ${If} $R0 == ""
-      StrCpy $R0 "$PagLegacyInstall"
-    ${EndIf}
     ${StrCase} $R1 "$R0" "L"
     ${StrCase} $R2 "$INSTDIR" "L"
     ${If} $R1 != $R2
-      !insertmacro PAG_FAIL "An unrelated pag executable exists at $INSTDIR\pag.exe. Choose another install directory or remove the conflicting file."
+      !insertmacro PAP_FAIL "An unrelated pap executable exists at $INSTDIR\pap.exe. Choose another install directory or remove the conflicting file."
     ${EndIf}
-    ExecWait '"$INSTDIR\pag.exe" --yes service stop' $R0
+    ExecWait '"$INSTDIR\pap.exe" --yes service stop' $R0
     ${If} $R0 != 0
-      !insertmacro PAG_FAIL "The existing Private AI Proxy backend could not be stopped. The installation was not replaced."
+      !insertmacro PAP_FAIL "The existing Private AI Proxy backend could not be stopped. The installation was not replaced."
     ${EndIf}
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ${If} $PagLegacyInstall != ""
-    Delete "$INSTDIR\aci.exe"
-    DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\Private AI Gateway"
-    DeleteRegKey SHCTX "${MANUKEY}\Private AI Gateway"
-  ${EndIf}
   ExecWait '"$INSTDIR\pap.exe" cli install' $R0
   ${If} $R0 != 0
-    !insertmacro PAG_FAIL "Private AI Proxy was installed, but pap could not be registered in the current user's PATH."
+    !insertmacro PAP_FAIL "Private AI Proxy was installed, but pap could not be registered in the current user's PATH."
   ${EndIf}
-  !insertmacro PAG_RELEASE_STARTUP_LOCK
+  !insertmacro PAP_RELEASE_STARTUP_LOCK
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro PAG_ACQUIRE_STARTUP_LOCK
+  !insertmacro PAP_ACQUIRE_STARTUP_LOCK
 
-  ${If} ${FileExists} "$INSTDIR\pag.exe"
-    ExecWait '"$INSTDIR\pag.exe" --yes service stop' $R0
+  ${If} ${FileExists} "$INSTDIR\pap.exe"
+    ExecWait '"$INSTDIR\pap.exe" --yes service stop' $R0
     ${If} $R0 != 0
-      !insertmacro PAG_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
+      !insertmacro PAP_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
     ${EndIf}
     ${If} $UpdateMode != 1
       ExecWait '"$INSTDIR\pap.exe" --yes cli uninstall' $R0
       ${If} $R0 != 0
-        !insertmacro PAG_FAIL "pap could not remove its current-user PATH registration. Uninstall was cancelled."
+        !insertmacro PAP_FAIL "pap could not remove its current-user PATH registration. Uninstall was cancelled."
       ${EndIf}
     ${EndIf}
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  !insertmacro PAG_RELEASE_STARTUP_LOCK
+  !insertmacro PAP_RELEASE_STARTUP_LOCK
 !macroend

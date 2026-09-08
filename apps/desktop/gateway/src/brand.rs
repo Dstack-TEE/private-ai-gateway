@@ -11,4 +11,4 @@ pub const SUPPORT_URL: &str =
 pub const SERVICE_NAME: &str = "RedPill";
 pub const SERVICE_DEFAULT_URL: &str = "https://tee.redpill.ai";
 /// Bundle identifier; names the per-user app data directory on every platform.
-pub const APP_IDENTIFIER: &str = "org.dstack.private-ai-gateway";
+pub const APP_IDENTIFIER: &str = "org.dstack.private-ai-proxy";

@@ -15,7 +15,7 @@ const releaseVersion = process.env.DESKTOP_RELEASE_VERSION?.trim();
 const buildEnv = {
   ...process.env,
   ...(path.isAbsolute(cargo) ? { PATH: `${cargoDirectory}${path.delimiter}${pathValue}` } : {}),
-  ...(releaseVersion ? { PAG_BUILD_VERSION: releaseVersion } : {}),
+  ...(releaseVersion ? { PAP_BUILD_VERSION: releaseVersion } : {}),
 };
 const rustcOutput = execFileSync(rustc, ["-vV"], {
   cwd: repoRoot,
@@ -35,22 +35,18 @@ await mkdir(destinationDir, { recursive: true });
 const sidecars = [
   { name: "pap", manifestPath: path.join(repoRoot, "Cargo.toml") },
   {
-    name: "pag",
-    manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
+    name: "pap-service",
+    manifestPath: path.join(repoRoot, "Cargo.toml"),
   },
   {
-    name: "pag-service",
-    manifestPath: path.join(appRoot, "runtime/Cargo.toml"),
-  },
-  {
-    name: "private-ai-gateway-helper",
+    name: "private-ai-proxy-helper",
     manifestPath: path.join(appRoot, "gateway/Cargo.toml"),
   },
 ];
 
 for (const sidecar of sidecars) {
   const buildArgs = ["build", "--locked", "--manifest-path", sidecar.manifestPath, "--bin", sidecar.name];
-  if (sidecar.name === "pap") buildArgs.push("--features", "desktop-client");
+  if (sidecar.name.startsWith("pap")) buildArgs.push("--features", "desktop-client");
   if (!debug) {
     buildArgs.push("--release");
   }

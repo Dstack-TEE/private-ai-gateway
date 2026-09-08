@@ -6,13 +6,13 @@ use desktop_runtime::{
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "pag-service", version = desktop_runtime::protocol::BUILD_VERSION, about = "Run the per-user PAG backend in the foreground")]
+#[command(name = "pap-service", version = desktop_runtime::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
 struct Arguments {}
 
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("PAG backend: {error}");
+        eprintln!("PAP backend: {error}");
         std::process::exit(1);
     }
 }
@@ -39,7 +39,7 @@ async fn run() -> Result<(), String> {
     let launcher = Arc::new(TokioSidecarLauncher::new(directory.join(name("pap")))?);
     let options = RuntimeOptions {
         launcher,
-        helper_path: directory.join(name("private-ai-gateway-helper")),
+        helper_path: directory.join(name("private-ai-proxy-helper")),
         task_runtime: tokio::runtime::Handle::current(),
     };
     // Runtime initialization uses synchronous persistence APIs outside executor workers.

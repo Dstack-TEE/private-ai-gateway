@@ -25,7 +25,7 @@ export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
         const result = await api.importProfiles(backup);
         onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
       } else {
-        const path = mock ? "profiles.json" : await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-gateway-profiles.json", filters });
+        const path = mock ? "profiles.json" : await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-proxy-profiles.json", filters });
         if (!path) return;
         await api.exportProfiles(path);
         onMessage("Profile configurations exported without credentials.", false);
@@ -45,7 +45,7 @@ export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessa
     if (busy) return;
     setBusy(true);
     try {
-      const path = mock ? "diagnostics.json" : await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-gateway-diagnostics.json", filters });
+      const path = mock ? "diagnostics.json" : await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-proxy-diagnostics.json", filters });
       if (!path) return;
       await api.exportDiagnostics(path);
       onMessage("Diagnostics exported without keys, URLs, local paths or request content.");

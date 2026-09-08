@@ -167,7 +167,7 @@ fn connection(
                 id: request.id,
                 outcome: Outcome::Error(RpcError::new(
                     "incompatible_protocol",
-                    "Update PAG clients and backend together.",
+                    "Update PAP clients and backend together.",
                 )),
             },
         );

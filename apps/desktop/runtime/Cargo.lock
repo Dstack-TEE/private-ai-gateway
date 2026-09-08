@@ -1533,7 +1533,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "private-ai-gateway-desktop-gateway"
+name = "private-ai-proxy-gateway"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -1559,7 +1559,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "private-ai-gateway-desktop-runtime"
+name = "private-ai-proxy-runtime"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -1567,7 +1567,7 @@ dependencies = [
  "futures-util",
  "libc",
  "netwatcher",
- "private-ai-gateway-desktop-gateway",
+ "private-ai-proxy-gateway",
  "rpassword",
  "rusqlite",
  "rustix",

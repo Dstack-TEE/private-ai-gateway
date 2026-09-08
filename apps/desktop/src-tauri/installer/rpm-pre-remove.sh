@@ -1,15 +1,15 @@
 #!/bin/sh
 set -eu
 
-pag=/usr/bin/pag
-[ -e "$pag" ] || [ -L "$pag" ] || exit 0
-directory=$(dirname "$(readlink -f "$pag")")
-for binary in pag-service pap aci private-ai-gateway-helper; do
+pap=/usr/bin/pap
+[ -e "$pap" ] || [ -L "$pap" ] || exit 0
+directory=$(dirname "$(readlink -f "$pap")")
+for binary in pap-service pap private-ai-proxy-helper; do
   executable="$directory/$binary"
   [ -e "$executable" ] || continue
   for process in /proc/[0-9]*/exe; do
     [ "$(readlink "$process" 2>/dev/null || true)" != "$executable" ] || {
-      echo "Private AI Proxy is still running. As the signed-in user, run: pag --yes service stop" >&2
+      echo "Private AI Proxy is still running. As the signed-in user, run: pap --yes service stop" >&2
       exit 1
     }
   done

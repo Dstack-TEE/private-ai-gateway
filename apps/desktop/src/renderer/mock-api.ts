@@ -334,7 +334,7 @@ export function mockApi(name: string | null): DesktopApi {
     && (!query.sessionId || item.sessionId === query.sessionId)
     && (query.since === undefined || item.at >= query.since)
     && (query.until === undefined || item.at < query.until));
-  let clientKey = "sk-pag-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
+  let clientKey = "sk-pap-2f8a19c4d7e6b305a418b62f903c7de84fd119b7a02e65c83b34f09c719a5d2e";
   const credentialProfiles = new Set(state.profiles.filter((profile) => profile.credentialSaved ?? Boolean(profile.verifiedAt)).map((profile) => profile.id));
   const publish = () => {
     const protectedNow = state.status === "verified" && !state.configurationVerification && state.apiKeySaved;
@@ -360,10 +360,10 @@ export function mockApi(name: string | null): DesktopApi {
     showEditMenu: async (editable) => { window.dispatchEvent(new CustomEvent("mock:edit-menu", { detail: { editable } })); },
     getAppearance: async () => {
       if (name === "appearance-pending") await new Promise<void>((resolve) => window.addEventListener("mock:finish-appearance", () => resolve(), { once: true }));
-      const value = localStorage.getItem("pag-preview-appearance");
+      const value = localStorage.getItem("pap-preview-appearance");
       return value === "light" || value === "dark" ? value : "system";
     },
-    setAppearance: async (appearance) => { localStorage.setItem("pag-preview-appearance", appearance); },
+    setAppearance: async (appearance) => { localStorage.setItem("pap-preview-appearance", appearance); },
     onAppearanceChange: () => () => undefined,
     getAppVersion: async () => "0.1.0",
     getUpdateChannel: async () => updateChannel,
@@ -415,7 +415,7 @@ export function mockApi(name: string | null): DesktopApi {
         keyListeners.forEach((listener) => listener(false));
         throw new Error("Could not store the replacement client key");
       }
-      clientKey = `sk-pag-${Array.from({ length: 4 }, () => Math.random().toString(16).slice(2).padEnd(16, "0")).join("").slice(0, 64)}`;
+      clientKey = `sk-pap-${Array.from({ length: 4 }, () => Math.random().toString(16).slice(2).padEnd(16, "0")).join("").slice(0, 64)}`;
       keyListeners.forEach((listener) => listener(true));
       return clientKey;
     },
@@ -443,7 +443,7 @@ export function mockApi(name: string | null): DesktopApi {
       agents = agents.map((agent) => ({ ...agent, connected: false, recorded: false, authorized: false, attention: undefined, repairAction: undefined }));
       launchPreferences = { openAtLogin: false, connectOnLaunch: false };
       updateChannel = "stable";
-      localStorage.setItem("pag-preview-appearance", "system");
+      localStorage.setItem("pap-preview-appearance", "system");
       for (const key of ["enabled", "gateway", "localApi", "verification"]) localStorage.removeItem(`mock:notifications:${key}`);
       publish();
       window.dispatchEvent(new Event("mock:settings-reset"));
@@ -720,7 +720,7 @@ export function mockApi(name: string | null): DesktopApi {
           : "Only fields written by Private AI Proxy are restored; the agent's local token is revoked.",
         changes: connect
           ? [
-              { key: agentId === "codex" ? "model_providers.private_ai_gateway.base_url" : "env.ANTHROPIC_BASE_URL", before: null, after: "http://127.0.0.1:4180", sensitive: false },
+              { key: agentId === "codex" ? "model_providers.private_ai_proxy.base_url" : "env.ANTHROPIC_BASE_URL", before: null, after: "http://127.0.0.1:4180", sensitive: false },
               { key: "env.ANTHROPIC_MODEL", before: null, after: options.defaultModel ?? "Discovered at runtime", sensitive: false },
               { key: "apiKeyHelper", before: null, after: "Managed local credential", sensitive: true },
               { key: "env.ANTHROPIC_AUTH_TOKEN", before: "Existing secret", after: null, sensitive: true },

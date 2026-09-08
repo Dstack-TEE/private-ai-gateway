@@ -11,7 +11,7 @@ use crate::{
     protocol::{Command, Preference},
     usage::UsageQuery,
 };
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -29,37 +29,6 @@ pub fn cli_command() -> clap::Command {
 pub fn run_matches(matches: &clap::ArgMatches, command: clap::Command) -> Result<(), String> {
     let cli = Cli::from_arg_matches(matches).map_err(|error| error.to_string())?;
     execute(&cli, command)
-}
-
-pub fn main() {
-    let args: Vec<_> = std::env::args_os().collect();
-    let json_requested = args
-        .iter()
-        .skip(1)
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "--json");
-    let cli = match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
-        Err(error) if json_requested && error.use_stderr() => {
-            eprintln!(
-                "{}",
-                json!({"error": {"code": "invalid_arguments", "message": error.to_string()}})
-            );
-            std::process::exit(error.exit_code());
-        }
-        Err(error) => error.exit(),
-    };
-    if let Err(error) = execute(&cli, Cli::command()) {
-        if cli.json {
-            eprintln!(
-                "{}",
-                json!({"error": {"code": "command_failed", "message": error}})
-            );
-        } else {
-            eprintln!("pag: {}", human::safe(&error));
-        }
-        std::process::exit(1);
-    }
 }
 
 fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
@@ -172,12 +141,12 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                         "verifying" => {}
                         _ => {
                             return Err(
-                                "Gateway did not become verified. Inspect pag status.".into()
+                                "Gateway did not become verified. Inspect pap status.".into()
                             )
                         }
                     }
                     if Instant::now() >= deadline {
-                        return Err("Verification wait timed out; the backend may still be verifying. Inspect pag status before retrying.".into());
+                        return Err("Verification wait timed out; the backend may still be verifying. Inspect pap status before retrying.".into());
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -480,7 +449,7 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                 value(crate::cli_install::install(directory.clone())?)?
             }
             Registration::Uninstall { directory } => {
-                confirm(cli, "Unregister the pag command?")?;
+                confirm(cli, "Unregister the pap command?")?;
                 value(crate::cli_install::uninstall(directory.clone())?)?
             }
         },
@@ -511,9 +480,9 @@ fn execute(cli: &Cli, mut command: clap::Command) -> Result<(), String> {
                     .parent()
                     .ok_or("Cannot locate app directory")?
                     .join(if cfg!(windows) {
-                        "private-ai-gateway-desktop.exe"
+                        "private-ai-proxy-desktop.exe"
                     } else {
-                        "private-ai-gateway-desktop"
+                        "private-ai-proxy-desktop"
                     });
             if !app.is_file() {
                 return Err("Desktop UI is not installed alongside this CLI.".into());
@@ -733,14 +702,15 @@ fn finish_output(result: Result<(), OutputError>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn automation_modes_never_prompt_or_imply_consent() {
         for mode in ["--json", "--non-interactive", "--no-interactive"] {
-            let cli = Cli::try_parse_from(["pag", mode, "status"]).unwrap();
+            let cli = Cli::try_parse_from(["pap", mode, "status"]).unwrap();
             assert!(confirm(&cli, "Confirm?").unwrap_err().contains("--yes"));
             assert!(read_key(&cli, false).unwrap_err().contains("--key-stdin"));
-            let approved = Cli::try_parse_from(["pag", mode, "--yes", "status"]).unwrap();
+            let approved = Cli::try_parse_from(["pap", mode, "--yes", "status"]).unwrap();
             assert!(confirm(&approved, "Confirm?").is_ok());
         }
     }
@@ -766,9 +736,9 @@ mod tests {
                 &Action::Token {
                     command: Token::Show
                 },
-                &json!({"token":"sk-pag-example"})
+                &json!({"token":"sk-pap-example"})
             ),
-            "sk-pag-example"
+            "sk-pap-example"
         );
         let agents = human::render(
             &Action::Agents {

@@ -13,7 +13,7 @@ assert.equal(process.platform, "linux");
 assert.ok(binaries && path.isAbsolute(binaries), "Supply an absolute installed binary directory");
 const exec = promisify(execFile);
 const home = await mkdtemp(path.join(tmpdir(), "pap-native-"));
-const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"), XDG_CACHE_HOME: path.join(home, "cache"), PRIVATE_AI_GATEWAY_HOME: home };
+const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"), XDG_CACHE_HOME: path.join(home, "cache"), PRIVATE_AI_PROXY_HOME: home };
 const children = [];
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cli = async (...args) => JSON.parse((await exec(path.join(binaries, "pap"), [...args, "--json"], { env, timeout: 25_000, maxBuffer: 1_048_576 })).stdout);
@@ -48,10 +48,10 @@ try {
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   await new Promise((resolve) => server.close(resolve));
-  const data = path.join(home, ".private-ai-gateway");
+  const data = path.join(home, ".private-ai-proxy");
   await mkdir(data, { mode: 0o700 });
   await writeFile(path.join(data, "local-api.json"), JSON.stringify({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: address.port }), { mode: 0o600 });
-  const backend = start("pag-service");
+  const backend = start("pap-service");
   let state;
   for (let count = 0; count < 100; count++) {
     assert.equal(backend.exitCode, null, "Backend exited before readiness");
@@ -61,7 +61,7 @@ try {
   }
   assert.ok(state.backend, "Backend readiness timed out");
   const instance = state.backend.instanceId;
-  let ui = start("private-ai-gateway-desktop");
+  let ui = start("private-ai-proxy-desktop");
   let windows = "";
   for (let count = 0; count < 150; count++) {
     assert.equal(ui.exitCode, null, `UI exited before creating a window: ${ui.diagnostic}`);
@@ -72,7 +72,7 @@ try {
   assert.match(windows, /Private AI Proxy/, ui.diagnostic);
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
-  ui = start("private-ai-gateway-desktop");
+  ui = start("private-ai-proxy-desktop");
   await delay(1_000);
   assert.equal(ui.exitCode, null);
   assert.equal((await cli("status")).backend.instanceId, instance);

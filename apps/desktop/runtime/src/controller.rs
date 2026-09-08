@@ -206,7 +206,7 @@ impl DesktopRuntime {
         let data_dir = app_data_dir()?;
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
-            .ok_or_else(|| "Another Private AI Gateway instance is already running".to_string())?;
+            .ok_or_else(|| "Another Private AI Proxy instance is already running".to_string())?;
         #[cfg(unix)]
         if let Err(error) = crate::helper_staging::stage(&options.helper_path, &data_dir) {
             // OpenClaw independently rejects an unavailable or mismatched staged copy.
@@ -1433,7 +1433,7 @@ mod tests {
 
     #[test]
     fn launch_requires_instance_ownership_before_initialization() {
-        const CASE_ENV: &str = "PAG_TEST_INSTANCE_OWNERSHIP";
+        const CASE_ENV: &str = "PAP_TEST_INSTANCE_OWNERSHIP";
         if let Ok(case) = std::env::var(CASE_ENV) {
             let executor = tokio::runtime::Runtime::new().unwrap();
             let result = DesktopRuntime::launch(RuntimeOptions {
@@ -1447,7 +1447,7 @@ mod tests {
             match case.as_str() {
                 "held" => assert_eq!(
                     error,
-                    "Another Private AI Gateway instance is already running"
+                    "Another Private AI Proxy instance is already running"
                 ),
                 "invalid" => assert!(error.starts_with("Cannot take the instance lock:")),
                 _ => panic!("Unknown instance ownership test case"),
@@ -1457,7 +1457,7 @@ mod tests {
 
         for case in ["held", "invalid"] {
             let home = tempfile::tempdir().unwrap();
-            let data = home.path().join(".private-ai-gateway");
+            let data = home.path().join(".private-ai-proxy");
             std::fs::create_dir(&data).unwrap();
             let _owner = if case == "held" {
                 Some(lock::instance(&data).unwrap().unwrap())
