@@ -85,7 +85,11 @@ use the destructive token. Overview decoration remains neutral.
 Protection switches use primary when enabled, with warning taking precedence in
 development mode; preference and agent switches retain the default theme.
 `semantic.css` contains application aliases and warning/chart tokens.
-`styles.css` owns product layout, not a second button/switch implementation.
+Product layout, responsive rules, and interaction states use Tailwind utilities
+at their component owners. `base.css` contains only global defaults and animation
+keyframes; `theme.css` remains managed by shadcn. `NativeDialogHost` owns the shared
+native-window layout. Semantic class names are retained as stable test selectors,
+not as a parallel CSS styling system.
 Tailwind Preflight and shadcn's standard CSS are enabled. System selects retain
 their browser/platform picker. Do not override component dimensions, radii,
 shadows or typography; choose from the official component variants instead.

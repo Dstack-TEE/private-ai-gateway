@@ -74,7 +74,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./component
 import { Input } from "./components/ui/input";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "./components/ui/input-group";
 import { IconButton, SwitchControl } from "./components/controls";
-import { Sheet, SheetActions, DismissSheetAction } from "./components/sheet";
+import { Sheet, SheetActions, DismissSheetAction, NativeDialogHost } from "./components/sheet";
 import { SettingsSection, SettingsList, SettingsLink, SettingsToggle, FormField } from "./components/settings";
 import { ChoiceSelect } from "./components/choice-select";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
@@ -218,17 +218,17 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
   const seconds = since === undefined ? undefined : Math.max(0, Math.floor(now / 1_000) - since);
   const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
   return (
-    <span className="protection-status">
+    <span className="protection-status inline-flex items-center justify-center gap-1.25 max-w-full flex-wrap [&_>_svg]:flex-none">
       {active ? <ShieldCheck size={14} aria-hidden="true" /> : state.reconnecting ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{label}</span>
-      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
+      {elapsed !== undefined && <time className="protection-duration w-[8ch] font-medium text-xs leading-4.5 font-mono tabular-nums text-muted-foreground whitespace-nowrap" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
 
 function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
   const appearance = useAppearance();
-  const classes = ["brand-logo", className, busy ? "is-busy" : ""].filter(Boolean).join(" ");
+  const classes = ["brand-logo inline-grid place-items-center flex-none [&>img]:block [&>img]:size-full [&>img]:object-contain motion-reduce:animate-none", className, busy ? "is-busy animate-brand-icon-pulse" : ""].filter(Boolean).join(" ");
   return (
     <picture className={classes} aria-hidden="true">
       {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.mark.dark} />}
@@ -240,9 +240,9 @@ function BrandMark({ className = "", busy = false }: { className?: string; busy?
 function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" | "large" }): React.JSX.Element {
   const service = servicePreset(url);
   if (!service) {
-    return <span className={`service-custom-icon service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
+    return <span className={`service-custom-icon w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
   }
-  return <span className={`service-logo service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
+  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
 }
 
 type View = "overview" | "agents" | "usage" | "settings";
@@ -291,8 +291,6 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
     document.title = `${title} - ${brand.productName}`;
     const root = document.documentElement;
     root.classList.add("is-native-dialog");
-    root.style.setProperty("--accent-light", brand.theme.accentLight);
-    root.style.setProperty("--accent-dark", brand.theme.accentDark);
     let active = true;
     let receivedState = false;
     const unsubscribe = desktopApi.onStateChange((nextState) => {
@@ -334,13 +332,13 @@ function NativeUpdateProgressWindow(): React.JSX.Element {
   useDialogClose(native.close, Boolean(progress?.error), !native.closed);
   useEffect(() => desktopApi.onUpdateProgress(setProgress), []);
   if (native.closed) return <main aria-label="Software update closed" />;
-  return <main className="native-dialog-host p-6 flex flex-col gap-4" aria-labelledby="update-title">
+  return <NativeDialogHost className="p-6 flex flex-col gap-4" aria-labelledby="update-title">
     <h2 id="update-title" className="text-lg font-semibold">{progress?.error ? "Update failed" : "Installing update"}</h2>
     <p className="min-h-0 overflow-auto break-words text-sm text-muted-foreground" role={progress?.error ? "alert" : undefined}>{progress?.error ?? "The app will restart when installation completes."}</p>
     {!progress?.error && <UpdateProgressMeter progress={progress} />}
     {native.loadError && <p role="alert" className="text-sm text-destructive">{native.loadError}</p>}
     {progress?.error && <div className="mt-auto flex justify-end"><Button variant="outline" onClick={native.close}>Done</Button></div>}
-  </main>;
+  </NativeDialogHost>;
 }
 
 function NativeDialogStatus({ label, error, onClose }: { label: string; error?: string; onClose(): void }): React.JSX.Element | null {
@@ -348,11 +346,11 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
   // The native window remains hidden until content or an actionable error is ready.
   if (!error) return null;
   return (
-    <main className="native-dialog-host native-dialog-loading" aria-label={label}>
+    <NativeDialogHost className="native-dialog-loading flex flex-col items-center justify-center gap-3 p-5 text-center text-muted-foreground" aria-label={label}>
       <TriangleAlert aria-hidden="true" />
       <span className="min-h-0 overflow-auto break-words" role="alert">{error}</span>
       <Button variant="outline" onClick={onClose}>Done</Button>
-    </main>
+    </NativeDialogHost>
   );
 }
 
@@ -373,14 +371,14 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
     }
   };
 
-  if (native.closed) return <main className="native-dialog-host" aria-label="Profiles closed" />;
+  if (native.closed) return <NativeDialogHost  aria-label="Profiles closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="profiles" error={native.loadError} onClose={native.close} />;
   const busy = native.state.status === "verifying";
   const running = !native.state.configurationVerification && (native.state.status === "verified" || native.state.status === "blocked");
   const editingProfileId = profileId;
   const editingProfile = native.state.profiles.find((profile) => profile.id === editingProfileId);
   if (editor && editingProfileId && !editingProfile) return <NativeDialogStatus label="profile" error="This profile is no longer available." onClose={native.close} />;
-  if (editor) return <main className="native-dialog-host"><ProfileEditorSheet
+  if (editor) return <NativeDialogHost ><ProfileEditorSheet
     state={native.state} busy={busy} running={running}
     profile={editingProfile}
     onVerify={(profile, key) => run(async () => {
@@ -389,9 +387,9 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
     })}
     onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
     onComplete={native.close} onDeleted={native.close} onClose={native.close}
-  /></main>;
+  /></NativeDialogHost>;
   return (
-    <main className="native-dialog-host">
+    <NativeDialogHost >
       {actionError && <div className="sr-only" role="alert">{actionError}</div>}
       <ProfilesSheet
         key={repairRequest}
@@ -404,7 +402,7 @@ function NativeProfilesWindow({ repair, editor = false, profileId, startAfterSav
         onDelete={(profileId) => run(() => desktopApi.deleteProfile(profileId))}
         onClose={native.close}
       />
-    </main>
+    </NativeDialogHost>
   );
 }
 
@@ -412,31 +410,31 @@ function NativeNotificationsWindow(): React.JSX.Element {
   const { data, error } = useNotifications();
   const native = useNativeGatewayWindow("Notifications", Boolean(data || error));
   if (native.closed) return <main aria-label="Notifications closed" />;
-  return <main className="native-dialog-host"><NotificationsSheet onClose={native.close} /></main>;
+  return <NativeDialogHost ><NotificationsSheet onClose={native.close} /></NativeDialogHost>;
 }
 
 function NativeLocalApiExampleWindow(): React.JSX.Element {
   const [exampleReady, setExampleReady] = useState(false);
   const native = useNativeGatewayWindow("Local API examples", exampleReady);
-  if (native.closed) return <main className="native-dialog-host" aria-label="Local API examples closed" />;
+  if (native.closed) return <NativeDialogHost  aria-label="Local API examples closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="Local API examples" error={native.loadError} onClose={native.close} />;
-  return <main className="native-dialog-host"><LocalApiExamples
+  return <NativeDialogHost ><LocalApiExamples
     api={desktopApi}
     onReady={() => setExampleReady(true)}
     endpoint={native.state.proxyUrl ?? localEndpoint(native.state.localApi)}
     models={native.state.catalog?.models ?? []}
     onCopy={(value) => desktopApi.copyText(value)} onClose={native.close}
-  /></main>;
+  /></NativeDialogHost>;
 }
 
 function NativePrivacyWindow(): React.JSX.Element {
   const native = useNativeGatewayWindow("Privacy Verification");
-  if (native.closed) return <main className="native-dialog-host" aria-label="Privacy verification closed" />;
+  if (native.closed) return <NativeDialogHost  aria-label="Privacy verification closed" />;
   if (!native.loaded || native.loadError) return <NativeDialogStatus label="privacy verification" error={native.loadError} onClose={native.close} />;
   return (
-    <main className="native-dialog-host">
+    <NativeDialogHost >
       <PrivacyVerificationSheet state={native.state} onClose={native.close} />
-    </main>
+    </NativeDialogHost>
   );
 }
 
@@ -479,7 +477,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
     };
   }, [loadClientKey]);
 
-  if (native.closed) return <main className="native-dialog-host" aria-label="Local API settings closed" />;
+  if (native.closed) return <NativeDialogHost  aria-label="Local API settings closed" />;
   if (!native.loaded || !keyLoaded || native.loadError || keyError) {
     return <NativeDialogStatus label="Local API settings" error={native.loadError ?? keyError} onClose={native.close} />;
   }
@@ -517,7 +515,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
     }
   };
   return (
-    <main className="native-dialog-host">
+    <NativeDialogHost >
       <LocalApiSheet
         state={native.state}
         frozen={busy}
@@ -531,7 +529,7 @@ function NativeLocalApiWindow(): React.JSX.Element {
         onSave={saveLocalApi}
         onClose={native.close}
       />
-    </main>
+    </NativeDialogHost>
   );
 }
 
@@ -552,9 +550,9 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
     );
     return () => { active = false; };
   }, [recordId]);
-  if (native.closed) return <main className="native-dialog-host" aria-label="Usage proof closed" />;
+  if (native.closed) return <NativeDialogHost  aria-label="Usage proof closed" />;
   if (!activity || error || native.loadError) return <NativeDialogStatus label="usage proof" error={error ?? native.loadError} onClose={native.close} />;
-  return <main className="native-dialog-host"><UsageEvidenceSheet activity={activity} onClose={native.close} /></main>;
+  return <NativeDialogHost ><UsageEvidenceSheet activity={activity} onClose={native.close} /></NativeDialogHost>;
 }
 
 function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
@@ -629,9 +627,6 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
 
   useEffect(() => {
     document.title = brand.productName;
-    const root = document.documentElement.style;
-    root.setProperty("--accent-light", brand.theme.accentLight);
-    root.setProperty("--accent-dark", brand.theme.accentDark);
   }, []);
 
   useLayoutEffect(() => {
@@ -1014,9 +1009,9 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   }, []);
 
   const windowContent = (
-    <main className="app-shell">
+    <main className="app-shell w-full h-full grid grid-cols-[var(--sidebar-width)_minmax(0,_1fr)] overflow-hidden bg-background max-[780px]:grid-cols-[154px_minmax(0,_1fr)] max-[620px]:grid-cols-[68px_minmax(0,_1fr)] max-[440px]:grid-cols-[56px_minmax(0,_1fr)]">
       <Sidebar view={view} previewControls={previewMode} updateAvailable={Boolean(updates.info?.version)} updateBusy={Boolean(updates.busy)} onInstallUpdate={() => void updates.install()} onChange={changeView} />
-      <section className="workspace">
+      <section className="workspace min-w-0 min-h-0 flex flex-col">
         <PageHeader
           view={view}
           state={state}
@@ -1026,7 +1021,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
           developmentMode={allowDevelopmentOs}
           onToggle={toggleGateway}
         />
-        <div className="content" id={`page-${view}`} key={view}>
+        <div className="content flex-auto min-w-0 min-h-0 overflow-auto pt-4 pr-6 pb-6 pl-6 [&_>_[role=alert]]:mb-4 max-[780px]:p-4 max-[440px]:p-3" id={`page-${view}`} key={view}>
         {state.backendConnected === false && <Alert>
           <AlertDescription className="flex items-center justify-between gap-4">
             <span>Backend disconnected</span>
@@ -1156,13 +1151,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   );
 
   if (!previewMode) {
-    return <div className="native-host">{windowContent}</div>;
+    return <div className="native-host w-full h-full">{windowContent}</div>;
   }
 
   return (
-    <div className="desktop-preview">
+    <div className="desktop-preview relative w-full h-full min-w-50 pt-12 pr-6 pb-6 pl-6 grid place-items-center overflow-hidden bg-background bg-[url('/macos-wallpaper.webp')] bg-center bg-cover bg-no-repeat max-[620px]:pt-10 max-[620px]:pr-2 max-[620px]:pb-2 max-[620px]:pl-2">
       <MacMenuBar protected={isProtected(state)} trayOpen={previewTrayOpen} onTray={() => setPreviewTrayOpen((open) => !open)} />
-      <div className="desktop-window">{windowContent}</div>
+      <div className="desktop-window relative box-content w-[min(1052px,_calc(100%_-_2px))] h-[min(928px,_calc(100vh_-_74px))] min-h-140 overflow-hidden bg-background border border-[color-mix(in_srgb,_var(--color-black)_20%,_transparent)] rounded-lg [box-shadow:0_22px_60px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_16%,_transparent)] max-[620px]:w-[calc(100vw_-_16px)] max-[620px]:h-[calc(100vh_-_48px)] max-[620px]:min-h-0">{windowContent}</div>
       {previewTrayOpen && (
         <PreviewTrayMenu
           state={state}
@@ -1219,19 +1214,19 @@ function Sidebar({
     (event.currentTarget.querySelector(`#nav-${next}`) as HTMLElement | null)?.focus();
   };
   return (
-    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar" : "sidebar sidebar-standard"}>
-      <div className="sidebar-drag" data-tauri-drag-region>
+    <aside className={previewMode || /Macintosh|Mac OS X/.test(navigator.userAgent) ? "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5" : "sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5 sidebar-standard [&_.sidebar-drag]:hidden"}>
+      <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region>
         {previewControls && (
-          <span className="traffic-lights" aria-hidden="true">
-            <span className="traffic-close" />
-            <span className="traffic-minimize" />
-            <span className="traffic-zoom" />
+          <span className="traffic-lights absolute inset-0 p-1 flex items-center gap-2 [&_>_span]:w-3 [&_>_span]:h-3 [&_>_span]:border-[0.5px] [&_>_span]:border-[color-mix(in_srgb,_var(--color-black)_16%,_transparent)] [&_>_span]:rounded-full [&_>_span]:[box-shadow:inset_0_0_0_0.5px_color-mix(in_srgb,_var(--color-white)_18%,_transparent)] max-[440px]:top-5.5 max-[440px]:left-1/2 max-[440px]:gap-1 max-[440px]:-translate-x-1/2 max-[440px]:[&_>_span]:w-2 max-[440px]:[&_>_span]:h-2" aria-hidden="true">
+            <span className="traffic-close bg-red-500" />
+            <span className="traffic-minimize bg-amber-400" />
+            <span className="traffic-zoom bg-green-500" />
           </span>
         )}
       </div>
-      <div className="sidebar-brand" data-tauri-drag-region>
-        <BrandMark className="brand-mark" />
-        <span className="sidebar-brand-copy"><span>{brand.productName}</span><small>by dstack TEE</small></span>
+      <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" data-tauri-drag-region>
+        <BrandMark className="brand-mark w-7.5 h-7.5" />
+        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 leading-4.5 [&_small]:text-xs [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>by dstack TEE</small></span>
       </div>
       <SidebarProvider keyboardShortcut={false} className="min-h-0 flex-col">
       <nav className="w-full" aria-label="Main navigation" onKeyDown={onKeyDown}>
@@ -1274,15 +1269,15 @@ function MacMenuBar({ protected: isProtected, trayOpen, onTray }: { protected: b
     minute: "2-digit",
   }).format(new Date());
   return (
-    <div className="mac-menu-bar">
-      <div className="mac-menu-left" aria-hidden="true">
-        <span className="mac-apple" aria-hidden="true">◆</span>
+    <div className="mac-menu-bar absolute z-30 top-0 right-0 bottom-auto left-0 h-7 pt-0 pr-2.5 pb-0 pl-2.5 flex items-center justify-between gap-4 text-foreground bg-background/82 border-b border-b-[color-mix(in_srgb,_var(--color-black)_12%,_transparent)] [box-shadow:0_1px_8px_color-mix(in_srgb,_var(--color-black)_8%,_transparent)] [backdrop-filter:blur(18px)_saturate(130%)] text-sm select-none dark:text-foreground dark:bg-background/82 dark:[border-bottom-color:color-mix(in_srgb,_var(--color-white)_13%,_transparent)] max-[440px]:pt-0 max-[440px]:pr-1.75 max-[440px]:pb-0 max-[440px]:pl-1.75">
+      <div className="mac-menu-left min-w-0 flex items-center gap-4.25 whitespace-nowrap [&_strong]:text-sm [&_strong]:font-semibold max-[620px]:[&_span:not(.mac-apple)]:hidden max-[620px]:[&_strong]:hidden max-[620px]:gap-0" aria-hidden="true">
+        <span className="mac-apple text-xs" aria-hidden="true">◆</span>
         <strong>{brand.productName}</strong>
         <span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span>
       </div>
-      <div className="mac-menu-right">
-        <Button variant="ghost" className={`tray-trigger${trayOpen ? " is-open" : ""}`} aria-label="Private AI Proxy menu" aria-expanded={trayOpen} onClick={onTray}>
-          <span className={`tray-template-icon${isProtected ? " is-protected" : ""}`} aria-hidden="true" />
+      <div className="mac-menu-right min-w-0 flex items-center whitespace-nowrap gap-2.75 [&_time]:tabular-nums max-[620px]:[&_time]:max-w-37.5 max-[620px]:[&_time]:overflow-hidden max-[620px]:[&_time]:text-ellipsis max-[440px]:gap-2 max-[440px]:[&_time]:max-w-31.5">
+        <Button variant="ghost" className={`tray-trigger w-6 h-6 p-0.5 grid place-items-center bg-transparent border-0 rounded-sm hover:bg-black/10 [&.is-open]:bg-black/10 dark:hover:bg-white/13 dark:[&.is-open]:bg-white/13 ${trayOpen ? " is-open" : ""}`} aria-label="Private AI Proxy menu" aria-expanded={trayOpen} onClick={onTray}>
+          <span className={`tray-template-icon w-4.5 h-4.5 text-inherit bg-current [mask:url("./generated/tray-mark.svg")_center_/_contain_no-repeat] [mask-mode:alpha] ${isProtected ? "is-protected" : "opacity-45"}`} aria-hidden="true" />
         </Button>
         <Wifi size={15} strokeWidth={1.8} aria-hidden="true" />
         <BatteryMedium size={17} strokeWidth={1.8} aria-hidden="true" />
@@ -1325,23 +1320,23 @@ function PreviewTrayMenu({
   const action = verifying ? "Cancel verification" : running ? "Stop protection"
     : profileIsAvailable(activeProfile, state) ? "Start protection" : "Set Up Profile…";
   return (
-    <div className="preview-tray" role="menu" aria-label="Private AI Proxy">
-      <div className="preview-tray-heading">
+    <div className="preview-tray fixed z-50 top-8 right-2 w-71.5 pt-2.25 pr-0 pb-2.25 pl-0 text-foreground bg-white/94 border border-[color-mix(in_srgb,_var(--color-black)_16%,_transparent)] rounded-xl [box-shadow:0_16px_40px_color-mix(in_srgb,_var(--color-black)_30%,_transparent),_0_2px_8px_color-mix(in_srgb,_var(--color-black)_18%,_transparent)] [backdrop-filter:blur(26px)_saturate(140%)] dark:text-foreground dark:bg-card/95 dark:border-[color-mix(in_srgb,_var(--color-white)_17%,_transparent)] max-[440px]:right-2 max-[440px]:w-[min(286px,_calc(100vw_-_16px))]" role="menu" aria-label="Private AI Proxy">
+      <div className="preview-tray-heading min-h-14.5 pt-1.25 pr-3.5 pb-2 pl-3.5 flex items-center gap-2.5 [&_.brand-logo]:w-8 [&_.brand-logo]:h-8 [&_span]:min-w-0 [&_span]:grid [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs dark:[&_small]:text-muted-foreground">
         <BrandMark />
         <span><strong>{brand.productName}</strong><small>{serviceHost(state.remoteUrl ?? state.config.remoteUrl)}</small></span>
       </div>
-      <div className="preview-tray-status" role="status">{verdict.title}{developmentMode ? " (Dev mode)" : ""}</div>
-      <Button variant="ghost" className="preview-tray-item" role="menuitem" disabled={(busy && !verifying) || (endpointDown && !running && !verifying)} onClick={onProtection}>{action}</Button>
-      <div className="preview-tray-separator" />
-      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onOpen}>Open {brand.productName}</Button>
-      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onSettings}>Settings…</Button>
-      <div className="preview-tray-separator" />
-      <Button variant="ghost" className="preview-tray-item" role="menuitemcheckbox" aria-checked={openAtLogin} onClick={onOpenAtLogin}>
-        <span className="preview-tray-check" aria-hidden="true">{openAtLogin ? "✓" : ""}</span>
+      <div className="preview-tray-status text-muted-foreground text-xs pt-1 pr-3.5 pb-1 pl-3.5 dark:text-muted-foreground" role="status">{verdict.title}{developmentMode ? " (Dev mode)" : ""}</div>
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitem" disabled={(busy && !verifying) || (endpointDown && !running && !verifying)} onClick={onProtection}>{action}</Button>
+      <div className="preview-tray-separator h-px mt-1.25 mr-3.25 mb-1.25 ml-3.25 bg-black/12 dark:bg-white/13" />
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitem" onClick={onOpen}>Open {brand.productName}</Button>
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitem" onClick={onSettings}>Settings…</Button>
+      <div className="preview-tray-separator h-px mt-1.25 mr-3.25 mb-1.25 ml-3.25 bg-black/12 dark:bg-white/13" />
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitemcheckbox" aria-checked={openAtLogin} onClick={onOpenAtLogin}>
+        <span className="preview-tray-check w-4.5 flex-none text-primary font-bold dark:text-primary" aria-hidden="true">{openAtLogin ? "✓" : ""}</span>
         Open at Login
       </Button>
-      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onQuit}>Quit {brand.productName}</Button>
-      <Button variant="ghost" className="preview-tray-item" role="menuitem" onClick={onStopAllQuit}>Stop All and Quit…</Button>
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitem" onClick={onQuit}>Quit {brand.productName}</Button>
+      <Button variant="ghost" className="preview-tray-item w-full min-h-7.5 pt-0.75 pr-3.5 pb-0.75 pl-3.5 flex items-center text-inherit bg-transparent border-0 text-left text-sm hover:text-primary-foreground hover:bg-primary hover:shadow-none focus-visible:text-primary-foreground focus-visible:bg-primary focus-visible:shadow-none [&:hover_.preview-tray-check]:text-primary-foreground [&:focus-visible_.preview-tray-check]:text-primary-foreground" role="menuitem" onClick={onStopAllQuit}>Stop All and Quit…</Button>
     </div>
   );
 }
@@ -1366,12 +1361,12 @@ function PageHeader({
   const title = VIEWS.find((entry) => entry.id === view)?.label ?? "";
   const verdict = presentation(state);
   return (
-    <header className="page-header" data-tauri-drag-region>
+    <header className="page-header flex-[0_0_56px] mt-0 mr-6 mb-0 ml-6 pt-2 flex items-center justify-between gap-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-normal [&_h1]:pointer-events-none [&_h1]:select-none max-[620px]:pl-4 max-[620px]:pr-4 max-[440px]:basis-13 max-[440px]:mt-0 max-[440px]:mr-3 max-[440px]:mb-0 max-[440px]:ml-3 max-[440px]:pt-1.75 max-[440px]:gap-2" data-tauri-drag-region>
       <h1 id={`page-title-${view}`} tabIndex={-1}>{title}</h1>
       {view !== "overview" && (
-        <div className="page-protection">
-          {developmentMode && <span className="state state-warning">Dev mode</span>}
-          <span className={`page-switch-copy state-${verdict.tone}`}>
+        <div className="page-protection min-w-0 ml-auto flex items-center gap-2">
+          {developmentMode && <span className="state inline-flex items-center gap-1.25 text-muted-foreground text-xs font-medium [&_.dot]:w-1.5 [&_.dot]:h-1.5 [&_.dot]:flex-[0_0_6px] [&_.dot]:bg-current [&_.dot]:rounded-full state-warning text-warning">Dev mode</span>}
+          <span className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_small]:text-xs [&_small]:text-muted-foreground [&_small.is-on]:text-primary [&_small.is-development]:text-warning [&_small.is-error]:text-destructive [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full state-${verdict.tone}`}>
             <strong><ProtectionStatus state={state} label={verdict.title} /></strong>
           </span>
           <ProtectedControl
@@ -1443,8 +1438,8 @@ function Overview({
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
   const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 4) : [];
   return (
-    <div className="overview-page">
-      <div className="overview-top">
+    <div className="overview-page max-w-240 min-h-full mt-0 mr-auto mb-0 ml-auto flex flex-col @container/overview @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:col-auto @max-[600px]/overview:[&_.overview-grid_>_.overview-module:nth-child(n)]:row-auto">
+      <div className="overview-top grid grid-cols-2 gap-4 items-stretch [&_.status-surface.status-compact]:min-w-0 @max-[600px]/overview:grid-cols-1">
       <StatusSurface
         state={state}
         agents={agents}
@@ -1459,11 +1454,11 @@ function Overview({
       <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
       {problem && (
-        <p className="banner overview-banner" role="alert">
+        <p className="banner pt-2.25 pr-3 pb-2.25 pl-3 flex items-start gap-1.75 text-destructive bg-[var(--danger-bg)] rounded-lg wrap-anywhere overview-banner mt-3" role="alert">
           <TriangleAlert size={15} aria-hidden="true" /> {problem}
         </p>
       )}
-      <div className="overview-grid">
+      <div className="overview-grid flex-1 mt-4 grid grid-cols-2 grid-rows-[minmax(212px,_1fr)_auto] gap-4 @max-[540px]/overview:grid-cols-1 [&_>_.overview-module:first-child]:col-start-1 [&_>_.overview-module:first-child]:row-start-1 [&_>_.overview-module:nth-child(2)]:col-start-1 [&_>_.overview-module:nth-child(2)]:row-start-2 [&_>_.overview-module:nth-child(3)]:col-start-2 [&_>_.overview-module:nth-child(3)]:row-[1_/_span_2] max-[780px]:grid-cols-1 max-[440px]:gap-3">
         <OverviewModule title="Local API" titleAdornment={<Hint content="Local API examples"><Badge variant="ghost" className="size-6 p-0 [&>svg]:size-4!" render={<button type="button" />} aria-label="Local API examples" aria-haspopup="dialog" onClick={onLocalExamples}><CircleHelp aria-hidden="true" /></Badge></Hint>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />}>
           <LocalApiPanel
             proxyUrl={state.proxyUrl}
@@ -1477,7 +1472,7 @@ function Overview({
           />
         </OverviewModule>
         <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
-          <div className="preview-list overview-agent-list">
+          <div className="preview-list [&_>_:last-child]:border-b-0 overview-agent-list [--agent-row-height:calc(2rem_+_1.25rem_+_2px)] grid grid-rows-[repeat(4,_minmax(var(--agent-row-height),_auto))] gap-3 [&_>_.empty-state]:row-span-full">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
               <AgentRow
@@ -1497,7 +1492,7 @@ function Overview({
           action="View all"
           onAction={onUsage}
         >
-          <div className="preview-list">
+          <div className="preview-list [&_>_:last-child]:border-b-0">
             {recent.length === 0 && (
               <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
@@ -1536,14 +1531,14 @@ function StatusSurface({
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <Card size="sm" role="region" className={`status-surface status-compact status-${state.status} ${protectedNow ? developmentMode ? "status-ready ring-warning dark:ring-warning" : "status-ready ring-primary dark:ring-primary" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
+    <Card size="sm" role="region" className={`status-surface relative isolate [&.status-compact]:transition-colors [&.status-compact]:duration-200 [&.status-compact]:ease-out @max-[600px]/overview:[&.status-compact]:w-full max-[780px]:h-52 max-[620px]:h-auto max-[620px]:grid-cols-1 motion-reduce:[&.status-compact]:transition-none status-compact [&_.protected-control]:col-start-2 [&_.protected-control]:row-start-1 [&_.protected-control]:self-start [&_.protected-control]:justify-self-end [&_.protected-control]:min-h-[calc(var(--text-2xl)_*_var(--text-2xl--line-height))] [&_.tracks-right]:inset-0 [&_.tracks-right]:[mask-image:linear-gradient(to_right,_transparent,_#000_12%,_#000_88%,_transparent)] [&_.tracks-right]:text-[color-mix(in_srgb,_var(--muted-foreground)_5%,_var(--card))] [&.status-ready_.tracks-right]:opacity-100 [&_.status-profile]:w-[min(140px,_100%)] [&_.status-profile]:bg-card [&_.is-icon-only]:m-0 [&_.protection-status]:justify-start [&_.status-heading]:transition-colors [&_.status-heading]:duration-200 [&_.status-heading]:ease-out [&_[data-slot=switch]]:transition-colors [&_[data-slot=switch]]:duration-200 [&_[data-slot=switch]]:ease-out motion-reduce:[&_.status-heading]:transition-none motion-reduce:[&_[data-slot=switch]]:transition-none status-${state.status} ${protectedNow ? developmentMode ? "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] ring-warning dark:ring-warning" : "status-ready [&_.tracks-right]:opacity-12 [&_.track-strip]:[animation-play-state:running] ring-primary dark:ring-primary" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer />
-      <CardContent className="status-compact-content">
-        <div className={`status-heading state-${verdict.tone}`}>
+      <CardContent className="status-compact-content relative z-2 grid grid-cols-[minmax(0,_1fr)_44px] grid-rows-[auto_1fr] gap-y-2 gap-x-3 flex-1 w-full">
+        <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive status-heading col-start-1 row-start-1 min-w-0 [&_.protection-status]:grid [&_.protection-status]:grid-cols-[24px_minmax(0,_1fr)] [&_.protection-status]:gap-y-1 [&_.protection-status]:gap-x-1.5 [&_.protection-status]:items-center [&_.protection-status]:text-2xl [&_.protection-status]:font-semibold [&_.protection-status_>_svg]:w-6 [&_.protection-status_>_svg]:h-6 [&_.protection-duration]:col-start-2 [&_.protection-duration]:text-xs [&_.protection-duration]:font-normal state-${verdict.tone}`}>
           <ProtectionStatus state={state} label={verdict.title} />
         </div>
-        <div className="status-profile-actions">
-        <Button id="overview-profile" variant="outline" size="sm" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
+        <div className="status-profile-actions col-span-full row-start-2 self-end flex items-center gap-2 min-w-0">
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile w-[min(128px,_100%)] min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:min-w-0 [&_>_span:not(.service-logo):not(.service-custom-icon)]:flex-1 [&_>_span:not(.service-logo):not(.service-custom-icon)]:overflow-hidden [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-left [&_>_span:not(.service-logo):not(.service-custom-icon)]:text-ellipsis [&_>_span:not(.service-logo):not(.service-custom-icon)]:whitespace-nowrap [&_>_svg]:flex-none [&_.service-logo]:w-5 [&_.service-logo]:h-5 [&_.service-custom-icon]:w-5 [&_.service-custom-icon]:h-5" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
@@ -1558,7 +1553,7 @@ function StatusSurface({
 
 const TrackLayer = memo(function TrackLayer(): React.JSX.Element {
   return (
-    <div className="track-layer tracks-right" aria-hidden="true">
+    <div className="track-layer absolute z-1 inset-0 pt-2 pr-0 pb-2 pl-0 grid grid-rows-11 items-center overflow-hidden opacity-0 pointer-events-none [transition:opacity_500ms_ease_80ms] max-[440px]:top-1.5 max-[440px]:right-0 max-[440px]:bottom-1.5 max-[440px]:left-0 motion-reduce:transition-none tracks-right text-muted-foreground [mask-image:linear-gradient(to_left,_var(--color-black)_0%,_var(--color-black)_18%,_color-mix(in_srgb,_var(--color-black)_55.00000000000001%,_transparent)_34%,_color-mix(in_srgb,_var(--color-black)_18%,_transparent)_46%,_transparent_58%)] max-[440px]:[mask-image:linear-gradient(to_top,_transparent_0%,_var(--color-black)_18%,_var(--color-black)_36%,_transparent_58%)]" aria-hidden="true">
       {TLS_TRACKS.map((line, index) => <TrackRow key={line} text={line} reverse={index % 2 === 1} />)}
     </div>
   );
@@ -1566,9 +1561,9 @@ const TrackLayer = memo(function TrackLayer(): React.JSX.Element {
 
 function TrackRow({ text, reverse }: { text: string; reverse: boolean }): React.JSX.Element {
   return (
-    <div className={`track-row ${reverse ? "track-reverse" : ""}`}>
-      <div className="track-strip">
-        <span className="track-copy">{text}</span><span className="track-copy">{text}</span>
+    <div className={`track-row min-w-0 overflow-hidden flex items-center text-xs leading-4.5 font-mono whitespace-nowrap ${reverse ? "track-reverse [&_.track-strip]:animate-track-right" : ""}`}>
+      <div className="track-strip w-[max-content] flex animate-track-left [animation-play-state:paused] motion-reduce:animate-none">
+        <span className="track-copy flex-none pr-8">{text}</span><span className="track-copy flex-none pr-8">{text}</span>
       </div>
     </div>
   );
@@ -1599,9 +1594,9 @@ function ProtectedControl({
     ? state.configurationVerification ? "Verifying configuration" : "Cancel protection start"
     : state.reconnecting ? "Cancel reconnection" : running ? "Stop protection" : "Start protection";
   return (
-    <div className={`protected-control ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only" : ""}`}>
+    <div className={`protected-control flex items-center gap-2.5 text-xs font-semibold [&.is-compact]:p-0 max-[440px]:[&.is-compact]:gap-1.5 max-[440px]:[&.is-compact]:pl-1.75 max-[440px]:[&.is-compact]:text-xs ${compact ? "is-compact" : ""} ${iconOnly && !compact ? "is-icon-only mt-0.75" : ""}`}>
       {!iconOnly && <span>Protected</span>}
-      {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
+      {developmentMode && !compact && <span className="dev-mode-label text-warning text-xs font-semibold">Dev mode</span>}
       <SwitchControl
         size="default"
         checked={checked}
@@ -1631,13 +1626,13 @@ function OverviewModule({
   onAction?(): void;
 }>): React.JSX.Element {
   return (
-    <Card size="sm" className="overview-module">
+    <Card size="sm" className="overview-module min-w-0 [&_.agent-config]:hidden">
       <CardHeader className="items-center">
-        <CardTitle className="overview-module-title"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
+        <CardTitle className="overview-module-title flex items-center flex-wrap gap-2"><h2 className="text-base font-medium">{title}</h2>{titleAdornment}{status}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
         {action && onAction && <CardAction><Button variant="outline" size="sm" onClick={onAction}>{action}</Button></CardAction>}
       </CardHeader>
-      <CardContent className="module min-h-0 flex-1">{children}</CardContent>
+      <CardContent className="module min-w-0 @container min-h-0 flex-1">{children}</CardContent>
     </Card>
   );
 }
@@ -1664,33 +1659,33 @@ function LocalApiPanel({
   const endpointLabel = "Local endpoint";
   const keyLabel = "Client key";
   return (
-    <div className="copy-rows">
-      <Item variant="muted" size="xs" className="copy-row overflow-hidden">
+    <div className="copy-rows relative h-full grid grid-rows-[repeat(2,_minmax(64px,_1fr))] gap-3">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
         <Button variant="ghost"
-          className="copy-surface h-full w-full rounded-none"
+          className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none"
           disabled={!proxyUrl}
           aria-label={`${endpointLabel}: ${proxyUrl ?? "Unavailable"}. Copy`}
           onClick={() => proxyUrl && void onCopy(endpointLabel, proxyUrl)}
         >
-          <span className="row-title-line">
+          <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
             <span className="row-title">Endpoint</span>
           </span>
-          <code className="row-note">{proxyUrl ?? "Unavailable"}</code>
-          <span className={`copy-feedback ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
+          <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{proxyUrl ?? "Unavailable"}</code>
+          <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === endpointLabel ? "is-copied" : ""}`}>{copied === endpointLabel ? "Copied" : "Copy"}</span>
         </Button>
-        <IconButton className="row-action" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
+        <IconButton className="row-action absolute z-2 right-3.25 top-[50%] -translate-y-1/2" label="Local API settings" onClick={onSettings}><Settings size={16} /></IconButton>
       </Item>
-      <Item variant="muted" size="xs" className="copy-row overflow-hidden">
-        <Button variant="ghost" className="copy-surface h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
-          <span className="row-title-line">
+      <Item variant="muted" size="xs" className="copy-row relative min-w-0 min-h-16 overflow-hidden">
+        <Button variant="ghost" className="copy-surface absolute inset-0 min-w-0 min-h-0 pt-2.25 pr-[min(100px,_40%)] pb-2.25 pl-3 flex flex-col items-start justify-center gap-0.5 bg-transparent border-0 text-left [&_>_*]:max-w-full [&_>_.row-title-line]:w-full [&_>_.row-title-line]:min-w-0 [&_>_.row-note]:w-full [&_>_.row-note]:min-w-0 [&_>_.row-title-line]:overflow-hidden [&_>_.row-title-line_>_*]:min-w-0 [&_>_.row-title-line_>_*]:overflow-hidden [&_>_.row-title-line_>_*]:text-ellipsis [&_>_.row-title-line_>_*]:whitespace-nowrap [&_>_.row-note]:flex-none [&_.row-title]:text-muted-foreground [&_.row-title]:text-xs [&_.row-title]:font-normal [&_code.row-note]:text-foreground [&_code.row-note]:text-sm hover:bg-muted [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&:hover_.copy-feedback]:opacity-100 [&:focus-visible_.copy-feedback]:opacity-100 h-full w-full rounded-none" disabled={!clientKey} aria-label={`${keyLabel}: ${clientKeyVisible ? clientKey : "hidden"}. Copy`} onClick={() => clientKey && void onCopy(keyLabel, clientKey)}>
+          <span className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
             <span className="row-title">Client key</span>
           </span>
-          <code className="row-note">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
-          <span className={`copy-feedback ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
+          <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{clientKey ? clientKeyVisible ? clientKey : maskClientKey(clientKey) : "Unavailable"}</code>
+          <span className={`copy-feedback absolute right-13.5 top-[50%] opacity-0 -translate-y-1/2 text-muted-foreground text-xs font-semibold [transition:opacity_120ms_ease] [&.is-copied]:opacity-100 [&.is-copied]:text-primary ${copied === keyLabel ? "is-copied" : ""}`}>{copied === keyLabel ? "Copied" : "Copy"}</span>
         </Button>
-        <IconButton className="row-action" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+        <IconButton className="row-action absolute z-2 right-3.25 top-[50%] -translate-y-1/2" label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </Item>
-      {endpointError && <p className="inline-error">{endpointError}</p>}
+      {endpointError && <p className="inline-error pt-2 pr-3.25 pb-2 pl-3.25 text-destructive bg-[var(--danger-bg)] text-xs">{endpointError}</p>}
     </div>
   );
 }
@@ -1700,9 +1695,9 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
   const totalTokens = summary.inputTokens + summary.outputTokens;
   const protectedRate = forwarded ? Math.round((summary.protected / forwarded) * 100) : 0;
   return (
-    <Card size="sm" role="region" className="session-overview" aria-labelledby="session-usage-heading">
+    <Card size="sm" role="region" className="session-overview min-w-0" aria-labelledby="session-usage-heading">
       <CardHeader><CardTitle><h2 id="session-usage-heading" className="text-base font-medium">Current session</h2></CardTitle></CardHeader>
-    <CardContent className="session-summary" role="group" aria-label="Usage in this session">
+    <CardContent className="session-summary flex-1 min-w-0 grid grid-cols-2 gap-4 [&_>_[data-slot=item]]:min-w-0 [&_strong]:block [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-xl [&_strong]:font-semibold [&_strong]:tabular-nums [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap" role="group" aria-label="Usage in this session">
       {[
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],
@@ -1719,15 +1714,15 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
   const tokens = usageTokens(activity);
   const timestamp = new Date(activity.at * 1_000);
   return (
-    <ActionItem size="xs" className="usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
-      <span className="row-main">
+    <ActionItem size="xs" className="usage-row min-h-15.5 gap-2.5 overflow-hidden [&_.row-main]:min-w-0 [&_.row-main]:flex-1 [&_.row-title]:text-sm [&_.state]:ml-0.5 [&_time]:min-w-17.5 [&_time]:grid [&_time]:text-right @max-[480px]:[&_.usage-cost]:hidden @max-[480px]:[&_.usage-amount]:w-13 max-[620px]:items-start max-[620px]:flex-wrap max-[620px]:[&_.row-main]:flex-[1_1_calc(100%_-_88px)] max-[620px]:[&_time]:order-4 max-[620px]:[&_time]:flex-[1_0_100%] max-[620px]:[&_time]:pl-11 max-[440px]:[&_.row-main]:basis-[calc(100%_-_74px)] max-[440px]:[&_time]:pl-0" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
+      <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2">
         <span className="row-title font-medium">{agentName(activity.agent)}</span>
         <StateLabel tone={outcome.tone} text={outcome.label} />
-        <code className="row-note">{activity.model ?? activity.path}</code>
+        <code className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{activity.model ?? activity.path}</code>
       </span>
-      <span className="usage-amount"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
-      <span className="usage-amount usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
-      <time className="row-side" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
+      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
+      <span className="usage-amount w-18.5 flex-none grid justify-items-end tabular-nums [&_strong]:max-w-full [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:text-muted-foreground [&_small]:text-xs max-[620px]:w-17 max-[620px]:[&:nth-of-type(3)]:hidden max-[440px]:w-15.5 usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
+      <time className="row-side flex-none text-muted-foreground text-xs tabular-nums whitespace-nowrap" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
     </ActionItem>
   );
 }
@@ -1735,7 +1730,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {
   const icon = AGENT_ICONS[agent.id];
   return (
-    <span className={agent.id === "oh-my-pi" ? "mark mark-oh-my-pi" : "mark"} aria-hidden="true">
+    <span className={agent.id === "oh-my-pi" ? "mark [&.mark-oh-my-pi]:bg-[#0d0d0d] flex-none w-8 h-8 grid place-items-center overflow-hidden text-muted-foreground bg-white border border-border rounded-xl text-xs font-bold [&_img]:w-5 [&_img]:h-5 [&_img]:object-contain mark-oh-my-pi" : "mark [&.mark-oh-my-pi]:bg-[#0d0d0d] flex-none w-8 h-8 grid place-items-center overflow-hidden text-muted-foreground bg-white border border-border rounded-xl text-xs font-bold [&_img]:w-5 [&_img]:h-5 [&_img]:object-contain"} aria-hidden="true">
       {icon ? <img src={icon} alt="" /> : agent.name.slice(0, 2).toUpperCase()}
     </span>
   );
@@ -1756,15 +1751,15 @@ function AgentsView({
 }): React.JSX.Element {
   const connected = agents.filter((agent) => agent.installed && agent.connected).length;
   return (
-    <div className="page-body">
+    <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
-      <div className="page-toolbar">
-        <p className="page-intro">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
+      <div className="page-toolbar flex items-center gap-4 mb-4 [&_.page-intro]:flex-1 [&_.page-intro]:m-0">
+        <p className="page-intro mt-[-4px] mr-0 mb-3 ml-0 text-muted-foreground text-xs [&_+_.group]:mt-3">Connected agents use {brand.productName} while protected. Their previous settings return when protection stops.</p>
       </div>
-      <section className="group" aria-labelledby="agents-title">
-        <h2 className="group-title" id="agents-title">Installed <span>{connected} connected</span></h2>
-        <div className="inset">
+      <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
+        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="agents-title">Installed <span>{connected} connected</span></h2>
+        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
           {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
           {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
             <AgentRow
@@ -1777,9 +1772,9 @@ function AgentsView({
           ))}
         </div>
       </section>
-      {agents.some((agent) => !agent.installed) && <section className="group" aria-labelledby="not-installed-title">
-        <h2 className="group-title" id="not-installed-title">Not installed</h2>
-        <div className="inset">{sortAgents(agents.filter((agent) => !agent.installed)).map((agent) => (
+      {agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
+        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="not-installed-title">Not installed</h2>
+        <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{sortAgents(agents.filter((agent) => !agent.installed)).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
         ))}</div>
       </section>}
@@ -1819,7 +1814,7 @@ function AgentRow({
     <><Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
-        <ItemTitle className="row-title-line flex-wrap">
+        <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2 flex-wrap">
           <span className="row-title">{name}</span>
           {note && pendingConnection === undefined
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
@@ -1845,7 +1840,7 @@ function AgentWebsite({ agent }: { agent: AgentStatus }): React.JSX.Element {
   return <span><Button variant="outline" onClick={() => {
     setError(undefined);
     void desktopApi.openAgentWebsite(agent.id).catch((error: unknown) => setError(errorMessage(error)));
-  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note" role="alert">{error}</span>}</span>;
+  }}>Website<ExternalLink size={14} aria-hidden="true" /></Button>{error && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" role="alert">{error}</span>}</span>;
 }
 
 function UsageView({
@@ -1948,23 +1943,23 @@ function UsageView({
   };
 
   return (
-    <div className="usage-page">
+    <div className="usage-page max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
       {(problem || error) && <Alert variant="destructive"><AlertDescription>{problem ?? error}</AlertDescription></Alert>}
-      <div className="usage-toolbar" role="group" aria-label="Usage filters">
+      <div className="usage-toolbar grid grid-cols-[minmax(150px,_0.8fr)_minmax(210px,_1.25fr)_auto] items-end gap-2.5 [&_select]:w-full [&_select]:min-w-0 max-[780px]:grid-cols-2 max-[440px]:grid-cols-1" role="group" aria-label="Usage filters">
         <Field><FieldLabel htmlFor="usage-agent">Agent</FieldLabel><ChoiceSelect id="usage-agent" label="Agent" className="w-full" value={agent} onChange={(value) => { setAgent(value); resetPagination(); }} options={[{ value: "", label: "All agents" }, ...agentOptions.map((entry) => ({ value: entry, label: agentName(entry) }))]} /></Field>
         <Field><FieldLabel htmlFor="usage-model">Model</FieldLabel><ChoiceSelect id="usage-model" label="Model" className="w-full" value={model} onChange={(value) => { setModel(value); resetPagination(); }} options={[{ value: "", label: "All models" }, ...modelOptions.map((entry) => ({ value: entry, label: entry }))]} /></Field>
-        <FieldSet className="time-filter min-w-0 gap-0">
+        <FieldSet className="time-filter max-[780px]:col-span-full max-[440px]:col-auto min-w-0 gap-0">
           <FieldLegend variant="label" className="leading-snug">Time</FieldLegend>
           <Suspense fallback={<Button variant="outline" disabled>{usageDateLabel(range)}</Button>}><UsageDatePicker value={range} onChange={(next) => { setRange(next); resetPagination(); }} /></Suspense>
         </FieldSet>
       </div>
       <UsageStats page={page} />
-      <section className="group usage-over-time" aria-labelledby="usage-chart-title">
-        <h2 className="group-title" id="usage-chart-title">Usage over time <span>{usageDateLabel(range)}</span></h2>
+      <section className="group mt-5 [&:first-child]:mt-0 usage-over-time mt-4.5" aria-labelledby="usage-chart-title">
+        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="usage-chart-title">Usage over time <span>{usageDateLabel(range)}</span></h2>
         <UsageChart page={page} loading={loading} range={range.preset} bounds={bounds} metric={metric} onMetric={setMetric} />
       </section>
-      <section className="group usage-history" aria-labelledby="usage-history-title">
-        <h2 className="group-title" id="usage-history-title" tabIndex={-1}>
+      <section className="group mt-5 [&:first-child]:mt-0 usage-history" aria-labelledby="usage-history-title">
+        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="usage-history-title" tabIndex={-1}>
           Usage history
           <span aria-live="polite">{loading ? "Loading" : page ? `${page.summary.requests} records · kept on this Mac` : "Unavailable"}</span>
           <span className="group-actions">
@@ -1973,7 +1968,7 @@ function UsageView({
           </span>
         </h2>
         <Suspense fallback={<div className="h-80" aria-busy="true" />}><UsageTable items={page?.items ?? []} loading={loading} pageIndex={cursors.length - 1} pageSize={pageSize} total={page?.summary.requests ?? 0} onInspect={onInspect} /></Suspense>
-        <div className="pagination">
+        <div className="pagination mt-2.5 flex flex-wrap items-center justify-center gap-3 [&_>_span]:min-w-32 [&_>_span]:text-muted-foreground [&_>_span]:text-center">
           <Field orientation="horizontal" className="w-auto">
             <FieldLabel htmlFor="usage-page-size">Rows per page</FieldLabel>
             <ChoiceSelect id="usage-page-size" label="Rows per page" size="sm" value={String(pageSize)} disabled={loading} onChange={(value) => { setPageSize(Number(value)); resetPagination(); }} options={[20, 50, 100].map((size) => ({ value: String(size), label: String(size) }))} />
@@ -2013,7 +2008,7 @@ function UsageStats({ page }: { page?: UsagePage }): React.JSX.Element {
   const forwarded = Math.max(0, (summary?.requests ?? 0) - (summary?.blockedLocally ?? 0));
   const protectedRate = forwarded ? (summary?.protected ?? 0) / forwarded : 0;
   const failedOrRejected = (summary?.blockedLocally ?? 0) + (summary?.failedProof ?? 0);
-  return <div className="usage-stats"><div><span>Requests</span><strong>{summary ? summary.requests.toLocaleString() : "—"}</strong><small>{summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"}</small></div><div><span>Tokens</span><strong>{summary ? formatTokens(totalTokens) : "—"}</strong><small>{summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"}</small></div><div><span>Cost</span><strong>{summary ? currency(summary.costUsd) : "—"}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary ? `${summary.protected} of ${forwarded} answers` : "—"}</small></div></div>;
+  return <div className="usage-stats mt-3.5 grid grid-cols-4 bg-card border border-border rounded-2xl overflow-hidden [&_>_div]:min-w-0 [&_>_div]:min-h-20.5 [&_>_div]:pt-2 [&_>_div]:pr-3 [&_>_div]:pb-2 [&_>_div]:pl-3 [&_>_div]:flex [&_>_div]:flex-col [&_>_div]:justify-center [&_>_div]:border-r [&_>_div]:border-r-border [&_>_div:last-child]:border-r-0 [&_span]:text-muted-foreground [&_span]:text-xs [&_small]:text-xs [&_small]:text-muted-foreground [&_strong]:max-w-full [&_strong]:mt-0.5 [&_strong]:mr-0 [&_strong]:mb-0.5 [&_strong]:ml-0 [&_strong]:overflow-hidden [&_strong]:text-xl [&_strong]:tabular-nums [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap max-[780px]:grid-cols-2 max-[780px]:[&_>_div:nth-child(2)]:border-r-0 max-[780px]:[&_>_div:nth-child(-n_+_2)]:border-b max-[780px]:[&_>_div:nth-child(-n_+_2)]:border-b-border"><div><span>Requests</span><strong>{summary ? summary.requests.toLocaleString() : "—"}</strong><small>{summary ? `${failedOrRejected.toLocaleString()} failed or rejected` : "—"}</small></div><div><span>Tokens</span><strong>{summary ? formatTokens(totalTokens) : "—"}</strong><small>{summary ? `${formatTokens(summary.inputTokens)} in · ${formatTokens(summary.outputTokens)} out` : "—"}</small></div><div><span>Cost</span><strong>{summary ? currency(summary.costUsd) : "—"}</strong><small>Estimated from model prices</small></div><div><span>Protected</span><strong>{forwarded ? `${Math.round(protectedRate * 100)}%` : "—"}</strong><small>{summary ? `${summary.protected} of ${forwarded} answers` : "—"}</small></div></div>;
 }
 
 function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Element {
@@ -2034,11 +2029,11 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
   ].filter(Boolean);
   return (
     <>
-    <div className={`privacy-verdict state-${receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral"}`}>
+    <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive privacy-verdict [&.state-neutral]:bg-transparent [&.state-neutral]:border-border [&.state-danger]:bg-transparent [&.state-danger]:border-current p-3.5 flex items-start gap-3 bg-muted border border-border rounded-2xl [&.state-success]:bg-primary/10 [&.state-success]:border-[color-mix(in_srgb,_var(--primary)_18%,_transparent)] [&_>_svg]:flex-none [&_>_span]:min-w-0 [&_>_span]:grid [&_>_span]:gap-1.5 [&_>_span]:wrap-anywhere [&_strong]:text-foreground [&_small]:text-muted-foreground [&_small]:text-xs state-${receiptVerified ? "success" : activity.leftDevice && activity.verified === false ? "danger" : "neutral"}`}>
       <ReceiptIcon size={22} aria-hidden="true" />
       <span><strong>{!activity.leftDevice ? "Request kept on this Mac" : receiptVerified ? "Signed receipt verified" : activity.verified === false ? "Receipt verification failed" : "No verified receipt"}</strong><small>{!activity.leftDevice ? "Nothing was sent to the provider. No remote receipt is needed." : activity.verified === false ? "Do not treat this response as verified. See the recorded reason below." : receiptVerified ? "The signed receipt matches the request and response bytes recorded by the verifier." : "No successful verification result is recorded for this request."}</small></span>
     </div>
-    <dl className="evidence">
+    <dl className="evidence [&_dd]:select-text grid grid-cols-[82px_minmax(0,_1fr)] gap-y-3.5 gap-x-4 text-sm [&_dt]:text-muted-foreground [&_dt]:font-semibold [&_dd]:min-w-0 [&_dd]:text-muted-foreground [&_dd]:wrap-anywhere [&_dd_>_code]:block [&_dd_>_code]:mt-0.5 [&_dd_>_code]:text-muted-foreground max-[440px]:grid-cols-1 max-[440px]:[&_dt]:mt-1.25">
       <dt>Request</dt>
       <dd>
         {agentName(activity.agent)} <code>{activity.method} {activity.path}</code>
@@ -2047,7 +2042,7 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
       <dt>Outcome</dt>
       <dd>
         <StateLabel tone={outcome.tone} text={outcome.label} />
-        {failed && <span className="dim"> HTTP {activity.status}</span>}
+        {failed && <span className="dim text-muted-foreground"> HTTP {activity.status}</span>}
       </dd>
       <dt>Network</dt>
       <dd>
@@ -2080,8 +2075,8 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
-    {activity.detail && <section className="proof-explanation" aria-label="Verification details"><h3>Verification details</h3><p className="break-words whitespace-pre-wrap">{activity.detail}</p></section>}
-    {activity.leftDevice && <section className="proof-explanation" aria-label="Proof scope">
+    {activity.detail && <section className="proof-explanation pt-3.5 border-t border-t-border [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mt-1.5 [&_p]:text-muted-foreground [&_p]:text-xs" aria-label="Verification details"><h3>Verification details</h3><p className="break-words whitespace-pre-wrap">{activity.detail}</p></section>}
+    {activity.leftDevice && <section className="proof-explanation pt-3.5 border-t border-t-border [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mt-1.5 [&_p]:text-muted-foreground [&_p]:text-xs" aria-label="Proof scope">
       <h3>What the proof checks</h3>
       <p>The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.</p>
       <p>Only the verification result and receipt ID are saved here, not the full signed receipt.</p>
@@ -2092,8 +2087,8 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
 
 function UsageEvidenceSheet({ activity, onClose }: { activity: RequestActivity; onClose(): void }): React.JSX.Element {
   return (
-    <Sheet title="Usage proof" className="usage-evidence-sheet" headingClassName="usage-proof-heading" description={formatTimestamp(activity.at * 1_000, true)} onClose={onClose}>
-      <div className="proof-card"><Evidence activity={activity} /></div>
+    <Sheet title="Usage proof" className="usage-evidence-sheet w-[min(540px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" headingClassName="usage-proof-heading [&>span:last-child]:min-w-0 [&>span:last-child]:grid [&>span:last-child]:gap-0.5 [&_small]:text-muted-foreground [&_small]:text-xs" description={formatTimestamp(activity.at * 1_000, true)} onClose={onClose}>
+      <div className="proof-card p-0 mt-4 flex flex-col gap-5 [&_.evidence]:text-sm [&_.evidence]:gap-y-4.5 [&_.privacy-verdict]:shrink-0"><Evidence activity={activity} /></div>
       <DismissSheetAction onClose={onClose} />
     </Sheet>
   );
@@ -2184,7 +2179,7 @@ function SettingsView({
   const [diagnosticMessage, setDiagnosticMessage] = useState<string>();
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <div className="page-body settings-page">
+    <div className="page-body max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto settings-page">
       {state.wakeMonitorAvailable === false && <Alert className="border-warning/30 bg-warning/10"><AlertDescription className="text-warning">System wake monitoring is unavailable. Reconnect protection manually after sleep until monitoring recovers.</AlertDescription></Alert>}
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
@@ -2201,7 +2196,7 @@ function SettingsView({
           <SettingsLink title="Local API" description="Listener and client access" aria-label="Local API settings" aria-haspopup="dialog" onClick={() => onOpen("local-api")} />
       </SettingsSection>
 
-      <Collapsible className="group settings-advanced">
+      <Collapsible className="group mt-5 [&:first-child]:mt-0 settings-advanced [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
         <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
@@ -2332,15 +2327,15 @@ function ProfileListSheet({
     onClose();
   };
   return (
-    <Sheet title="Profiles" className="profiles-sheet" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
-      <p className="sheet-text">Choose the verified service and credential used when protection starts.</p>
+    <Sheet title="Profiles" className="profiles-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(500px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
+      <p className="sheet-text mt-3 text-sm [&.error]:text-destructive">Choose the verified service and credential used when protection starts.</p>
       {!activeProfileAvailable && (
-        <p className="banner sheet-banner profile-availability">
+        <p className="banner pt-2.25 pr-3 pb-2.25 pl-3 flex items-start gap-1.75 text-destructive bg-[var(--danger-bg)] rounded-lg wrap-anywhere sheet-banner mt-2.5 profile-availability text-warning bg-[var(--warning-bg)]">
           <TriangleAlert size={15} aria-hidden="true" />
           {activeProfile ? `“${activeProfile.name}” cannot start protection until it is verified with an available credential.` : "Choose a verified profile before starting protection."}
         </p>
       )}
-      <div className="profile-list" role="list" aria-label="AI service profiles">
+      <div className="profile-list min-h-0 mt-3.5 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
@@ -2350,17 +2345,17 @@ function ProfileListSheet({
               ? "Ready"
               : "Verification required";
           return (
-            <div className={`profile-list-row${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
+            <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
               <ActionItem
                 type="button"
-                className="profile-select"
+                className="profile-select min-w-0 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
                 aria-pressed={active}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => void select(profile.id)}
               >
                 <ServiceLogo url={profile.remoteUrl} size="large" />
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
-                {working ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
+                {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
               <IconButton size="icon-sm" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></IconButton>
             </div>
@@ -2469,21 +2464,21 @@ function ProfileEditorSheet({
     finally { setSaving(false); }
   };
   return (
-    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet form-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title={isNew ? "New Profile" : "Edit Profile"} label={isNew ? "New profile" : "Edit profile"} className="profile-editor-sheet w-[min(620px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col [&_form]:min-h-0 [&_form]:flex [&_form]:flex-col form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" initialFocus="field" dismissible={!saving} onClose={onClose}>
       <form className="mt-4" onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-1">
         <FieldGroup>
         <Field>
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
+        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
-            <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name}>
+            <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.name}>
               <ServiceLogo url={service.url} />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
             </ToggleGroupItem>
           ))}
-          <ToggleGroupItem value="custom" className="service-preset" aria-label="Custom">
+          <ToggleGroupItem value="custom" className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label="Custom">
             <ServiceLogo url="custom://service" />
             <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
@@ -2510,7 +2505,7 @@ function ProfileEditorSheet({
 }
 
 function PrivacyVerificationSheet({ state, onClose }: { state: GatewayState; onClose(): void }): React.JSX.Element {
-  return <Sheet title="Privacy verification" className="privacy-sheet" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
+  return <Sheet title="Privacy verification" className="privacy-sheet w-[min(680px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(680px,_calc(var(--window-dialog-height,_100vh)_-_32px))]" onClose={onClose}><PrivacyVerification state={state} /><DismissSheetAction onClose={onClose} /></Sheet>;
 }
 
 function LocalApiSheet({
@@ -2587,7 +2582,7 @@ function LocalApiSheet({
     }
   };
   return (
-    <Sheet title="Local API settings" className="local-api-sheet form-sheet" initialFocus="field" dismissible={!saving} onClose={onClose}>
+    <Sheet title="Local API settings" className="local-api-sheet w-[min(560px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(512px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&_.sheet-card]:mt-3 form-sheet [&_>_.sheet-heading]:px-5 [&_>_.field-note]:mx-5 [&_.sheet-footer]:mx-5 [&_form_>_[data-slot=field-error]]:mx-5 [&_.sheet-scroll]:px-5" initialFocus="field" dismissible={!saving} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <div className="sheet-scroll py-4">
           <FieldGroup>
@@ -2608,7 +2603,7 @@ function LocalApiSheet({
           <Field>
             <FieldLabel htmlFor="local-client-key">Client key</FieldLabel>
             <InputGroup>
-              <InputGroupInput id="local-client-key" className="mono" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
+              <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide client key" : "Reveal client key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide client key" : "Reveal client key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                 <Hint content="Copy client key"><InputGroupButton size="icon-xs" aria-label="Copy client key" disabled={saving || !clientKey} onClick={() => void onCopy("Client key", clientKey)}>{copied === "Client key" ? <Check /> : <Copy />}</InputGroupButton></Hint>
@@ -2664,29 +2659,29 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
     },
   ];
   return (
-    <section className="privacy-content" aria-label="Privacy">
-      <div className={`privacy-verdict state-${verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral"}`}>
+    <section className="privacy-content mt-3.5" aria-label="Privacy">
+      <div className={`[&.state-success]:text-primary [&.state-neutral]:text-muted-foreground [&.state-warning]:text-warning [&.state-danger]:text-destructive privacy-verdict [&.state-neutral]:bg-transparent [&.state-neutral]:border-border [&.state-danger]:bg-transparent [&.state-danger]:border-current p-3.5 flex items-start gap-3 bg-muted border border-border rounded-2xl [&.state-success]:bg-primary/10 [&.state-success]:border-[color-mix(in_srgb,_var(--primary)_18%,_transparent)] [&_>_svg]:flex-none [&_>_span]:min-w-0 [&_>_span]:grid [&_>_span]:gap-1.5 [&_>_span]:wrap-anywhere [&_strong]:text-foreground [&_small]:text-muted-foreground [&_small]:text-xs state-${verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral"}`}>
         {verified ? <ShieldCheck size={22} aria-hidden="true" /> : <ShieldX size={22} aria-hidden="true" />}
         <span><strong>{verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}</strong><small>{verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}</small></span>
       </div>
-      <div className="sheet-card privacy-facts">
+      <div className="sheet-card privacy-facts mt-4 [&_.row]:p-3.5 [&_.row-main]:grid [&_.row-main]:gap-1.25">
         {facts.map((fact) => (
-          <div className="row fact" key={fact.title}>
-            <span className={fact.ok ? "check-icon check-pass" : "check-icon check-skip"} aria-hidden="true">
+          <div className="row min-h-12.5 pt-2.25 pr-3 pb-2.25 pl-3 flex items-center gap-3 border-b border-b-border last:border-b-0 fact items-start" key={fact.title}>
+            <span className={fact.ok ? "check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-pass" : "check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-skip"} aria-hidden="true">
               {fact.ok ? <Check size={12} /> : <LockOpen size={11} />}
             </span>
-            <span className="row-main">
+            <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2">
               {fact.title}
-              <span className="row-note">{fact.detail}</span>
+              <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{fact.detail}</span>
             </span>
           </div>
         ))}
       </div>
-      <p className="proof-boundary">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
+      <p className="proof-boundary mt-3 mr-0 mb-4.5 ml-0 text-muted-foreground text-xs">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
-        <section className="privacy-section" aria-labelledby="verified-identity-title">
-          <div className="privacy-section-heading"><h3 id="verified-identity-title">{verified ? "Current service identity" : "Last reported identity"}</h3><span>{checkCount(checks)} checks passed</span></div>
-          <div className="sheet-card identity-grid">
+        <section className="privacy-section mt-6" aria-labelledby="verified-identity-title">
+          <div className="privacy-section-heading min-h-9 pt-0 pr-0.5 pb-2 pl-0.5 flex items-center flex-wrap justify-between gap-y-1 gap-x-4 [&_h3]:m-0 [&_h3]:text-foreground [&_h3]:text-sm [&_h3]:font-semibold [&_>_span]:text-muted-foreground [&_>_span]:text-xs"><h3 id="verified-identity-title">{verified ? "Current service identity" : "Last reported identity"}</h3><span>{checkCount(checks)} checks passed</span></div>
+          <div className="sheet-card identity-grid [&_strong]:select-text p-3.5 grid grid-cols-2 gap-y-4 gap-x-5 border-t-border [&_>_div]:min-w-0 [&_.wide]:col-span-full [&_span]:block [&_span]:mb-0.5 [&_span]:text-muted-foreground [&_span]:text-xs [&_strong]:block [&_strong]:font-semibold [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere [&_strong.mono]:whitespace-normal border-t-0">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
             <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono wide />
@@ -2701,9 +2696,9 @@ function PrivacyVerification({ state }: { state: GatewayState }): React.JSX.Elem
         </section>
       )}
       {checks.length > 0 && (
-        <section className="privacy-section" aria-labelledby="verification-checks-title">
-          <div className="privacy-section-heading"><h3 id="verification-checks-title">Verification checks</h3><span>{checks.length} total</span></div>
-          <div className="sheet-card check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+        <section className="privacy-section mt-6" aria-labelledby="verification-checks-title">
+          <div className="privacy-section-heading min-h-9 pt-0 pr-0.5 pb-2 pl-0.5 flex items-center flex-wrap justify-between gap-y-1 gap-x-4 [&_h3]:m-0 [&_h3]:text-foreground [&_h3]:text-sm [&_h3]:font-semibold [&_>_span]:text-muted-foreground [&_>_span]:text-xs"><h3 id="verification-checks-title">Verification checks</h3><span>{checks.length} total</span></div>
+          <div className="sheet-card check-list [&_.check-row:first-child]:border-t-0">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
         </section>
       )}
     </section>
@@ -2724,7 +2719,7 @@ function Detail({
   return (
     <div className={wide ? "wide" : undefined}>
       <span>{label}</span>
-      <strong className={mono ? "mono" : undefined}>{value}</strong>
+      <strong className={mono ? "mono font-mono text-xs" : undefined}>{value}</strong>
     </div>
   );
 }
@@ -2732,18 +2727,18 @@ function Detail({
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
   return (
-    <div className="row check-row">
-      <span className={`check-icon check-${check.status}`} aria-hidden="true">
+    <div className="row min-h-12.5 pt-2.25 pr-3 pb-2.25 pl-3 flex items-center gap-3 border-b border-b-border last:border-b-0 check-row [&_.row-note]:select-text min-h-9 border-t border-t-border border-b-0 [&_.row-main]:overflow-hidden [&_.row-main]:text-ellipsis grid grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 pt-3 pr-3.5 pb-3 pl-3.5 [&_.row-main]:min-w-0 [&_.row-main]:grid [&_.row-main]:whitespace-normal [&_.row-note]:mt-1.25">
+      <span className={`check-icon w-4.5 h-4.5 flex-none grid place-items-center rounded-full [&.check-pass]:text-primary-foreground [&.check-pass]:bg-primary [&.check-fail]:text-destructive [&.check-fail]:bg-[var(--danger-bg)] [&.check-skip]:text-warning [&.check-skip]:bg-[var(--warning-bg)] [&.check-info]:text-warning [&.check-info]:bg-[var(--warning-bg)] check-${check.status}`} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>
-      <span className="row-main"><span className="row-title font-medium">{title}</span><span className="row-note">{check.detail}</span></span>
-      <span className={`result result-${check.status}`}>{checkStatusLabel(check.status)}</span>
+      <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2"><span className="row-title font-medium">{title}</span><span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap">{check.detail}</span></span>
+      <span className={`[&.result-pass]:text-primary [&.result-fail]:text-destructive [&.result-skip]:text-warning [&.result-info]:text-warning result flex-none text-xs font-semibold result-${check.status}`}>{checkStatusLabel(check.status)}</span>
     </div>
   );
 }
 
 function EmptyState({ text }: { text: string }): React.JSX.Element {
-  return <div className="empty-state">{text}</div>;
+  return <div className="empty-state min-h-18 p-3.25 grid place-items-center text-muted-foreground text-xs text-center">{text}</div>;
 }
 
 // One headline, one line of detail, one tone: the protection status.

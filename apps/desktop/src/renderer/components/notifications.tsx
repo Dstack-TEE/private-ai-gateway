@@ -83,7 +83,7 @@ function NotificationPermissionNotice() {
 
 export function NotificationsSheet({ onClose }: { onClose(): void }) {
   const { data, error, busy, change, refresh } = useNotifications();
-  return <Sheet title="Notifications" className="notifications-sheet" dismissible={!busy} onClose={onClose}>
+  return <Sheet title="Notifications" className="notifications-sheet w-[min(580px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!busy} onClose={onClose}>
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto py-4">
       <NotificationPermissionNotice />
       {error && <Alert variant="destructive"><AlertDescription>{error}<Button variant="outline" size="sm" onClick={() => void refresh()}>Retry</Button></AlertDescription></Alert>}
