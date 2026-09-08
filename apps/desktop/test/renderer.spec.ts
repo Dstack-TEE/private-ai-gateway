@@ -49,7 +49,7 @@ test("compact overview separates provider verification from current-session usag
   await expect(protection.locator(".tracks-left, .status-glow, .status-local")).toHaveCount(0);
   const session = page.getByRole("region", { name: "Current session", exact: true });
   await expect(session.getByRole("heading", { name: "Current session" })).toBeVisible();
-  await expect(agentCard.locator('[data-slot="card-description"]')).toHaveText("Installed on this device.");
+  await expect(agentCard.locator('[data-slot="card-description"]')).toHaveText("Use private AI in your agents.");
   await expect(page.getByText("Latest requests in this session.", { exact: true })).toBeVisible();
   await expect(session.locator(".session-summary > div")).toHaveCount(4);
   await expect(session.getByText("Active", { exact: true })).toHaveCount(0);
@@ -1251,7 +1251,7 @@ test("overview shows four agents, four current-session records, truthful copy su
 
   const session = page.getByRole("region", { name: "Current session", exact: true });
   const localApi = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Local API" }) });
-  for (const label of ["Requests", "Tokens", "Estimated cost", "Verified answers"]) {
+  for (const label of ["Requests", "Tokens", "Estimated cost", "Verified responses"]) {
     await expect(session.getByText(label, { exact: true })).toBeVisible();
   }
   await expect(session.locator("small")).toHaveCount(0);
