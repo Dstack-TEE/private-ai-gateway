@@ -14,14 +14,16 @@ const tag = release.tag;
 const platforms = {};
 for (const specification of desktopPackages) {
   const { suffix, targets } = specification;
-  const candidates = files.filter((file) => file.endsWith(suffix) && !path.basename(file).startsWith("private-ai-proxy-cli"));
+  const filename = artifactName({ version, ...specification });
+  const candidates = files.filter((file) => specification.platform === "macos"
+    ? path.basename(file) === filename
+    : file.endsWith(suffix) && !path.basename(file).startsWith("private-ai-proxy-cli"));
   if (candidates.length !== 1) throw new Error(`Expected one ${suffix} update package; found ${candidates.length}`);
   const file = candidates[0];
   const signature = (await readFile(`${file}.sig`, "utf8")).trim();
   if (!signature) throw new Error(`Missing signature for ${suffix}`);
   // GitHub rewrites asset names containing spaces. Stage portable names first
   // so upload and manifest URLs refer to exactly the same signed bytes.
-  const filename = artifactName({ version, ...specification });
   const staged = path.join(path.dirname(file), filename);
   if (staged !== file) {
     await rename(file, staged);

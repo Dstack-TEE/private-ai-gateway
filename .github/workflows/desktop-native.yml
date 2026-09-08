@@ -98,10 +98,10 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          key: pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
           restore-keys: |
-            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
-            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -170,11 +170,18 @@ jobs:
       matrix:
         include:
           - os: macos-26
-            platform: macos-universal
+            platform: macos-arm64
             cli_platform: macos
-            cli_arch: universal
-            target: universal-apple-darwin
-            bundle_dir: universal-apple-darwin/release/bundle
+            cli_arch: arm64
+            target: aarch64-apple-darwin
+            bundle_dir: aarch64-apple-darwin/release/bundle
+            bundles: app,dmg
+          - os: macos-26
+            platform: macos-x64
+            cli_platform: macos
+            cli_arch: x64
+            target: x86_64-apple-darwin
+            bundle_dir: x86_64-apple-darwin/release/bundle
             bundles: app,dmg
           - os: windows-2025
             platform: windows-x64
@@ -222,9 +229,9 @@ jobs:
         with:
           toolchain: stable
       - *restore-rust-cache
-      - name: Install macOS Universal targets
+      - name: Install macOS target
         if: runner.os == 'macOS'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: rustup target add "$PAP_BUILD_TARGET"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: |
@@ -287,22 +294,24 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release_version && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
-      - name: Verify Universal executables
+      - name: Verify macOS executables
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
           app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
           test -n "$app_bundle"
+          architecture=arm64
+          if [[ "$PAP_BUILD_TARGET" == x86_64-apple-darwin ]]; then architecture=x86_64; fi
           for binary in private-ai-proxy-desktop pap pap-service private-ai-proxy-helper; do
-            xcrun lipo "$app_bundle/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+            test "$(xcrun lipo -archs "$app_bundle/Contents/MacOS/$binary")" = "$architecture"
           done
-          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+          if [[ "$architecture" == x86_64 ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             softwareupdate --install-rosetta --agree-to-license
           fi
-          arch -x86_64 "$app_bundle/Contents/MacOS/pap" --version
-          arch -x86_64 "$app_bundle/Contents/MacOS/pap-service" --version
-          arch -x86_64 "$app_bundle/Contents/MacOS/private-ai-proxy-helper" --help
+          arch "-$architecture" "$app_bundle/Contents/MacOS/pap" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/pap-service" --version
+          arch "-$architecture" "$app_bundle/Contents/MacOS/private-ai-proxy-helper" --help
 
       - name: Package CLI-only distribution
         working-directory: apps/desktop
@@ -394,8 +403,8 @@ jobs:
           xcrun stapler staple "$dmg"
           cli_scratch="$(mktemp -d "$RUNNER_TEMP/pap-cli-notary.XXXXXX")"
           trap 'rm -rf "$cli_scratch"' EXIT
-          tar -xzf "release/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-universal.tar.gz" -C "$cli_scratch"
-          cli_directory="$cli_scratch/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-universal"
+          tar -xzf "release/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}.tar.gz" -C "$cli_scratch"
+          cli_directory="$cli_scratch/private-ai-proxy-cli-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
           for executable in "$cli_directory"/*; do codesign --verify --strict "$executable"; done
           ditto -c -k --keepParent "$cli_directory" "$cli_scratch/cli.zip"
           xcrun notarytool submit "$cli_scratch/cli.zip" \
@@ -599,7 +608,14 @@ jobs:
           kill -0 "$registration_pid"
           cleanup_registration
           hdiutil verify "$dmg"
-          cp "$dmg" release/
+          base="private-ai-proxy-${DESKTOP_RELEASE_VERSION:-0.1.0}-macos-${{ matrix.cli_arch }}"
+          cp "$dmg" "release/$base.dmg"
+          if [[ -n "$DESKTOP_RELEASE_VERSION" ]]; then
+            updater="$(find "$PAP_BUNDLE_DIR/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+            test -n "$updater"
+            mv "$updater" "release/$base.app.tar.gz"
+            mv "$updater.sig" "release/$base.app.tar.gz.sig"
+          fi
       - name: Upload desktop package
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -608,6 +624,7 @@ jobs:
           retention-days: 14
           path: |
             apps/desktop/release/*.dmg
+            apps/desktop/release/*.app.tar.gz*
             apps/desktop/release/private-ai-proxy-cli-*
             ${{ env.PAP_BUNDLE_DIR }}/nsis/*.exe
             ${{ env.PAP_BUNDLE_DIR }}/deb/*.deb
@@ -644,7 +661,7 @@ jobs:
         with:
           pattern: private-ai-proxy-*
           path: release-artifacts
-          merge-multiple: true
+          merge-multiple: false
       - name: Install release tooling
         working-directory: apps/desktop
         run: npm ci --ignore-scripts

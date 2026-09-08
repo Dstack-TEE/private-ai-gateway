@@ -11,9 +11,9 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
   const directory = await mkdtemp(path.resolve("playwright-artifacts/update-manifest-"));
   const run = () => promisify(execFile)(process.execPath, ["scripts/create-update-manifest.mjs", directory, version, "Dstack-TEE/private-ai-gateway", channel]);
   try {
-    for (const file of ["Gateway.app.tar.gz", "Gateway Setup.exe", "Gateway.deb", "Gateway.rpm"]) {
+    for (const file of [`private-ai-proxy-${version}-macos-arm64.app.tar.gz`, `private-ai-proxy-${version}-macos-x64.app.tar.gz`, "Gateway Setup.exe", "Gateway.deb", "Gateway.rpm"]) {
       await writeFile(path.join(directory, file), "fixture");
-      await writeFile(path.join(directory, `${file}.sig`), "test-signature\n");
+      await writeFile(path.join(directory, `${file}.sig`), `${file}-signature\n`);
     }
     await writeFile(path.join(directory, "private-ai-proxy-cli_0.1.2_amd64.deb"), "cli fixture");
     await writeFile(path.join(directory, "private-ai-proxy-cli-0.1.2.x86_64.rpm"), "cli fixture");
@@ -29,15 +29,18 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
       "windows-x86_64",
     ]);
     assert.ok(manifest.platforms["windows-x86_64"].url.endsWith(`/desktop-v${version}/private-ai-proxy-${version}-windows-x64.exe`));
-    assert.deepEqual(manifest.platforms["darwin-aarch64"], manifest.platforms["darwin-x86_64"]);
+    assert.ok(manifest.platforms["darwin-aarch64"].url.endsWith(`-macos-arm64.app.tar.gz`));
+    assert.ok(manifest.platforms["darwin-x86_64"].url.endsWith(`-macos-x64.app.tar.gz`));
+    assert.notEqual(manifest.platforms["darwin-aarch64"].signature, manifest.platforms["darwin-x86_64"].signature);
     for (const entry of Object.values(manifest.platforms)) {
       const filename = path.basename(new URL(entry.url).pathname);
       assert.equal(await readFile(path.join(directory, filename), "utf8"), "fixture");
       assert.equal((await readFile(path.join(directory, `${filename}.sig`), "utf8")).trim(), entry.signature);
     }
-    assert.equal(manifest.platforms["darwin-aarch64"].signature, "test-signature");
     await writeFile(path.join(directory, "duplicate-app.zip"), "duplicate");
-    await writeFile(path.join(directory, "Private AI Proxy.dmg"), "disk image");
+    for (const arch of ["arm64", "x64"]) {
+      await writeFile(path.join(directory, `private-ai-proxy-${version}-macos-${arch}.dmg`), "disk image");
+    }
     await writeFile(path.join(directory, "private-ai-proxy-cli-0.1.2-linux-x64.tar.gz"), "cli archive");
     const selected = (await promisify(execFile)(process.execPath, ["scripts/release-assets.mjs", directory])).stdout.split("\0").filter(Boolean).map((file) => path.basename(file));
     for (const entry of Object.values(manifest.platforms)) {
@@ -45,8 +48,10 @@ test(`${channel} manifests use signed platform artifacts and reject incomplete r
     }
     assert.ok(selected.includes("private-ai-proxy-cli-0.1.2-linux-x64.tar.gz"));
     assert.ok(selected.includes("SHA256SUMS"));
-    assert.ok(selected.includes(`private-ai-proxy-${version}-macos-universal.dmg`));
-    assert.ok((await readFile(path.join(directory, "SHA256SUMS"), "utf8")).includes(`  private-ai-proxy-${version}-macos-universal.dmg\n`));
+    for (const arch of ["arm64", "x64"]) {
+      assert.ok(selected.includes(`private-ai-proxy-${version}-macos-${arch}.dmg`));
+      assert.ok((await readFile(path.join(directory, "SHA256SUMS"), "utf8")).includes(`  private-ai-proxy-${version}-macos-${arch}.dmg\n`));
+    }
     assert.ok(!selected.some((file) => file.endsWith(".sig") || file === "duplicate-app.zip" || file.startsWith("private-ai-proxy-cli_")));
     await rm(path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`));
     await assert.rejects(run);

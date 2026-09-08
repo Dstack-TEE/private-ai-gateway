@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactName } from "./release-artifacts.mjs";
 import { releaseChannel } from "./release-channel.mjs";
 
 const [directory] = process.argv.slice(2);
@@ -15,9 +14,7 @@ const assets = files.filter((file) => {
 }).sort();
 const manifest = JSON.parse(await readFile(path.join(directory, "latest.json"), "utf8"));
 releaseChannel(manifest.version, manifest.channel);
-const normalized = assets.map((file) => path.join(path.dirname(file), file.endsWith(".dmg")
-  ? artifactName({ version: manifest.version, platform: "macos", arch: "universal", suffix: ".dmg" })
-  : path.basename(file).replaceAll(" ", ".")));
+const normalized = assets.map((file) => path.join(path.dirname(file), path.basename(file).replaceAll(" ", ".")));
 if (new Set(normalized.map((file) => path.basename(file))).size !== assets.length) throw new Error("Duplicate release asset names");
 const sums = [];
 for (const [index, file] of normalized.entries()) {
