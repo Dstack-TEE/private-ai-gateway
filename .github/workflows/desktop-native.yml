@@ -81,12 +81,27 @@ jobs:
           toolchain: '1.89'
           components: rustfmt, clippy
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - &restore-rust-cache
+        name: Restore Rust dependencies
+        id: rust-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          workspaces: apps/desktop/src-tauri -> target
-          cache-on-failure: true
+          path: &rust-cache-paths |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/build
+            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/*/build
+          key: pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'apps/desktop/gateway/Cargo.lock', 'apps/desktop/gateway/Cargo.toml', 'apps/desktop/runtime/Cargo.lock', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}-partial-
+            pap-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.cachekey }}-
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
@@ -132,6 +147,13 @@ jobs:
           cargo test --locked --bin pap --features desktop-client
           cargo test --locked --test pap_cli --features desktop-client
           cargo test --locked --test aci_cli
+      - &save-rust-cache
+        name: Save Rust dependencies
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: *rust-cache-paths
+          key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
 
   package:
     name: Package (${{ matrix.platform }})
@@ -196,12 +218,10 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: rust
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: apps/desktop/src-tauri -> target
-          cache-on-failure: true
+      - *restore-rust-cache
       - name: Install macOS Universal targets
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -602,6 +622,7 @@ jobs:
         if: always() && runner.os == 'macOS' && inputs.production_macos
         shell: bash
         run: rm -f "${APPLE_API_KEY_PATH:-}"
+      - *save-rust-cache
 
   draft-release:
     if: inputs.release_version != '' && inputs.production_macos

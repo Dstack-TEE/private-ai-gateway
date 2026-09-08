@@ -9,14 +9,18 @@ use std::process::ExitCode;
 
 use desktop_gateway::{agents, tokens::TokenFiles};
 
+const USAGE: &str = "usage: private-ai-proxy-helper --agent-token <codex|claude-code|opencode|pi|hermes|openclaw|oh-my-pi>";
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let agent = match (args.next().as_deref(), args.next()) {
-        (Some("--agent-token"), Some(agent)) => agent,
+    let agent = match (args.next().as_deref(), args.next(), args.next()) {
+        (Some("--help" | "-h"), None, None) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        (Some("--agent-token"), Some(agent), None) => agent,
         _ => {
-            eprintln!(
-                "usage: private-ai-proxy-helper --agent-token <codex|claude-code|opencode|pi|hermes|openclaw|oh-my-pi>"
-            );
+            eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
     };
