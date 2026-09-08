@@ -19,19 +19,19 @@ longer bundled. The backend launches `pap serve` with strict receipt enforcement
 Build the unified CLI with `cargo build --features desktop-client --bin pap`;
 ordinary server and standalone ACI builds do not acquire desktop dependencies.
 
-Distribution builds on macOS default to `universal-apple-darwin`. Install both
-Rust targets with `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
-The CLI, backend and helper are compiled for both targets and merged with
-Apple's `lipo`; Tauri builds the Universal UI executable. CI verifies both
-slices in all four packaged executables and starts the Intel CLI slice through
-Rosetta. Development builds continue to use the host architecture.
+macOS releases provide separate Apple Silicon (`arm64`) and Intel (`x64`)
+packages. Local builds default to the host architecture; pass `--target` to
+build for another target after installing it with `rustup target add`.
+CI checks the architecture of all four executables and runs Intel packages
+through Rosetta on macOS 26. Explicit `--target universal-apple-darwin` builds
+remain available when both Rust targets are installed.
 
 Public download names follow
 `private-ai-proxy[-cli]-<version>-<platform>-<architecture>.<format>`.
-For example, `private-ai-proxy-0.1.2-beta.21-macos-universal.dmg` and
-`private-ai-proxy-cli-0.1.2-beta.21-macos-universal.tar.gz`.
-Tauri's `darwin-aarch64` and `darwin-x86_64` updater entries reference the same
-signed Universal archive. CI shares one Cargo target directory across the
+For example, `private-ai-proxy-0.1.2-beta.22-macos-arm64.dmg` and
+`private-ai-proxy-cli-0.1.2-beta.22-macos-x64.tar.gz`.
+Tauri's `darwin-aarch64` and `darwin-x86_64` updater entries reference separate
+signed archives. CI shares one Cargo target directory across the
 manifests, uses the same distribution entry point as local builds, and avoids
 generating a redundant desktop ZIP.
 GitHub's official cache restore/save actions cache registry sources and Cargo
