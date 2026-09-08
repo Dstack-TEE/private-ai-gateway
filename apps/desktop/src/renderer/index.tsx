@@ -1926,7 +1926,7 @@ function UsageView({
     try {
       const path = query.has("mock")
         ? "usage.csv"
-        : await save({ title: "Export Usage", defaultPath: `private-ai-gateway-usage-${new Date().toISOString().slice(0, 10)}.csv`, filters: [{ name: "CSV", extensions: ["csv"] }] });
+        : await save({ title: "Export Usage", defaultPath: `private-ai-proxy-usage-${new Date().toISOString().slice(0, 10)}.csv`, filters: [{ name: "CSV", extensions: ["csv"] }] });
       if (!path) return;
       const count = await desktopApi.exportUsageCsv({ agent: agent || undefined, model: model || undefined, since, until }, path);
       onNotice(`Exported ${count.toLocaleString()} usage ${count === 1 ? "record" : "records"}`);
@@ -2805,7 +2805,7 @@ function sortAgents(agents: AgentStatus[]): AgentStatus[] {
 
 function maskClientKey(key: string): string {
   if (!key) return "Unavailable";
-  const prefix = key.startsWith("sk-pag-") ? "sk-pag-" : key.startsWith("pag_") ? "pag_" : "";
+  const prefix = key.startsWith("sk-pap-") ? "sk-pap-" : "";
   return `${prefix}${"•".repeat(12)}`;
 }
 

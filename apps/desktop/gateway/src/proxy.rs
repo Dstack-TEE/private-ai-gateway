@@ -1024,7 +1024,7 @@ fn new_id() -> String {
 }
 
 fn format_tag(request_id: &str, session_id: &str, agent: &str) -> String {
-    format!("pag:{request_id}:{session_id}:{agent}")
+    format!("pap:{request_id}:{session_id}:{agent}")
 }
 
 // A downstream disconnect drops the body without polling it to EOF.
@@ -1305,7 +1305,7 @@ mod tests {
 
     #[test]
     fn sidecar_requests_ignore_proxy_environment() {
-        const CHILD: &str = "PAG_TEST_PROXY_ENV_CHILD";
+        const CHILD: &str = "PAP_TEST_PROXY_ENV_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Isolate proxy variables from the other concurrently running tests.
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1560,7 +1560,7 @@ mod tests {
         let tag = echo["tag"].as_str().unwrap();
         let parts: Vec<_> = tag.split(':').collect();
         assert_eq!(parts.len(), 4);
-        assert_eq!(parts[0], "pag");
+        assert_eq!(parts[0], "pap");
         assert_eq!(parts[2], "test-session");
         assert_eq!(parts[3], "opencode");
         assert_eq!(echo["anthropic-beta"], json!("keep-me"));
@@ -1576,7 +1576,7 @@ mod tests {
         assert_eq!(counted.status().as_u16(), 200);
         let echo: Value = counted.json().await.unwrap();
         let tag = echo["tag"].as_str().unwrap();
-        assert!(tag.starts_with("pag:"));
+        assert!(tag.starts_with("pap:"));
         assert!(tag.ends_with(":test-session:claude-code"));
     }
 
@@ -1676,7 +1676,7 @@ mod tests {
             let text = response.text().await.unwrap();
             assert!(
                 text.starts_with(&format!(
-                    "event: echo\ndata: POST {path}?beta=true&v=2 pag:"
+                    "event: echo\ndata: POST {path}?beta=true&v=2 pap:"
                 )),
                 "{path}: {text}"
             );
@@ -1835,7 +1835,7 @@ mod tests {
     fn attribution_tag_contains_request_session_and_agent() {
         assert_eq!(
             format_tag("request-1", "session-2", "pi"),
-            "pag:request-1:session-2:pi"
+            "pap:request-1:session-2:pi"
         );
     }
 

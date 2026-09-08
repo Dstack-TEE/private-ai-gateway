@@ -1,14 +1,14 @@
-# PAG Backend and CLI
+# PAP Backend and CLI
 
-The desktop UI and `pag` connect to one per-user `pag-service` backend. Only the
+The desktop UI and `pap` connect to one per-user `pap-service` backend. Only the
 backend owns gateway state, profile credentials, agent projection, usage,
 preferences, and the ACI subprocess. Neither client opens an inference listener
 or writes backend configuration directly.
 
 ```text
 React -> Tauri commands -> Rust Client --+
-                                       +-> private IPC -> pag-service -> aci
-pag --------------------> Rust Client --+
+                                       +-> private IPC -> pap-service -> aci
+pap --------------------> Rust Client --+
 ```
 
 This is stacked on desktop PR #177. It retains the shared renderer and existing
@@ -21,33 +21,33 @@ See the [CLI guide](CLI.md) for human and automated workflows, command discovery
 confirmation rules, output contracts and desktop-only boundaries.
 
 ```sh
-pag status --json
-pag status --watch --json
-pag service start
-pag start --profile work
-pag stop
-pag service stop --yes
-pag profiles add --id work --name Work --url https://tee.redpill.ai --provider redpill
-pag profiles verify work
-pag profiles list
-pag profiles import profiles.json --yes
-pag profiles export --output profiles.json
-pag profiles use work --yes
-pag agents list
-pag agents connect codex --model MODEL --dry-run
-pag agents connect codex --model MODEL --yes
-pag agents disconnect codex --yes
-pag models list --refresh
-pag usage list --limit 20
-pag usage export --format csv --output usage.csv
-pag settings show
-pag settings set appearance dark --yes
-pag token rotate --yes
-pag cli status --json
-pag cli install
-pag app open
-pag doctor
-pag diagnostics --output diagnostics.json
+pap status --json
+pap status --watch --json
+pap service start
+pap start --profile work
+pap stop
+pap service stop --yes
+pap profiles add --id work --name Work --url https://tee.redpill.ai --provider redpill
+pap profiles verify work
+pap profiles list
+pap profiles import profiles.json --yes
+pap profiles export --output profiles.json
+pap profiles use work --yes
+pap agents list
+pap agents connect codex --model MODEL --dry-run
+pap agents connect codex --model MODEL --yes
+pap agents disconnect codex --yes
+pap models list --refresh
+pap usage list --limit 20
+pap usage export --format csv --output usage.csv
+pap settings show
+pap settings set appearance dark --yes
+pap token rotate --yes
+pap cli status --json
+pap cli install
+pap app open
+pap doctor
+pap diagnostics --output diagnostics.json
 ```
 
 `--help` lists the complete command and option set. Credentials use a hidden

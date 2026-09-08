@@ -83,7 +83,7 @@ impl TokenFiles {
         // OpenClaw's text exec resolver first attempts JSON parsing. A prefix
         // prevents a randomly all-numeric token from being treated as a number.
         let token = if agent == LOCAL_TOOLS_AGENT || agent == "openclaw" {
-            format!("sk-pag-{}", generate())
+            format!("sk-pap-{}", generate())
         } else {
             generate()
         };
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn tokens_are_private_per_agent_and_revocable() {
-        let dir = std::env::temp_dir().join(format!("pag-tokens-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pap-tokens-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let files = TokenFiles::new(&dir);
         let codex = files.ensure("codex").unwrap();
@@ -436,16 +436,16 @@ mod tests {
         assert_eq!(set.agent_for("nope"), None);
         assert_eq!(set.without("codex").agent_for(&codex), None);
         let client = files.ensure(LOCAL_TOOLS_AGENT).unwrap();
-        assert!(client.starts_with("sk-pag-"));
-        assert_eq!(client.len(), "sk-pag-".len() + TOKEN_BYTES * 2);
+        assert!(client.starts_with("sk-pap-"));
+        assert_eq!(client.len(), "sk-pap-".len() + TOKEN_BYTES * 2);
         let openclaw = files.ensure("openclaw").unwrap();
-        assert!(openclaw.starts_with("sk-pag-"));
-        assert_eq!(openclaw.len(), "sk-pag-".len() + TOKEN_BYTES * 2);
+        assert!(openclaw.starts_with("sk-pap-"));
+        assert_eq!(openclaw.len(), "sk-pap-".len() + TOKEN_BYTES * 2);
         assert!(serde_json::from_str::<serde_json::Value>(&openclaw).is_err());
         assert_eq!(files.ensure("openclaw").unwrap(), openclaw);
         let rotated = files.rotate("openclaw").unwrap();
         assert_ne!(rotated, openclaw);
-        assert!(rotated.starts_with("sk-pag-"));
+        assert!(rotated.starts_with("sk-pap-"));
         files.revoke("codex").unwrap();
         assert!(files.read("codex").unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);

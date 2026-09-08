@@ -12,7 +12,7 @@
     "keyLabel": "RedPill API key"
   },
   "bundle": {
-    "identifier": "com.phala.private-ai-gateway",
+    "identifier": "com.phala.private-ai-proxy",
     "category": "DeveloperTool",
     "shortDescription": "Verified local AI gateway",
     "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."

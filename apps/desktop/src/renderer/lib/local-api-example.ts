@@ -9,7 +9,7 @@ export function localApiExample(language: ExampleLanguage, endpoint: string, mod
     const quotedUrl = `'${url.toString().replaceAll("'", "'\\''")}'`;
     return [
       `curl --fail-with-body --max-time 60 --request POST ${quotedUrl} \\`,
-      apiKey ? `  --header 'Authorization: Bearer ${apiKey.replaceAll("'", "'\\''")}' \\` : '  --header "Authorization: Bearer ${PAG_API_KEY:?Set PAG_API_KEY to your local client key}" \\',
+      apiKey ? `  --header 'Authorization: Bearer ${apiKey.replaceAll("'", "'\\''")}' \\` : '  --header "Authorization: Bearer ${PAP_API_KEY:?Set PAP_API_KEY to your local client key}" \\',
       "  --header 'Content-Type: application/json' \\",
       "  --data @- <<'JSON'",
       payload,

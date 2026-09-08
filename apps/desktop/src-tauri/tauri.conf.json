@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Private AI Proxy",
   "version": "0.1.0",
-  "identifier": "dev.private-ai-gateway.desktop",
+  "identifier": "dev.private-ai-proxy.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
@@ -40,12 +40,11 @@
     "active": true,
     "targets": ["app", "dmg"],
     "category": "DeveloperTool",
-    "shortDescription": "Verified local AI gateway",
+    "shortDescription": "Verified local AI proxy",
     "externalBin": [
       "binaries/pap",
-      "binaries/pag",
-      "binaries/pag-service",
-      "binaries/private-ai-gateway-helper"
+      "binaries/pap-service",
+      "binaries/private-ai-proxy-helper"
     ],
     "icon": [
       "icons/32x32.png",
@@ -68,15 +67,10 @@
     },
     "linux": {
       "deb": {
-        "replaces": ["private-ai-gateway"],
-        "conflicts": ["private-ai-gateway"],
-        "provides": ["private-ai-gateway"],
         "preInstallScript": "installer/deb-pre-install.sh",
         "preRemoveScript": "installer/deb-pre-remove.sh"
       },
       "rpm": {
-        "obsoletes": ["private-ai-gateway"],
-        "provides": ["private-ai-gateway"],
         "preInstallScript": "installer/rpm-pre-install.sh",
         "preRemoveScript": "installer/rpm-pre-remove.sh"
       }

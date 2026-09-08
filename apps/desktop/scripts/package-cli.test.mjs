@@ -6,8 +6,8 @@ import test from "node:test";
 
 import { binaries, releaseVersionParts, stageLinuxPackageRoot, stagePortable } from "./package-cli.mjs";
 
-test("stages the four sibling CLI executables and Linux package symlink", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pag-cli-package-"));
+test("stages the three sibling CLI executables and Linux package symlink", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pap-cli-package-"));
   try {
     const source = path.join(root, "source");
     const portable = path.join(root, "portable");
@@ -28,11 +28,11 @@ test("stages the four sibling CLI executables and Linux package symlink", async 
     }
 
     await stageLinuxPackageRoot(portable, packageRoot);
-    assert.equal(await readlink(path.join(packageRoot, "usr/bin/pag")), "../libexec/private-ai-gateway/pag");
-    assert.ok((await lstat(path.join(packageRoot, "usr/bin/pag"))).isSymbolicLink());
+    assert.equal(await readlink(path.join(packageRoot, "usr/bin/pap")), "../libexec/private-ai-proxy/pap");
+    assert.ok((await lstat(path.join(packageRoot, "usr/bin/pap"))).isSymbolicLink());
     for (const name of binaries) {
       assert.equal(
-        await readFile(path.join(packageRoot, "usr/libexec/private-ai-gateway", name), "utf8"),
+        await readFile(path.join(packageRoot, "usr/libexec/private-ai-proxy", name), "utf8"),
         name,
       );
     }

@@ -23,7 +23,7 @@ assert.ok(targetTriple?.includes("windows"), "Expected a Windows Rust host targe
 const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.brand.conf.json"), "utf8"));
 assert.match(identifier, /^[A-Za-z0-9.-]+$/);
 
-const scratch = await mkdtemp(path.join(os.tmpdir(), "pag-windows-gate-"));
+const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-windows-gate-"));
 const portable = path.join(scratch, "bin");
 const appData = path.join(scratch, "appdata");
 const profile = path.join(scratch, "profile");
@@ -31,15 +31,15 @@ const data = path.join(appData, identifier);
 const acquired = path.join(scratch, "acquired");
 const release = path.join(scratch, "release");
 const fixture = path.join(scratch, "gate-fixture.exe");
-const pag = path.join(portable, "pag.exe");
+const pap = path.join(portable, "pap.exe");
 const env = {
   ...process.env,
   APPDATA: appData,
   USERPROFILE: profile,
   HOME: profile,
-  PRIVATE_AI_GATEWAY_HOME: "",
-  PAG_GATE_ACQUIRED: acquired,
-  PAG_GATE_RELEASE: release,
+  PRIVATE_AI_PROXY_HOME: "",
+  PAP_GATE_ACQUIRED: acquired,
+  PAP_GATE_RELEASE: release,
   ACI_API_KEY: "",
   OPENAI_API_KEY: "",
   ANTHROPIC_API_KEY: "",
@@ -62,7 +62,7 @@ const waitForExit = async (child, timeout) => {
 const expectGateFailure = async (arguments_, timeout) => {
   let failure;
   try {
-    await execute(pag, ["--json", ...arguments_], { env, timeout, windowsHide: true });
+    await execute(pap, ["--json", ...arguments_], { env, timeout, windowsHide: true });
   } catch (error) {
     failure = error;
   }
@@ -113,7 +113,7 @@ try {
     allowNetworkAccess: false,
     port: await reservePort(),
   }));
-  const started = JSON.parse((await execute(pag, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
+  const started = JSON.parse((await execute(pap, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
   assert.ok(Number.isInteger(started.processId) && started.processId > 0);
 } finally {
   let cleanupError;
@@ -123,7 +123,7 @@ try {
     await waitForExit(gate, 2_000).catch((error) => { cleanupError ??= error; });
   }
   if (backendAttempted) {
-    await execute(pag, ["--json", "--yes", "service", "stop"], {
+    await execute(pap, ["--json", "--yes", "service", "stop"], {
       env, timeout: 10_000, windowsHide: true,
     }).catch((error) => {
       const output = `${error.stdout ?? ""}\n${error.stderr ?? ""}`.trim();

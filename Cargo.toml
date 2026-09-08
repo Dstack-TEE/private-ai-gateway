@@ -18,11 +18,17 @@ name = "pap"
 path = "src/bin/pap/main.rs"
 required-features = ["desktop-client"]
 
+[[bin]]
+name = "pap-service"
+path = "src/bin/pap-service/main.rs"
+required-features = ["desktop-client"]
+
 [features]
-desktop-client = ["dep:desktop_runtime"]
+desktop-client = ["dep:desktop_runtime", "dep:desktop_gateway"]
 
 [dependencies]
-desktop_runtime = { package = "private-ai-gateway-desktop-runtime", path = "apps/desktop/runtime", optional = true }
+desktop_runtime = { package = "private-ai-proxy-runtime", path = "apps/desktop/runtime", optional = true }
+desktop_gateway = { package = "private-ai-proxy-gateway", path = "apps/desktop/gateway", optional = true }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -95,6 +101,7 @@ clap = { version = "4", default-features = false, features = ["derive", "std", "
 dstack-sdk = "0.1.2"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
 

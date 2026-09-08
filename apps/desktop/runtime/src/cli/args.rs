@@ -5,10 +5,10 @@ use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
-    name = "pag",
+    name = "pap",
     version = crate::protocol::BUILD_VERSION,
-    about = "Control the Private AI Gateway",
-    long_about = "Control the Private AI Gateway backend, protected connection, profiles, and coding-agent integrations. `pag start` explicitly starts protection and waits for verification. `pag service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
+    about = "Control the Private AI Proxy",
+    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `pap start` explicitly starts protection and waits for verification. `pap service start` starts the backend; saved connect-on-launch behavior may then start protection automatically."
 )]
 pub(super) struct Cli {
     /// Emit compact JSON instead of human-readable output.
@@ -127,15 +127,15 @@ pub(super) enum App {
 
 #[derive(Subcommand)]
 pub(super) enum Registration {
-    /// Show whether pag is registered on PATH.
+    /// Show whether pap is registered on PATH.
     Status,
-    /// Register pag in a user-writable directory.
+    /// Register pap in a user-writable directory.
     Install {
         /// Installation directory; omit to use the platform default.
         #[arg(long)]
         directory: Option<PathBuf>,
     },
-    /// Remove a pag registration previously installed by this app.
+    /// Remove a pap registration previously installed by this app.
     Uninstall {
         /// Registration directory; omit to use the platform default.
         #[arg(long)]
@@ -253,7 +253,7 @@ pub(super) enum Agents {
     List,
     /// Connect an agent to the Local API.
     Connect {
-        /// Agent ID reported by `pag agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Optional default model from the verified catalog.
         #[arg(long)]
@@ -267,7 +267,7 @@ pub(super) enum Agents {
     },
     /// Disconnect an agent and restore its managed configuration.
     Disconnect {
-        /// Agent ID reported by `pag agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Preview changes and return a revision without applying them.
         #[arg(long, conflicts_with = "revision")]

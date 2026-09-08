@@ -6,7 +6,7 @@
 use super::*;
 use serde_json::{json, Value};
 
-const PROVIDER: &str = "private-ai-gateway";
+const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
 
 fn agent_dir(home: &Path, tool_env: bool) -> PathBuf {
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn native_directory_overrides_are_checked_in_isolated_processes() {
-        const CASE: &str = "PAG_OMP_DIRECTORY_TEST";
+        const CASE: &str = "PAP_OMP_DIRECTORY_TEST";
         if let Ok(case) = env::var(CASE) {
             let sandbox = sandbox("omp-directory");
             let home = &sandbox.home;
@@ -262,7 +262,7 @@ mod tests {
             .unwrap();
         let path = config_path(&sandbox.home, false);
         let external =
-            "# externally replaced\nproviders: {private-ai-gateway: {apiKey: external-secret}}\n";
+            "# externally replaced\nproviders: {private-ai-proxy: {apiKey: external-secret}}\n";
         write(&path, external);
         let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
         assert!(
@@ -355,18 +355,18 @@ mod tests {
         let dir = sandbox.home.join(".omp/agent");
         write(
             &dir.join("models.json"),
-            r#"{"providers":{"private-ai-gateway":{"apiKey":"legacy-secret"}}}"#,
+            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#,
         );
         assert!(validate_host(&sandbox.home, false)
             .unwrap_err()
             .contains("migration"));
         assert_eq!(
             fs::read_to_string(dir.join("models.json")).unwrap(),
-            r#"{"providers":{"private-ai-gateway":{"apiKey":"legacy-secret"}}}"#
+            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#
         );
         for text in [
-            "providers:\n  private-ai-gateway: {apiKey: secret}\n",
-            "providers:\n  private-ai-gateway: null\n",
+            "providers:\n  private-ai-proxy: {apiKey: secret}\n",
+            "providers:\n  private-ai-proxy: null\n",
             "providers: []\n",
             "providers: {other: {}, other: {}}\n",
             "base: &base {other: {}}\nproviders: {<<: *base}\n",

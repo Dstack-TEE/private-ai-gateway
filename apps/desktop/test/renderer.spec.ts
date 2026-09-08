@@ -170,12 +170,12 @@ test("Local API help opens examples with model selection and copy actions", asyn
   const dialog = page.getByRole("dialog", { name: "Local API examples", exact: true });
   await expect(dialog.locator("code")).toContainText("http://127.0.0.1:4180/v1");
   await expect(dialog.getByText("Available", { exact: true })).toHaveCount(0);
-  await expect(dialog.locator("code")).toContainText("sk-pag-");
+  await expect(dialog.locator("code")).toContainText("sk-pap-");
   await choose(page, dialog.getByRole("combobox", { name: "Model", exact: true }), "Z.ai: GLM 5.2");
   for (const language of ["cURL", "Python", "JavaScript"]) {
     await dialog.getByRole("tab", { name: language, exact: true }).click();
     await expect(dialog.locator("code")).toContainText("zai/glm-5.2");
-    await expect(dialog.locator("code")).toContainText("sk-pag-");
+    await expect(dialog.locator("code")).toContainText("sk-pap-");
     await dialog.getByRole("button", { name: "Copy example", exact: true }).click();
     await expect(dialog.getByRole("status")).toHaveText("Example copied");
   }
@@ -807,7 +807,7 @@ test("dialog theme is initialized before presentation without loading the chart 
   await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(() => {
     window.__GATEWAY_INITIAL_APPEARANCE__ = "light";
-    localStorage.setItem("pag-preview-appearance", "light");
+    localStorage.setItem("pap-preview-appearance", "light");
   });
   const chartRequests: string[] = [];
   page.on("request", (request) => { if (request.url().includes("usage-chart-plot")) chartRequests.push(request.url()); });
@@ -825,7 +825,7 @@ test("native presentation waits for required credentials but not decorative imag
   await expect(page.locator("html")).not.toHaveAttribute("data-native-presented", "true");
   await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-example-key")));
   await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
-  await expect(page.locator("code")).toContainText("sk-pag-");
+  await expect(page.locator("code")).toContainText("sk-pap-");
 
   await page.addInitScript(() => {
     const decode = HTMLImageElement.prototype.decode;
@@ -856,7 +856,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       size: { width: 720, height: 560 },
       path: "/?mock=ready&native-dialog=local-api-example",
       name: "Local API examples",
-      text: "sk-pag-",
+      text: "sk-pap-",
     },
     {
       size: { width: 580, height: 510 },
@@ -1045,7 +1045,7 @@ test("rotating the client key requires an explicit native confirmation", async (
     await expect(page.getByRole("alert")).toContainText("Could not store the replacement client key");
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Rotate key" }).click();
-    await expect(key).toHaveValue(/^sk-pag-/);
+    await expect(key).toHaveValue(/^sk-pap-/);
     await expect(page.getByRole("button", { name: "Copy client key" })).toBeEnabled();
     await expect(page.getByRole("alert")).toHaveCount(0);
   }
@@ -1206,7 +1206,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await clientKey.click();
   await expect(page.locator('.sr-only[role="status"]')).toContainText("Client key copied");
   await localApi.getByRole("button", { name: "Reveal client key" }).click();
-  await expect(clientKey).toContainText("sk-pag-");
+  await expect(clientKey).toContainText("sk-pap-");
 
   await localApi.getByRole("button", { name: "Local API settings" }).click();
   const localSheet = page.getByRole("dialog", { name: "Local API settings" });

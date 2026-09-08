@@ -116,7 +116,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: pag service start\nStart protection: pag start".into();
+        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn status_includes_operational_context_without_credentials_or_activity() {
-        assert!(status(&json!({"status":"not_running"})).contains("pag service start"));
+        assert!(status(&json!({"status":"not_running"})).contains("pap service start"));
         let value = json!({
             "backend": {"processId":42,"version":"0.1.0"},
             "gateway": {

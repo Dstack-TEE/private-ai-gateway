@@ -38,7 +38,7 @@ use crate::{
 };
 
 /// Test-only override for the home directory (and the app data directory).
-pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_GATEWAY_HOME";
+pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
 pub use crate::brand::APP_IDENTIFIER;
 const STORE_FILE: &str = "agent-connections.json";
 const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
@@ -51,9 +51,9 @@ const RESTORE_PATH_MISSING: &str = "This legacy connection has no recorded absol
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {
     if cfg!(windows) {
-        "private-ai-gateway-helper.exe"
+        "private-ai-proxy-helper.exe"
     } else {
-        "private-ai-gateway-helper"
+        "private-ai-proxy-helper"
     }
 }
 
@@ -326,28 +326,28 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         Agent::OhMyPi => oh_my_pi::fields(inputs)?,
         Agent::Codex => {
             let mut fields = vec![
-                set(&["model_provider"], "private_ai_gateway"),
-                absent(&["model_providers", "private_ai_gateway", "env_key"]),
+                set(&["model_provider"], "private_ai_proxy"),
+                absent(&["model_providers", "private_ai_proxy", "env_key"]),
                 absent(&[
                     "model_providers",
-                    "private_ai_gateway",
+                    "private_ai_proxy",
                     "experimental_bearer_token",
                 ]),
                 absent(&[
                     "model_providers",
-                    "private_ai_gateway",
+                    "private_ai_proxy",
                     "requires_openai_auth",
                 ]),
                 set(
-                    &["model_providers", "private_ai_gateway", "name"],
+                    &["model_providers", "private_ai_proxy", "name"],
                     PRODUCT_NAME,
                 ),
                 set(
-                    &["model_providers", "private_ai_gateway", "base_url"],
+                    &["model_providers", "private_ai_proxy", "base_url"],
                     format!("{base}/v1"),
                 ),
                 set(
-                    &["model_providers", "private_ai_gateway", "wire_api"],
+                    &["model_providers", "private_ai_proxy", "wire_api"],
                     "responses",
                 ),
                 set(
@@ -355,26 +355,21 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
                     inputs.codex_catalog_path.display().to_string(),
                 ),
                 set(
-                    &["model_providers", "private_ai_gateway", "auth", "command"],
+                    &["model_providers", "private_ai_proxy", "auth", "command"],
                     inputs.helper_exe.display().to_string(),
                 ),
                 list(
-                    &["model_providers", "private_ai_gateway", "auth", "args"],
+                    &["model_providers", "private_ai_proxy", "auth", "args"],
                     &["--agent-token", "codex"],
                 ),
                 number(
-                    &[
-                        "model_providers",
-                        "private_ai_gateway",
-                        "auth",
-                        "timeout_ms",
-                    ],
+                    &["model_providers", "private_ai_proxy", "auth", "timeout_ms"],
                     5_000,
                 ),
                 number(
                     &[
                         "model_providers",
-                        "private_ai_gateway",
+                        "private_ai_proxy",
                         "auth",
                         "refresh_interval_ms",
                     ],
@@ -403,7 +398,7 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             fields
         }
         Agent::OpenCode => {
-            let provider = "private-ai-gateway";
+            let provider = "private-ai-proxy";
             let mut fields = vec![generated_catalog(
                 &["provider", provider],
                 opencode_provider(catalog, base, inputs.token_path),
@@ -415,12 +410,12 @@ fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             fields
         }
         Agent::Pi => vec![generated_catalog(
-            &["providers", "private-ai-gateway"],
+            &["providers", "private-ai-proxy"],
             pi_provider(catalog, base, inputs.helper_exe)?,
             catalog.models.len(),
         )],
         Agent::Hermes => {
-            let provider = "private-ai-gateway";
+            let provider = "private-ai-proxy";
             let mut fields = vec![
                 set(&["providers", provider, "name"], PRODUCT_NAME),
                 set(&["providers", provider, "api"], format!("{base}/v1")),
@@ -796,18 +791,18 @@ fn credential_helper_command(exe: &Path, agent: Agent) -> Result<String, String>
 fn stale_helper(agent: Agent, record: &Connection, exe: &Path) -> bool {
     let (path, expected) = match agent {
         Agent::Codex => (
-            &["model_providers", "private_ai_gateway", "auth", "command"][..],
+            &["model_providers", "private_ai_proxy", "auth", "command"][..],
             exe.to_str().map(str::to_string),
         ),
         Agent::ClaudeCode => (&["apiKeyHelper"][..], helper_command(exe, agent.id()).ok()),
         Agent::Pi => (
-            &["providers", "private-ai-gateway"][..],
+            &["providers", "private-ai-proxy"][..],
             credential_helper_command(exe, agent)
                 .ok()
                 .map(|command| format!("!{command}")),
         ),
         Agent::Hermes => (
-            &["providers", "private-ai-gateway", "key_cmd"][..],
+            &["providers", "private-ai-proxy", "key_cmd"][..],
             credential_helper_command(exe, agent).ok(),
         ),
         Agent::OpenCode => return false,
@@ -1600,38 +1595,38 @@ impl Projector {
     ) -> Result<(), String> {
         match agent {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior),
-            Agent::Codex if doc.contains(&["model_providers", "private_ai_gateway", "aws"]) => {
+            Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
                 Err("Codex's gateway provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string())
             }
             Agent::Pi => {
                 let path = Agent::Pi.config_path(&self.home, self.tool_env).with_file_name("auth.json");
                 let auth = read_auth_document(&path)?;
-                if auth.get("private-ai-gateway").is_some() {
-                    return Err("Pi has a stored credential for private-ai-gateway that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string());
+                if auth.get("private-ai-proxy").is_some() {
+                    return Err("Pi has a stored credential for private-ai-proxy that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string());
                 }
                 Ok(())
             }
             Agent::Hermes => {
-                let scope = &["providers", "private-ai-gateway"];
+                let scope = &["providers", "private-ai-proxy"];
                 if doc.contains(scope) {
                     let owned = prior.is_some_and(|record| {
                         let fields: Vec<_> = record.fields.iter().filter(|field| field.path.starts_with(&owned(scope))).collect();
                         !fields.is_empty() && fields.iter().all(|field| doc.get_value(&refs(&field.path)) == field.value)
                     });
                     if !owned {
-                        return Err("The Hermes private-ai-gateway provider already exists outside this connection; it will not be overwritten".to_string());
+                        return Err("The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten".to_string());
                     }
                 }
-                if doc.contains(&["providers", "private-ai-gateway", "enabled"])
-                    && doc.get_value(&["providers", "private-ai-gateway", "enabled"]) != Some(ConfigValue::Bool(true)) {
+                if doc.contains(&["providers", "private-ai-proxy", "enabled"])
+                    && doc.get_value(&["providers", "private-ai-proxy", "enabled"]) != Some(ConfigValue::Bool(true)) {
                     return Err("The Hermes gateway provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string());
                 }
-                if doc.contains(&["providers", "private-ai-gateway", "api_mode"])
-                    && doc.get_str(&["providers", "private-ai-gateway", "api_mode"]).as_deref() != Some("chat_completions") {
+                if doc.contains(&["providers", "private-ai-proxy", "api_mode"])
+                    && doc.get_str(&["providers", "private-ai-proxy", "api_mode"]).as_deref() != Some("chat_completions") {
                     return Err("Hermes api_mode overrides the gateway's chat_completions transport; resolve that conflict in Hermes".to_string());
                 }
                 for key in ["api_key", "key_env", "api_key_env"] {
-                    if doc.contains(&["providers", "private-ai-gateway", key]) || doc.contains(&["model", key]) {
+                    if doc.contains(&["providers", "private-ai-proxy", key]) || doc.contains(&["model", key]) {
                         return Err("Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes".to_string());
                     }
                 }
@@ -1654,13 +1649,13 @@ impl Projector {
                         directory.parent().and_then(Path::parent).ok_or("Invalid Hermes profile directory")?.to_path_buf()
                     } else { directory.to_path_buf() };
                 // Hermes falls back to the root auth store for named profiles.
-                let name = doc.get_str(&["providers", "private-ai-gateway", "name"])
+                let name = doc.get_str(&["providers", "private-ai-proxy", "name"])
                     .unwrap_or_else(|| PRODUCT_NAME.to_string());
                 for path in [directory.join("auth.json"), root.join("auth.json")] {
                     let auth = read_auth_document(&path)?;
                     if let Some(pool) = auth.get("credential_pool") {
                         let pool = pool.as_object().ok_or("Cannot verify Hermes credential_pool; resolve its shape in Hermes")?;
-                        for key in ["private-ai-gateway".to_string(), format!("custom:{}", name.trim().to_lowercase().replace(' ', "-"))] {
+                        for key in ["private-ai-proxy".to_string(), format!("custom:{}", name.trim().to_lowercase().replace(' ', "-"))] {
                             if pool.get(&key).is_some_and(|entries| entries.as_array().is_none_or(|entries| !entries.is_empty())) {
                                 return Err("Hermes has a gateway credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged".to_string());
                             }
@@ -1749,19 +1744,19 @@ impl Projector {
             values.as_array().is_none_or(|values| {
                 values
                     .iter()
-                    .any(|value| !value.is_string() || value.as_str() == Some("private-ai-gateway"))
+                    .any(|value| !value.is_string() || value.as_str() == Some("private-ai-proxy"))
             })
         }) || merged.get("enabled_providers").is_some_and(|values| {
             values.as_array().is_none_or(|values| {
                 values.iter().any(|value| !value.is_string())
                     || !values
                         .iter()
-                        .any(|value| value.as_str() == Some("private-ai-gateway"))
+                        .any(|value| value.as_str() == Some("private-ai-proxy"))
             })
         }) {
             return Err("OpenCode's enabled_providers/disabled_providers exclude the gateway or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
         }
-        for pointer in ["/provider/private-ai-gateway", "/model"] {
+        for pointer in ["/provider/private-ai-proxy", "/model"] {
             if pointer == "/model" && !owns_model {
                 continue;
             }
@@ -2374,11 +2369,9 @@ fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
     match agent {
         Agent::Codex => doc.get_str(&["model"]),
         Agent::ClaudeCode => doc.get_str(&["env", "ANTHROPIC_MODEL"]),
-        Agent::OpenCode => doc.get_str(&["model"]).and_then(|value| {
-            value
-                .strip_prefix("private-ai-gateway/")
-                .map(str::to_string)
-        }),
+        Agent::OpenCode => doc
+            .get_str(&["model"])
+            .and_then(|value| value.strip_prefix("private-ai-proxy/").map(str::to_string)),
         Agent::Pi => None,
         Agent::Hermes => doc.get_str(&["model", "default"]),
         Agent::OpenClaw => openclaw::selected_model(doc),
@@ -2575,7 +2568,7 @@ fn home_dir() -> Result<PathBuf, String> {
 /// bundled helper.
 pub fn app_data_dir() -> Result<PathBuf, String> {
     if let Some(home) = env_path(HOME_OVERRIDE_ENV) {
-        return Ok(home.join(".private-ai-gateway"));
+        return Ok(home.join(".private-ai-proxy"));
     }
     let base = if cfg!(target_os = "macos") {
         home_dir()?.join("Library").join("Application Support")
@@ -2691,12 +2684,10 @@ mod tests {
     /// binary; tool env overrides are ignored so no real config is
     /// touched.
     pub(super) fn sandbox(name: &str) -> Sandbox {
-        let home = env::temp_dir().join(format!("pag-agents-{}-{name}", std::process::id()));
+        let home = env::temp_dir().join(format!("pap-agents-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
-        let helper = home
-            .join("Private AI Gateway.app")
-            .join(helper_binary_name());
+        let helper = home.join("Private AI Proxy.app").join(helper_binary_name());
         write(&helper, "#!/bin/sh\n");
         let data_dir = if cfg!(target_os = "macos") {
             home.join("Library")
@@ -2819,15 +2810,12 @@ mod tests {
             if agent == Agent::Pi {
                 let mut config = doc(&sandbox, agent);
                 config
-                    .set_str(
-                        &["providers", "private-ai-gateway", "name"],
-                        "Previous name",
-                    )
+                    .set_str(&["providers", "private-ai-proxy", "name"], "Previous name")
                     .unwrap();
                 write(&path, &config.render().unwrap());
                 let mut store = sandbox.projector.load_store().unwrap();
                 store.get_mut(agent.id()).unwrap().fields[0].value =
-                    config.get_value(&["providers", "private-ai-gateway"]);
+                    config.get_value(&["providers", "private-ai-proxy"]);
                 sandbox.projector.save_store(&store).unwrap();
                 assert_scan(&sandbox, true, None);
             }
@@ -2863,10 +2851,10 @@ mod tests {
                 Agent::Codex => &["model_provider"][..],
                 Agent::ClaudeCode => &["apiKeyHelper"][..],
                 Agent::OpenCode => &["model"][..],
-                Agent::Pi => &["providers", "private-ai-gateway", "apiKey"][..],
-                Agent::Hermes => &["providers", "private-ai-gateway", "key_cmd"][..],
+                Agent::Pi => &["providers", "private-ai-proxy", "apiKey"][..],
+                Agent::Hermes => &["providers", "private-ai-proxy", "key_cmd"][..],
                 Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
-                Agent::OhMyPi => &["providers", "private-ai-gateway", "apiKey"][..],
+                Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
             };
             config.set_str(field, "external-edit").unwrap();
             write(&path, &config.render().unwrap());
@@ -2881,7 +2869,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_timeout_releases_the_config_transaction() {
-        const CHILD_ENV: &str = "PAG_TEST_METADATA_TIMEOUT_CHILD";
+        const CHILD_ENV: &str = "PAP_TEST_METADATA_TIMEOUT_CHILD";
         if env::var_os(CHILD_ENV).is_some() {
             std::thread::sleep(std::time::Duration::from_secs(30));
             return;
@@ -2910,7 +2898,7 @@ mod tests {
     fn command_output_resolves_the_discovered_shebang_runtime() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = env::temp_dir().join(format!("pag-command-path-{}", std::process::id()));
+        let root = env::temp_dir().join(format!("pap-command-path-{}", std::process::id()));
         let runtime = root.join("bin");
         let executable = runtime.join("codex");
         let node = runtime.join("node");
@@ -2928,8 +2916,8 @@ mod tests {
 
     #[test]
     fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
-        const CASE_ENV: &str = "PAG_TEST_HERMES_PATH_CASE";
-        const ROOT_ENV: &str = "PAG_TEST_HERMES_PATH_ROOT";
+        const CASE_ENV: &str = "PAP_TEST_HERMES_PATH_CASE";
+        const ROOT_ENV: &str = "PAP_TEST_HERMES_PATH_ROOT";
         if let Ok(case) = env::var(CASE_ENV) {
             let root = PathBuf::from(env::var_os(ROOT_ENV).unwrap());
             let home = root.join(if case == "isolated" {
@@ -2968,7 +2956,7 @@ mod tests {
             );
             if case == "isolated" {
                 assert!(!projector.tool_env);
-                assert_eq!(projector.data_dir, home.join(".private-ai-gateway"));
+                assert_eq!(projector.data_dir, home.join(".private-ai-proxy"));
                 for agent in Agent::ALL {
                     assert!(agent
                         .config_path(&projector.home, projector.tool_env)
@@ -3036,15 +3024,15 @@ mod tests {
     #[test]
     #[ignore = "requires the installed helper and Python on a disposable Windows runner"]
     fn hermes_windows_installed_command_round_trip() {
-        let installed = PathBuf::from(env::var_os("PAG_TEST_HELPER_PATH").unwrap());
+        let installed = PathBuf::from(env::var_os("PAP_TEST_HELPER_PATH").unwrap());
         assert!(installed.is_absolute() && installed.is_file());
         assert!(installed.to_str().unwrap().contains(' '));
         let home = tempfile::tempdir().unwrap();
-        let data = home.path().join(".private-ai-gateway");
+        let data = home.path().join(".private-ai-proxy");
         let tokens = TokenFiles::new(&data);
         let hostile = home
             .path()
-            .join("quote'\u{2019}; Write-Output injected; # %PAG_CMD_PROBE% ! ^ & (meta)")
+            .join("quote'\u{2019}; Write-Output injected; # %PAP_CMD_PROBE% ! ^ & (meta)")
             .join(helper_binary_name());
         fs::create_dir_all(hostile.parent().unwrap()).unwrap();
         fs::copy(&installed, &hostile).unwrap();
@@ -3064,7 +3052,7 @@ mod tests {
             .unwrap();
             let command = fields
                 .into_iter()
-                .find(|field| field.path == owned(&["providers", "private-ai-gateway", "key_cmd"]))
+                .find(|field| field.path == owned(&["providers", "private-ai-proxy", "key_cmd"]))
                 .and_then(|field| match field.value {
                     Some(ConfigValue::Str(command)) => Some(command),
                     _ => None,
@@ -3078,7 +3066,7 @@ mod tests {
                         &command,
                     ])
                     .env(HOME_OVERRIDE_ENV, home.path())
-                    .env("PAG_CMD_PROBE", "expanded-by-shell")
+                    .env("PAP_CMD_PROBE", "expanded-by-shell")
                     .output()
                     .unwrap()
             };
@@ -3163,7 +3151,7 @@ mod tests {
         let mut config = doc(&sandbox, agent);
         config
             .set_str(
-                &["model_providers", "private_ai_gateway", "base_url"],
+                &["model_providers", "private_ai_proxy", "base_url"],
                 "https://example.com/v1",
             )
             .unwrap();
@@ -3172,7 +3160,7 @@ mod tests {
         assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
         assert_eq!(
             doc(&sandbox, agent)
-                .get_str(&["model_providers", "private_ai_gateway", "base_url"])
+                .get_str(&["model_providers", "private_ai_proxy", "base_url"])
                 .as_deref(),
             Some("https://example.com/v1")
         );
@@ -3402,8 +3390,8 @@ mod tests {
         let token_before = fs::read(&token_path).unwrap();
         for conflict in [
             "{\"model\":\"other/override\",}",
-            "{/* keep */\"provider\":{\"private-ai-gateway\":{\"options\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
-            "{\"provider\":{\"private-ai-gateway\":{\"options\":{\"apiKey\":\"synthetic-never-log-me\"}}}}",
+            "{/* keep */\"provider\":{\"private-ai-proxy\":{\"options\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
+            "{\"provider\":{\"private-ai-proxy\":{\"options\":{\"apiKey\":\"synthetic-never-log-me\"}}}}",
             "{\"provider\":null}",
             "{/* broken",
         ] {
@@ -3472,7 +3460,7 @@ mod tests {
 
     #[test]
     fn opencode_process_overrides_follow_official_merge_order() {
-        const CASE: &str = "PAG_TEST_OPENCODE_MERGE_CASE";
+        const CASE: &str = "PAP_TEST_OPENCODE_MERGE_CASE";
         if let Ok(case) = env::var(CASE) {
             let mut sandbox = sandbox("opencode-env-merge");
             sandbox.projector.tool_env = true;
@@ -3482,14 +3470,14 @@ mod tests {
                 "{/* preserved */\"model\":\"other/model\"}",
             );
             let expected = ConfigDoc::Json(json!({
-                "model": "private-ai-gateway/test",
-                "provider": {"private-ai-gateway": {"name": "Gateway"}}
+                "model": "private-ai-proxy/test",
+                "provider": {"private-ai-proxy": {"name": "Gateway"}}
             }));
             if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
                 write(&dir.join("opencode.json"), "{\"model\":\"other/dir-json\"}");
                 write(
                     &dir.join("opencode.jsonc"),
-                    "{\"model\":\"private-ai-gateway/test\",}",
+                    "{\"model\":\"private-ai-proxy/test\",}",
                 );
             }
             let result = sandbox.projector.check_opencode_merge(&expected, true);
@@ -3728,7 +3716,7 @@ mod tests {
                 } else {
                     "providers"
                 };
-                let text = json!({key:{"private-ai-gateway":value}}).to_string();
+                let text = json!({key:{"private-ai-proxy":value}}).to_string();
                 write(&path, &text);
                 let error = sandbox
                     .projector
@@ -3776,18 +3764,18 @@ mod tests {
             match (agent, case) {
                 (Agent::Codex, _) => edited
                     .set_str(
-                        &["model_providers", "private_ai_gateway", "aws", "region"],
+                        &["model_providers", "private_ai_proxy", "aws", "region"],
                         "test-region",
                     )
                     .unwrap(),
                 (Agent::Pi, _) => write(
                     &auth_path,
-                    r#"{"private-ai-gateway":{"type":"api_key","key":"sk-test-hidden"}}"#,
+                    r#"{"private-ai-proxy":{"type":"api_key","key":"sk-test-hidden"}}"#,
                 ),
                 (Agent::OpenCode, "disabled") => edited
                     .set_value(
                         &["disabled_providers"],
-                        &ConfigValue::List(vec!["private-ai-gateway".into()]),
+                        &ConfigValue::List(vec!["private-ai-proxy".into()]),
                     )
                     .unwrap(),
                 (Agent::OpenCode, _) => edited
@@ -3798,13 +3786,13 @@ mod tests {
                     .unwrap(),
                 (Agent::Hermes, "api_mode") => edited
                     .set_str(
-                        &["providers", "private-ai-gateway", "api_mode"],
+                        &["providers", "private-ai-proxy", "api_mode"],
                         "codex_responses",
                     )
                     .unwrap(),
                 (Agent::Hermes, "disabled") => edited
                     .set_value(
-                        &["providers", "private-ai-gateway", "enabled"],
+                        &["providers", "private-ai-proxy", "enabled"],
                         &ConfigValue::Bool(false),
                     )
                     .unwrap(),
@@ -3813,7 +3801,7 @@ mod tests {
                     .unwrap(),
                 (Agent::Hermes, "pool") => write(
                     &auth_path,
-                    r#"{"credential_pool":{"private-ai-gateway":[{"access_token":"sk-test-hidden"}]}}"#,
+                    r#"{"credential_pool":{"private-ai-proxy":[{"access_token":"sk-test-hidden"}]}}"#,
                 ),
                 (Agent::Hermes, _) => edited
                     .set_str(&["fallback_model", "provider"], "other")
@@ -3915,7 +3903,7 @@ mod tests {
         let path = Agent::Codex.config_path(&sandbox.home, false);
         write(
             &path,
-            "[model_providers.private_ai_gateway]\n\
+            "[model_providers.private_ai_proxy]\n\
                       env_key = 'OLD_KEY'\n\
                       experimental_bearer_token = 'old-synthetic-token'\n\
                       requires_openai_auth = true\n",
@@ -3943,7 +3931,7 @@ mod tests {
             "requires_openai_auth",
         ] {
             assert_eq!(
-                codex.get_value(&["model_providers", "private_ai_gateway", key]),
+                codex.get_value(&["model_providers", "private_ai_proxy", key]),
                 None,
             );
         }
@@ -3952,17 +3940,17 @@ mod tests {
             .contains("old-synthetic-token"));
         assert_eq!(
             codex.get_str(&["model_provider"]).as_deref(),
-            Some("private_ai_gateway")
+            Some("private_ai_proxy")
         );
         assert_eq!(
             codex
-                .get_str(&["model_providers", "private_ai_gateway", "wire_api"])
+                .get_str(&["model_providers", "private_ai_proxy", "wire_api"])
                 .as_deref(),
             Some("responses")
         );
         assert_eq!(
             codex
-                .get_str(&["model_providers", "private_ai_gateway", "base_url"])
+                .get_str(&["model_providers", "private_ai_proxy", "base_url"])
                 .as_deref(),
             Some("http://127.0.0.1:4180/v1")
         );
@@ -4021,7 +4009,7 @@ mod tests {
             ("requires_openai_auth", ConfigValue::Bool(true)),
         ] {
             assert_eq!(
-                restored.get_value(&["model_providers", "private_ai_gateway", key]),
+                restored.get_value(&["model_providers", "private_ai_proxy", key]),
                 Some(value),
             );
         }
@@ -4031,7 +4019,7 @@ mod tests {
             .preview(Agent::OpenCode, true, Some(&catalog), &options)
             .unwrap();
         assert!(preview.changes.iter().any(|change| {
-            change.key == "provider.private-ai-gateway"
+            change.key == "provider.private-ai-proxy"
                 && change.after.as_deref() == Some("Generated catalog (2 models)")
         }));
         let status = sandbox
@@ -4048,13 +4036,13 @@ mod tests {
         let opencode = doc(&sandbox, Agent::OpenCode);
         assert_eq!(
             opencode
-                .get_str(&["provider", "private-ai-gateway", "npm"])
+                .get_str(&["provider", "private-ai-proxy", "npm"])
                 .as_deref(),
             Some("@ai-sdk/openai-compatible")
         );
         assert_eq!(
             opencode
-                .get_str(&["provider", "private-ai-gateway", "options", "baseURL"])
+                .get_str(&["provider", "private-ai-proxy", "options", "baseURL"])
                 .as_deref(),
             Some("http://127.0.0.1:4180/v1")
         );
@@ -4080,7 +4068,7 @@ mod tests {
             .preview(Agent::Pi, true, Some(&catalog), &options)
             .unwrap();
         assert!(preview.changes.iter().any(|change| {
-            change.key == "providers.private-ai-gateway"
+            change.key == "providers.private-ai-proxy"
                 && change.after.as_deref() == Some("Generated catalog (2 models)")
         }));
         sandbox
@@ -4088,7 +4076,7 @@ mod tests {
             .apply(Agent::Pi, true, &preview.revision, Some(&catalog), &options)
             .unwrap();
         let pi = doc(&sandbox, Agent::Pi);
-        let provider = pi.get_value(&["providers", "private-ai-gateway"]).unwrap();
+        let provider = pi.get_value(&["providers", "private-ai-proxy"]).unwrap();
         let ConfigValue::Json(provider) = provider else {
             panic!("Pi provider must be a generated JSON catalog");
         };
@@ -4119,7 +4107,7 @@ mod tests {
             let value = ConfigValue::Json(legacy);
             let mut config = doc(&sandbox, Agent::Pi);
             config
-                .set_value(&["providers", "private-ai-gateway"], &value)
+                .set_value(&["providers", "private-ai-proxy"], &value)
                 .unwrap();
             write(&config_path, &config.render().unwrap());
             let mut store = sandbox.projector.load_store().unwrap();
@@ -4128,7 +4116,7 @@ mod tests {
                 .unwrap()
                 .fields
                 .iter_mut()
-                .find(|field| field.path == owned(&["providers", "private-ai-gateway"]))
+                .find(|field| field.path == owned(&["providers", "private-ai-proxy"]))
                 .unwrap()
                 .value = Some(value);
             sandbox.projector.save_store(&store).unwrap();
@@ -4156,7 +4144,7 @@ mod tests {
 
             config
                 .set_str(
-                    &["providers", "private-ai-gateway", "apiKey"],
+                    &["providers", "private-ai-proxy", "apiKey"],
                     "!user-command",
                 )
                 .unwrap();
@@ -4202,18 +4190,18 @@ mod tests {
             .unwrap();
         let hermes = doc(&sandbox, Agent::Hermes);
         assert_eq!(
-            hermes.get_value(&["providers", "private-ai-gateway", "discover_models"]),
+            hermes.get_value(&["providers", "private-ai-proxy", "discover_models"]),
             Some(ConfigValue::Bool(true))
         );
         assert_eq!(
             hermes.get_str(&["model", "provider"]).as_deref(),
-            Some("custom:private-ai-gateway")
+            Some("custom:private-ai-proxy")
         );
         disconnect(&sandbox, Agent::Hermes);
         let restored = fs::read_to_string(path).unwrap();
         assert!(restored.contains("# keep this comment"));
         assert!(restored.contains("theme: dark"));
-        assert!(!restored.contains("private-ai-gateway"));
+        assert!(!restored.contains("private-ai-proxy"));
 
         let fresh = self::sandbox("fresh-hermes");
         assert!(fresh
@@ -4242,12 +4230,12 @@ mod tests {
         let hermes = doc(&fresh, Agent::Hermes);
         assert_eq!(
             hermes
-                .get_str(&["providers", "private-ai-gateway", "transport"])
+                .get_str(&["providers", "private-ai-proxy", "transport"])
                 .as_deref(),
             Some("chat_completions")
         );
         assert_eq!(
-            hermes.get_str(&["providers", "private-ai-gateway", "key_cmd"]),
+            hermes.get_str(&["providers", "private-ai-proxy", "key_cmd"]),
             Some(credential_helper_command(&fresh.projector.helper_exe, Agent::Hermes).unwrap())
         );
     }
@@ -4584,7 +4572,7 @@ mod tests {
         );
         connect(&sandbox);
         let codex = sandbox.home.join(".codex").join("config.toml");
-        write(&codex, "model_provider = \"private_ai_gateway\"\n");
+        write(&codex, "model_provider = \"private_ai_proxy\"\n");
         sandbox.projector.tokens.ensure("codex").unwrap();
         let mut store = sandbox.projector.load_store().unwrap();
         store.insert(
@@ -4593,7 +4581,7 @@ mod tests {
                 config_path: Some(codex.clone()),
                 fields: vec![OwnedField {
                     path: owned(&["model_provider"]),
-                    value: Some(ConfigValue::Str("private_ai_gateway".into())),
+                    value: Some(ConfigValue::Str("private_ai_proxy".into())),
                     previous: None,
                 }],
                 disabled: true,
@@ -4621,7 +4609,7 @@ mod tests {
 
     #[test]
     fn atomic_writes_refuse_symlinks_and_changed_files() {
-        let dir = env::temp_dir().join(format!("pag-atomic-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("pap-atomic-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("config.json");
@@ -4738,7 +4726,7 @@ mod tests {
     #[test]
     fn helper_command_quotes_hostile_paths_for_the_shell() {
         for hostile in [
-            "/Applications/Private AI Gateway.app/Contents/MacOS/helper",
+            "/Applications/Private AI Proxy.app/Contents/MacOS/helper",
             "/tmp/it's here/$HOME`echo`;rm -rf/helper",
             "/tmp/quote\"double\"/helper",
         ] {

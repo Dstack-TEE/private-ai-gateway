@@ -9,17 +9,17 @@ RequestExecutionLevel user
 !include "windows.nsh"
 
 Section
-  !insertmacro PAG_ACQUIRE_STARTUP_LOCK
-  ReadEnvStr $R4 "PAG_GATE_ACQUIRED"
+  !insertmacro PAP_ACQUIRE_STARTUP_LOCK
+  ReadEnvStr $R4 "PAP_GATE_ACQUIRED"
   ClearErrors
   FileOpen $R5 "$R4" w
   ${If} ${Errors}
-    !insertmacro PAG_FAIL "Cannot write the startup gate acquired marker."
+    !insertmacro PAP_FAIL "Cannot write the startup gate acquired marker."
   ${EndIf}
   FileWrite $R5 "acquired"
   FileClose $R5
 
-  ReadEnvStr $R4 "PAG_GATE_RELEASE"
+  ReadEnvStr $R4 "PAP_GATE_RELEASE"
   StrCpy $R5 450
 pag_gate_wait:
   IfFileExists "$R4" pag_gate_release
@@ -27,7 +27,7 @@ pag_gate_wait:
   IntOp $R5 $R5 - 1
   IntCmp $R5 0 pag_gate_timeout pag_gate_wait pag_gate_wait
 pag_gate_timeout:
-  !insertmacro PAG_FAIL "Startup gate fixture release timed out."
+  !insertmacro PAP_FAIL "Startup gate fixture release timed out."
 pag_gate_release:
-  !insertmacro PAG_RELEASE_STARTUP_LOCK
+  !insertmacro PAP_RELEASE_STARTUP_LOCK
 SectionEnd

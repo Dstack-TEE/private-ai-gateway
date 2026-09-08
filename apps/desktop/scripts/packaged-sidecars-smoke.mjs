@@ -10,11 +10,11 @@ import { fileURLToPath } from "node:url";
 const [directory] = process.argv.slice(2);
 assert.ok(directory && path.isAbsolute(directory), "Supply the installed binary directory");
 const binary = (name) => path.join(directory, `${name}${process.platform === "win32" ? ".exe" : ""}`);
-for (const name of ["pag", "pag-service", "pap", "private-ai-gateway-helper"]) {
+for (const name of ["pap", "pap-service", "private-ai-proxy-helper"]) {
   await access(binary(name), process.platform === "win32" ? constants.F_OK : constants.X_OK);
 }
 const home = await mkdtemp(path.join(os.tmpdir(), "tauri-sidecars-"));
-const env = { ...process.env, PRIVATE_AI_GATEWAY_HOME: home, ACI_API_KEY: "", NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" };
+const env = { ...process.env, PRIVATE_AI_PROXY_HOME: home, ACI_API_KEY: "", NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" };
 const requests = [];
 // A deliberately unavailable loopback service: no quote verification can fetch
 // collateral, and none of the commands may progress to inference or sessions.
@@ -63,21 +63,21 @@ try {
   assert.deepEqual(requests, Array(4).fill("/v1/aci/attestation"));
   console.log("Installed ACI: offline audit, malformed input, verify/sessions/send/serve fail-closed checks passed");
 
-  const tokens = path.join(home, ".private-ai-gateway", "agent-tokens");
+  const tokens = path.join(home, ".private-ai-proxy", "agent-tokens");
   await mkdir(tokens, { recursive: true, mode: 0o700 });
   for (const agent of ["codex", "claude-code", "opencode", "pi", "hermes", "openclaw", "oh-my-pi"]) {
-    await run("private-ai-gateway-helper", ["--agent-token", agent], 1);
+    await run("private-ai-proxy-helper", ["--agent-token", agent], 1);
     // Synthetic local token fixture, not a provider credential or a claim that
     // a verified agent connection has been established.
     const token = `smoke-local-token-${agent}`;
     const tokenPath = path.join(tokens, agent);
     await writeFile(tokenPath, token, { mode: 0o600, flag: "wx" });
-    assert.equal(await run("private-ai-gateway-helper", ["--agent-token", agent], 0), token);
+    assert.equal(await run("private-ai-proxy-helper", ["--agent-token", agent], 0), token);
     assert.equal(await readFile(tokenPath, "utf8"), token);
     await rm(tokenPath);
-    await run("private-ai-gateway-helper", ["--agent-token", agent], 1);
+    await run("private-ai-proxy-helper", ["--agent-token", agent], 1);
   }
-  await run("private-ai-gateway-helper", ["--agent-token", "unknown-agent"], 1);
+  await run("private-ai-proxy-helper", ["--agent-token", "unknown-agent"], 1);
   console.log("Installed helper: seven isolated token reads and missing/deleted/unknown-agent failures passed");
 } finally {
   server.closeAllConnections();

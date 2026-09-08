@@ -696,19 +696,19 @@ mod tests {
     fn yaml_edits_preserve_comments_and_prune_owned_tables() {
         let mut doc = ConfigDoc::parse(Format::Yaml, "# user comment\ntheme: dark\n").unwrap();
         doc.set_value(
-            &["providers", "private-ai-gateway", "discover_models"],
+            &["providers", "private-ai-proxy", "discover_models"],
             &ConfigValue::Bool(true),
         )
         .unwrap();
         assert_eq!(
-            doc.get_value(&["providers", "private-ai-gateway", "discover_models"]),
+            doc.get_value(&["providers", "private-ai-proxy", "discover_models"]),
             Some(ConfigValue::Bool(true))
         );
-        doc.remove(&["providers", "private-ai-gateway", "discover_models"])
+        doc.remove(&["providers", "private-ai-proxy", "discover_models"])
             .unwrap();
         let text = doc.render().unwrap();
         assert!(text.contains("# user comment"));
         assert!(text.contains("theme: dark"));
-        assert!(!text.contains("private-ai-gateway"));
+        assert!(!text.contains("private-ai-proxy"));
     }
 }

@@ -1,4 +1,5 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
+#![cfg(feature = "desktop-client")]
 use serde_json::Value;
 use std::{
     fs,
@@ -19,7 +20,7 @@ fn argument_errors_are_machine_readable_in_json_mode() {
         vec!["--json", "--non-interactive", "unknown-command"],
         vec!["status", "--json", "--no-interactive", "--unknown-option"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_pag"))
+        let output = Command::new(env!("CARGO_BIN_EXE_pap"))
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -33,7 +34,7 @@ fn argument_errors_are_machine_readable_in_json_mode() {
 
 #[test]
 fn command_discovery_is_detailed_and_machine_readable() {
-    let settings = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let settings = Command::new(env!("CARGO_BIN_EXE_pap"))
         .args(["settings", "set", "--help"])
         .output()
         .unwrap();
@@ -48,7 +49,7 @@ fn command_discovery_is_detailed_and_machine_readable() {
         assert!(settings.contains(key), "missing settings key {key}");
     }
 
-    let usage = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let usage = Command::new(env!("CARGO_BIN_EXE_pap"))
         .args(["usage", "export", "--help"])
         .output()
         .unwrap();
@@ -58,13 +59,13 @@ fn command_discovery_is_detailed_and_machine_readable() {
     assert!(!usage.contains("--cursor"));
     assert!(!usage.contains("--limit"));
 
-    let schema = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let schema = Command::new(env!("CARGO_BIN_EXE_pap"))
         .arg("schema")
         .output()
         .unwrap();
     assert_success(&schema);
     let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(schema["name"], "pag");
+    assert_eq!(schema["name"], "pap");
     let json_flag = schema["arguments"]
         .as_array()
         .unwrap()
@@ -80,16 +81,16 @@ fn command_discovery_is_detailed_and_machine_readable() {
         .iter()
         .any(|command| command["name"] == "profiles"));
 
-    let completion = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let completion = Command::new(env!("CARGO_BIN_EXE_pap"))
         .args(["completions", "bash"])
         .output()
         .unwrap();
     assert_success(&completion);
     assert!(String::from_utf8(completion.stdout)
         .unwrap()
-        .contains("pag"));
+        .contains("pap"));
 
-    let conflict = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let conflict = Command::new(env!("CARGO_BIN_EXE_pap"))
         .args([
             "agents",
             "connect",
@@ -106,7 +107,7 @@ fn command_discovery_is_detailed_and_machine_readable() {
 #[test]
 fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
     let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pag"))
+    let output = Command::new(env!("CARGO_BIN_EXE_pap"))
         .args([
             "--json",
             "profiles",
@@ -142,17 +143,16 @@ impl Backend {
                 name.into()
             })
         };
-        fs::copy(env!("CARGO_BIN_EXE_pag"), binary("pag")).unwrap();
-        fs::copy(env!("CARGO_BIN_EXE_pag-service"), binary("pag-service")).unwrap();
-        // These must exist for bundle validation but no test starts inference.
-        fs::copy(env!("CARGO_BIN_EXE_pag"), binary("pap")).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_pap"), binary("pap")).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_pap-service"), binary("pap-service")).unwrap();
+        // The helper must exist for bundle validation; no test starts inference.
         fs::copy(
-            env!("CARGO_BIN_EXE_pag"),
-            binary("private-ai-gateway-helper"),
+            env!("CARGO_BIN_EXE_pap"),
+            binary("private-ai-proxy-helper"),
         )
         .unwrap();
         let home = directory.path().join("home");
-        let data = home.join(".private-ai-gateway");
+        let data = home.join(".private-ai-proxy");
         desktop_gateway::tokens::create_private_dir(&data).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -164,7 +164,7 @@ impl Backend {
             &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
         )
         .unwrap();
-        let child = Command::new(binary("pag-service"))
+        let child = Command::new(binary("pap-service"))
             .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -193,7 +193,7 @@ impl Backend {
     fn cli(&self) -> PathBuf {
         self.directory
             .path()
-            .join(if cfg!(windows) { "pag.exe" } else { "pag" })
+            .join(if cfg!(windows) { "pap.exe" } else { "pap" })
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
@@ -278,7 +278,7 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     assert!(backend
         .directory
         .path()
-        .join("home/.private-ai-gateway/helpers/private-ai-gateway-helper")
+        .join("home/.private-ai-proxy/helpers/private-ai-proxy-helper")
         .is_file());
     let first = backend.run(&["status"]);
     let rejected = backend

@@ -101,7 +101,7 @@ impl Client {
                 // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Backend readiness timed out. Run pag doctor.".into());
+                return Err("Backend readiness timed out. Run pap doctor.".into());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -134,7 +134,7 @@ impl Client {
                 state.proxy_url = None;
                 state.error = Some(error.clone());
                 state.endpoint_error =
-                    Some("Backend disconnected. Start it with pag service start.".into());
+                    Some("Backend disconnected. Start it with pap service start.".into());
                 client.states.send_replace(state);
             }
             drop(client);
@@ -413,7 +413,7 @@ fn open() -> io::Result<(BufReader<Stream>, Hello)> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Incompatible PAG backend; update the client and backend together",
+            "Incompatible PAP backend; update the client and backend together",
         ));
     }
     Ok((reader, hello))
@@ -441,7 +441,7 @@ fn absent(error: &io::Error) -> bool {
 fn connection_error(error: io::Error) -> String {
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-            "Backend is not running. Run pag service start.".into()
+            "Backend is not running. Run pap service start.".into()
         }
         io::ErrorKind::PermissionDenied => {
             "Management endpoint access denied. Use the same OS user as the backend.".into()
@@ -454,7 +454,7 @@ fn connection_error(error: io::Error) -> String {
             "Incompatible or invalid management protocol. Update the client and backend together."
                 .into()
         }
-        _ => "Management connection failed. Run pag doctor; do not automatically retry mutations."
+        _ => "Management connection failed. Run pap doctor; do not automatically retry mutations."
             .into(),
     }
 }
@@ -466,11 +466,11 @@ mod tests {
 
     #[test]
     fn export_rejects_paths_that_json_cannot_represent() {
-        let path = PathBuf::from(OsString::from_vec(b"/tmp/pag-\xff.csv".to_vec()));
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/pap-\xff.csv".to_vec()));
         assert!(export_path(&path).is_err());
         assert_eq!(
-            export_path(std::path::Path::new("/tmp/pag.csv")).unwrap(),
-            "/tmp/pag.csv"
+            export_path(std::path::Path::new("/tmp/pap.csv")).unwrap(),
+            "/tmp/pap.csv"
         );
     }
 }

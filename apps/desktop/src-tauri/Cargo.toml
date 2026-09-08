@@ -1,5 +1,5 @@
 [package]
-name = "private-ai-gateway-desktop"
+name = "private-ai-proxy-desktop"
 version = "0.1.0"
 description = "Menu bar controller for the ACI local verifying proxy"
 authors = ["Dstack-TEE"]
@@ -10,15 +10,15 @@ rust-version = "1.89"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "private_ai_gateway_desktop_lib"
+name = "private_ai_proxy_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-desktop-gateway = { package = "private-ai-gateway-desktop-gateway", path = "../gateway" }
-desktop-runtime = { package = "private-ai-gateway-desktop-runtime", path = "../runtime" }
+desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 semver = "1"

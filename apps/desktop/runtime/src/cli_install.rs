@@ -24,9 +24,7 @@ pub fn uninstall(directory: Option<PathBuf>) -> Result<Registration, String> {
 }
 
 fn current_executable() -> Result<PathBuf, String> {
-    let current = std::env::current_exe().map_err(|_| "Cannot locate pap".to_string())?;
-    let sibling = current.with_file_name(if cfg!(windows) { "pap.exe" } else { "pap" });
-    let executable = if sibling.is_file() { sibling } else { current };
+    let executable = std::env::current_exe().map_err(|_| "Cannot locate pap".to_string())?;
     executable
         .canonicalize()
         .map_err(|_| "Cannot resolve the pap executable path".to_string())
@@ -405,7 +403,7 @@ mod platform {
 
     const ENVIRONMENT_KEY: &str = "Environment";
     const PATH_VALUE: &str = "Path";
-    const OWNERSHIP_KEY: &str = r"Software\Private AI Gateway\CLI";
+    const OWNERSHIP_KEY: &str = r"Software\Private AI Proxy\CLI";
     const OWNERSHIP_VALUE: &str = "OwnedPath";
 
     pub(super) fn status() -> Result<Registration, String> {
@@ -822,7 +820,7 @@ mod platform {
         #[test]
         fn path_entries_are_compared_without_case_or_separator_noise() {
             assert_eq!(
-                normalize_path_text(r#""C:/Users/Alice/PAG/""#),
+                normalize_path_text(r#""C:/Users/Alice/PAP/""#),
                 normalize_path_text(r"c:\users\alice\pap")
             );
             assert_eq!(

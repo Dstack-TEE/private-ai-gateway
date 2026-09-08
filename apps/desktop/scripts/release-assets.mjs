@@ -8,7 +8,7 @@ const entries = await readdir(directory, { recursive: true, withFileTypes: true 
 const files = entries.filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
 const assets = files.filter((file) => {
   const name = path.basename(file);
-  if (/^private-ai-(gateway|proxy)-cli/.test(name)) return /\.(tar\.gz|zip)$/.test(name);
+  if (name.startsWith("private-ai-proxy-cli")) return /\.(tar\.gz|zip)$/.test(name);
   return name === "latest.json" || /\.(dmg|exe|deb|rpm|app\.tar\.gz)$/.test(name);
 }).sort();
 if (new Set(assets.map((file) => path.basename(file))).size !== assets.length) throw new Error("Duplicate release asset names");

@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn apply_lock_serializes_writers() {
-        let dir = std::env::temp_dir().join(format!("pag-apply-lock-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pap-apply-lock-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let holder_dir = dir.clone();

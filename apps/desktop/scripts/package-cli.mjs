@@ -17,7 +17,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const binaries = ["pap", "pag", "pag-service", "private-ai-gateway-helper"];
+export const binaries = ["pap", "pap-service", "private-ai-proxy-helper"];
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
@@ -56,7 +56,7 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
 }
 
 export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
-  const libexec = path.join(packageRoot, "usr/libexec/private-ai-gateway");
+  const libexec = path.join(packageRoot, "usr/libexec/private-ai-proxy");
   const bin = path.join(packageRoot, "usr/bin");
   await mkdir(libexec, { recursive: true });
   await mkdir(bin, { recursive: true });
@@ -65,14 +65,13 @@ export async function stageLinuxPackageRoot(portableDirectory, packageRoot) {
     await copyFile(path.join(portableDirectory, name), target);
     await chmod(target, 0o755);
   }
-  await symlink("../libexec/private-ai-gateway/pag", path.join(bin, "pag"));
-  await symlink("../libexec/private-ai-gateway/pap", path.join(bin, "pap"));
+  await symlink("../libexec/private-ai-proxy/pap", path.join(bin, "pap"));
 }
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   await mkdir(options.output, { recursive: true });
-  const scratch = await mkdtemp(path.join(options.output, ".pag-cli-"));
+  const scratch = await mkdtemp(path.join(options.output, ".pap-cli-"));
   const artifactBase = `private-ai-proxy-cli-${options.version}-${options.platform}-${options.arch}`;
   const portable = path.join(scratch, artifactBase);
   const artifacts = [];
@@ -162,11 +161,11 @@ async function createDeb(options, scratch, packageRoot) {
   const installedSize = Math.max(1, Math.ceil((await treeSize(packageRoot)) / 1024));
   await writeFile(
     path.join(controlDir, "control"),
-    `Package: private-ai-gateway-cli\nVersion: ${deb}\nSection: utils\nPriority: optional\nArchitecture: ${architecture}\nInstalled-Size: ${installedSize}\nMaintainer: Dstack <support@dstack.org>\nHomepage: https://github.com/Dstack-TEE/private-ai-gateway\nDescription: Private AI Gateway command line client and user backend\n`,
+    `Package: private-ai-proxy-cli\nVersion: ${deb}\nSection: utils\nPriority: optional\nArchitecture: ${architecture}\nInstalled-Size: ${installedSize}\nMaintainer: Dstack <support@dstack.org>\nHomepage: https://github.com/Dstack-TEE/private-ai-gateway\nDescription: Private AI Proxy command line client and user backend\n`,
   );
   await copyInstallerScript("deb-pre-install.sh", path.join(controlDir, "preinst"));
   await copyInstallerScript("deb-pre-remove.sh", path.join(controlDir, "prerm"));
-  const output = path.join(options.output, `private-ai-gateway-cli_${deb}_${architecture}.deb`);
+  const output = path.join(options.output, `private-ai-proxy-cli_${deb}_${architecture}.deb`);
   execFileSync("dpkg-deb", ["--build", "--root-owner-group", packageRoot, output], { stdio: "inherit" });
   return output;
 }
@@ -184,10 +183,10 @@ async function createRpm(options, scratch, portable) {
   }
   const preInstall = await rpmScriptlet("rpm-pre-install.sh");
   const preRemove = await rpmScriptlet("rpm-pre-remove.sh");
-  const spec = path.join(specs, "private-ai-gateway-cli.spec");
+  const spec = path.join(specs, "private-ai-proxy-cli.spec");
   await writeFile(
     spec,
-    `Name: private-ai-gateway-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Gateway command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Gateway CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-gateway %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/pag %{buildroot}/usr/libexec/private-ai-gateway/pag\ninstall -m 0755 %{_sourcedir}/pag-service %{buildroot}/usr/libexec/private-ai-gateway/pag-service\ninstall -m 0755 %{_sourcedir}/pap %{buildroot}/usr/libexec/private-ai-gateway/pap\ninstall -m 0755 %{_sourcedir}/private-ai-gateway-helper %{buildroot}/usr/libexec/private-ai-gateway/private-ai-gateway-helper\nln -s ../libexec/private-ai-gateway/pag %{buildroot}/usr/bin/pag\nln -s ../libexec/private-ai-gateway/pap %{buildroot}/usr/bin/pap\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/pap\n/usr/bin/pag\n/usr/libexec/private-ai-gateway/pap\n/usr/libexec/private-ai-gateway/pag\n/usr/libexec/private-ai-gateway/pag-service\n/usr/libexec/private-ai-gateway/private-ai-gateway-helper\n`,
+    `Name: private-ai-proxy-cli\nVersion: ${rpmVersion}\nRelease: ${rpmRelease}\nSummary: Private AI Proxy command line client and user backend\nLicense: Apache-2.0\nURL: https://github.com/Dstack-TEE/private-ai-gateway\nBuildArch: ${architecture}\nAutoReqProv: no\n\n%description\nPrivate AI Proxy CLI, user-owned backend, verifier, and credential helper.\n\n%install\nrm -rf %{buildroot}\nmkdir -p %{buildroot}/usr/libexec/private-ai-proxy %{buildroot}/usr/bin\ninstall -m 0755 %{_sourcedir}/pap-service %{buildroot}/usr/libexec/private-ai-proxy/pap-service\ninstall -m 0755 %{_sourcedir}/pap %{buildroot}/usr/libexec/private-ai-proxy/pap\ninstall -m 0755 %{_sourcedir}/private-ai-proxy-helper %{buildroot}/usr/libexec/private-ai-proxy/private-ai-proxy-helper\nln -s ../libexec/private-ai-proxy/pap %{buildroot}/usr/bin/pap\n\n%pre\n${preInstall}\n\n%preun\n${preRemove}\n\n%files\n/usr/bin/pap\n/usr/libexec/private-ai-proxy/pap\n/usr/libexec/private-ai-proxy/pap-service\n/usr/libexec/private-ai-proxy/private-ai-proxy-helper\n`,
   );
   execFileSync("rpmbuild", ["-bb", "--define", `_topdir ${topDir}`, "--target", architecture, spec], {
     stdio: "inherit",
@@ -196,7 +195,7 @@ async function createRpm(options, scratch, portable) {
   if (!rpm) {
     throw new Error("rpmbuild did not produce an RPM package");
   }
-  const output = path.join(options.output, `private-ai-gateway-cli-${options.version}.${architecture}.rpm`);
+  const output = path.join(options.output, `private-ai-proxy-cli-${options.version}.${architecture}.rpm`);
   await copyFile(rpm, output);
   return output;
 }
@@ -209,8 +208,8 @@ async function copyInstallerScript(name, destination) {
 async function rpmScriptlet(name) {
   const script = await readFile(path.join(appRoot, "src-tauri/installer", name), "utf8");
   return script.replace(/^#![^\n]*\n/, "")
-    .replaceAll('"@PACKAGE_NAME@"', '"private-ai-gateway-cli"')
-    .replaceAll('"private-ai-gateway"', '"private-ai-gateway-cli"')
+    .replaceAll('"@PACKAGE_NAME@"', '"private-ai-proxy-cli"')
+    .replaceAll('"private-ai-proxy"', '"private-ai-proxy-cli"')
     .replaceAll("%", "%%").trimEnd();
 }
 

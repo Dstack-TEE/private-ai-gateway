@@ -1,4 +1,4 @@
-//! Explicit, platform-native launch of the persistent PAG service.
+//! Explicit, platform-native launch of the persistent PAP service.
 
 use std::{
     io,
@@ -9,7 +9,7 @@ use std::{
 
 use crate::process::sibling_executable;
 
-const SERVICE_BINARY: &str = "pag-service";
+const SERVICE_BINARY: &str = "pap-service";
 
 pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
@@ -29,7 +29,7 @@ pub fn spawn_background() -> Result<Child, String> {
     configure_background_command(&mut command);
     command
         .spawn()
-        .map_err(|error| format!("Cannot start PAG service: {error}"))
+        .map_err(|error| format!("Cannot start PAP service: {error}"))
 }
 
 /// Wait until the operating system reports that `pid` has exited. This never
@@ -87,7 +87,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(());
         }
-        return Err(format!("Cannot observe PAG service process {pid}: {error}"));
+        return Err(format!("Cannot observe PAP service process {pid}: {error}"));
     }
     // SAFETY: the successful syscall returned a new descriptor owned here.
     let pid_fd = unsafe { OwnedFd::from_raw_fd(raw_fd as libc::c_int) };
@@ -108,7 +108,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
                 return Ok(());
             }
             return Err(format!(
-                "Unexpected pidfd event {} for PAG service process {pid}",
+                "Unexpected pidfd event {} for PAP service process {pid}",
                 descriptor.revents
             ));
         }
@@ -121,7 +121,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(format!(
-                "Cannot wait for PAG service process {pid}: {error}"
+                "Cannot wait for PAP service process {pid}: {error}"
             ));
         }
     }
@@ -139,7 +139,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
     let raw_queue = unsafe { libc::kqueue() };
     if raw_queue == -1 {
         return Err(format!(
-            "Cannot create a PAG service process observer: {}",
+            "Cannot create a PAP service process observer: {}",
             io::Error::last_os_error()
         ));
     }
@@ -161,7 +161,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(());
         }
-        return Err(format!("Cannot observe PAG service process {pid}: {error}"));
+        return Err(format!("Cannot observe PAP service process {pid}: {error}"));
     }
 
     let started = Instant::now();
@@ -185,7 +185,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(format!(
-                "Cannot wait for PAG service process {pid}: {error}"
+                "Cannot wait for PAP service process {pid}: {error}"
             ));
         }
     }
@@ -218,7 +218,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
         if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
             return Ok(());
         }
-        return Err(format!("Cannot observe PAG service process {pid}: {error}"));
+        return Err(format!("Cannot observe PAP service process {pid}: {error}"));
     }
     let handle = ProcessHandle(handle);
     let started = Instant::now();
@@ -235,13 +235,13 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
             }
             WAIT_FAILED => {
                 return Err(format!(
-                    "Cannot wait for PAG service process {pid}: {}",
+                    "Cannot wait for PAP service process {pid}: {}",
                     io::Error::last_os_error()
                 ));
             }
             result => {
                 return Err(format!(
-                    "Unexpected wait result {result} for PAG service process {pid}"
+                    "Unexpected wait result {result} for PAP service process {pid}"
                 ));
             }
         }
@@ -264,7 +264,7 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
                 return Ok(());
             }
             if error.raw_os_error() != Some(libc::EPERM) {
-                return Err(format!("Cannot observe PAG service process {pid}: {error}"));
+                return Err(format!("Cannot observe PAP service process {pid}: {error}"));
             }
         }
 
@@ -313,7 +313,7 @@ fn remaining_windows_millis(started: Instant, timeout: Duration) -> u32 {
 #[cfg(any(unix, windows))]
 fn exit_timeout(pid: u32, timeout: Duration) -> String {
     format!(
-        "Timed out after {} ms waiting for PAG service process {pid} to exit",
+        "Timed out after {} ms waiting for PAP service process {pid} to exit",
         timeout.as_millis()
     )
 }

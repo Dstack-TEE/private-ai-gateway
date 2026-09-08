@@ -1058,7 +1058,7 @@ fn parse_request_tag(
 ) -> (String, String, Option<String>) {
     if let Some(tag) = tag {
         let mut parts = tag.splitn(4, ':');
-        if parts.next() == Some("pag") {
+        if parts.next() == Some("pap") {
             if let (Some(request), Some(session), Some(agent)) =
                 (parts.next(), parts.next(), parts.next())
             {
@@ -1251,14 +1251,14 @@ mod tests {
         let request = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": null,
-            "detail": "receipt rcpt-1 recorded", "tag": "pag:req-1:session-1:claude-code"
+            "detail": "receipt rcpt-1 recorded", "tag": "pap:req-1:session-1:claude-code"
         });
         apply_request_event(&mut state, request.as_object().unwrap()).unwrap();
         let verdict = json!({
             "method": "POST", "path": "/v1/messages", "status": 200, "streamed": true,
             "receipt_id": "rcpt-1", "verified": true, "rewritten": true,
             "locally_constrained": true,
-            "detail": "receipt verified", "tag": "pag:req-1:session-1:claude-code"
+            "detail": "receipt verified", "tag": "pap:req-1:session-1:claude-code"
         });
         apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
 
@@ -1306,7 +1306,7 @@ mod tests {
             "streamed": true, "receipt_id": "rcpt-merge", "verified": true,
             "locally_constrained": true, "rewritten": true,
             "detail": "receipt verified",
-            "tag": "pag:req-merge:session-merge:claude-code"
+            "tag": "pap:req-merge:session-merge:claude-code"
         });
         apply_request_event(&mut state, verdict.as_object().unwrap()).unwrap();
 

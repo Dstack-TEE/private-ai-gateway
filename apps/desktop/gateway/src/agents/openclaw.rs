@@ -6,7 +6,7 @@
 use super::*;
 use serde_json::{json, Map, Value};
 
-const PROVIDER: &str = "private-ai-gateway";
+const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["models", "providers", PROVIDER];
 const SECRET_PATH: &[&str] = &["secrets", "providers", PROVIDER];
 const PRIMARY_PATH: &[&str] = &["agents", "defaults", "model", "primary"];
@@ -326,7 +326,7 @@ fn helper_env(token_path: &Path) -> Result<Value, String> {
         return Err("OpenClaw requires a normalized native-host token directory".into());
     }
     let parent = dir.parent().ok_or("Invalid OpenClaw app data directory")?;
-    if dir.file_name().is_some_and(|s| s == ".private-ai-gateway")
+    if dir.file_name().is_some_and(|s| s == ".private-ai-proxy")
         && env_path(HOME_OVERRIDE_ENV).as_deref() == Some(parent)
     {
         return Ok(json!({HOME_OVERRIDE_ENV: path_text(parent)?}));
@@ -387,7 +387,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
     {
         use std::os::unix::fs::MetadataExt;
         let metadata = fs::symlink_metadata(&command).map_err(|_| {
-            "The staged OpenClaw helper is missing or unreadable; restart the PAG backend"
+            "The staged OpenClaw helper is missing or unreadable; restart the PAP backend"
         })?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err("The OpenClaw helper must be a regular file, not a symlink".into());
@@ -405,7 +405,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
             .map_err(|_| "Cannot verify the staged OpenClaw helper against this installation")?
     {
         return Err(
-            "The staged OpenClaw helper differs from this installation; restart the PAG backend"
+            "The staged OpenClaw helper differs from this installation; restart the PAP backend"
                 .into(),
         );
     }
@@ -614,7 +614,7 @@ mod tests {
         for root in [
             json!({"models":{"providers":{PROVIDER:{"apiKey":"synthetic-existing"}}}}),
             json!({"secrets":{"providers":{PROVIDER:null}}}),
-            json!({"models":{"providers":{" PRIVATE-AI-GATEWAY ":{}}}}),
+            json!({"models":{"providers":{format!(" {} ", PROVIDER.to_ascii_uppercase()):{}}}}),
             json!({"models":{"$include":"models.json"}}),
             json!({"gateway":{"mode":"remote"}}),
             json!({"env":{"KEY":{"source":"exec","provider":PROVIDER,"id":"another"}}}),

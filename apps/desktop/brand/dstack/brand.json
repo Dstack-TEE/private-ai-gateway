@@ -12,7 +12,7 @@
     "keyLabel": "RedPill API key"
   },
   "bundle": {
-    "identifier": "org.dstack.private-ai-gateway",
+    "identifier": "org.dstack.private-ai-proxy",
     "category": "DeveloperTool",
     "shortDescription": "Verified local AI proxy",
     "longDescription": "Routes coding agents through a hardware-verified confidential AI service with a signed proof for every answer."

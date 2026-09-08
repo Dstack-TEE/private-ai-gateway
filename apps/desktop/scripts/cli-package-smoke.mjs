@@ -28,11 +28,11 @@ const version = execFileSync(pap, ["--version"], {
 assert.equal(version, `pap ${expectedVersion}`);
 
 const execute = promisify(execFile);
-const home = await mkdtemp(path.join(os.tmpdir(), "pag-cli-smoke-"));
-const data = path.join(home, ".private-ai-gateway");
+const home = await mkdtemp(path.join(os.tmpdir(), "pap-cli-smoke-"));
+const data = path.join(home, ".private-ai-proxy");
 const env = {
   ...process.env,
-  PRIVATE_AI_GATEWAY_HOME: home,
+  PRIVATE_AI_PROXY_HOME: home,
   ACI_API_KEY: "",
   OPENAI_API_KEY: "",
   ANTHROPIC_API_KEY: "",
@@ -125,7 +125,7 @@ try {
   assert.equal((await waitForNotRunning(10_000)).status, "not_running");
   assert.equal((await runJson(["service", "status"])).status, "not_running");
   ownedBackend = undefined;
-  console.log(`CLI package: lifecycle passed with four sibling executables; ${version}`);
+  console.log(`CLI package: lifecycle passed with three sibling executables; ${version}`);
 } finally {
   let cleanupError;
   try {

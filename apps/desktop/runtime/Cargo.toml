@@ -1,5 +1,5 @@
 [package]
-name = "private-ai-gateway-desktop-runtime"
+name = "private-ai-proxy-runtime"
 version = "0.1.0"
 description = "Platform-neutral state and persistence for Private AI Gateway desktop"
 license = "Apache-2.0"
@@ -10,20 +10,12 @@ rust-version = "1.89"
 name = "desktop_runtime"
 path = "src/lib.rs"
 
-[[bin]]
-name = "pag"
-path = "src/bin/pag.rs"
-
-[[bin]]
-name = "pag-service"
-path = "src/bin/pag-service.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tempfile = "3"
 rpassword = "7"
-desktop-gateway = { package = "private-ai-gateway-desktop-gateway", path = "../gateway" }
+desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }

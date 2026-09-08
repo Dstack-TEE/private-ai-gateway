@@ -174,7 +174,7 @@ pub(super) fn endpoint_path(data_dir: &Path) -> io::Result<PathBuf> {
 }
 
 fn runtime_endpoint(base: &Path, hash: u64) -> PathBuf {
-    base.join(format!("pag-{hash:016x}")).join(SOCKET_FILE)
+    base.join(format!("pap-{hash:016x}")).join(SOCKET_FILE)
 }
 
 fn socket_path_fits(path: &Path) -> bool {
