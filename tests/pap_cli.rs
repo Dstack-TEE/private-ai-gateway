@@ -146,11 +146,7 @@ impl Backend {
         fs::copy(env!("CARGO_BIN_EXE_pap"), binary("pap")).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_pap-service"), binary("pap-service")).unwrap();
         // The helper must exist for bundle validation; no test starts inference.
-        fs::copy(
-            env!("CARGO_BIN_EXE_pap"),
-            binary("private-ai-proxy-helper"),
-        )
-        .unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_pap"), binary("private-ai-proxy-helper")).unwrap();
         let home = directory.path().join("home");
         let data = home.join(".private-ai-proxy");
         desktop_gateway::tokens::create_private_dir(&data).unwrap();
