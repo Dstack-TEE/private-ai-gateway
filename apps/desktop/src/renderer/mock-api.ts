@@ -318,6 +318,8 @@ export function mockApi(name: string | null): DesktopApi {
   ];
   if (name === "wake-monitor-unavailable") state.wakeMonitorAvailable = false;
   if (name === "mixed-agents") agents = agents.map((agent) => ({ ...agent, installed: agent.id !== "pi" }));
+  if (name === "one-agent") agents = agents.map((agent) => ({ ...agent, installed: agent.id === "codex" }));
+  if (name === "no-agents") agents = agents.map((agent) => ({ ...agent, installed: false }));
   if (state.status === "verified" && !state.configurationVerification) state.protectedSince = Math.floor(Date.now() / 1_000) - 600;
   const listeners = new Set<(state: GatewayState) => void>();
   const keyListeners = new Set<(available: boolean) => void>();
@@ -453,7 +455,16 @@ export function mockApi(name: string | null): DesktopApi {
     },
     onStateChange: (listener) => {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      const refreshUsage = () => {
+        history = history.map((item) => item.inputTokens === undefined ? item : { ...item, inputTokens: item.inputTokens + 1 });
+        state = { ...state, usageRevision: (state.usageRevision ?? 0) + 1 };
+        publish();
+      };
+      if (name === "usage-live-refresh") window.addEventListener("mock:refresh-usage", refreshUsage);
+      return () => {
+        listeners.delete(listener);
+        window.removeEventListener("mock:refresh-usage", refreshUsage);
+      };
     },
     onNavigate: () => () => undefined,
     onProfileRepairRequest: () => () => undefined,

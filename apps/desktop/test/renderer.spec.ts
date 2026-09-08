@@ -669,10 +669,50 @@ test("fixed sidebar does not consume Cmd+B or Ctrl+B", async ({ page }) => {
   expect(prevented).toEqual([false, false]);
 });
 
+test("usage tooltips stay mounted while backend state and row data refresh", async ({ page }) => {
+  await page.goto("/?mock=usage-live-refresh");
+  await nav(page, "Usage").click();
+  const trigger = page.getByRole("table", { name: "Usage history", exact: true }).getByLabel("Token details", { exact: true }).first();
+  await trigger.hover();
+  const tooltip = page.getByRole("tooltip").and(page.locator("[data-open]"));
+  await expect(tooltip).toContainText("Cache read");
+  const initialInput = Number((await tooltip.locator("dd").first().innerText()).replaceAll(",", ""));
+  await tooltip.evaluate((node) => node.setAttribute("data-test-retained", "true"));
+  await trigger.evaluate((node) => node.setAttribute("data-test-retained", "true"));
+  for (let index = 1; index <= 3; index++) {
+    await page.evaluate(() => window.dispatchEvent(new Event("mock:refresh-usage")));
+    await expect(tooltip.locator("dd").first()).toHaveText((initialInput + index).toLocaleString("en-US"));
+    await expect(tooltip).toHaveAttribute("data-test-retained", "true");
+    await expect(trigger).toHaveAttribute("data-test-retained", "true");
+  }
+  await page.keyboard.press("Escape");
+  await page.getByRole("table", { name: "Usage history", exact: true }).getByRole("button", { name: /View proof/ }).first().click();
+  await expect(page.getByRole("dialog", { name: "Usage proof", exact: true })).toBeVisible();
+});
+
+test("Agents reserves four rows and elapsed time only appears while protected", async ({ page }) => {
+  let fullHeight: number | undefined;
+  for (const [scenario, count] of [["ready", 4], ["one-agent", 1], ["no-agents", 0]] as const) {
+    await page.goto(`/?mock=${scenario}`);
+    const card = page.locator(".overview-module").filter({ has: page.getByRole("heading", { name: "Agents", exact: true }) });
+    await expect(card.locator(".agent-block")).toHaveCount(count);
+    const height = await card.locator(".module").evaluate((node) => node.getBoundingClientRect().height);
+    fullHeight ??= height;
+    expect(height).toBe(fullHeight);
+  }
+  for (const scenario of ["interactive", "verifying", "blocked", "error", "reconnecting"]) {
+    await page.goto(`/?mock=${scenario}`);
+    await expect(page.getByLabel("Protection status").locator(".protection-duration")).toHaveCount(0);
+  }
+  await page.goto("/?mock=ready");
+  await expect(page.getByLabel("Protection status").locator(".protection-duration")).toBeVisible();
+});
+
 test("reconnection preserves visible session totals and can be cancelled", async ({ page }) => {
   await page.goto("/?mock=reconnecting");
   const card = page.getByLabel("Protection status");
   await expect(card.getByText("Reconnecting", { exact: true })).toBeVisible();
+  await expect(card.locator(".protection-duration")).toHaveCount(0);
   await expect(card.getByRole("switch", { name: "Cancel reconnection" })).toBeChecked();
   await expect(page.locator(".session-summary strong").first()).not.toHaveText("—");
   await card.getByRole("switch", { name: "Cancel reconnection" }).click();
@@ -702,6 +742,11 @@ test("local rejections explain why token usage is not applicable", async ({ page
 
 test("help uses hover and focus tooltips in the main window and native dialogs", async ({ page }) => {
   await page.goto("/?mock=ready");
+  const toggle = page.getByLabel("Protection status").getByRole("switch");
+  await toggle.hover();
+  await expect(toggle).not.toHaveAttribute("data-base-ui-tooltip-trigger");
+  await expect(toggle).not.toHaveAttribute("title");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toHaveCount(0);
   const privacy = page.getByRole("button", { name: "Privacy verification", exact: true });
   await privacy.hover();
   await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toHaveText("Privacy verification");

@@ -25,7 +25,7 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
   const columns = useMemo<ColumnDef<typeof features, RequestActivity>[]>(() => [
     { id: "time", header: "Time", cell: ({ row }) => {
       const date = new Date(row.original.at * 1000);
-      return <Hint content={date.toLocaleString()}><time dateTime={date.toISOString()} className="block tabular-nums"><span className="block">{date.toLocaleTimeString()}</span><span className="block text-xs text-muted-foreground">{date.toLocaleDateString()}</span></time></Hint>;
+      return <time dateTime={date.toISOString()} className="block tabular-nums"><span className="block">{date.toLocaleTimeString()}</span><span className="block text-xs text-muted-foreground">{date.toLocaleDateString()}</span></time>;
     } },
     { id: "agent", header: "Agent", cell: ({ row }) => <Button variant="link" className="h-auto p-0 text-left" onClick={() => onInspect(row.original)} aria-label={`${agentName(row.original.agent)}, ${outcomeOf(row.original).label}, ${row.original.model ?? row.original.path}. View proof`}>{agentName(row.original.agent)}</Button> },
     { accessorKey: "model", header: "Model", cell: ({ row }) => <Hint content={row.original.model ?? row.original.path}><span className="block max-w-48 truncate font-mono text-xs">{row.original.model ?? row.original.path}</span></Hint> },

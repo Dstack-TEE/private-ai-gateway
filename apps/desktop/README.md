@@ -36,8 +36,10 @@ Component sources in `src/renderer/components/ui` were obtained from the officia
 Local changes are import paths and Lucide icon substitution.
 Protection controls use the standard 44x20 switch geometry and Base UI behavior.
 Overview aligns the switch with the status text at the top right;
-the profile and info actions sit below. The Agents card fits its four rows
-without a minimum-height spacer. The initial window is 1052x728; saved user window geometry takes
+the profile and info actions sit below. The Agents card reserves four standard
+item rows even when fewer agents are installed; it does not create placeholder
+agents. Elapsed time is visible only while protected, independent of whether a
+session remains resumable. The initial window is 1052x728; saved user window geometry takes
 precedence on later launches.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
@@ -233,20 +235,17 @@ container for HTML dialogs, and composed triggers preserve the rendered control'
 data-slot rather than replacing a switch/badge slot with tooltip-trigger.
 Tooltips inside HTML dialogs portal into that dialog's top layer. Action menus
 and agent repair actions remain click-open Popovers; chart data uses ChartTooltip.
-Browser title attributes are not used for application help.
+Browser title attributes are not used for application help. Switches, labeled
+buttons, provider choices, ordinary fields and visible evidence do not repeat
+their labels in tooltips.
 
 | Surface | Hint content | Component / interaction |
 | --- | --- | --- |
-| Protection and preference switches | Current action or unavailable-endpoint reason | Tooltip, hover/focus |
 | Overview privacy info / Local API help | Dialog name | Tooltip; click opens the dialog |
-| Profile selector | Full profile name or setup label | Tooltip; click opens Profiles |
-| Session timer / usage timestamps | Full start time / date and time | Tooltip |
 | Edit, copy, reveal, rotate, export and other icon actions | Action name | Tooltip; click executes the action |
-| Sidebar update badge | Install update | Tooltip; click follows update confirmation |
 | Theme icon toggles | System / Light / Dark | Tooltip; click selects the theme |
-| Provider presets | Endpoint or custom-provider explanation | Tooltip; click selects the provider |
-| Agent configuration path / usage model / evidence values | Full text | Tooltip |
-| Local API port / non-loopback warning | Valid range / network exposure explanation | Tooltip |
+| Agent configuration path / usage model | Full text that may be truncated | Tooltip |
+| Non-loopback warning | Network exposure explanation | Tooltip |
 | Usage table token count | Input, output, cache counts | Tooltip, hover/focus |
 | Missing usage in proof | Why unavailable or not applicable | Tooltip, hover/focus |
 | Usage chart | Model and metric at the hovered date | shadcn ChartTooltip (Recharts) |

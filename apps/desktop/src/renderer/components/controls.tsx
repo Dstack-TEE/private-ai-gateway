@@ -18,12 +18,11 @@ type SwitchControlProps = {
   developmentMode?: boolean;
   tone?: "default" | "success";
   size?: "sm" | "default" | "lg";
-  title?: string;
   "aria-describedby"?: string;
   "aria-busy"?: boolean;
   onToggle(): void;
 };
 
-export function SwitchControl({ label, developmentMode = false, tone = "default", onToggle, title, ...props }: SwitchControlProps): React.JSX.Element {
-  return <Hint content={title ?? label}><Switch className={developmentMode ? "is-development" : tone === "success" ? "is-success" : undefined} aria-label={label} onCheckedChange={onToggle} {...props} /></Hint>;
+export function SwitchControl({ label, developmentMode = false, tone = "default", onToggle, ...props }: SwitchControlProps): React.JSX.Element {
+  return <Switch className={developmentMode ? "is-development" : tone === "success" ? "is-success" : undefined} aria-label={label} onCheckedChange={onToggle} {...props} />;
 }

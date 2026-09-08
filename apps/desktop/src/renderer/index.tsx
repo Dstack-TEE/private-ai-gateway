@@ -195,7 +195,7 @@ function hasLiveVerification(state: GatewayState): boolean {
 
 function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
   const active = isProtected(state);
-  const since = active || state.sessionActive || state.reconnecting ? state.protectedSince : undefined;
+  const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (since === undefined) return;
@@ -209,7 +209,7 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
     <span className="protection-status">
       {active ? <ShieldCheck size={14} aria-hidden="true" /> : state.reconnecting ? <RefreshCw size={14} aria-hidden="true" /> : <ShieldX size={14} aria-hidden="true" />}
       <span aria-live="polite">{label}</span>
-      {elapsed !== undefined && <Hint content={`Session started ${formatTimestamp((since ?? 0) * 1_000, true)}`}><time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time></Hint>}
+      {elapsed !== undefined && <time className="protection-duration" dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
@@ -1007,13 +1007,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     }
     setSettingsTarget(target);
   };
-  const inspectUsage = (activity: RequestActivity) => {
+  const inspectUsage = useCallback((activity: RequestActivity) => {
     if (previewMode) {
       setSelectedUsage(activity);
       return;
     }
     void desktopApi.openNativeDialog("usage-proof", { recordId: activity.id }).catch((error: unknown) => setActionError(errorMessage(error)));
-  };
+  }, []);
 
   const windowContent = (
     <main className="app-shell">
@@ -1258,9 +1258,9 @@ function Sidebar({
       </nav>
       </SidebarProvider>
       {updateAvailable && <div className="mt-auto pt-4">
-        <Hint content="Install update"><Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" onClick={onInstallUpdate}>
+        <Badge variant="outline" className="h-8 w-full gap-2 text-sm hover:bg-muted [&>svg]:size-4!" render={<button type="button" disabled={updateBusy} />} aria-label="Update available" onClick={onInstallUpdate}>
           <Download aria-hidden="true" /><span className="max-[620px]:hidden">Update available</span>
-        </Badge></Hint>
+        </Badge>
       </div>}
     </aside>
   );
@@ -1478,7 +1478,7 @@ function Overview({
           />
         </OverviewModule>
         <OverviewModule title="Agents" action="View all" onAction={onAgents}>
-          <div className="preview-list">
+          <div className="preview-list overview-agent-list">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
               <AgentRow
@@ -1543,11 +1543,11 @@ function StatusSurface({
           <ProtectionStatus state={state} label={verdict.title} />
         </div>
         <div className="status-profile-actions">
-        <Hint content={activeProfile?.name ?? "Set up profile"}><Button id="overview-profile" variant="outline" size="sm" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
+        <Button id="overview-profile" variant="outline" size="sm" className="status-profile" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set up profile"} aria-haspopup="dialog" onClick={onSettings}>
           {activeProfile ? <ServiceLogo url={activeProfile.remoteUrl} /> : <Plus aria-hidden="true" />}
           <span>{activeProfile?.name ?? "Set up"}</span>
           {activeProfile && <ChevronDown aria-hidden="true" />}
-        </Button></Hint>
+        </Button>
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
@@ -1622,7 +1622,6 @@ function ProtectedControl({
         checked={checked}
         label={label}
         disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
-        title={endpointDown && !checked ? state.endpointError : label}
         developmentMode={developmentMode}
         onToggle={onToggle}
       />
@@ -1740,7 +1739,7 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
       </span>
       <span className="usage-amount"><strong>{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
       <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
-      <Hint content={formatTimestamp(timestamp.getTime(), true)}><time className="row-side" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time></Hint>
+      <time className="row-side" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
     </ActionItem>
   );
 }
@@ -2490,17 +2489,17 @@ function ProfileEditorSheet({
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
         <ToggleGroup variant="outline" className="service-presets" value={[draft.provider]} disabled={frozen || saving} aria-labelledby="profile-provider-label" onValueChange={([value]) => { if (value === "phala" || value === "redpill" || value === "custom") chooseService(value); }}>
           {SERVICE_PRESETS.map((service) => (
-            <Hint key={service.id} content={service.url}><ToggleGroupItem value={service.id} className="service-preset" aria-label={service.name}>
+            <ToggleGroupItem key={service.id} value={service.id} className="service-preset" aria-label={service.name}>
               <ServiceLogo url={service.url} />
               <strong>{service.name}</strong>
               {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
-            </ToggleGroupItem></Hint>
+            </ToggleGroupItem>
           ))}
-          <Hint content="Use another ACI endpoint"><ToggleGroupItem value="custom" className="service-preset" aria-label="Custom">
+          <ToggleGroupItem value="custom" className="service-preset" aria-label="Custom">
             <ServiceLogo url="custom://service" />
             <strong>Custom</strong>
             {draft.provider === "custom" && <Check size={15} aria-hidden="true" />}
-          </ToggleGroupItem></Hint>
+          </ToggleGroupItem>
         </ToggleGroup>
         </Field>
           <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || saving} autoComplete="off" /></FormField>
@@ -2611,7 +2610,7 @@ function LocalApiSheet({
           </Field>
           <Field>
             <FieldLabel className="min-h-5" htmlFor="local-port">Port</FieldLabel>
-            <Hint content="Port: 1024–65535"><Input id="local-port" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} /></Hint>
+            <Input id="local-port" type="number" min="1024" max="65535" required value={draft.port} disabled={frozen || saving} onChange={(event) => update("port", Number(event.target.value))} />
           </Field>
           </div>
           <FormField id="local-client-host" label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : "Optional host for client URLs and agent configs. Does not change the listener."}>
@@ -2737,7 +2736,7 @@ function Detail({
   return (
     <div className={wide ? "wide" : undefined}>
       <span>{label}</span>
-      <Hint content={value}><strong className={mono ? "mono" : undefined}>{value}</strong></Hint>
+      <strong className={mono ? "mono" : undefined}>{value}</strong>
     </div>
   );
 }
