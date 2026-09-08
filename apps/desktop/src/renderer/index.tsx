@@ -1535,9 +1535,9 @@ function StatusSurface({
   const protectedNow = isProtected(state);
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   return (
-    <section className={`status-surface status-compact status-${state.status} ${protectedNow ? "status-ready" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
+    <Card size="sm" role="region" className={`status-surface status-compact status-${state.status} ${protectedNow ? developmentMode ? "status-ready ring-warning dark:ring-warning" : "status-ready ring-primary dark:ring-primary" : ""} ${developmentMode ? "is-development" : ""}`} aria-label="Protection status">
       <TrackLayer />
-      <div className="status-compact-content">
+      <CardContent className="status-compact-content">
         <div className={`status-heading state-${verdict.tone}`}>
           <ProtectionStatus state={state} label={verdict.title} />
         </div>
@@ -1550,8 +1550,8 @@ function StatusSurface({
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </div>
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1699,10 +1699,12 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
     <section className="session-overview" aria-labelledby="session-usage-heading">
       <h2 className="sr-only" id="session-usage-heading">Current session</h2>
     <div className="session-summary" role="group" aria-label="Usage in this session">
-      <div><span>Requests</span><strong>{active ? summary.requests.toLocaleString() : "—"}</strong></div>
-      <div><span>Tokens</span><strong>{active ? formatTokens(totalTokens) : "—"}</strong></div>
-      <div><span>Estimated cost</span><strong>{active ? currency(summary.costUsd) : "—"}</strong></div>
-      <div><span>Verified answers</span><strong>{active && forwarded ? `${protectedRate}%` : "—"}</strong></div>
+      {[
+        ["Requests", active ? summary.requests.toLocaleString() : "—"],
+        ["Tokens", active ? formatTokens(totalTokens) : "—"],
+        ["Estimated cost", active ? currency(summary.costUsd) : "—"],
+        ["Verified answers", active && forwarded ? `${protectedRate}%` : "—"],
+      ].map(([label, value]) => <Card key={label} size="sm"><CardContent className="grid gap-2"><span className="text-xs text-muted-foreground">{label}</span><strong className="text-xl font-semibold tabular-nums">{value}</strong></CardContent></Card>)}
     </div>
     </section>
   );

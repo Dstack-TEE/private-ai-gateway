@@ -35,6 +35,11 @@ test("compact overview separates provider verification from current-session usag
     return [content.left - frame.left, frame.right - content.right, frame.bottom - content.bottom];
   });
   expect(margins).toEqual([24, 24, 24]);
+  await expect(page.locator(".overview-page [data-slot=card]")).toHaveCount(8);
+  await expect(page.locator(".page-header")).toHaveCSS("border-bottom-width", "0px");
+  await expect(page.locator(".session-summary")).toHaveCSS("gap", "16px");
+  await expect(page.locator(".overview-top")).toHaveCSS("gap", "16px");
+  await expect(page.locator(".overview-grid")).toHaveCSS("gap", "16px");
   await expect(page.locator("html")).toHaveAttribute("data-main-presented", "true");
   await expect(protection.getByText("Request protection", { exact: false })).toHaveCount(0);
   await expect(protection.getByText("Protect requests", { exact: true })).toHaveCount(0);
@@ -1213,7 +1218,7 @@ test("five agents connect and disconnect directly from the verified discovered c
 });
 
 test("overview shows four agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
-  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.setViewportSize({ width: 1100, height: 960 });
   await page.goto("/?mock=ready");
 
   const agentsModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents" }) });
@@ -1366,7 +1371,7 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(available).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await expect(available.locator('[data-slot="status-dot"]')).toHaveCSS("background-color", success);
     await expect(nav(page, "Agents")).toHaveCSS("border-radius", "14px");
-    await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
+    expect(await page.locator(".status-compact").evaluate((node) => getComputedStyle(node).boxShadow)).toContain(success);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
