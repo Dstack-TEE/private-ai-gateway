@@ -19,6 +19,22 @@ longer bundled. The backend launches `pap serve` with strict receipt enforcement
 Build the unified CLI with `cargo build --features desktop-client --bin pap`;
 ordinary server and standalone ACI builds do not acquire desktop dependencies.
 
+Distribution builds on macOS default to `universal-apple-darwin`. Install both
+Rust targets with `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
+The CLI, backend and helper are compiled for both targets and merged with
+Apple's `lipo`; Tauri builds the Universal UI executable. CI verifies both
+slices in all four packaged executables and starts the Intel CLI slice through
+Rosetta. Development builds continue to use the host architecture.
+
+Public download names follow
+`private-ai-proxy[-cli]-<version>-<platform>-<architecture>.<format>`.
+For example, `private-ai-proxy-0.1.2-beta.21-macos-universal.dmg` and
+`private-ai-proxy-cli-0.1.2-beta.21-macos-universal.tar.gz`.
+Tauri's `darwin-aarch64` and `darwin-x86_64` updater entries reference the same
+signed Universal archive. CI shares one Cargo target directory across the
+manifests, uses the same distribution entry point as local builds, and avoids
+generating a redundant desktop ZIP.
+
 Launching with no profiles stays on Overview. Starting protection without a
 profile opens New Profile and resumes protection after successful verification
 and saving; opening profile settings manually never opts into protection.
@@ -772,11 +788,10 @@ usage, persistent-history filters and cursor pagination, CSV/clear flows,
 proof and local-block semantics, profile management, system confirmation boundaries,
 dark/high-contrast/reduced-motion
 media, 200% zoom, and
-940/720/540/320 widths. UI checks require the explicit `run_ui_tests` manual
-workflow input and are disabled on ordinary PR builds. TypeScript, release
-manifest tests, and Rust checks still run. Windows package jobs also execute
+940/720/540/320 widths. Renderer UI checks, TypeScript, release manifest tests,
+and Rust checks run on every desktop CI build. Windows package jobs also execute
 the shared libraries' tests. NSIS/DEB installation checks exercise the bundled
-CLI, backend, ACI and helper without opening the app, then uninstall the package; temporary
+CLI, backend and helper, then uninstall the package; temporary
 credential-store fixtures are separate from real provider credentials.
 
 ## Packaging
