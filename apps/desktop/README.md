@@ -235,6 +235,20 @@ unpresented window and reports the failure in the main window. Browser checks
 cover readiness ordering; compositor behavior still requires macOS acceptance.
 SheetActions provides one shared footer divider.
 
+Rendering follows [Tauri's system-WebView architecture](https://v2.tauri.app/concept/architecture/):
+Recharts, the usage table, and the date picker load on demand. Cipher motion uses
+CSS transforms without per-row layout observers. React `useMemo` keeps chart
+aggregation and number formatters stable, and `memo` isolates the plot from
+unrelated page updates. The session clock follows the Page Visibility API and
+resynchronizes from wall time when a hidden window becomes visible.
+These are frontend optimizations; they do not replace platform compositor testing.
+References: [React memo](https://react.dev/reference/react/memo),
+[Page Visibility API](https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API).
+
+Keep dependency updates within [Tauri's version compatibility rules](https://v2.tauri.app/develop/updating-dependencies/):
+the JavaScript API and Rust crate share a minor version, paired plugins share an
+exact version, and Wry is resolved through Tauri rather than overridden separately.
+
 The dstack macOS 26+ icon uses Apple Icon Composer specular highlights, restrained
 translucency, and a layer shadow. Its near-black green background and source mark
 remain unchanged. Legacy ICNS/PNG/ICO assets remain flat; the material is rendered

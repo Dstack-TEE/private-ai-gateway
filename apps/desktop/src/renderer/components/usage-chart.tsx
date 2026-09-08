@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useMemo } from "react";
 import { differenceInCalendarDays, eachDayOfInterval, eachMonthOfInterval, format, parseISO, startOfDay, subDays } from "date-fns";
 import type { UsagePage } from "../../shared/contracts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
@@ -40,10 +40,15 @@ export function modelChartData(page: Pick<UsagePage, "modelSeries" | "series"> &
 export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
   page?: UsagePage; loading: boolean; range: string; bounds?: { start?: Date; end?: Date }; metric: UsageMetric; onMetric(metric: UsageMetric): void;
 }): React.JSX.Element {
-  const { rows, series, monthly } = modelChartData(page ?? { modelSeries: [], series: [] }, range, metric, bounds);
-  const formatValue = (value: number) => metric === "cost"
-    ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 6 }).format(value)
-    : value.toLocaleString();
+  const start = bounds?.start?.getTime();
+  const end = (bounds?.end ?? startOfDay(new Date())).getTime();
+  const { rows, series, monthly } = useMemo(() => modelChartData(
+    page ?? { modelSeries: [], series: [] }, range, metric,
+    { start: start === undefined ? undefined : new Date(start), end: new Date(end) },
+  ), [page, range, metric, start, end]);
+  const formatValue = useMemo(() => new Intl.NumberFormat(undefined, metric === "cost"
+    ? { style: "currency", currency: "USD", maximumFractionDigits: 6 }
+    : {}).format, [metric]);
   return <figure className="usage-chart" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
     <Tabs value={metric} onValueChange={(value) => { if (value === "tokens" || value === "cost" || value === "requests") onMetric(value); }}>
       <TabsList aria-label="Chart metric">

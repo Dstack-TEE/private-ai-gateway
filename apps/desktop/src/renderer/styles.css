@@ -157,7 +157,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .tracks-right { color: var(--primary); mask-image: linear-gradient(to left, var(--color-black) 0%, var(--color-black) 18%, color-mix(in srgb, var(--color-black) 55.00000000000001%, transparent) 34%, color-mix(in srgb, var(--color-black) 18%, transparent) 46%, transparent 58%); }
 .status-ready .tracks-right { opacity: 0.12; }
 .track-row { min-width: 0; overflow: hidden; display: flex; align-items: center; font: var(--font-caption)/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
-.track-strip { width: max-content; display: flex; animation: track-left var(--track-duration, 120s) linear infinite; animation-play-state: paused; }
+.track-strip { width: max-content; display: flex; animation: track-left 60s linear infinite; animation-play-state: paused; }
 .status-ready .track-strip { animation-play-state: running; }
 .track-reverse .track-strip { animation-name: track-right; }
 .track-copy { flex: 0 0 auto; padding-right: 32px; }

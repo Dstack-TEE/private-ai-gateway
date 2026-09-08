@@ -1,4 +1,4 @@
-import React, { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWindowReady } from "./lib/use-window-ready";
 import {
   BatteryMedium,
@@ -200,9 +200,19 @@ function ProtectionStatus({ state, label }: { state: GatewayState; label: string
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (since === undefined) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const syncVisibility = () => {
+      window.clearInterval(timer);
+      if (document.hidden) return;
+      setNow(Date.now());
+      timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    };
+    document.addEventListener("visibilitychange", syncVisibility);
+    syncVisibility();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", syncVisibility);
+    };
   }, [since]);
   const seconds = since === undefined ? undefined : Math.max(0, Math.floor(now / 1_000) - since);
   const elapsed = seconds === undefined ? undefined : [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, "0")).join(":");
@@ -1544,31 +1554,17 @@ function StatusSurface({
   );
 }
 
-function TrackLayer(): React.JSX.Element {
+const TrackLayer = memo(function TrackLayer(): React.JSX.Element {
   return (
     <div className="track-layer tracks-right" aria-hidden="true">
       {TLS_TRACKS.map((line, index) => <TrackRow key={line} text={line} reverse={index % 2 === 1} />)}
     </div>
   );
-}
+});
 
 function TrackRow({ text, reverse }: { text: string; reverse: boolean }): React.JSX.Element {
-  const row = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const node = row.current;
-    const copy = node?.querySelector<HTMLElement>(".track-copy");
-    if (!node || !copy) return undefined;
-    const update = () => {
-      const distance = copy.getBoundingClientRect().width;
-      node.style.setProperty("--track-duration", `${Math.max(distance / 20, 1)}s`);
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(copy);
-    return () => observer.disconnect();
-  }, [text]);
   return (
-    <div ref={row} className={`track-row ${reverse ? "track-reverse" : ""}`}>
+    <div className={`track-row ${reverse ? "track-reverse" : ""}`}>
       <div className="track-strip">
         <span className="track-copy">{text}</span><span className="track-copy">{text}</span>
       </div>
