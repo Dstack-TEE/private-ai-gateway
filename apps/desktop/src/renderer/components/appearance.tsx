@@ -7,17 +7,21 @@ import { FieldLabel, FieldError } from "./ui/field";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 
-const AppearanceContext = createContext({ value: "system" as Appearance, busy: false, error: "", change: (_value: Appearance) => {} });
+const AppearanceContext = createContext({ value: "system" as Appearance, ready: false, busy: false, error: "", change: (_value: Appearance) => {} });
 
 export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
   const [value, setValue] = useState<Appearance>(initialAppearance ?? "system");
+  const [ready, setReady] = useState(initialAppearance !== undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
     let received = false;
     const unsubscribe = api.onAppearanceChange((next) => { received = true; if (active) setValue(next); });
-    void api.getAppearance().then((next) => { if (active && !received) setValue(next); }).catch(() => { if (active) setError("Could not read appearance settings."); });
+    void api.getAppearance()
+      .then((next) => { if (active && !received) setValue(next); })
+      .catch(() => { if (active) setError("Could not read appearance settings."); })
+      .finally(() => { if (active) setReady(true); });
     return () => { active = false; unsubscribe(); };
   }, [api]);
   useLayoutEffect(() => {
@@ -36,10 +40,11 @@ export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: D
     catch { setError("Could not save appearance settings."); }
     finally { setBusy(false); }
   };
-  return <AppearanceContext.Provider value={{ value, busy, error, change: (next) => void change(next) }}>{children}</AppearanceContext.Provider>;
+  return <AppearanceContext.Provider value={{ value, ready, busy, error, change: (next) => void change(next) }}>{children}</AppearanceContext.Provider>;
 }
 
 export function useAppearance() { return useContext(AppearanceContext).value; }
+export function useAppearanceReady() { return useContext(AppearanceContext).ready; }
 
 export function AppearanceControl() {
   const appearance = useContext(AppearanceContext);

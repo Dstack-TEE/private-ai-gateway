@@ -102,7 +102,7 @@ pub fn open(
                 "New Profile"
             },
             width: 580.0,
-            height: 510.0,
+            height: 560.0,
             min_width: 520.0,
             min_height: 460.0,
             query: format!(
@@ -137,7 +137,7 @@ pub fn open(
             label: LOCAL_API_LABEL,
             title: "Local API Settings",
             width: 600.0,
-            height: 480.0,
+            height: 512.0,
             min_width: 540.0,
             min_height: 440.0,
             query: "index.html?native-dialog=local-api".to_string(),

@@ -526,6 +526,11 @@ fn native_dialog_ready(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn main_window_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    tray::main_window_ready(&window)
+}
+
+#[tauri::command]
 fn close_native_dialog(window: tauri::WebviewWindow) -> Result<(), String> {
     native_dialog::close(&window)
 }
@@ -693,6 +698,7 @@ pub fn run() {
         .manage(updates::PendingUpdate::default())
         .manage(CliStartup::default())
         .manage(native_dialog::DialogCache::default())
+        .manage(tray::MainWindowPresentation::default())
         .manage(updates::UpdateProgress::default())
         .plugin(tauri_plugin_notification::init())
         .manage(notifications::Settings::default())
@@ -726,6 +732,7 @@ pub fn run() {
             show_edit_menu,
             open_native_dialog,
             native_dialog_ready,
+            main_window_ready,
             open_agent_website,
             close_native_dialog,
             query_usage,

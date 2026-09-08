@@ -419,7 +419,32 @@ fn protection_title(state: &GatewayState) -> String {
     format!("{mode} - {}h {:02}m", minutes / 60, minutes % 60)
 }
 
+#[derive(Default)]
+pub struct MainWindowPresentation {
+    ready: AtomicBool,
+    requested: AtomicBool,
+}
+
+pub fn main_window_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the main window can announce its content is ready".into());
+    }
+    let app = window.app_handle();
+    let presentation = app.state::<MainWindowPresentation>();
+    if !presentation.ready.swap(true, Ordering::SeqCst)
+        && presentation.requested.load(Ordering::SeqCst)
+    {
+        show_window(app);
+    }
+    Ok(())
+}
+
 pub fn show_window(app: &AppHandle) {
+    let presentation = app.state::<MainWindowPresentation>();
+    presentation.requested.store(true, Ordering::SeqCst);
+    if !presentation.ready.load(Ordering::SeqCst) {
+        return;
+    }
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = handle.get_webview_window("main") else {

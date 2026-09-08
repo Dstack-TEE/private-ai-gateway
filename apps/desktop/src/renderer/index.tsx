@@ -1,4 +1,5 @@
 import React, { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useWindowReady } from "./lib/use-window-ready";
 import {
   BatteryMedium,
   Bot,
@@ -273,17 +274,7 @@ function useNativeGatewayWindow(title: string, contentReady = true): {
   const [loaded, setLoaded] = useState(Boolean(initialState));
   const [loadError, setLoadError] = useState<string>();
   const [closed, setClosed] = useState(false);
-  const presented = useRef(false);
-
-  useEffect(() => {
-    if (!loaded || (!contentReady && !loadError) || closed || presented.current) return;
-    let active = true;
-    presented.current = true;
-    void desktopApi.nativeDialogReady().catch((error: unknown) => {
-      if (active) setLoadError(errorMessage(error));
-    });
-    return () => { active = false; };
-  }, [loaded, contentReady, loadError, closed]);
+  useWindowReady(loaded && (contentReady || Boolean(loadError)) && !closed, desktopApi.nativeDialogReady, setLoadError);
 
   useEffect(() => {
     document.title = `${title} - ${brand.productName}`;
@@ -334,7 +325,7 @@ function NativeUpdateProgressWindow(): React.JSX.Element {
   if (native.closed) return <main aria-label="Software update closed" />;
   return <main className="native-dialog-host p-6 flex flex-col gap-4" aria-labelledby="update-title">
     <h2 id="update-title" className="text-lg font-semibold">{progress?.error ? "Update failed" : "Installing update"}</h2>
-    <p className="text-sm text-muted-foreground" role={progress?.error ? "alert" : undefined}>{progress?.error ?? "The app will restart when installation completes."}</p>
+    <p className="min-h-0 overflow-auto break-words text-sm text-muted-foreground" role={progress?.error ? "alert" : undefined}>{progress?.error ?? "The app will restart when installation completes."}</p>
     {!progress?.error && <UpdateProgressMeter progress={progress} />}
     {native.loadError && <p role="alert" className="text-sm text-destructive">{native.loadError}</p>}
     {progress?.error && <div className="mt-auto flex justify-end"><Button variant="outline" onClick={native.close}>Done</Button></div>}
@@ -348,7 +339,7 @@ function NativeDialogStatus({ label, error, onClose }: { label: string; error?: 
   return (
     <main className="native-dialog-host native-dialog-loading" aria-label={label}>
       <TriangleAlert aria-hidden="true" />
-      <span role="alert">{error}</span>
+      <span className="min-h-0 overflow-auto break-words" role="alert">{error}</span>
       <Button variant="outline" onClick={onClose}>Done</Button>
     </main>
   );
@@ -561,11 +552,13 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
+  const [stateLoaded, setStateLoaded] = useState(false);
   const [allowDevelopmentOs, setAllowDevelopmentOs] = useState(false);
   const [launchPreferences, setLaunchPreferences] = useState<LaunchPreferences>();
   const [savingPreference, setSavingPreference] = useState(false);
   const [connectingBackend, setConnectingBackend] = useState(false);
   const [actionError, setActionError] = useState<string>();
+  useWindowReady(stateLoaded, desktopApi.mainWindowReady, setActionError);
   const [clientKeyError, setClientKeyError] = useState<string>();
   const [copied, setCopied] = useState<string>();
   const [clientKey, setClientKey] = useState("");
@@ -661,6 +654,7 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
     const unsubscribe = desktopApi.onStateChange((nextState) => {
       if (active) {
         setState(nextState);
+        setStateLoaded(true);
       }
     });
     const unsubscribeNavigate = desktopApi.onNavigate((section) => {
@@ -674,10 +668,12 @@ function App({ initialView = "overview" }: { initialView?: View }): React.JSX.El
       (nextState) => {
         if (!active) return;
         setState(nextState);
+        setStateLoaded(true);
       },
       (error: unknown) => {
         if (!active) return;
         setState(unavailableState(error));
+        setStateLoaded(true);
         setActionError(errorMessage(error));
       },
     );
