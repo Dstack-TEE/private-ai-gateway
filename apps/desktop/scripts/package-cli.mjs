@@ -52,7 +52,7 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
     }
     await copyFile(source, target);
     if (targetTriple === UNIVERSAL_MACOS_TARGET) {
-      execFileSync("xcrun", ["lipo", "-verify_arch", "arm64", "x86_64", target], { stdio: "inherit" });
+      execFileSync("xcrun", ["lipo", target, "-verify_arch", "arm64", "x86_64"], { stdio: "inherit" });
     }
     if (platform !== "windows") {
       await chmod(target, 0o755);
