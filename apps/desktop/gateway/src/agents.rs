@@ -2492,7 +2492,54 @@ fn command_output(
         command = Command::new(executable);
         command.args(args);
     }
-    command.env("PATH", command_path(search_paths)?).output()
+    command.env("PATH", command_path(search_paths)?);
+    bounded_command_output(command, std::time::Duration::from_secs(15))
+}
+
+fn bounded_command_output(
+    command: Command,
+    timeout: std::time::Duration,
+) -> io::Result<std::process::Output> {
+    // Agent transactions are synchronous and may run inside a Tokio worker.
+    // A dedicated thread keeps the bounded I/O runtime out of the caller's runtime.
+    std::thread::Builder::new()
+        .name("agent-metadata".to_string())
+        .spawn(move || {
+            use std::process::Stdio;
+            use tokio::io::AsyncReadExt;
+
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let mut child = tokio::process::Command::from(command)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .kill_on_drop(true)
+                        .spawn()?;
+                    let mut stdout = child.stdout.take().ok_or_else(|| io::Error::other("Missing stdout pipe"))?;
+                    let mut stderr = child.stderr.take().ok_or_else(|| io::Error::other("Missing stderr pipe"))?;
+                    let mut out = Vec::new();
+                    let mut err = Vec::new();
+                    let result = tokio::time::timeout(timeout, async {
+                        tokio::try_join!(child.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+                    }).await;
+                    match result {
+                        Ok(Ok((status, _, _))) => Ok(std::process::Output { status, stdout: out, stderr: err }),
+                        result => {
+                            // kill() also waits for exit, releasing the process before the config lock.
+                            child.kill().await?;
+                            match result {
+                                Ok(Err(error)) => Err(error),
+                                _ => Err(io::Error::new(io::ErrorKind::TimedOut, "Codex model metadata export timed out; check the Codex installation and retry")),
+                            }
+                        }
+                    }
+                })
+        })?
+        .join()
+        .map_err(|_| io::Error::other("Model metadata worker failed"))?
 }
 
 fn command_path(search_paths: &[PathBuf]) -> io::Result<OsString> {
@@ -2830,6 +2877,32 @@ mod tests {
                 Some("external-edit"),
             );
         }
+    }
+
+    #[tokio::test]
+    async fn metadata_timeout_releases_the_config_transaction() {
+        const CHILD_ENV: &str = "PAG_TEST_METADATA_TIMEOUT_CHILD";
+        if env::var_os(CHILD_ENV).is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new(env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "agents::tests::metadata_timeout_releases_the_config_transaction",
+        ]);
+        command.env(CHILD_ENV, "1");
+        let started = std::time::Instant::now();
+        let error = lock::with_apply_lock(root.path(), || {
+            let error =
+                bounded_command_output(command, std::time::Duration::from_secs(1)).unwrap_err();
+            Ok(error.kind())
+        })
+        .unwrap();
+        assert_eq!(error, io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        lock::with_apply_lock(root.path(), || Ok(())).unwrap();
     }
 
     #[cfg(unix)]

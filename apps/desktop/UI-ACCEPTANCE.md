@@ -1,9 +1,48 @@
 # Desktop Acceptance Audit
 
-Baseline: `9e528c6`, plus the fixes documented below. This is an evidence ledger,
+Historical baseline: `9e528c6`, plus the fixes documented below. This is an evidence ledger,
 not a claim of complete product, platform or accessibility certification.
 Renderer tests exercise the real components against a mock bridge; gateway and
 runtime tests exercise filesystem, SQLite, local HTTP and policy behavior.
+
+## Stable Candidate Review (2026-09-08)
+
+- Beta.19 (`c03eec2`) passed 66 renderer tests and all three native CI jobs.
+  macOS Developer ID signing, notarization and package inspection passed in
+  https://github.com/Dstack-TEE/private-ai-gateway/actions/runs/34182726717.
+- At the default 1052x728 preview size, Overview's content scroll height equals
+  its client height (670px); all four agent rows fit. This is browser layout
+  evidence, not native multi-monitor restoration evidence.
+- Main `c2d31a8` was subsequently merged into the candidate branch. It includes
+  tenant identity changes and the Chutes per-instance evidence memory fix.
+- Codex metadata export now has a 15-second deadline with concurrent pipe
+  reads and explicit child termination/reaping on failure. This bounds the time
+  the external CLI can hold an agent configuration transaction. The regression
+  runs inside Tokio and confirms timeout releases the configuration lock.
+- Local gateway validation after the fix: 77 passed, one platform keyring test
+  ignored; Clippy passed with warnings denied. Beta.19 does not contain this fix.
+- After the main merge, all 51 middleware completion and 20 service integration
+  tests passed, including stable Chutes sessions across evidence rounds.
+- The two tenant identity compatibility tests passed. Shared runtime validation:
+  45 passed, two installation-dependent tests ignored.
+
+Stable acceptance remains open for the new candidate:
+
+| Required evidence | Current status |
+| --- | --- |
+| Fresh native builds after the main merge and timeout fix | Pending |
+| Installed beta.18 to beta.19 upgrade, restart and profile preservation | Requires a real installed-app test |
+| Sleep/wake, login launch, notification permission denial/regrant, forced exit and recovery | Requires native platform acceptance |
+| Windows Authenticode installer/executable signing | Not configured in the current workflow; Tauri update signatures do not satisfy this |
+
+For Windows, first select a distribution signer (for example Microsoft Artifact
+Signing or a supported certificate-backed signing service), supply its account
+and signing authorization, then verify the installer and every shipped PE
+binary. Do not infer OS distribution signing from an updater `.sig` file.
+Linux package/repository signing requires a separate distribution decision;
+current Tauri update signatures authenticate updates, not apt/rpm repositories.
+
+Naming and CLI integration proposal: [Client architecture](CLIENT-ARCHITECTURE.md).
 
 ## Confirmed Corrections
 
@@ -93,7 +132,7 @@ upgrade/restart still require platform acceptance.
 | Layout | Four Overview rows, bounded widths down to 320px, 200% zoom, dark/high-contrast/reduced-motion checks | Human visual approval on macOS |
 | Tray/startup/quit | Native code uses shared runtime operations; runtime enforces projection only while connected and protected | Native tray interactions, login launch and quit recovery |
 
-## Verification
+## Historical Verification
 
 - Renderer: 39 tests cover native close-request dispatch and save guards, nested
   focus return, fixed-sidebar shortcuts, native editing-menu dispatch, browser-navigation suppression,
