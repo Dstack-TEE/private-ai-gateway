@@ -619,14 +619,14 @@ test("local rejections explain why token usage is not applicable", async ({ page
   const missing = page.getByText("Not applicable", { exact: true });
   await expect(missing).toHaveCount(2);
   await missing.first().focus();
-  await expect(page.getByRole("tooltip")).toContainText("blocked locally before forwarding");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toContainText("blocked locally before forwarding");
 });
 
 test("help uses hover and focus tooltips in the main window and native dialogs", async ({ page }) => {
   await page.goto("/?mock=ready");
   const privacy = page.getByRole("button", { name: "Privacy verification", exact: true });
   await privacy.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Privacy verification");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toHaveText("Privacy verification");
   await expect(privacy).not.toHaveAttribute("title");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.keyboard.press("Escape");
@@ -635,7 +635,7 @@ test("help uses hover and focus tooltips in the main window and native dialogs",
   await page.goto("/?mock=ready&native-dialog=local-api");
   const reveal = page.getByRole("button", { name: "Reveal client key", exact: true });
   await reveal.focus();
-  const tooltip = page.getByRole("tooltip");
+  const tooltip = page.getByRole("tooltip").and(page.locator("[data-open]"));
   await expect(tooltip).toHaveText("Reveal client key");
   expect(await tooltip.evaluate((node) => Boolean(node.closest("dialog")))).toBe(true);
   await reveal.click();
@@ -863,7 +863,7 @@ test("network listeners show discovered addresses and require explicit save cons
   await page.getByRole("option", { name: "192.168.1.20 en0" }).click();
   await expect(input).toHaveValue("192.168.1.20");
   await sheet.getByRole("button", { name: "Network access warning" }).hover();
-  await expect(page.getByRole("tooltip")).toContainText("unencrypted HTTP");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toContainText("unencrypted HTTP");
   page.once("dialog", (dialog) => { expect(dialog.message()).toContain("192.168.1.20"); void dialog.dismiss(); });
   await sheet.getByRole("button", { name: "Save", exact: true }).click();
   await expect(sheet).toBeVisible();
@@ -1094,7 +1094,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await localSheet.getByLabel("Listen address", { exact: true }).fill("192.168.1.20");
   await page.keyboard.press("Escape");
   await localSheet.getByRole("button", { name: "Network access warning" }).hover();
-  await expect(page.getByRole("tooltip")).toContainText("trusted network");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toContainText("trusted network");
   await localSheet.getByLabel("Listen address", { exact: true }).fill("127.0.0.1");
   await page.keyboard.press("Escape");
   await expect(localSheet.getByText("Access keys", { exact: true })).toHaveCount(0);
@@ -1298,7 +1298,7 @@ test("model stacks render under production-style CSP without dynamic style tags"
   await expect(picker.locator('[data-slot="calendar"]')).toBeVisible();
   await picker.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("table", { name: "Usage history", exact: true }).getByLabel("Token details", { exact: true }).first().hover();
-  await expect(page.getByRole("tooltip")).toContainText("Cache read");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toContainText("Cache read");
 });
 
 test("settings keep the installed version visible without manual update controls", async ({ page }) => {
@@ -1386,7 +1386,7 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await expect(history.locator("tbody tr")).toHaveCount(20);
   await expect(history.getByRole("columnheader")).toHaveText(["Time", "Agent", "Model", "Tokens", "Cost", "Result"]);
   await history.getByLabel("Token details", { exact: true }).first().hover();
-  await expect(page.getByRole("tooltip")).toContainText("Cache read");
+  await expect(page.getByRole("tooltip").and(page.locator("[data-open]"))).toContainText("Cache read");
   await page.keyboard.press("Escape");
   await choose(page, page.getByRole("combobox", { name: "Rows per page" }), "50");
   await expect(history.locator("tbody tr")).not.toHaveCount(20);
