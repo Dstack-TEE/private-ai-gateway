@@ -1476,7 +1476,7 @@ function Overview({
             onToggleKey={onToggleClientKey}
           />
         </OverviewModule>
-        <OverviewModule title="Agents" description="Installed on this device." action="View all" onAction={onAgents}>
+        <OverviewModule title="Agents" description="Use private AI in your agents." action="View all" onAction={onAgents}>
           <div className="preview-list overview-agent-list">
             {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
             {sortAgents(agents.filter((agent) => agent.installed)).slice(0, 4).map((agent) => (
@@ -1499,7 +1499,7 @@ function Overview({
         >
           <div className="preview-list">
             {recent.length === 0 && (
-              <EmptyState text={running ? "No requests in this session yet." : "Start protection to begin a new session."} />
+              <EmptyState text={running || state.sessionActive || state.reconnecting ? "No requests in this session yet." : "Start protection to begin a new session."} />
             )}
             {recent.map((item) => (
               <React.Fragment key={item.id}><UsageRow activity={item} onOpen={() => onInspect(item)} /><Separator className="last:hidden" /></React.Fragment>
@@ -1707,7 +1707,7 @@ function SessionSummary({ summary, active }: { summary: UsageSummary; active: bo
         ["Requests", active ? summary.requests.toLocaleString() : "—"],
         ["Tokens", active ? formatTokens(totalTokens) : "—"],
         ["Estimated cost", active ? currency(summary.costUsd) : "—"],
-        ["Verified answers", active && forwarded ? `${protectedRate}%` : "—"],
+        ["Verified responses", active && forwarded ? `${protectedRate}%` : "—"],
       ].map(([label, value]) => <Item key={label} variant="muted" size="xs"><ItemContent className="min-w-0"><span className="text-xs text-muted-foreground">{label}</span><strong className="text-xl font-semibold tabular-nums">{value}</strong></ItemContent></Item>)}
     </CardContent>
     </Card>
