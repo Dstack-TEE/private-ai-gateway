@@ -1721,12 +1721,12 @@ function UsageRow({ activity, onOpen }: { activity: RequestActivity; onOpen(): v
   return (
     <ActionItem size="xs" className="usage-row" onClick={onOpen} aria-label={`${agentName(activity.agent)}, ${outcome.label}, ${activity.model ?? activity.path}. View proof`}>
       <span className="row-main">
-        <span className="row-title">{agentName(activity.agent)}</span>
+        <span className="row-title font-medium">{agentName(activity.agent)}</span>
         <StateLabel tone={outcome.tone} text={outcome.label} />
         <code className="row-note">{activity.model ?? activity.path}</code>
       </span>
-      <span className="usage-amount"><strong>{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
-      <span className="usage-amount usage-cost"><strong>{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
+      <span className="usage-amount"><strong className="font-medium">{tokens === undefined ? "—" : formatTokens(tokens)}</strong><small>tokens</small></span>
+      <span className="usage-amount usage-cost"><strong className="font-medium">{activity.costUsd === undefined ? "—" : currency(activity.costUsd)}</strong><small>cost</small></span>
       <time className="row-side" dateTime={timestamp.toISOString()}><span>{timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span><span>{formatTimestamp(timestamp.getTime())}</span></time>
     </ActionItem>
   );
@@ -2736,7 +2736,7 @@ function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
       <span className={`check-icon check-${check.status}`} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>
-      <span className="row-main"><span className="row-title">{title}</span><span className="row-note">{check.detail}</span></span>
+      <span className="row-main"><span className="row-title font-medium">{title}</span><span className="row-note">{check.detail}</span></span>
       <span className={`result result-${check.status}`}>{checkStatusLabel(check.status)}</span>
     </div>
   );
