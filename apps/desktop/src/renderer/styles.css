@@ -30,7 +30,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .form-sheet > .field-note, .form-sheet .sheet-footer, .form-sheet form > [data-slot="field-error"] { margin-inline: 20px; }
 .form-sheet .sheet-scroll { padding-inline: 20px; }
 .desktop-preview { position: relative; width: 100%; height: 100%; min-width: 200px; padding: 48px 24px 24px; display: grid; place-items: center; overflow: hidden; background: var(--background) url("/macos-wallpaper.webp") center / cover no-repeat; }
-.desktop-window { position: relative; width: min(1052px, 100%); height: min(728px, calc(100vh - 72px)); min-height: 560px; overflow: hidden; background: var(--window); border: 1px solid color-mix(in srgb, var(--color-black) 20%, transparent); border-radius: 10px; box-shadow: 0 22px 60px color-mix(in srgb, var(--color-black) 30%, transparent), 0 2px 8px color-mix(in srgb, var(--color-black) 16%, transparent); }
+.desktop-window { position: relative; box-sizing: content-box; width: min(1052px, calc(100% - 2px)); height: min(720px, calc(100vh - 74px)); min-height: 560px; overflow: hidden; background: var(--window); border: 1px solid color-mix(in srgb, var(--color-black) 20%, transparent); border-radius: 10px; box-shadow: 0 22px 60px color-mix(in srgb, var(--color-black) 30%, transparent), 0 2px 8px color-mix(in srgb, var(--color-black) 16%, transparent); }
 .mac-menu-bar { position: absolute; z-index: 30; inset: 0 0 auto; height: 28px; padding: 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--foreground); background: color-mix(in srgb, var(--background) 82%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-black) 12%, transparent); box-shadow: 0 1px 8px color-mix(in srgb, var(--color-black) 8%, transparent); backdrop-filter: blur(18px) saturate(130%); font-size: var(--text-sm); user-select: none; }
 .mac-menu-left, .mac-menu-right { min-width: 0; display: flex; align-items: center; gap: 17px; white-space: nowrap; }
 .mac-menu-left strong { font-size: var(--text-sm); font-weight: 600; }
@@ -90,7 +90,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .page-header h1 { font-size: var(--font-title); line-height: var(--text-lg--line-height); font-weight: 600; letter-spacing: 0; }
 .page-header h1 { pointer-events: none; user-select: none; }
 .content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; padding: 16px 24px 24px; }
-.overview-page { max-width: 960px; margin: 0 auto; container: overview / inline-size; }
+.overview-page { max-width: 960px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; container: overview / inline-size; }
 .page-body, .split { max-width: 920px; min-height: 100%; margin: 0 auto; }
 .page-footnote { margin: 8px 2px 0; color: var(--text-tertiary); font-size: var(--font-caption); line-height: var(--text-xs--line-height); }
 .page-protection { min-width: 0; margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -103,7 +103,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 
 .status-surface { position: relative; isolation: isolate; min-height: 168px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; background: var(--panel); border: 1px solid var(--separator); border-radius: var(--radius-2xl); }
 .overview-top { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
-.overview-top .status-surface.status-compact { width: 100%; height: auto; min-height: 140px; display: flex; align-items: stretch; overflow: hidden; }
+.overview-top .status-surface.status-compact { width: 100%; height: auto; min-height: 146px; display: flex; align-items: stretch; overflow: hidden; }
 .status-compact-content { position: relative; z-index: 2; display: grid; grid-template-columns: minmax(0, 1fr) 44px; grid-template-rows: auto 1fr; gap: 8px 12px; padding: 16px 20px; width: 100%; }
 .status-compact.status-ready { border-color: var(--success); }
 .status-compact.status-ready.is-development { border-color: var(--warning); }
@@ -170,7 +170,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .is-icon-only { margin-top: 3px; }
 
 .overview-banner { margin-top: 12px; }
-.overview-grid { margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 20px; }
+.overview-grid { flex: 1; margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(164px, 1fr) auto; gap: 28px 20px; }
 .overview-module { min-width: 0; }
 @container overview (max-width: 540px) {
   .overview-grid { grid-template-columns: 1fr; }
@@ -181,7 +181,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .module { min-width: 0; container-type: inline-size; background: var(--panel); border: 1px solid var(--separator); border-radius: var(--radius-2xl); }
 .overview-grid > .overview-module { display: grid; grid-template-rows: auto 1fr; }
 .overview-grid > .overview-module:first-child { grid-column: 1; grid-row: 1; }
-.overview-grid > .overview-module:first-child .module { height: 136px; }
+.overview-grid > .overview-module:first-child .module { min-height: 136px; }
 .overview-grid > .overview-module:nth-child(2) { grid-column: 1; grid-row: 2; }
 .overview-grid > .overview-module:nth-child(2) .module { align-self: start; }
 .overview-agent-list { --agent-row-height: calc(2rem + 1.25rem + 2px); display: grid; grid-template-rows: repeat(3, minmax(var(--agent-row-height), auto) 1px) minmax(var(--agent-row-height), auto); }
@@ -305,7 +305,7 @@ h1, h2, p, dl, dd, ul { margin: 0; }
 .profile-editor-sheet { width: min(620px, calc(var(--window-dialog-width, 100vw) - 32px)); }
 .profiles-sheet[open], .profile-editor-sheet[open] { display: flex; flex-direction: column; }
 .profile-editor-sheet form { min-height: 0; display: flex; flex-direction: column; }
-.local-api-sheet { width: min(560px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(480px, calc(var(--window-dialog-height, 100vh) - 32px)); }
+.local-api-sheet { width: min(560px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(512px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .local-api-examples-sheet { width: min(720px, calc(var(--window-dialog-width, 100vw) - 32px)); height: min(560px, calc(var(--window-dialog-height, 100vh) - 32px)); }
 .local-api-examples-sheet[open] { display: flex; flex-direction: column; }
 .notifications-sheet { width: min(580px, calc(var(--window-dialog-width, 100vw) - 32px)); }

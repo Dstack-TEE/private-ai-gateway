@@ -27,6 +27,15 @@ test("compact overview separates provider verification from current-session usag
   });
   expect(bottomSpace).toBeLessThanOrEqual(1.5);
   expect(await page.locator(".content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
+  const margins = await page.locator(".content").evaluate((node) => {
+    const frame = node.getBoundingClientRect();
+    const overview = node.querySelector(".overview-page");
+    if (!overview) throw new Error("Missing overview");
+    const content = overview.getBoundingClientRect();
+    return [content.left - frame.left, frame.right - content.right, frame.bottom - content.bottom];
+  });
+  expect(margins).toEqual([24, 24, 24]);
+  await expect(page.locator("html")).toHaveAttribute("data-main-presented", "true");
   await expect(protection.getByText("Request protection", { exact: false })).toHaveCount(0);
   await expect(protection.getByText("Protect requests", { exact: true })).toHaveCount(0);
   await expect(protection.locator(".tracks-left, .status-glow, .status-local")).toHaveCount(0);
@@ -806,7 +815,7 @@ test("reused native dialog discards drafts and credentials before reopening", as
 test("dialog theme is initialized before presentation without loading the chart engine", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(() => {
-    window.__GATEWAY_INITIAL_APPEARANCE__ = "light";
+    if (new URLSearchParams(location.search).has("native-dialog")) window.__GATEWAY_INITIAL_APPEARANCE__ = "light";
     localStorage.setItem("pap-preview-appearance", "light");
   });
   const chartRequests: string[] = [];
@@ -817,9 +826,16 @@ test("dialog theme is initialized before presentation without loading the chart 
   expect(chartRequests).toEqual([]);
   await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-appearance")));
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+  await page.goto("/?mock=appearance-pending");
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-main-presented", "true");
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-appearance")));
+  await expect(page.locator("html")).toHaveAttribute("data-main-presented", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
-test("native presentation waits for required credentials but not decorative image decoding", async ({ page }) => {
+test("native presentation waits for required credentials and local visual assets", async ({ page }) => {
   await page.goto("/?mock=example-key-pending&native-dialog=local-api-example");
   await expect(page.getByRole("dialog", { name: "Local API examples" })).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-native-presented", "true");
@@ -830,12 +846,16 @@ test("native presentation waits for required credentials but not decorative imag
   await page.addInitScript(() => {
     const decode = HTMLImageElement.prototype.decode;
     HTMLImageElement.prototype.decode = async function () {
+      document.documentElement.dataset.imageDecodePending = "true";
       await new Promise<void>((resolve) => window.addEventListener("test:decode-images", () => resolve(), { once: true }));
       return decode.call(this);
     };
   });
   await page.goto("/?mock=ready&native-dialog=profile-editor");
   await expect(page.getByRole("dialog", { name: "New profile" })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-image-decode-pending", "true");
+  await expect(page.locator("html")).not.toHaveAttribute("data-native-presented", "true");
+  await page.evaluate(() => window.dispatchEvent(new Event("test:decode-images")));
   await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
 });
 
@@ -859,7 +879,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       text: "sk-pap-",
     },
     {
-      size: { width: 580, height: 510 },
+      size: { width: 580, height: 560 },
       path: "/?mock=ready&native-dialog=profile-editor",
       name: "New profile",
       text: "Verify and Save",
@@ -871,7 +891,7 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       text: "Attested encrypted channel",
     },
     {
-      size: { width: 600, height: 680 },
+      size: { width: 600, height: 512 },
       path: "/?mock=no-key&native-dialog=local-api",
       name: "Local API settings",
       text: "Listen address",
@@ -881,6 +901,18 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
       path: "/?mock=ready&native-dialog=usage-proof&record=51be02",
       name: "Usage proof",
       text: "Signed receipt verified",
+    },
+    {
+      size: { width: 620, height: 560 },
+      path: "/?mock=ready&native-dialog=profiles",
+      name: "Profiles",
+      text: "New Profile",
+    },
+    {
+      size: { width: 580, height: 580 },
+      path: "/?mock=ready&native-dialog=notifications",
+      name: "Notifications",
+      text: "Allow notifications",
     },
   ] as const;
 
@@ -893,6 +925,11 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     await expect(page.locator("html")).toHaveAttribute("data-native-presented", "true");
     await expect(page.locator("html")).not.toHaveAttribute("data-loading-frame-observed", "true");
     expect(await dialog.boundingBox()).toEqual({ x: 0, y: 0, ...entry.size });
+    expect(await dialog.evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
+    await expect(dialog.locator(".sheet-footer")).toBeInViewport();
+    if (entry.name === "New profile" || entry.name === "Local API settings") {
+      expect(await dialog.locator(".sheet-scroll").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
+    }
     if (entry.name === "New profile") await expect(dialog.getByRole("textbox", { name: "Profile name" })).toBeFocused();
     else if (entry.name === "Local API settings") await expect(dialog.getByLabel("Listen address", { exact: true })).toBeFocused();
     else await expect(dialog.getByRole("heading").first()).toBeFocused();
@@ -925,6 +962,9 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
         await expect(dialog.getByRole("region", { name: "Proof scope" })).toBeVisible();
       }
     }
+    await page.setViewportSize({ width: entry.size.width, height: 420 });
+    expect(await dialog.evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
+    await expect(dialog.locator(".sheet-footer")).toBeInViewport();
   }
 });
 
@@ -1192,7 +1232,7 @@ test("overview shows four agents, four current-session records, truthful copy su
   await expect(localApi.locator(".overview-module-title").getByText("Available", { exact: true })).toBeVisible();
   await expect(localApi.locator(".copy-rows").getByText("Available", { exact: true })).toHaveCount(0);
   await expect(localApi.getByText("for your own tools", { exact: true })).toHaveCount(0);
-  await expect(localApi.locator(".module")).toHaveCSS("height", "136px");
+  await expect(localApi.locator(".module")).toHaveCSS("min-height", "136px");
   await expect(session.locator(".session-summary > div")).toHaveCount(4);
 
   const endpoint = localApi.getByRole("button", { name: /Local endpoint/ });

@@ -85,7 +85,7 @@ Overview aligns the switch with the status text at the top right;
 the profile and info actions sit below. The Agents card reserves four standard
 item rows even when fewer agents are installed; it does not create placeholder
 agents. Elapsed time is visible only while protected, independent of whether a
-session remains resumable. The initial window is 1052x728; saved user window geometry takes
+session remains resumable. The initial window is 1052x720; saved user window geometry takes
 precedence on later launches.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
@@ -202,8 +202,13 @@ that limitation without claiming permission is granted. Focus modes may still
 suppress delivery. Installed packages must be tested on each OS; tray state,
 update badges and inline errors remain available without notification delivery.
 
-Native dialogs present once required content is mounted; decorative image decoding
-does not block presentation. Example dialogs wait for their local key read.
+Native windows wait for required content, the initial appearance, fonts and local
+image decoding before requesting presentation. Failed image decoding does not
+block the window. Example dialogs also wait for their local key read.
+The main window uses the same readiness gate instead of showing during native
+setup; Open at Login stays hidden until explicitly requested. This follows
+[Tauri's frontend-ready pattern](https://v2.tauri.app/learn/splashscreen/), without
+adding a splash screen. It is a content-readiness gate, not a compositor fence.
 Dialog windows are created lazily and reused after closing. Closing unmounts the
 form, clearing drafts, credential inputs, and data subscriptions; reopening mounts
 fresh content from the backend subscription snapshot. Mutations still use fresh
@@ -212,6 +217,9 @@ and Linux are recreated because their owner is fixed at creation.
 Each dialog kind retains at most one WebView, trading bounded memory for faster
 repeat opens. The first open still pays the platform's WebView creation cost.
 Dialog windows are not user-resizable; screen-boundary fitting remains enabled.
+Profile editors use 580x560 and Local API settings use 600x512 content areas to
+fit standard fields without scrolling. Long verification details and small-screen
+layouts scroll within the body while keeping the footer visible.
 Both emitters and JavaScript listeners target the owning WebviewWindow. Tauri's
 default Any listener also receives targeted events, so emit_to alone does not
 isolate nested sheets.

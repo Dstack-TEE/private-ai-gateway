@@ -330,6 +330,7 @@ export interface DesktopApi {
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   openNativeDialog(kind: "profiles" | "profile-editor" | "setup-profile" | "privacy" | "local-api" | "usage-proof" | "update-progress" | "local-api-example" | "notifications", options?: { repair?: boolean; recordId?: string; profileId?: string }): Promise<void>;
   nativeDialogReady(): Promise<void>;
+  mainWindowReady(): Promise<void>;
   onNativeDialogOpen(listener: (request: { state: GatewayState; repair: boolean; recordId?: string | null; profileId?: string | null; startAfterSave?: boolean }) => void): () => void;
   onNativeDialogDismissed(listener: () => void): () => void;
   onNativeCloseRequest(listener: () => void): () => void;

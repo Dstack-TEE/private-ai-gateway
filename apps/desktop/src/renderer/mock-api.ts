@@ -473,6 +473,7 @@ export function mockApi(name: string | null): DesktopApi {
     openNativeDialog: async () => undefined,
     closeNativeDialog: async () => undefined,
     nativeDialogReady: async () => { document.documentElement.dataset.nativePresented = "true"; },
+    mainWindowReady: async () => { document.documentElement.dataset.mainPresented = "true"; },
     onNativeDialogOpen: (listener) => {
       const open = () => listener({ state: structuredClone(state), repair: false });
       window.addEventListener("mock:dialog-open", open);

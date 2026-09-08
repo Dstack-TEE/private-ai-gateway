@@ -123,6 +123,7 @@ export const desktopApi: DesktopApi = {
     return invoke("close_native_dialog");
   },
   nativeDialogReady: () => invoke("native_dialog_ready"),
+  mainWindowReady: () => invoke("main_window_ready"),
   onNativeDialogOpen: (listener) => subscribe("gateway://dialog-open", listener),
   onNativeDialogDismissed: (listener) => subscribe("gateway://dialog-dismissed", listener),
   onNativeCloseRequest: (listener) => subscribe("gateway://dialog-close-requested", listener),
