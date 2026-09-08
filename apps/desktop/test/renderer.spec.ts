@@ -724,10 +724,16 @@ test("Agents reserves four rows and elapsed time only appears while protected", 
   for (const scenario of ["interactive", "verifying", "blocked", "error", "reconnecting"]) {
     await page.goto(`/?mock=${scenario}`);
     await expect(page.getByLabel("Protection status").locator(".protection-duration")).toHaveCount(0);
+    for (const card of await page.locator(".overview-top > [data-slot=card]").all()) {
+      await expect(card).toHaveCSS("height", "176px");
+    }
   }
   await page.goto("/?mock=ready");
   const duration = page.getByLabel("Protection status").locator(".protection-duration");
   await expect(duration).toBeVisible();
+  for (const card of await page.locator(".overview-top > [data-slot=card]").all()) {
+    await expect(card).toHaveCSS("height", "176px");
+  }
   await page.clock.install();
   const initial = await duration.getAttribute("datetime");
   if (!initial) throw new Error("Missing session duration");
@@ -1378,8 +1384,10 @@ test("success colors, list separators, control sizes and About alignment are con
     await expect(available).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await expect(available.locator('[data-slot="status-dot"]')).toHaveCSS("background-color", success);
     await expect(nav(page, "Agents")).toHaveCSS("border-radius", "14px");
-    await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
-    await expect(page.locator(".status-compact")).toHaveCSS("--tw-shadow", "0 0 #0000");
+    const protectionShadow = await page.locator(".status-compact").evaluate((node) => getComputedStyle(node).boxShadow);
+    expect(protectionShadow).toContain(success);
+    expect(protectionShadow).toContain("4px 6px -1px");
+    await expect(page.locator(".status-compact")).toHaveClass(/shadow-primary\/10/);
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
