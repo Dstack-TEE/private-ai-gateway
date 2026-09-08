@@ -14,14 +14,14 @@ export function SettingsList({ children }: PropsWithChildren): React.JSX.Element
 
 export function SettingsSection({ title, children }: PropsWithChildren<{ title: string }>): React.JSX.Element {
   const id = useId();
-  return <section className="group" aria-labelledby={id}>
-    <h2 className="group-title" id={id}>{title}</h2>
+  return <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby={id}>
+    <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id={id}>{title}</h2>
     <SettingsList>{children}</SettingsList>
   </section>;
 }
 
 export function RowContent({ title, description, descriptionId }: { title: ReactNode; description?: ReactNode; descriptionId?: string }): React.JSX.Element {
-  return <span className="row-main"><span className="row-title">{title}</span>{description && <span className="row-note" id={descriptionId}>{description}</span>}</span>;
+  return <span className="row-main min-w-0 flex-auto flex flex-wrap items-center gap-y-0.5 gap-x-2"><span className="row-title">{title}</span>{description && <span className="row-note flex-[1_0_100%] block text-muted-foreground text-xs wrap-anywhere [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [code&]:overflow-hidden [code&]:text-ellipsis [code&]:whitespace-nowrap" id={descriptionId}>{description}</span>}</span>;
 }
 
 export function SettingsLink({ title, description, external = false, ...props }: Omit<ComponentProps<typeof ActionItem>, "title" | "children" | "className"> & { title: string; description?: ReactNode; external?: boolean }): React.JSX.Element {

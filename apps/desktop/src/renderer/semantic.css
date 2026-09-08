@@ -21,34 +21,12 @@
   --chart-9: var(--color-pink-500);
   --chart-10: var(--color-indigo-500);
 
-  /* Existing page names alias standard theme tokens, not a second palette. */
-  --font-title: var(--text-lg);
-  --font-body: var(--text-sm);
-  --font-caption: var(--text-xs);
   --sidebar-width: 196px;
-  --text: var(--foreground);
-  --text-secondary: var(--muted-foreground);
-  --text-tertiary: var(--muted-foreground);
-  --window: var(--background);
-  --panel: var(--card);
-  --panel-subtle: var(--muted);
-  --separator: var(--border);
-  --separator-strong: var(--border);
-  --control: var(--background);
-  --control-hover: var(--muted);
-  --control-pressed: var(--secondary);
-  --control-border: var(--border);
-  --control-radius: var(--radius);
-  --selected: var(--accent);
-  --on-accent: var(--primary-foreground);
   --warning: var(--color-amber-700);
   --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
   --danger: var(--destructive);
   --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
-  --neutral: var(--muted-foreground);
-  --neutral-bg: var(--muted);
   --backdrop: color-mix(in oklch, var(--color-black) 32%, transparent);
-  --veil-color: color-mix(in srgb, var(--foreground) 16%, var(--panel));
 }
 :root.dark {
   color-scheme: dark;

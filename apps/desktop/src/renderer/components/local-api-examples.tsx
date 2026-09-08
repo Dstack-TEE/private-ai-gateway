@@ -54,7 +54,7 @@ export function LocalApiExamples({ endpoint, models, api, onCopy, onClose, onRea
     catch { setError("Could not copy the example."); }
     finally { setCopying(false); }
   };
-  return <Sheet title="Local API examples" className="local-api-examples-sheet" onClose={onClose}>
+  return <Sheet title="Local API examples" className="local-api-examples-sheet w-[min(720px,_calc(var(--window-dialog-width,_100vw)_-_32px))] h-[min(560px,_calc(var(--window-dialog-height,_100vh)_-_32px))] [&[open]]:flex [&[open]]:flex-col" onClose={onClose}>
     <Field className="mt-4">
       <FieldLabel htmlFor="example-model">Model</FieldLabel>
       <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}
