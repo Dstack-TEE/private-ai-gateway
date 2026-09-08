@@ -99,6 +99,7 @@ pub enum Command {
         options: ConnectOptions,
     },
     DisconnectAllAgents,
+    ResetSettings,
     Preferences,
     SetPreference(Preference),
 }

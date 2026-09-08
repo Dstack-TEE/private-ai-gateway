@@ -282,6 +282,9 @@ impl Client {
     pub fn preferences(&self) -> Result<Preferences, String> {
         self.request(Command::Preferences)
     }
+    pub fn reset_settings(&self) -> Result<GatewayState, String> {
+        self.request(Command::ResetSettings)
+    }
     pub fn set_preference(&self, change: Preference) -> Result<Preferences, String> {
         self.request(Command::SetPreference(change))
     }

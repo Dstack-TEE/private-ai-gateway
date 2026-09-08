@@ -387,6 +387,7 @@ async fn dispatch(runtime: &Arc<DesktopRuntime>, command: Command) -> Result<Val
                 options,
             } => value(runtime.apply_agent(agent_id, connect, revision, options)?),
             Command::DisconnectAllAgents => value(runtime.disconnect_all_agents()?),
+            Command::ResetSettings => value(runtime.reset_settings().await?),
             Command::Preferences => value(preferences::load()?),
             Command::SetPreference(change) => {
                 preferences::update(|saved| match change {

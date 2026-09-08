@@ -430,6 +430,27 @@ export function mockApi(name: string | null): DesktopApi {
       return state;
     },
     getState: async () => state,
+    resetSettings: async () => {
+      if (name === "reset-error") throw new Error("Reset could not finish. Retry Reset settings.");
+      verifyRun += 1;
+      state = { ...state, status: "stopped", sessionActive: false, reconnecting: false, protectedSince: undefined,
+        configurationVerification: false, identity: undefined, checks: [], error: undefined,
+        config: { ...state.config, requireProductionOs: true },
+        localApi: { listenAddress: "127.0.0.1", allowNetworkAccess: false, port: 4180 },
+        proxyUrl: "http://127.0.0.1:4180" };
+      agents = agents.map((agent) => ({ ...agent, connected: false, recorded: false, authorized: false, attention: undefined, repairAction: undefined }));
+      launchPreferences = { openAtLogin: false, connectOnLaunch: false };
+      updateChannel = "stable";
+      localStorage.setItem("pag-preview-appearance", "system");
+      for (const key of ["enabled", "gateway", "localApi", "verification"]) localStorage.removeItem(`mock:notifications:${key}`);
+      publish();
+      window.dispatchEvent(new Event("mock:settings-reset"));
+      return state;
+    },
+    onSettingsReset: (listener) => {
+      window.addEventListener("mock:settings-reset", listener);
+      return () => window.removeEventListener("mock:settings-reset", listener);
+    },
     onStateChange: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -556,7 +577,7 @@ export function mockApi(name: string | null): DesktopApi {
     stop: async () => {
       if (name === "stop-protection-error") throw new Error("Could not stop protection");
       verifyRun += 1;
-      state = { ...state, status: "stopped", reconnecting: false, protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
+      state = { ...state, status: "stopped", sessionActive: false, reconnecting: false, protectedSince: undefined, configurationVerification: false, progress: undefined, identity: undefined, checks: [] };
       publish();
       return state;
     },

@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
-pub struct PendingUpdate(tokio::sync::Mutex<Option<Update>>);
+pub struct PendingUpdate(pub(crate) tokio::sync::Mutex<Option<Update>>);
 
 fn matches_channel(version: &str, channel: UpdateChannel) -> bool {
     let Ok(version) = semver::Version::parse(version) else {

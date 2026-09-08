@@ -681,7 +681,8 @@ impl DesktopRuntime {
         if initial.status == "verifying" {
             return Err("Wait for the current verification to finish".to_string());
         }
-        let reconnect = self.manager.is_running()? && !initial.configuration_verification;
+        let reconnect = initial.session_active
+            || (self.manager.is_running()? && !initial.configuration_verification);
         let initial_settings = service_config::settings_from_state(
             initial.profiles.clone(),
             initial.active_profile_id.clone(),
@@ -731,7 +732,8 @@ impl DesktopRuntime {
         settings.require_production_os = require_production_os;
 
         if reconnect {
-            self.stop_inner()?;
+            self.stop_with_reconnect(true)?;
+            self.manager.cancel_reconnection();
         }
         let previous = self.manager.snapshot()?;
 
@@ -755,7 +757,7 @@ impl DesktopRuntime {
             return Err("Configuration verification did not start".to_string());
         };
         let verified = self.manager.wait_for_verification(&session_id).await;
-        let stop_result = self.manager.stop();
+        let stop_result = self.manager.stop_with_reconnect(initial.session_active);
         if let Err(error) = verified {
             self.proxy.set_api_key(None);
             self.manager.restore_snapshot(previous);
@@ -826,7 +828,8 @@ impl DesktopRuntime {
         if previous.active_profile_id == profile_id {
             return Ok(previous);
         }
-        let reconnect = self.manager.is_running()? && !previous.configuration_verification;
+        let reconnect = previous.session_active
+            || (self.manager.is_running()? && !previous.configuration_verification);
         let mut settings = service_config::settings_from_state(
             previous.profiles,
             previous.active_profile_id,
@@ -839,7 +842,8 @@ impl DesktopRuntime {
             .cloned()
             .ok_or_else(|| "Confidential AI profile not found".to_string())?;
         if reconnect {
-            self.stop_inner()?;
+            self.stop_with_reconnect(true)?;
+            self.manager.cancel_reconnection();
         }
         settings.active_profile_id = profile.id;
         let settings = service_config::save(settings)?;
@@ -1217,6 +1221,7 @@ impl DesktopRuntime {
         revision: String,
         options: ConnectOptions,
     ) -> Result<AgentStatus, String> {
+        let _operation = self.configuration_change()?;
         let _guard = self
             .agent_policy
             .lock()
@@ -1248,6 +1253,11 @@ impl DesktopRuntime {
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, String> {
+        let _operation = self.configuration_change()?;
+        self.disconnect_all_agents_inner()
+    }
+
+    fn disconnect_all_agents_inner(&self) -> Result<Vec<AgentStatus>, String> {
         let _guard = self
             .agent_policy
             .lock()
@@ -1277,6 +1287,38 @@ impl DesktopRuntime {
                 }
             }
         }
+    }
+
+    pub async fn reset_settings(self: &Arc<Self>) -> Result<GatewayState, String> {
+        let _operation = self.configuration_change()?;
+        if self.instance.is_none() {
+            return Err("Reset settings in the primary backend instance".into());
+        }
+        self.recovery.cancel();
+        self.stop_inner()?;
+        self.disconnect_all_agents_inner()?;
+        let current = self.manager.local_api()?;
+        let defaults = LocalApiConfig::default();
+        let resolved = local_api::resolve(defaults.clone())?;
+        self.rebind_local_api(defaults, current, resolved).await?;
+        let state = self.manager.snapshot()?;
+        let settings =
+            service_config::settings_from_state(state.profiles, state.active_profile_id, true)?;
+        let settings = service_config::save(settings)?;
+        let config = settings.runtime_config()?;
+        let credential_saved = settings
+            .active_profile()
+            .is_ok_and(service_config::profile_has_credential);
+        self.manager.set_service_configuration(
+            config,
+            settings.profiles,
+            settings.active_profile_id,
+            credential_saved,
+            false,
+        );
+        crate::preferences::reset()?;
+        self.codex_sync.reset()?;
+        self.manager.snapshot()
     }
 
     fn reconcile_agents(&self) -> Result<(), String> {
@@ -1512,6 +1554,7 @@ mod tests {
         runtime.manager.restore_snapshot(GatewayState {
             status: "verified".into(),
             session_id: Some("network-session".into()),
+            session_active: true,
             protected_since: Some(123),
             session_usage: UsageSummary {
                 requests: 7,

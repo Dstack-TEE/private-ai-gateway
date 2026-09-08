@@ -96,6 +96,9 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             command: Usage::Clear,
         } => format!("Deleted {} usage records.", text(&value["deleted"])),
         Action::Settings {
+            command: Settings::Reset,
+        } => "Backend settings reset. Profiles, keys and usage kept; protection is off.".into(),
+        Action::Settings {
             command: Settings::Set { key, .. },
         } => format!("Updated {}.", safe(&key.to_string())),
         Action::Token {

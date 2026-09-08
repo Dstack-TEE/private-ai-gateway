@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { confirm } from "@tauri-apps/plugin-dialog";
 
 import type {
@@ -92,6 +93,8 @@ export const desktopApi: DesktopApi = {
   getState(): Promise<GatewayState> {
     return invoke("get_gateway_state");
   },
+  resetSettings: () => invoke("reset_settings"),
+  onSettingsReset: (listener) => subscribe("gateway://settings-reset", listener),
   onStateChange(listener: (state: GatewayState) => void): () => void {
     return subscribe("gateway://state", listener);
   },
@@ -192,7 +195,9 @@ function subscribe<T>(event: string, listener: (payload: T) => void): () => void
   let disposed = false;
   let unlisten: (() => void) | undefined;
   try {
-    void listen<T>(event, (received) => { if (!disposed) listener(received.payload); }).then(
+    void listen<T>(event, (received) => { if (!disposed) listener(received.payload); }, {
+      target: { kind: "WebviewWindow", label: getCurrentWebviewWindow().label },
+    }).then(
       (nextUnlisten) => {
         if (disposed) {
           nextUnlisten();

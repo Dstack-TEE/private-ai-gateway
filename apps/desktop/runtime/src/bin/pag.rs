@@ -392,6 +392,10 @@ fn execute(cli: &Cli) -> Result<(), String> {
         },
         Action::Settings { command } => {
             match command {
+                Settings::Reset => {
+                    confirm(cli, "Stop protection, restore all agents, and reset backend settings? Profiles, keys and usage are kept. Open at Login is managed by the desktop app.")?;
+                    value(client.reset_settings()?)?
+                }
                 Settings::Show => {
                     json!({"preferences": client.preferences()?, "localApi": client.state()?.local_api})
                 }

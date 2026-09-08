@@ -134,6 +134,55 @@ async fn set_launch_preference(
 const AUTOSTART_ARG: &str = "--autostart";
 
 #[tauri::command]
+async fn reset_settings(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    pending: State<'_, updates::PendingUpdate>,
+) -> Result<GatewayState, String> {
+    let mut pending = pending
+        .0
+        .try_lock()
+        .map_err(|_| "An update operation is in progress")?;
+    let worker_app = app.clone();
+    let client = client.inner().clone();
+    let worker = client.clone();
+    let result = run_blocking(move || {
+        let state = worker.reset_settings()?;
+        tray::set_open_at_login(&worker_app, false)?;
+        if let (Some(window), Some(defaults)) = (
+            worker_app.get_webview_window("main"),
+            worker_app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main"),
+        ) {
+            window
+                .set_fullscreen(false)
+                .map_err(|_| "Could not reset the window")?;
+            window
+                .unmaximize()
+                .map_err(|_| "Could not reset the window")?;
+            window
+                .set_size(tauri::LogicalSize::new(defaults.width, defaults.height))
+                .map_err(|_| "Could not reset the window size")?;
+            window.center().map_err(|_| "Could not center the window")?;
+        }
+        Ok(state)
+    })
+    .await;
+    *pending = None;
+    refresh_preferences(&app, &client);
+    let state = result.map_err(|error| {
+        format!("Reset did not finish. Review the error and retry Reset settings. {error}")
+    })?;
+    app.emit_to("main", "gateway://settings-reset", ())
+        .map_err(|_| "Settings reset, but the interface could not refresh")?;
+    Ok(state)
+}
+
+#[tauri::command]
 async fn get_appearance(client: State<'_, Arc<Client>>) -> Result<Appearance, String> {
     let client = client.inner().clone();
     run_blocking(move || Ok(client.preferences()?.appearance)).await
@@ -650,6 +699,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_backend_service,
             get_gateway_state,
+            reset_settings,
             read_profile_backup,
             import_profiles,
             export_profiles,

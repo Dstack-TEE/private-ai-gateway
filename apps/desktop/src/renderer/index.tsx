@@ -195,7 +195,7 @@ function hasLiveVerification(state: GatewayState): boolean {
 
 function ProtectionStatus({ state, label }: { state: GatewayState; label: string }): React.JSX.Element {
   const active = isProtected(state);
-  const since = active || state.reconnecting ? state.protectedSince : undefined;
+  const since = active || state.sessionActive || state.reconnecting ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (since === undefined) return;
@@ -552,9 +552,9 @@ function NativeUsageProofWindow({ initialRecordId }: { initialRecordId: string }
   return <main className="native-dialog-host"><UsageEvidenceSheet activity={activity} onClose={native.close} /></main>;
 }
 
-function App(): React.JSX.Element {
+function App({ initialView = "overview" }: { initialView?: View }): React.JSX.Element {
   const updates = useUpdates(desktopApi, !previewMode);
-  const [view, setView] = useState<View>("overview");
+  const [view, setView] = useState<View>(initialView);
   const [settingsTarget, setSettingsTarget] = useState<SettingsTarget>();
   const [profileEditorId, setProfileEditorId] = useState<string>();
   const [state, setState] = useState<GatewayState>(INITIAL_STATE);
@@ -576,7 +576,7 @@ function App(): React.JSX.Element {
   const agentScanQueued = useRef(false);
   const [applying, setApplying] = useState(false);
   const [selectedUsage, setSelectedUsage] = useState<RequestActivity>();
-  const [notice, setNotice] = useState<{ id: number; text: string }>();
+  const [notice, setNotice] = useState<{ id: number; text: string } | undefined>(() => initialView === "settings" ? { id: Date.now(), text: "Settings reset" } : undefined);
   const [previewTrayOpen, setPreviewTrayOpen] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
   const firstUsePresented = useRef(false);
@@ -959,14 +959,14 @@ function App(): React.JSX.Element {
     }
   };
 
-  const restoreAll = async () => {
+  const resetSettings = async () => {
     setActionError(undefined);
     let confirmed: boolean;
     try {
       confirmed = await desktopApi.confirm({
-        title: "Restore all agents?",
-        message: "Every agent token will be revoked first, then every configuration managed by Private AI Gateway will be restored.",
-        confirmLabel: "Restore All",
+        title: "Reset settings?",
+        message: "Stop protection, disconnect all agents and restore their configurations, and reset appearance, notifications, startup preferences, development OS policy, update channel, Local API settings, and window size. Profiles, credentials, the local API key, and usage history are kept. This does not change system notification permission or uninstall the pag command.",
+        confirmLabel: "Reset settings",
       });
     } catch (error) {
       setActionError(errorMessage(error));
@@ -975,9 +975,9 @@ function App(): React.JSX.Element {
     if (!confirmed) return;
     setApplying(true);
     try {
-      await desktopApi.disconnectAllAgents();
+      setState(await desktopApi.resetSettings());
       await loadAgents();
-      setNotice({ id: Date.now(), text: "All agent configurations restored" });
+      setNotice({ id: Date.now(), text: "Settings reset" });
       window.setTimeout(() => document.getElementById("page-title-settings")?.focus(), 0);
     } catch (error) {
       setActionError(errorMessage(error));
@@ -986,7 +986,6 @@ function App(): React.JSX.Element {
     }
   };
 
-  const anyRecorded = agents.some((agent) => agent.recorded);
   const problem = actionError ?? clientKeyError ?? state.error;
   const locked = applying;
   const focusPageHeading = (next: View) => {
@@ -1095,11 +1094,10 @@ function App(): React.JSX.Element {
             busy={busy}
             running={running}
             allowDevelopmentOs={allowDevelopmentOs}
-            anyRecorded={anyRecorded}
             locked={locked || Object.keys(pendingAgentChanges).length > 0}
             problem={problem}
             onPolicy={(value) => void changeDevelopmentOs(value)}
-            onRestoreAll={() => void restoreAll()}
+            onResetSettings={() => void resetSettings()}
             onAboutLink={(target) => void run(() => desktopApi.openAboutLink(target))}
             onOpen={openSettings}
             launchPreferences={launchPreferences}
@@ -1444,7 +1442,7 @@ function Overview({
 }): React.JSX.Element {
   const protectedNow = isProtected(state);
   const localAvailable = isProtected(state) && Boolean(state.proxyUrl) && !state.endpointError;
-  const recent = protectedNow || state.reconnecting ? state.activity.slice(0, 4) : [];
+  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 4) : [];
   return (
     <div className="overview-page">
       <div className="overview-top">
@@ -1459,7 +1457,7 @@ function Overview({
         onSettings={onSettings}
         onPrivacy={onPrivacy}
       />
-      <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.reconnecting)} />
+      <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
       </div>
       {problem && (
         <p className="banner overview-banner" role="alert">
@@ -1620,7 +1618,7 @@ function ProtectedControl({
       {developmentMode && !compact && <span className="dev-mode-label">Dev mode</span>}
       <SwitchControl
         tone="success"
-        size={iconOnly && !compact ? "lg" : "default"}
+        size="default"
         checked={checked}
         label={label}
         disabled={(busy && state.configurationVerification) || (endpointDown && !checked)}
@@ -2171,11 +2169,10 @@ function SettingsView({
   busy,
   running,
   allowDevelopmentOs,
-  anyRecorded,
   locked,
   problem,
   onPolicy,
-  onRestoreAll,
+  onResetSettings,
   onAboutLink,
   onOpen,
   launchPreferences,
@@ -2187,11 +2184,10 @@ function SettingsView({
   busy: boolean;
   running: boolean;
   allowDevelopmentOs: boolean;
-  anyRecorded: boolean;
   locked: boolean;
   problem?: string;
   onPolicy(value: boolean): void;
-  onRestoreAll(): void;
+  onResetSettings(): void;
   onAboutLink(target: "documentation" | "github"): void;
   onOpen(target: SettingsTarget): void;
   launchPreferences?: LaunchPreferences;
@@ -2226,11 +2222,11 @@ function SettingsView({
           <UpdateChannelControl updates={updates} />
           <CliRegistrationControl />
           <ExportDiagnostics api={desktopApi} onMessage={setDiagnosticMessage} />
+          <SettingsLink title="Reset settings" disabled={locked} onClick={onResetSettings} />
           </SettingsList>
         </CollapsibleContent>
       </Collapsible>
 
-      {anyRecorded && <SettingsSection title="Agents"><Item><ItemContent><ItemTitle>Restore all agent configs</ItemTitle><ItemDescription>Restore the original configuration for every connected agent.</ItemDescription></ItemContent><ItemActions><Button variant="outline" disabled={locked} onClick={onRestoreAll}>Restore all</Button></ItemActions></Item></SettingsSection>}
 
       <SettingsSection title="About">
           <UpdateControl updates={updates} productName={brand.productName} />
@@ -2929,12 +2925,14 @@ function MissingUsage({ activity }: { activity: Pick<RequestActivity, "leftDevic
   return <Hint content={explanation}><span tabIndex={0} className="text-muted-foreground underline decoration-dotted underline-offset-4">{notApplicable ? "Not applicable" : "Unavailable"}</span></Hint>;
 }
 
-function WindowContent(): React.JSX.Element {
-  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App /></NotificationsProvider>;
+function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
+  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App initialView={reset ? "settings" : "overview"} /></NotificationsProvider>;
 }
 
 export function Renderer(): React.JSX.Element {
   const [interactionError, setInteractionError] = useState("");
+  const [settingsRevision, setSettingsRevision] = useState(0);
+  useEffect(() => desktopApi.onSettingsReset(() => setSettingsRevision((value) => value + 1)), []);
   useEffect(() => installNativeInteractions(desktopApi, setInteractionError), []);
-  return <TooltipProvider><AppearanceProvider api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider>;
+  return <TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider>{interactionError && <span className="sr-only" role="alert">{interactionError}</span>}</AppearanceProvider></TooltipProvider>;
 }

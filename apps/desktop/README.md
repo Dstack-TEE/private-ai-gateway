@@ -34,8 +34,11 @@ shadows or typography; choose from the official component variants instead.
 Component sources in `src/renderer/components/ui` were obtained from the official
 `https://ui.shadcn.com/r/styles/base-luma/{component}.json` registry on 2026-09-05.
 Local changes are import paths and Lucide icon substitution.
-The Overview protection control uses the existing 60x28 large switch variant;
-page headers retain the default 44x20 geometry. Both use Base UI behavior.
+Protection controls use the standard 44x20 switch geometry and Base UI behavior.
+Overview aligns the switch with the status text at the top right;
+the profile and info actions sit below. The Agents card fits its four rows
+without a minimum-height spacer. The initial window is 1052x728; saved user window geometry takes
+precedence on later launches.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent
 shadcn additions. Use these components for new standard controls; retain semantic
@@ -118,10 +121,12 @@ or stream termination, with cancellation on backend exit. Monitor availability i
 visible in Settings and redacted diagnostics. Environments without login1 retain
 network recovery but cannot report wake until the service becomes available.
 Recovery revokes the old transport generation and restores agent configurations
-before fresh verification. Automatic network/wake recovery preserves the user
-session ID, start time, usage totals, and recent records. Changing Local API
-settings also preserves that session; manual stop/start or switching profiles
-starts a new one. Retaining usage never reuses a verified identity or catalog.
+before fresh verification. The user session is independent of that transport:
+network/wake recovery, interrupted-verification retries, profile changes and Local
+API restarts preserve its ID, start time and usage. SQLite stores the current
+session marker so an abnormal backend exit does not silently split usage. Restart
+loads its usage summary but never restores a verified identity or forwarding
+permission. Manual stop, explicit backend shutdown and Reset settings end it.
 If all non-loopback addresses disappear it waits for an address to
 return. Address presence is not a claim of internet reachability; a failed fresh
 verification requires user attention, not unlimited retries. Events survive a busy
@@ -158,6 +163,10 @@ backend validation. Update dialogs are one-shot, and profile editors on Windows
 and Linux are recreated because their owner is fixed at creation.
 Each dialog kind retains at most one WebView, trading bounded memory for faster
 repeat opens. The first open still pays the platform's WebView creation cost.
+Dialog windows are not user-resizable; screen-boundary fitting remains enabled.
+Both emitters and JavaScript listeners target the owning WebviewWindow. Tauri's
+default Any listener also receives targeted events, so emit_to alone does not
+isolate nested sheets.
 Native dialogs receive the saved appearance with their initial state and apply
 it in a layout effect, avoiding a temporary System-theme render before the async
 preferences read. Recharts is loaded only on Usage; its fixed-height shell stays
@@ -647,7 +656,16 @@ the exact fields with a revision of the inputs; generated model maps are shown
 as a concise catalog summary instead of serialized JSON. `Apply` refuses if any
 moved. Token, parked secrets, config, and record are applied as one transaction
 and rolled back together.
-`Disconnect` and `Restore all` work without endpoint or gateway.
+`Disconnect` and CLI `agents disconnect-all` work without endpoint or gateway.
+Settings > Advanced > Reset settings stops protection, restores all managed agent
+configurations, restores the default local listener and production-OS policy,
+and resets preferences. The desktop also disables Open at Login, resets the main
+window size and position, and refreshes
+all preference controls. Profiles, provider credentials, the local client key,
+usage history, system notification authorization, and installed CLI registration
+are retained. Partial failures are reported and leave the reset retryable; no
+unrelated agent edits are overwritten. The CLI counterpart `pag --yes settings reset`
+uses the same backend transaction but does not change the OS login item.
 `Disconnect` tombstones the record (disabled, cleanup pending), deletes the
 token file before any record or config is touched, and syncs the removal to
 the parent directory (on Windows, a directory-handle flush) before anything

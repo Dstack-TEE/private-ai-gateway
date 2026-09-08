@@ -266,11 +266,14 @@ pub struct GatewayState {
     /// Stable id and complete persisted totals for the current protection run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Unix seconds when this protection session first became verified.
+    /// Unix seconds when this user protection session began.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_since: Option<u64>,
     #[serde(default)]
     pub reconnecting: bool,
+    /// User protection session, independent of the current verified transport.
+    #[serde(default)]
+    pub session_active: bool,
     pub session_usage: UsageSummary,
     /// Changes only when persisted usage changes; renderer queries can depend
     /// on this instead of the bounded activity preview.
@@ -310,6 +313,7 @@ impl Default for GatewayState {
             session_id: None,
             protected_since: None,
             reconnecting: false,
+            session_active: false,
             session_usage: UsageSummary::default(),
             usage_revision: 0,
             error: None,

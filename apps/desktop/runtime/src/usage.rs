@@ -72,6 +72,31 @@ pub struct UsageStore {
 }
 
 impl UsageStore {
+    pub fn active_session(&self) -> Result<Option<(String, u64)>, String> {
+        self.lock()?
+            .query_row(
+                "SELECT session_id, started_at FROM active_session WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("Cannot read the current session: {error}"))
+    }
+
+    pub fn save_active_session(&self, id: &str, started_at: u64) -> Result<(), String> {
+        self.lock()?.execute(
+            "INSERT INTO active_session (singleton, session_id, started_at) VALUES (1, ?1, ?2)
+             ON CONFLICT(singleton) DO UPDATE SET session_id = excluded.session_id, started_at = excluded.started_at",
+            params![id, started_at],
+        ).map(|_| ()).map_err(|error| format!("Cannot save the current session: {error}"))
+    }
+
+    pub fn end_session(&self) -> Result<(), String> {
+        self.lock()?
+            .execute("DELETE FROM active_session WHERE singleton = 1", [])
+            .map(|_| ())
+            .map_err(|error| format!("Cannot end the current session: {error}"))
+    }
     pub fn open(path: PathBuf) -> Result<Self, String> {
         secure_parent(&path)?;
         match fs::symlink_metadata(&path) {
@@ -328,6 +353,11 @@ fn initialize(connection: &Connection) -> Result<(), String> {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS active_session (
+               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+               session_id TEXT NOT NULL,
+               started_at INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS usage_records (
                id TEXT PRIMARY KEY NOT NULL,
                session_id TEXT NOT NULL,

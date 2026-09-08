@@ -88,6 +88,13 @@ pub fn update(change: impl FnOnce(&mut Preferences)) -> Result<(), String> {
     save(preferences)
 }
 
+pub fn reset() -> Result<(), String> {
+    let _guard = WRITE_LOCK
+        .lock()
+        .map_err(|_| "Preferences are unavailable")?;
+    save(Preferences::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Appearance, Preferences, UpdateChannel};

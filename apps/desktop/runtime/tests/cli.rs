@@ -225,6 +225,53 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
+    let backend = Backend::start();
+    let backup = backend.directory.path().join("profiles-reset.json");
+    fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
+    backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
+    backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
+    backend.run(&["settings", "set", "connectOnLaunch", "true", "--yes"]);
+    backend.run(&["agents", "connect", "codex", "--yes"]);
+    let key = backend.run(&["token", "show", "--yes"]);
+    let profiles = backend.run(&["profiles", "list"]);
+    let before = backend.run(&["settings", "show"]);
+    let refused = backend
+        .command(&["settings", "reset", "--json"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert_eq!(backend.run(&["settings", "show"]), before);
+    let occupied = TcpListener::bind("127.0.0.1:4180").unwrap();
+    let failed = backend
+        .command(&["settings", "reset", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(backend.run(&["settings", "show"]), before);
+    assert_eq!(backend.run(&["token", "show", "--yes"]), key);
+    drop(occupied);
+    let state = backend.run(&["settings", "reset", "--yes"]);
+    assert_eq!(state["status"], "stopped");
+    assert_eq!(state["sessionActive"], false);
+    assert_eq!(state["localApi"]["listenAddress"], "127.0.0.1");
+    assert_eq!(state["localApi"]["port"], 4180);
+    assert_eq!(state["config"]["requireProductionOs"], true);
+    assert_eq!(backend.run(&["token", "show", "--yes"]), key);
+    assert_eq!(backend.run(&["profiles", "list"]), profiles);
+    assert!(backend
+        .run(&["agents", "list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|agent| agent["recorded"] == false));
+    let settings = backend.run(&["settings", "show"]);
+    assert_eq!(settings["preferences"]["appearance"], "system");
+    assert_eq!(settings["preferences"]["connectOnLaunch"], false);
+    assert_eq!(settings["preferences"]["notifications"]["enabled"], true);
+}
+
+#[test]
 fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let backend = Backend::start();
     #[cfg(unix)]

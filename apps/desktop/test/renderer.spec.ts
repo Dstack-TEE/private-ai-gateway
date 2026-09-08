@@ -17,6 +17,16 @@ test("compact overview separates provider verification from current-session usag
   await page.setViewportSize({ width: 1280, height: 960 });
   await page.goto("/?mock=ready");
   const protection = page.getByRole("region", { name: "Protection status", exact: true });
+  const agentCard = page.locator(".overview-module").filter({ has: page.getByRole("heading", { name: "Agents", exact: true }) });
+  await expect(agentCard.locator(".agent-block")).toHaveCount(4);
+  const bottomSpace = await agentCard.evaluate((node) => {
+    const frame = node.querySelector(".module")?.getBoundingClientRect();
+    const last = Array.from(node.querySelectorAll(".agent-block")).at(-1)?.getBoundingClientRect();
+    if (!frame || !last) throw new Error("Missing agent card");
+    return frame.bottom - last.bottom;
+  });
+  expect(bottomSpace).toBeLessThanOrEqual(1.5);
+  expect(await page.locator(".content").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
   await expect(protection.getByText("Request protection", { exact: false })).toHaveCount(0);
   await expect(protection.getByText("Protect requests", { exact: true })).toHaveCount(0);
   await expect(protection.locator(".tracks-left, .status-glow, .status-local")).toHaveCount(0);
@@ -537,6 +547,74 @@ test("diagnostics export has success and error feedback", async ({ page }) => {
   await expect(page.getByRole("status").filter({ hasText: "Could not export diagnostics." })).toBeVisible();
 });
 
+test("reset is in Advanced, requires consent and preserves profiles", async ({ page }) => {
+  await page.goto("/?mock=ready");
+  await nav(page, "Settings").click();
+  await expect(page.getByText("Restore all agent configs", { exact: true })).toHaveCount(0);
+  const reset = page.getByRole("button", { name: "Reset settings", exact: true });
+  await expect(reset).not.toBeVisible();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await reset.click();
+  await expect(page.getByRole("switch", { name: "Stop protection" })).toBeChecked();
+  page.once("dialog", (dialog) => {
+    expect(dialog.message()).toContain("Profiles, credentials, the local API key, and usage history are kept");
+    return dialog.accept();
+  });
+  await reset.click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Start protection" })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "Profiles", exact: true })).toContainText("RedPill");
+  await expect(page.getByRole("switch", { name: "Protect on launch" })).not.toBeChecked();
+});
+
+test("native event subscriptions isolate child dismissal from the Profiles window", async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = {
+      status: "stopped", configurationVerification: false, apiKeySaved: true,
+      config: { remoteUrl: "https://tee.redpill.ai", requireProductionOs: true },
+      localApi: { listenAddress: "127.0.0.1", port: 4180, allowNetworkAccess: false },
+      activity: [], checks: [], sessionUsage: {}, activeProfileId: "work",
+      profiles: [{ id: "work", name: "Work profile", provider: "redpill", remoteUrl: "https://tee.redpill.ai", credentialSaved: true }],
+    };
+    const callbacks = new Map<number, (event: unknown) => void>();
+    const listeners = new Map<number, { event: string; target: { kind: string; label?: string }; handler: number }>();
+    let serial = 0;
+    Object.defineProperty(window, "__GATEWAY_INITIAL_STATE__", { configurable: true, value: state });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {
+      metadata: { currentWebview: { label: "profiles" }, currentWindow: { label: "profiles" } },
+      transformCallback: (callback: (event: unknown) => void) => { const id = ++serial; callbacks.set(id, callback); return id; },
+      unregisterCallback: (id: number) => callbacks.delete(id),
+      invoke: async (command: string, args: { event?: string; target?: { kind: string; label?: string }; handler?: number; eventId?: number }) => {
+        if (command === "plugin:event|listen" && args.event && args.handler !== undefined) {
+          const id = ++serial;
+          listeners.set(id, { event: args.event, target: args.target ?? { kind: "Any" }, handler: args.handler });
+          if (args.event === "gateway://dialog-dismissed") document.documentElement.dataset.dismissListenerReady = "true";
+          return id;
+        }
+        if (command === "plugin:event|unlisten" && args.eventId !== undefined) { listeners.delete(args.eventId); return; }
+        if (command === "get_gateway_state") return state;
+        if (command === "get_appearance") return "system";
+        if (command === "get_notification_settings") return { preferences: { enabled: false }, permission: "denied" };
+        if (command === "native_dialog_ready") document.documentElement.dataset.presented = "true";
+      },
+    } });
+    window.addEventListener("test:child-dismiss", () => {
+      for (const [id, listener] of listeners) {
+        if (listener.event === "gateway://dialog-dismissed" && (listener.target.kind === "Any" || listener.target.label === "profile-editor")) {
+          callbacks.get(listener.handler)?.({ event: listener.event, id, payload: null });
+        }
+      }
+    });
+  });
+  await page.goto("/?native-dialog=profiles");
+  await expect(page.locator("html")).toHaveAttribute("data-dismiss-listener-ready", "true");
+  await expect(page.getByText("Work profile", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("test:child-dismiss")));
+  await expect(page.getByRole("dialog", { name: "Profiles", exact: true })).toBeVisible();
+  await expect(page.getByText("Work profile", { exact: true })).toBeVisible();
+});
+
 test("Profiles keeps its list underneath the profile editor", async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 560 });
   await page.goto("/?mock=no-key&native-dialog=profiles");
@@ -647,12 +725,15 @@ test("overview profile and setup controls share compact dimensions", async ({ pa
     await page.goto(`/?mock=${scenario}`);
     const card = page.getByLabel("Protection status");
     const profile = card.locator("#overview-profile");
-    await expect(profile).toHaveCSS("width", "120px");
+    await expect(profile).toHaveCSS("width", "140px");
     await expect(profile).toHaveCSS("height", "32px");
     const bounds = await profile.boundingBox();
     const toggle = await card.getByRole("switch").boundingBox();
+    const label = await card.locator('.status-heading [aria-live="polite"]').boundingBox();
     expect(bounds).not.toBeNull();
     expect(toggle).not.toBeNull();
+    expect(label).not.toBeNull();
+    expect(Math.abs((toggle?.y ?? 0) + (toggle?.height ?? 0) / 2 - (label?.y ?? 0) - (label?.height ?? 0) / 2)).toBeLessThanOrEqual(0.5);
     expect(toggle?.y).toBeLessThan(bounds?.y ?? 0);
     expect(toggle?.x).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0));
     await expect(card.locator(".status-background-mark")).toHaveCount(0);
@@ -1020,13 +1101,16 @@ test("five agents connect and disconnect directly from the verified discovered c
   await expect(pi.getByText("Not connected", { exact: true })).toBeVisible();
 
   await nav(page, "Settings").click();
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
   page.once("dialog", async (dialog) => {
     expect(dialog.type()).toBe("confirm");
-    expect(dialog.message()).toContain("Restore all agents?");
+    expect(dialog.message()).toContain("Reset settings?");
     await dialog.accept();
   });
-  await page.getByRole("button", { name: "Restore all" }).click();
-  await expect(page.locator('.sr-only[role="status"]')).toContainText("All agent configurations restored");
+  await page.getByRole("button", { name: "Reset settings", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await nav(page, "Agents").click();
+  await expect(page.getByRole("switch", { name: /^Disconnect / })).toHaveCount(0);
 });
 
 test("overview shows four agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
@@ -1178,10 +1262,10 @@ test("success colors, list separators, control sizes and About alignment are con
     const local = page.locator(".overview-module-title", { has: page.getByRole("heading", { name: "Local API", exact: true }) });
     await expect(local.locator('[data-slot="badge"]').filter({ hasText: /^Available$/ })).toHaveCSS("color", success);
     await expect(page.locator(".status-compact")).toHaveCSS("border-color", success);
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "60px");
-    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "28px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("width", "44px");
+    await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("height", "20px");
     await expect(page.getByLabel("Protection status").getByRole("switch")).toHaveCSS("background-color", success);
-    await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "120px");
+    await expect(page.getByRole("button", { name: "Profiles: RedPill" })).toHaveCSS("width", "140px");
     await expect(nav(page, "Agents")).toHaveCSS("height", "36px");
     await expect(nav(page, "Agents")).toHaveCSS("font-weight", "400");
     const buttonBefore = await nav(page, "Agents").boundingBox();

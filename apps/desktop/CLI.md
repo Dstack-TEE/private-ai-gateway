@@ -29,6 +29,20 @@ start protection. `start` waits for verified protection. `stop` stops protection
 and restores managed agent configuration but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 
+The user session survives transport failures, retries and profile changes until
+protection is explicitly stopped. After an abnormal backend exit, its session ID
+and usage can be resumed; verification and forwarding permission are never
+restored from disk.
+
+### Reset Settings
+
+`pag settings reset --yes` stops protection, disconnects managed agents, and
+restores backend preferences, the default Local API listener, and the production
+OS policy. Profiles, credentials, the local client key and usage history are kept.
+The same operation is available under Settings > Advanced in the desktop, which
+also disables Open at Login. CLI installation and system notification permission
+are unchanged. Failures are reported; retry after resolving the reported conflict.
+
 Human `status` summarizes the backend PID/version, active profile and service,
 saved credential presence (not unlock status), Local API exposure, production OS
 policy, TEE identity/checks, catalog size and current-session usage. Retained

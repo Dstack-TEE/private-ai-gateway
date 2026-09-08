@@ -195,9 +195,10 @@ export interface GatewayState {
   clientKeyAvailable?: boolean;
   backendConnected?: boolean;
   wakeMonitorAvailable?: boolean;
-  /** Unix seconds when the current protection session became verified. */
+  /** Unix seconds when the user protection session began, including interruptions. */
   protectedSince?: number;
   reconnecting?: boolean;
+  sessionActive?: boolean;
   status: GatewayStatus;
   /** Settings is verifying a candidate without enabling forwarding. */
   configurationVerification: boolean;
@@ -318,6 +319,8 @@ export interface DesktopApi {
   requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
   openNotificationSettings(): Promise<void>;
   getState(): Promise<GatewayState>;
+  resetSettings(): Promise<GatewayState>;
+  onSettingsReset(listener: () => void): () => void;
   onStateChange(listener: (state: GatewayState) => void): () => void;
   /** A native menu asked the main window to show a section. */
   onNavigate(listener: (section: "settings" | "agents") => void): () => void;

@@ -89,8 +89,28 @@ impl GatewayManager {
         usage: Arc<UsageStore>,
         launcher: Arc<dyn SidecarLauncher>,
         task_runtime: Handle,
-        state: GatewayState,
+        mut state: GatewayState,
     ) -> Self {
+        match usage.active_session() {
+            Ok(Some((id, started_at))) => {
+                match usage.session_summary(&id) {
+                    Ok(summary) => state.session_usage = summary,
+                    Err(error) => state.error = Some(error),
+                }
+                state.session_id = Some(id);
+                state.protected_since = Some(started_at);
+                state.session_active = true;
+                if state.error.is_none() {
+                    state.error = Some("The previous protection session was interrupted. Start protection to verify the service and resume it.".into());
+                }
+            }
+            Err(error) => state.error = Some(error),
+            Ok(None) => {}
+        }
+        let session_id = state
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "unscoped".into());
         let (state_tx, _) = watch::channel(state.clone());
         Self {
             inner: Mutex::new(RuntimeState {
@@ -102,7 +122,7 @@ impl GatewayManager {
                 sidecar_url: None,
                 identity_ready: false,
                 verification_only: false,
-                session_id: "unscoped".to_string(),
+                session_id,
                 last_catalog: None,
                 state,
             }),
@@ -166,19 +186,30 @@ impl GatewayManager {
             "--verify-receipts".to_string(),
         ]);
 
-        let (receiver, child) = self.launcher.spawn(args)?;
+        let (receiver, mut child) = self.launcher.spawn(args)?;
 
         runtime.generation = runtime.generation.wrapping_add(1);
         let generation = runtime.generation;
-        let continuing = !verification_only
-            && runtime.state.reconnecting
-            && runtime.state.session_id.is_some()
-            && runtime.state.config.remote_url == config.remote_url
-            && runtime.state.config.require_production_os == config.require_production_os;
+        let continuing = runtime.state.session_active && runtime.state.session_id.is_some();
         if !continuing {
-            runtime.session_id = format!("{:016x}-{:016x}", now_secs(), generation);
+            runtime.session_id = uuid::Uuid::new_v4().to_string();
         }
         let session_id = runtime.session_id.clone();
+        let started_at = if continuing {
+            runtime.state.protected_since
+        } else {
+            None
+        }
+        .or_else(|| (!verification_only).then(now_secs));
+        if !verification_only {
+            if let Err(error) = self
+                .usage
+                .save_active_session(&session_id, started_at.unwrap_or_else(now_secs))
+            {
+                let _ = child.kill();
+                return Err(error);
+            }
+        }
         runtime.child = Some(child);
         runtime.stdout.clear();
         runtime.diagnostic.clear();
@@ -194,12 +225,9 @@ impl GatewayManager {
             progress: Some("Starting the verifier".to_string()),
             remote_url: Some(remote_url.clone()),
             session_id: Some(session_id.clone()),
-            reconnecting: continuing,
-            protected_since: if continuing {
-                runtime.state.protected_since
-            } else {
-                None
-            },
+            reconnecting: continuing && !verification_only,
+            session_active: continuing || !verification_only,
+            protected_since: started_at,
             session_usage: if continuing {
                 runtime.state.session_usage.clone()
             } else {
@@ -293,6 +321,7 @@ impl GatewayManager {
         let protected_since = runtime.state.protected_since;
         runtime.state = Self::carried(&runtime.state);
         runtime.state.reconnecting = reconnecting;
+        runtime.state.session_active = reconnecting && runtime.state.session_active;
         if reconnecting {
             runtime.state.protected_since = protected_since;
         }
@@ -307,12 +336,18 @@ impl GatewayManager {
             session_id: reconnecting.then_some(session_id),
             ..Session::default()
         });
+        let session_result = if reconnecting {
+            Ok(())
+        } else {
+            self.usage.end_session()
+        };
         if let Some(mut child) = child {
             child
                 .kill()
                 .map_err(|error| format!("Cannot stop ACI executable: {error}"))?;
         }
         self.publish();
+        session_result?;
         Ok(state)
     }
 
@@ -333,6 +368,7 @@ impl GatewayManager {
             endpoint_error: previous.endpoint_error.clone(),
             activity: previous.activity.clone(),
             session_id: previous.session_id.clone(),
+            session_active: previous.session_active,
             session_usage: previous.session_usage.clone(),
             usage_revision: previous.usage_revision,
             catalog: previous.catalog.clone(),
@@ -1111,6 +1147,7 @@ mod tests {
             status: "verified".into(),
             config: config.clone(),
             session_id: Some("same-session".into()),
+            session_active: true,
             protected_since: Some(123),
             session_usage: UsageSummary {
                 requests: 7,
@@ -1130,12 +1167,46 @@ mod tests {
         assert!(proxy.session().generation > retired_generation);
         manager.terminated(retired_generation).unwrap();
         assert_eq!(manager.snapshot().unwrap().status, "verifying");
+        manager
+            .fail(proxy.session().generation, "Transport interrupted".into())
+            .unwrap();
+        let recovered = GatewayManager::new(
+            proxy.clone(),
+            manager.usage.clone(),
+            Arc::new(WaitingSidecar),
+            executor.handle().clone(),
+            GatewayState::default(),
+        )
+        .snapshot()
+        .unwrap();
+        assert_eq!(recovered.session_id, resumed.session_id);
+        assert_eq!(recovered.protected_since, Some(123));
+        assert!(recovered.session_active && recovered.identity.is_none());
+        assert_eq!(recovered.status, "stopped");
+        let retried = manager.start(config.clone()).unwrap();
+        assert_eq!(retried.session_id, resumed.session_id);
+        assert_eq!(retried.session_usage.requests, 7);
+        assert!(retried.session_active);
+        manager.stop_with_reconnect(true).unwrap();
+        let candidate = StartGatewayConfig {
+            remote_url: "https://tee.redpill.ai".into(),
+            ..config.clone()
+        };
+        let verification = manager.begin_verification(candidate.clone(), true).unwrap();
+        assert_eq!(verification.session_id, resumed.session_id);
+        assert!(verification.configuration_verification && verification.session_active);
+        manager.stop_with_reconnect(true).unwrap();
+        let switched = manager.start(candidate).unwrap();
+        assert_eq!(switched.session_id, resumed.session_id);
+        assert_eq!(switched.protected_since, Some(123));
         manager.stop().unwrap();
         assert!(proxy.session().session_id.is_none());
+        assert!(manager.usage.active_session().unwrap().is_none());
         let fresh = manager.start(config).unwrap();
         assert_ne!(fresh.session_id.as_deref(), Some("same-session"));
         assert_eq!(fresh.session_usage.requests, 0);
-        assert!(fresh.protected_since.is_none() && !fresh.reconnecting);
+        assert!(fresh.protected_since.is_some() && !fresh.reconnecting);
+        assert!(fresh.session_active);
         manager.stop().unwrap();
     }
 

@@ -380,6 +380,8 @@ impl fmt::Display for SettingsKey {
 
 #[derive(Subcommand)]
 pub(super) enum Settings {
+    /// Stop protection and reset backend settings, preserving profiles, keys and usage.
+    Reset,
     /// Show desktop preferences and Local API settings.
     Show,
     /// Change one setting. This may restart the Local API or protection.

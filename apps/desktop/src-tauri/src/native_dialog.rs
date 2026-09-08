@@ -249,7 +249,7 @@ pub fn open(
             .inner_size(spec.width, spec.height)
             .min_inner_size(spec.min_width, spec.min_height)
             .prevent_overflow()
-            .resizable(true)
+            .resizable(false)
             .maximizable(false)
             .minimizable(false)
             .skip_taskbar(true)
