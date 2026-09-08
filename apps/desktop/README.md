@@ -98,7 +98,7 @@ Overview aligns the switch with the status text at the top right;
 the profile and info actions sit below. The Agents card reserves four standard
 item rows even when fewer agents are installed; it does not create placeholder
 agents. Elapsed time is visible only while protected, independent of whether a
-session remains resumable. The initial window is 1052x860; saved user window geometry takes
+session remains resumable. The initial window is 1052x928; saved user window geometry takes
 precedence on later launches.
 Sidebar buttons use Luma's default 36px size, not its 56px large variant.
 `components.json` configures subsequent

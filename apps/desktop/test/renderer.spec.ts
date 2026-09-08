@@ -14,7 +14,7 @@ async function choose(page: Page, control: import("@playwright/test").Locator, l
 }
 
 test("compact overview separates provider verification from current-session usage", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 960 });
+  await page.setViewportSize({ width: 1280, height: 1040 });
   await page.goto("/?mock=ready");
   const protection = page.getByRole("region", { name: "Protection status", exact: true });
   const agentCard = page.locator(".overview-module").filter({ has: page.getByRole("heading", { name: "Agents", exact: true }) });
@@ -48,6 +48,9 @@ test("compact overview separates provider verification from current-session usag
   await expect(protection.getByText("Protect requests", { exact: true })).toHaveCount(0);
   await expect(protection.locator(".tracks-left, .status-glow, .status-local")).toHaveCount(0);
   const session = page.getByRole("region", { name: "Current session", exact: true });
+  await expect(session.getByRole("heading", { name: "Current session" })).toBeVisible();
+  await expect(agentCard.locator('[data-slot="card-description"]')).toHaveText("Installed on this device.");
+  await expect(page.getByText("Latest requests in this session.", { exact: true })).toBeVisible();
   await expect(session.locator(".session-summary > div")).toHaveCount(4);
   await expect(session.getByText("Active", { exact: true })).toHaveCount(0);
   await protection.getByRole("button", { name: "Privacy verification" }).click();
@@ -1221,7 +1224,7 @@ test("five agents connect and disconnect directly from the verified discovered c
 });
 
 test("overview shows four agents, four current-session records, truthful copy surfaces, and session totals", async ({ page }) => {
-  await page.setViewportSize({ width: 1100, height: 960 });
+  await page.setViewportSize({ width: 1100, height: 1040 });
   await page.goto("/?mock=ready");
 
   const agentsModule = page.locator(".overview-module", { has: page.getByRole("heading", { name: "Agents" }) });
