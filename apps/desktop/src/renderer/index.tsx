@@ -1758,7 +1758,7 @@ function AgentsView({
       {problem && <Alert variant="destructive"><AlertDescription>{problem}</AlertDescription></Alert>}
 
       <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="agents-title">
-        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="agents-title">Installed <span>{connected} connected</span></h2>
+        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="agents-title">Installed <span className="ml-auto truncate text-xs font-normal text-muted-foreground">{connected} connected</span></h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">
           {!agents.some((agent) => agent.installed) && <EmptyState text="No installed agents found" />}
           {sortAgents(agents.filter((agent) => agent.installed)).map((agent) => (
@@ -1773,7 +1773,7 @@ function AgentsView({
         </div>
       </section>
       {agents.some((agent) => !agent.installed) && <section className="group mt-5 [&:first-child]:mt-0" aria-labelledby="not-installed-title">
-        <h2 className="group-title min-h-5 mt-0 mr-0.5 mb-2 ml-0.5 flex items-center gap-2 text-sm font-semibold [&_>_span]:ml-auto [&_>_span]:min-w-0 [&_>_span]:overflow-hidden [&_>_span]:text-muted-foreground [&_>_span]:text-xs [&_>_span]:font-normal [&_>_span]:text-ellipsis [&_>_span]:whitespace-nowrap [&_>_.group-actions]:ml-0 [&_>_.group-actions]:flex [&_>_.group-actions]:shrink-0 [&_>_.group-actions]:gap-1.5 [&_>_.group-actions]:overflow-visible [&_>_.group-actions:first-of-type]:ml-auto" id="not-installed-title">Not installed</h2>
+        <h2 className="group-title mx-0.5 mb-2 flex min-h-5 items-center gap-2 text-sm font-semibold" id="not-installed-title">Not installed</h2>
         <div className="inset min-w-0 bg-card border border-border rounded-2xl overflow-hidden">{sortAgents(agents.filter((agent) => !agent.installed)).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} onSelect={() => undefined} />
         ))}</div>
@@ -1814,7 +1814,7 @@ function AgentRow({
     <><Item size={compact ? "xs" : "default"} variant={compact ? "muted" : "default"} className="agent-block">
       <AgentMark agent={agent} />
       <ItemContent className="min-w-0">
-        <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2 flex-wrap">
+        <ItemTitle className="row-title-line max-w-full flex items-center flex-wrap gap-y-1 gap-x-2">
           <span className="row-title">{name}</span>
           {note && pendingConnection === undefined
             ? <AgentAttention name={name} message={note} authorized={agent.authorized} action={!disabled ? agent.repairAction : undefined} onRepair={() => onSelect(agent.repairAction === "reconnect")} />
@@ -2335,7 +2335,7 @@ function ProfileListSheet({
                 <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
                 {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
               </ActionItem>
-              <IconButton size="icon-sm" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></IconButton>
+              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => onEdit(profile.id)}><Pencil /></IconButton>
             </div>
           );
         })}
@@ -2344,7 +2344,7 @@ function ProfileListSheet({
       {transferMessage && <p role="status" className="text-sm text-muted-foreground">{transferMessage}</p>}
       <SheetActions leading={
         <div className="flex items-center gap-2">
-        <Button type="button" variant="outline" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
+        <Button type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={onNew}><Plus size={15} />New Profile</Button>
         <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onBusy={setTransferBusy} onMessage={(message, failed) => { setError(failed ? message : undefined); setTransferMessage(failed ? undefined : message); }} />
         </div>
       }>
