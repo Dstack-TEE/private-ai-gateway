@@ -40,7 +40,7 @@ Provider selection uses three outlined buttons with provider icons. Account and
 API key use the shared Tabs components with the default segmented appearance.
 Organization and balance use the official Item composition: icon, title and
 balance description, then ItemActions. Top up is the visible action; Refresh
-balance and Sign in again use the standard Dropdown Menu. Workspace is the account section's only form
+balance and Switch account use the standard Dropdown Menu. Workspace is the account section's only form
 control; it is selectable when the grant provides alternatives. The footer uses
 Save for both account and manual-key configuration, including verification.
 

@@ -121,7 +121,7 @@ function AccountActions({ disabled, refreshing, onRefresh, onSignIn }: {
     <DropdownMenuTrigger render={<Button ref={trigger} type="button" size="icon-sm" variant="ghost" aria-label="Account actions" disabled={disabled} />}><Ellipsis aria-hidden /></DropdownMenuTrigger>
     <DropdownMenuContent align="end" container={container ?? undefined}>
       <DropdownMenuItem disabled={refreshing} onClick={onRefresh}><RefreshCw aria-hidden />Refresh balance</DropdownMenuItem>
-      {onSignIn && <DropdownMenuItem onClick={onSignIn}><LogIn aria-hidden />Sign in again</DropdownMenuItem>}
+      {onSignIn && <DropdownMenuItem onClick={onSignIn}><LogIn aria-hidden />Switch account</DropdownMenuItem>}
     </DropdownMenuContent>
   </DropdownMenu>;
 }

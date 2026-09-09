@@ -2078,7 +2078,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(accountSummary.getByText("$12.50", { exact: true })).toBeVisible();
   await expect(accountSummary.getByRole("textbox")).toHaveCount(0);
   await accountSummary.getByRole("button", { name: "Account actions" }).click();
-  await expect(page.getByRole("menuitem", { name: "Sign in again" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Switch account" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Refresh balance" }).click();
   await expect(page.getByRole("menu")).toHaveCount(0);
   const save = editor.getByRole("button", { name: "Save" });
@@ -2114,7 +2114,7 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await expect(saved.getByLabel("Workspace", { exact: true })).toHaveValue("Research");
   await expect(saved.getByText("$12.50", { exact: true })).toBeInViewport();
   await saved.getByRole("button", { name: "Account actions" }).click();
-  await page.getByRole("menuitem", { name: "Sign in again" }).click();
+  await page.getByRole("menuitem", { name: "Switch account" }).click();
   await expect(saved.getByRole("button", { name: "Account actions" })).toBeVisible();
   await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
