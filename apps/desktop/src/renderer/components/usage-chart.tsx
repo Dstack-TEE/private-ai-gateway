@@ -1,7 +1,6 @@
 import { lazy, Suspense, useMemo } from "react";
 import { differenceInCalendarDays, eachDayOfInterval, eachMonthOfInterval, format, parseISO, startOfDay, subDays } from "date-fns";
 import type { UsagePage } from "../../shared/contracts";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 
 export type UsageMetric = "tokens" | "cost" | "requests";
 const UsagePlot = lazy(() => import("./usage-chart-plot"));
@@ -37,8 +36,8 @@ export function modelChartData(page: Pick<UsagePage, "modelSeries" | "series"> &
   return { rows: data, series, monthly };
 }
 
-export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
-  page?: UsagePage; loading: boolean; range: string; bounds?: { start?: Date; end?: Date }; metric: UsageMetric; onMetric(metric: UsageMetric): void;
+export function UsageChart({ page, loading, range, bounds, metric }: {
+  page?: UsagePage; loading: boolean; range: string; bounds?: { start?: Date; end?: Date }; metric: UsageMetric;
 }): React.JSX.Element {
   const start = bounds?.start?.getTime();
   const end = (bounds?.end ?? startOfDay(new Date())).getTime();
@@ -50,18 +49,11 @@ export function UsageChart({ page, loading, range, bounds, metric, onMetric }: {
     ? { style: "currency", currency: "USD", maximumFractionDigits: 6 }
     : {}).format, [metric]);
   return <figure className="usage-chart relative min-h-62.5 m-0 max-[440px]:min-h-43" aria-busy={loading} aria-label={`${metric} usage by model${monthly ? " per month" : " per day"}`}>
-    <Tabs value={metric} onValueChange={(value) => { if (value === "tokens" || value === "cost" || value === "requests") onMetric(value); }}>
-      <TabsList aria-label="Chart metric">
-        <TabsTrigger value="tokens">Tokens</TabsTrigger><TabsTrigger value="cost">Cost</TabsTrigger><TabsTrigger value="requests">Requests</TabsTrigger>
-      </TabsList>
-      <TabsContent value={metric}>
         {!page ? <div className="h-72 flex items-center justify-center text-sm text-muted-foreground" role="status">{loading ? null : "Usage data unavailable."}</div> : <Suspense fallback={<div className="h-72" aria-busy="true" />}><UsagePlot rows={rows} series={series} monthly={monthly} metric={metric} formatValue={formatValue} /></Suspense>}
         {page?.summary.requests === 0 && <p className="text-sm text-muted-foreground">No usage in this range.</p>}
         <table className="sr-only" aria-label="Usage by model">
           <thead><tr><th>Period</th>{series.map((entry) => <th key={entry.key}>{entry.label}</th>)}</tr></thead>
           <tbody>{rows.map((row) => <tr key={row.period}><th>{row.period}</th>{series.map((entry) => <td key={entry.key}>{formatValue(Number(row[entry.key] ?? 0))}</td>)}</tr>)}</tbody>
         </table>
-      </TabsContent>
-    </Tabs>
   </figure>;
 }

@@ -432,7 +432,7 @@ test("model colors survive filtering and Other preserves all three metrics", () 
   }
 });
 
-test("custom date ranges apply atomically to chart, table and export", async ({ page }) => {
+test("custom date ranges apply atomically to chart and table", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-09-06T12:00:00"));
   await page.goto("/?mock=ready");
   await nav(page, "Usage").click();
@@ -453,8 +453,7 @@ test("custom date ranges apply atomically to chart, table and export", async ({ 
   const timestamps = await table.locator("time").evaluateAll((nodes) => nodes.map((node) => Date.parse(node.getAttribute("datetime") ?? "")));
   expect(timestamps.length).toBeGreaterThan(0);
   expect(timestamps.every((time) => time >= new Date(2026, 8, 2).getTime() && time < new Date(2026, 8, 5).getTime())).toBe(true);
-  await page.getByRole("button", { name: "Export usage as CSV" }).click();
-  await expect(page.locator('.sr-only[role="status"]')).toContainText(`Exported ${timestamps.length} usage records`);
+
 });
 
 test("public preview frames the Tauri renderer as a macOS window and exposes the tray contract", async ({ page }) => {
@@ -526,7 +525,9 @@ test("Usage chart preserves its layout while the initial query is pending", asyn
   await nav(page, "Usage").click();
   const chart = page.locator(".usage-chart");
   await expect(chart).toHaveAttribute("aria-busy", "true");
-  await expect(chart.getByRole("tab", { name: "Tokens", exact: true })).toBeVisible();
+  await expect(page.locator('.usage-over-time [data-slot="card-action"]').getByRole("tab", { name: "Tokens", exact: true })).toBeVisible();
+  await expect(page.locator('.usage-stats > [data-slot="card"]')).toHaveCount(4);
+  await expect(page.locator(".usage-over-time").getByText("Last 7 days", { exact: true })).toHaveCount(0);
   const before = await chart.boundingBox();
   await page.evaluate(() => window.dispatchEvent(new Event("mock:finish-usage-query")));
   await expect(chart).toHaveAttribute("aria-busy", "false");
@@ -1019,7 +1020,7 @@ test("stale profile editors are dismissible and configuration verification canno
   await expect(control).toBeDisabled();
 });
 
-test("usage query failures do not display stale totals and clearing preserves the selected filter", async ({ page }) => {
+test("usage query failures do not display stale totals or lose the selected filter", async ({ page }) => {
   await page.goto("/?mock=usage-query-error");
   await nav(page, "Usage").click();
   const history = page.getByRole("table", { name: "Usage history", exact: true });
@@ -1034,15 +1035,6 @@ test("usage query failures do not display stale totals and clearing preserves th
   await expect(model.locator('[data-slot="select-value"]')).toHaveText(selected);
   await expect(page.getByText("Usage data unavailable.")).toBeVisible();
 
-  await page.goto("/?mock=ready");
-  await nav(page, "Usage").click();
-  await choose(page, model, selected);
-  await expect(history.getByRole("button").first()).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Clear usage history" }).click();
-  await expect(history.getByRole("button")).toHaveCount(0);
-  await expect(model.locator('[data-slot="select-value"]')).toHaveText(selected);
-  await expect(page.locator(".usage-stats strong").first()).toHaveText("0");
 });
 
 test("network listeners show discovered addresses and require explicit save consent", async ({ page }) => {
@@ -1561,7 +1553,7 @@ test("local copy hover follows the grouped row shape and profiles open their dia
   await expect(profile).toBeFocused();
 });
 
-test("usage history filters, paginates, inspects proof boundaries, exports, and clears explicitly", async ({ page }) => {
+test("usage history filters, paginates and inspects proof boundaries", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-09-06T12:00:00"));
   await page.setViewportSize({ width: 940, height: 760 });
   await page.goto("/?mock=ready");
@@ -1628,24 +1620,8 @@ test("usage history filters, paginates, inspects proof boundaries, exports, and 
   await blockedProof.getByRole("button", { name: "Done" }).click();
   await expect(history).not.toContainText("/v1/models");
 
-  await page.getByRole("button", { name: "Export usage as CSV" }).click();
-  await expect(page.locator('.sr-only[role="status"]')).toContainText(/Exported \d+ usage records/);
-
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toContain("Clear usage history?");
-    await dialog.dismiss();
-  });
-  await page.getByRole("button", { name: "Clear usage history" }).click();
-  await expect(history.locator("tbody tr")).toHaveCount(20);
-
-  page.once("dialog", async (dialog) => {
-    expect(dialog.type()).toBe("confirm");
-    expect(dialog.message()).toContain("Clear usage history?");
-    await dialog.accept();
-  });
-  await page.getByRole("button", { name: "Clear usage history" }).click();
-  await expect(page.locator(".usage-history")).toContainText("No saved usage matches these filters.");
-  await expect(page.locator('.sr-only[role="status"]')).toContainText(/Deleted \d+ usage records/);
+  await expect(page.getByRole("button", { name: "Export usage as CSV" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Clear usage history" })).toHaveCount(0);
 });
 
 test("service settings stay focused while privacy verification exposes the complete proof", async ({ page }) => {
