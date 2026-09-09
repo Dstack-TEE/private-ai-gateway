@@ -2044,12 +2044,12 @@ test("account sign-in stays in the form and requires explicit verification and s
     const editor = page.getByRole("dialog", { name: "New profile" });
     await editor.getByRole("button", { name: provider, exact: true }).click();
     const signIn = editor.locator(".sheet-scroll").getByRole("button", { name: `Sign in with ${provider}`, exact: true });
-    const save = editor.locator(".sheet-footer").getByRole("button", { name: "Verify and Save" });
+    const save = editor.locator(".sheet-footer").getByRole("button", { name: "Connect account" });
     await expect(signIn.locator("img")).toHaveCount(1);
     await expect(editor.locator(".sheet-footer").getByRole("button", { name: /Sign in/ })).toHaveCount(0);
     await expect(save).toBeDisabled();
     await signIn.click();
-    await expect(editor.getByText("Signed in as Personal. Verify and save to use this account.")).toBeVisible();
+    await expect(editor.getByText("Signed in as Personal. Confirm this account to connect.")).toBeVisible();
     await expect(editor).toBeVisible();
     await expect(save).toBeEnabled();
     if (provider === "Phala") {
@@ -2074,20 +2074,21 @@ test("RedPill confirms workspace and exposes scoped balance and top-up actions",
   await editor.getByRole("button", { name: "RedPill", exact: true }).click();
   await editor.getByRole("button", { name: "Sign in with RedPill" }).click();
   await expect(editor.getByText("Personal organization", { exact: true })).toBeVisible();
-  const save = editor.getByRole("button", { name: "Verify and Save" });
+  const save = editor.getByRole("button", { name: "Connect account" });
   await expect(save).toBeDisabled();
   await choose(page, editor.getByRole("combobox", { name: "Workspace" }), "Research");
   await expect(save).toBeEnabled();
-  await editor.getByRole("button", { name: "Check balance" }).click();
   await expect(editor.getByText("$12.50 USD", { exact: true })).toBeInViewport();
   await editor.getByRole("button", { name: "Top up", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-top-up-provider", "redpill");
   await save.click();
+  const mainCard = page.getByRole("region", { name: "Protection status" });
+  await expect(mainCard.getByText("$12.50 USD", { exact: true })).toBeVisible();
+  await expect(mainCard.getByRole("button", { name: "Top up", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Profiles: RedPill" }).click();
   await page.getByRole("button", { name: "Edit RedPill" }).click();
   const saved = page.getByRole("dialog", { name: "Edit profile" });
   await expect(saved.getByText("Research", { exact: true })).toBeVisible();
-  await saved.getByRole("button", { name: "Check balance" }).click();
   await expect(saved.getByText("$12.50 USD", { exact: true })).toBeInViewport();
   await saved.getByRole("button", { name: "Phala", exact: true }).click();
   await expect(saved.getByText("Personal organization", { exact: true })).toHaveCount(0);
@@ -2099,7 +2100,21 @@ test("balance permission errors never display a zero balance", async ({ page }) 
   await page.getByRole("button", { name: "Set up profile" }).click();
   const editor = page.getByRole("dialog", { name: "New profile" });
   await editor.getByRole("button", { name: "Sign in with Phala" }).click();
-  await editor.getByRole("button", { name: "Check balance" }).click();
   await expect(editor.getByText("Your account does not have permission to view this balance")).toBeVisible();
   await expect(editor.getByText(/\$0\.00/)).toHaveCount(0);
+});
+
+
+test("a delayed balance cannot appear after changing provider", async ({ page }) => {
+  await page.goto("/?mock=oauth-balance-delayed");
+  await page.getByRole("button", { name: "Set up profile" }).click();
+  const editor = page.getByRole("dialog", { name: "New profile" });
+  await editor.getByRole("button", { name: "Sign in with Phala" }).click();
+  await expect(editor.getByRole("button", { name: "Sign in again" })).toBeVisible();
+  await expect(editor.getByLabel("Account balance")).toBeVisible();
+  await editor.getByRole("button", { name: "RedPill", exact: true }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("mock:release-balance")));
+  await expect(editor.getByRole("button", { name: "Sign in with RedPill" })).toBeVisible();
+  await expect(editor.getByLabel("Account balance")).toHaveCount(0);
+  await expect(editor.getByText("$12.50 USD", { exact: true })).toHaveCount(0);
 });

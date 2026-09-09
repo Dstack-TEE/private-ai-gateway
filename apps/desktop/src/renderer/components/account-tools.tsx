@@ -1,43 +1,94 @@
-import { useEffect, useRef, useState } from "react";
-import { CircleDollarSign, ExternalLink } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import type { AccountBalance, AccountBalanceTarget, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Button } from "./ui/button";
 import { FieldDescription, FieldError } from "./ui/field";
 
-export function AccountTools({ api, provider, target, scope, disabled }: {
+type Props = {
   api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
   provider: ServiceProvider;
   target: AccountBalanceTarget;
   scope?: AccountScope;
-  disabled: boolean;
-}) {
-  const result = useRef<HTMLDivElement>(null);
+  credentialRef?: string;
+  disabled?: boolean;
+  compact?: boolean;
+};
+
+/** Changing account or credential must never display the previous account's balance. */
+export function AccountTools(props: Props) {
+  const id = props.target.kind === "login" ? props.target.id : props.target.profileId;
+  return <AccountBalanceView key={`${props.provider}:${props.target.kind}:${id}:${props.credentialRef ?? ""}`} {...props} />;
+}
+
+function AccountBalanceView({ api, provider, target, scope, disabled = false, compact = false }: Props) {
   const [balance, setBalance] = useState<AccountBalance>();
-  useEffect(() => { if (balance) result.current?.scrollIntoView({ block: "nearest" }); }, [balance]);
   const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const run = async (action: () => Promise<void>) => {
-    if (busy || disabled) return;
-    setBusy(true);
-    setError(undefined);
-    try { await action(); } catch (error) { setError(errorMessage(error)); } finally { setBusy(false); }
-  };
-  const billingScope = balance?.scope ?? scope;
-  const owner = billingScope?.organization ?? billingScope?.workspace;
-  return <div className="space-y-2">
-    <div className="flex flex-wrap items-center gap-2">
-      <Button type="button" variant="outline" disabled={disabled || busy} onClick={() => void run(async () => { setBalance(undefined); setBalance(await api.getAccountBalance(target)); })}>
-        <CircleDollarSign aria-hidden />{busy ? "Loading…" : balance ? "Refresh balance" : "Check balance"}
-      </Button>
-      <Button type="button" variant="link" disabled={disabled || busy} onClick={() => void run(() => api.openTopUp(provider))}>Top up<ExternalLink aria-hidden /></Button>
+  const [linkError, setLinkError] = useState<string>();
+  const [busy, setBusy] = useState(true);
+  const [opening, setOpening] = useState(false);
+  const refresh = useRef<() => void>(() => {});
+  const returningFromTopUp = useRef(false);
+  const openingRef = useRef(false);
+  const kind = target.kind;
+  const id = target.kind === "login" ? target.id : target.profileId;
+
+  useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    let lastAttempt = 0;
+    const load = async (force = false) => {
+      if (disposed || inFlight || document.visibilityState === "hidden" || (!force && Date.now() - lastAttempt < 30_000)) return;
+      inFlight = true;
+      lastAttempt = Date.now();
+      returningFromTopUp.current = false;
+      setBusy(true);
+      try {
+        const value = await api.getAccountBalance(kind === "login" ? { kind, id } : { kind, profileId: id });
+        if (!disposed) { setBalance(value); setError(undefined); }
+      } catch (error) {
+        if (!disposed) { setBalance(undefined); setError(errorMessage(error)); }
+      } finally {
+        inFlight = false;
+        if (!disposed) setBusy(false);
+      }
+    };
+    refresh.current = () => { void load(true); };
+    const onReturn = () => { void load(returningFromTopUp.current); };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    const timer = setInterval(() => void load(), compact ? 300_000 : 60_000);
+    void load();
+    return () => {
+      disposed = true;
+      refresh.current = () => {};
+      clearInterval(timer);
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, [api, kind, id, compact]);
+
+  const topUp = useCallback(async () => {
+    if (openingRef.current || disabled) return;
+    openingRef.current = true;
+    setOpening(true);
+    setLinkError(undefined);
+    returningFromTopUp.current = true;
+    try { await api.openTopUp(provider); }
+    catch (error) { setLinkError(errorMessage(error)); returningFromTopUp.current = false; }
+    finally { openingRef.current = false; setOpening(false); }
+  }, [api, provider, disabled]);
+  const owner = (balance?.scope ?? scope)?.organization ?? (balance?.scope ?? scope)?.workspace;
+  const label = provider === "redpill" ? "Organization balance" : "Workspace balance";
+  return <div className="space-y-1.5 min-w-0" aria-label="Account balance">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm tabular-nums" role="status" aria-live="polite" aria-busy={busy}>
+      <span>{label}{!compact && owner ? ` · ${owner}` : ""}: {balance ? <strong>{currency(Number(balance.balanceUsd))} USD</strong> : busy ? "Loading…" : "Unavailable"}</span>
+      <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh balance" disabled={disabled || busy} onClick={() => refresh.current()}><RefreshCw className={busy ? "animate-spin motion-reduce:animate-none" : ""} aria-hidden /></Button>
+      <Button type="button" size="sm" variant="link" disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>
     </div>
-    <FieldError>{error}</FieldError>
-    {balance && <div ref={result} role="status" className="text-sm tabular-nums">
-      <p>{provider === "redpill" ? "Organization balance" : "Workspace balance"}{owner ? ` · ${owner}` : ""}: <strong>{currency(Number(balance.balanceUsd))} USD</strong></p>
-      {balance.grantedUsd !== null && <p>Promotional credits: {currency(Number(balance.grantedUsd))} USD</p>}
-    </div>}
-    <FieldDescription>{provider === "redpill" ? "Balance is shared by the organization; workspace and key limits still apply. " : ""}{owner ? `On the billing website, select ${owner} before topping up.` : "Top up opens the official billing website."}</FieldDescription>
+    {balance?.grantedUsd != null && <p className="text-xs text-muted-foreground tabular-nums">Promotional credits: {currency(Number(balance.grantedUsd))} USD</p>}
+    <FieldError>{error ?? linkError}</FieldError>
+    <FieldDescription>{compact ? owner ? `Billing account: ${owner}. Select this account on the billing website.` : "Top up opens the official billing website." : `${provider === "redpill" ? "Balance is shared by the organization; workspace and key limits still apply. " : ""}${owner ? `On the billing website, select ${owner} before topping up.` : "Top up opens the official billing website."}`}</FieldDescription>
   </div>;
 }

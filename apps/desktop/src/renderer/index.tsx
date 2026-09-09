@@ -1561,6 +1561,9 @@ function StatusSurface({
         </Button>
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={onPrivacy}><Info aria-hidden="true" /></IconButton>
         </div>
+        {activeProfile?.auth.kind === "oauth" && profileHasCredential(activeProfile) && <div className="col-span-full row-start-3 border-t pt-2">
+          <AccountTools api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} scope={activeProfile.auth.scope} compact />
+        </div>}
         <ProtectedControl state={state} busy={busy} running={running} endpointDown={endpointDown} developmentMode={developmentMode} onToggle={onToggle} iconOnly />
       </CardContent>
     </Card>
@@ -2481,7 +2484,7 @@ function ProfileEditorSheet({
   };
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (needsAccountLogin || needsWorkspace) return;
+    if (working || frozen || needsAccountLogin || needsWorkspace) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -2531,8 +2534,13 @@ function ProfileEditorSheet({
             </ToggleGroup>
           </Field>}
           {draft.provider !== "custom" && authMethod === "account" ? <Field>
-            <FieldDescription>{authorized?.kind === "oauth" ? `Signed in${authorized.accountName ? ` as ${authorized.accountName}` : ""}. Verify and save to use this account.` : savedCredentialApplies && profile?.auth.kind === "oauth" ? `Signed in${profile.auth.accountName ? ` to ${profile.auth.accountName}` : ""}.` : `Sign in with ${selectedPreset?.name} in your browser. Requests use your selected workspace's balance and permissions.`}</FieldDescription>
+            <FieldDescription>{authorized?.kind === "oauth" ? `Signed in${authorized.accountName ? ` as ${authorized.accountName}` : ""}. Confirm this account to connect.` : savedCredentialApplies && profile?.auth.kind === "oauth" ? `Signed in${profile.auth.accountName ? ` to ${profile.auth.accountName}` : ""}.` : `Sign in with ${selectedPreset?.name} in your browser. Requests use your selected workspace's balance and permissions.`}</FieldDescription>
             {accountScope?.organization && <div className="space-y-1"><p className="text-sm">Organization: <strong>{accountScope.organization}</strong></p><FieldDescription>To change organization, sign in again.</FieldDescription></div>}
+            {(authorized && login || savedCredentialApplies && profile?.auth.kind === "oauth" && !account.busy) && <AccountTools
+              key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+              target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+              scope={accountScope} credentialRef={profile?.credentialRef} disabled={working || frozen}
+            />}
             {authorized && workspaces && workspaces.length > 0 ? <FormField id="profile-workspace" label="Workspace">
               <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                 { value: "", label: "Select a workspace", disabled: true },
@@ -2544,11 +2552,7 @@ function ProfileEditorSheet({
               {login.userCode && <p>Confirm code <strong className="font-mono">{login.userCode}</strong></p>}
               <Button type="button" variant="outline" disabled={account.working} onClick={() => void account.cancel()}>Cancel Sign-in</Button>
             </div> : <Button type="button" variant="outline" className="[&_.service-logo]:size-4.5" disabled={working || frozen || !draft.name.trim()} onClick={() => void signIn()}><ServiceLogo url={draft.remoteUrl} />{authorized || (savedCredentialApplies && profile?.auth.kind === "oauth") ? "Sign in again" : `Sign in with ${selectedPreset?.name}`}</Button>}
-            {(authorized && login || savedCredentialApplies && profile?.auth.kind === "oauth" && !account.busy) && <AccountTools
-              key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
-              target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
-              scope={accountScope} disabled={working || frozen}
-            />}
+
           </Field> : <Field>
             <FieldLabel htmlFor="profile-key">{keyLabel}</FieldLabel>
             <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
@@ -2559,7 +2563,7 @@ function ProfileEditorSheet({
         <FieldError className="mt-3">{error}</FieldError>
         <SheetActions leading={!isNew && <Button type="button" variant="destructive" disabled={working || frozen} onClick={() => void removeProfile()}><Trash2 size={14} />Delete Profile</Button>}>
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : "Verify and Save"}</Button>
+          <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || Boolean(needsAccountLogin) || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Verifying…" : authMethod === "account" && draft.provider !== "custom" ? authorized || needsAccountLogin ? "Connect account" : "Save" : "Verify and Save"}</Button>
         </SheetActions>
       </form>
     </Sheet>
