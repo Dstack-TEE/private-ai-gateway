@@ -136,6 +136,7 @@ pub fn load() -> Result<LoadedSettings, String> {
         active_profile_id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
         profiles: vec![ConfidentialProfile {
             id: LEGACY_DEFAULT_PROFILE_ID.to_string(),
+            credential_ref: None,
             name: provider_name(&provider).to_string(),
             provider,
             remote_url: legacy.remote_url,
@@ -187,6 +188,7 @@ pub fn resolve_profile(
     }
     Ok(ConfidentialProfile {
         id: input.id,
+        credential_ref: None,
         name: name.to_string(),
         provider: input.provider,
         remote_url,
@@ -214,6 +216,10 @@ pub fn settings_from_state(
         profiles,
         require_production_os,
     })
+}
+
+pub fn profile_credential_entry(profile: &ConfidentialProfile) -> Result<String, String> {
+    credential_entry(profile.credential_ref.as_deref().unwrap_or(&profile.id))
 }
 
 pub fn credential_entry(profile_id: &str) -> Result<String, String> {
@@ -251,6 +257,7 @@ fn resolve_settings(mut settings: ServiceSettings) -> Result<ServiceSettings, St
         if !ids.insert(resolved.id.clone()) {
             return Err("Confidential AI profile IDs must be unique".to_string());
         }
+        profile_credential_entry(profile)?;
         match &profile.auth {
             ProfileAuth::ApiKey => {}
             ProfileAuth::OAuth { account_id, .. } if !account_id.trim().is_empty() => {}

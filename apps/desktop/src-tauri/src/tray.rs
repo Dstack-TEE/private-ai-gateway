@@ -608,6 +608,7 @@ mod tests {
         let mut ready = state("stopped", true);
         ready.active_profile_id = "profile-1".to_string();
         ready.profiles.push(ConfidentialProfile {
+            credential_ref: None,
             id: "profile-1".to_string(),
             name: "Private AI".to_string(),
             provider: ServiceProvider::Custom,

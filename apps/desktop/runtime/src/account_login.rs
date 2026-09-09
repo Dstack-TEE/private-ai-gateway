@@ -97,7 +97,7 @@ impl Authorization {
                     .filter(|id| details.workspaces.iter().any(|w| w.id == *id))
                     .ok_or("Choose a workspace before saving")?;
                 let result = response(client()?.post(KEY_URL).bearer_auth(access_token).json(
-                    &json!({"installation_id": installation_id(&profile.id).to_string(), "name": profile.name, "workspace_id": selected}),
+                    &json!({"installation_id": installation_id(&profile.id)?.to_string(), "name": profile.name, "workspace_id": selected}),
                 )).await?;
                 if result.get("workspace_id").and_then(Value::as_i64) != Some(selected) {
                     return Err("Unexpected workspace in the account response".into());
@@ -150,6 +150,7 @@ pub(crate) struct PendingLogin {
     profile: ConfidentialProfileInput,
     state: LoginState,
     deadline: Instant,
+    saved: bool,
 }
 
 impl PendingLogin {
@@ -163,6 +164,7 @@ impl PendingLogin {
             profile,
             state: LoginState::Authorizing(worker),
             deadline: Instant::now() + LOGIN_TIMEOUT,
+            saved: false,
         }
     }
 
@@ -237,29 +239,87 @@ impl PendingLogin {
             .await
     }
 
-    pub async fn cancel(&mut self) -> Result<(), String> {
-        let redpill = self.profile.provider == ServiceProvider::Redpill;
+    pub fn profile_id(&self) -> &str {
+        &self.profile.id
+    }
+
+    pub async fn protect_saved_key(&mut self, saved_key: Option<&str>) {
         if let Ok(Some(Authorization::Inference(credential))) = self.resolve().await {
-            if redpill {
-                revoke_redpill_key(&credential.key).await?;
+            if saved_key == Some(&credential.key) {
+                self.saved = true;
             }
+        }
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.saved = true;
+    }
+
+    pub async fn cancel(&mut self) -> Result<(), String> {
+        let provider = self.profile.provider.clone();
+        if self.saved {
+            return Ok(());
+        }
+        let action = "abort";
+        if let Ok(Some(Authorization::Inference(credential))) = self.resolve().await {
+            transition_credential(&provider, &credential.key, action).await?;
         }
         // Failed revocation keeps the authorization available for a cleanup retry.
         Ok(())
     }
 }
 
-async fn revoke_redpill_key(key: &str) -> Result<(), String> {
-    let response = client()?
-        .delete(KEY_URL)
+#[derive(Debug)]
+pub(crate) enum CredentialTransition {
+    Applied,
+    Unavailable,
+}
+
+pub(crate) async fn transition_credential(
+    provider: &ServiceProvider,
+    key: &str,
+    action: &str,
+) -> Result<CredentialTransition, String> {
+    let base = match provider {
+        ServiceProvider::Redpill => KEY_URL,
+        ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/credential",
+        ServiceProvider::Custom => return Ok(CredentialTransition::Applied),
+    };
+    transition_at(provider, key, action, base).await
+}
+
+async fn transition_at(
+    provider: &ServiceProvider,
+    key: &str,
+    action: &str,
+    base: &str,
+) -> Result<CredentialTransition, String> {
+    let http = client()?;
+    let request = match action {
+        "activate" | "abort" => http.post(format!("{base}/{action}")),
+        "revoke" if *provider == ServiceProvider::Phala => http.post(format!("{base}/revoke")),
+        "revoke" => http.delete(base),
+        _ => return Err("Unsupported account operation".into()),
+    };
+    let response = request
+        .timeout(Duration::from_secs(5))
         .bearer_auth(key)
         .send()
         .await
-        .map_err(|_| "Could not revoke the RedPill device key".to_string())?;
-    if !response.status().is_success() {
-        return Err("Could not revoke the RedPill device key; remove it in RedPill Keys".into());
+        .map_err(|_| "Account: Credential update failed; retry the operation.")?;
+    if matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        return Ok(CredentialTransition::Unavailable);
     }
-    Ok(())
+    if !response.status().is_success() {
+        return Err(
+            "Account: Credential update failed; retry or manage the key in your provider console."
+                .into(),
+        );
+    }
+    Ok(CredentialTransition::Applied)
 }
 
 fn client() -> Result<Client, String> {
@@ -294,7 +354,7 @@ async fn request_json(request: reqwest::RequestBuilder) -> Result<(StatusCode, V
             "Invalid account response".into()
         } else {
             format!(
-                "Account service rejected the request (HTTP {})",
+                "Account: Service rejected the request (HTTP {}). Retry or contact support.",
                 status.as_u16()
             )
         }
@@ -311,11 +371,26 @@ fn protocol_error(data: &Value) -> Option<&str> {
 }
 
 fn account_error(status: StatusCode, data: &Value) -> String {
+    if let Some(message) = match protocol_error(data) {
+        Some("org_required") => Some("Select an organization on the sign-in page and try again."),
+        Some("keys_permission_required" | "organization_permission_required") => Some("Your organization must grant key-management permission before you can connect."),
+        Some("billing_permission_required") => Some("Your account does not have permission to view this balance."),
+        Some("account_mapping_conflict") => Some("Account setup conflicts with an existing account. Contact RedPill support."),
+        Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => Some("Account setup is temporarily unavailable. Retry signing in."),
+        Some("device_disabled") => Some("This device key was disabled. Manage it in RedPill Keys before reconnecting."),
+        Some("device_migration_required" | "device_credential_mismatch") => Some("This device credential needs repair in RedPill Keys."),
+        Some("invalid_authorization" | "invalid_identity" | "credentials_required" | "device_unavailable") => Some("Your authorization is no longer valid. Sign in again."),
+        Some("key_store_unavailable") => Some("The credential service is unavailable. Retry saving; your previous credential is unchanged."),
+        Some("account_unavailable") => Some("This account is unavailable. Contact your organization administrator."),
+        Some("not_available") => Some("Account login is not enabled on this service."),
+        _ => None,
+    } { return format!("Account: {message}"); }
+
     match protocol_error(data) {
-        Some("access_denied") => "Authorization was declined".into(),
-        Some("expired_token") => "Authorization expired; sign in again".into(),
+        Some("access_denied") => "Account: Authorization was declined.".into(),
+        Some("expired_token") => "Account: Authorization expired; sign in again.".into(),
         _ => format!(
-            "Account service rejected the request (HTTP {})",
+            "Account: Service rejected the request (HTTP {}). Retry or contact support.",
             status.as_u16()
         ),
     }
@@ -365,7 +440,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             let data = response(
                 client
                     .post(format!("{PHALA_API}/api/v1/auth/device/code"))
-                    .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key"})),
+                    .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key", "installation_id":installation_id(&profile.id)?.to_string()})),
             )
             .await?;
             let device = string(&data, "device_code")?;
@@ -434,13 +509,26 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
     ))
 }
 
-fn installation_id(profile_id: &str) -> Uuid {
+fn installation_id(profile_id: &str) -> Result<Uuid, String> {
     // Profile IDs are already random and persist with the credential. Deriving a
     // UUID keeps re-login stable without another installation file or secret.
-    let hash = Sha256::digest(profile_id.as_bytes());
+    let data = desktop_gateway::agents::app_data_dir()?;
+    let path = data.join("installation-id");
+    let device = match std::fs::read_to_string(&path) {
+        Ok(value) => uuid::Uuid::parse_str(value.trim())
+            .map_err(|_| "Account: Device identity needs repair.")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let id = Uuid::new_v4();
+            std::fs::write(&path, id.to_string())
+                .map_err(|_| "Account: Cannot save device identity.")?;
+            id
+        }
+        Err(_) => return Err("Account: Cannot read device identity.".into()),
+    };
+    let hash = Sha256::digest(format!("{device}:{profile_id}").as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash[..16]);
-    Uuid::from_bytes(bytes)
+    Ok(Uuid::from_bytes(bytes))
 }
 
 fn random_secret() -> String {
@@ -469,10 +557,19 @@ fn validate_discovery(data: &Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn phala(client: Client, device: String, mut interval: u64) -> Result<Credential, String> {
+async fn phala(client: Client, device: String, interval: u64) -> Result<Credential, String> {
+    phala_at(client, device, interval, PHALA_API).await
+}
+
+async fn phala_at(
+    client: Client,
+    device: String,
+    mut interval: u64,
+    base: &str,
+) -> Result<Credential, String> {
     loop {
         tokio::time::sleep(Duration::from_secs(interval)).await;
-        let (status, data) = request_json(client.post(format!("{PHALA_API}/api/v1/auth/device/token"))
+        let (status, data) = request_json(client.post(format!("{base}/api/v1/auth/device/token"))
             .json(&json!({"device_code":device,"client_id":"private-ai-proxy","grant_type":"urn:ietf:params:oauth:grant-type:device_code"}))).await?;
         if !status.is_success() {
             match protocol_error(&data) {
@@ -487,34 +584,46 @@ async fn phala(client: Client, device: String, mut interval: u64) -> Result<Cred
         let key = desktop_gateway::secrets::validate_api_key(&string(&data, "access_token")?)?;
         let metadata = response(
             client
-                .get(format!("{PHALA_API}/api/v1/private_ai/self"))
+                .get(format!("{base}/api/v1/private_ai/self"))
                 .timeout(Duration::from_secs(5))
                 .bearer_auth(&key),
         )
-        .await
-        .ok();
-        let name = metadata
-            .as_ref()
-            .and_then(|v| v.pointer("/workspace/name"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let account_name = metadata
-            .as_ref()
-            .and_then(|v| v.pointer("/user/username"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let account = account_name.clone().unwrap_or_else(|| "phala".into());
-        return Ok(Credential {
-            key,
-            auth: ProfileAuth::OAuth {
-                account_id: account,
-                account_name,
-                scope: name.map(|workspace| AccountScope {
+        .await;
+        let auth = metadata.and_then(|metadata| {
+            let workspace = string(
+                metadata
+                    .get("workspace")
+                    .ok_or("Account: Missing workspace identity")?,
+                "name",
+            )?;
+            let account = string(
+                metadata
+                    .get("user")
+                    .ok_or("Account: Missing account identity")?,
+                "username",
+            )?;
+            Ok(ProfileAuth::OAuth {
+                account_id: account.clone(),
+                account_name: Some(account),
+                scope: Some(AccountScope {
                     workspace: Some(workspace),
                     ..AccountScope::default()
                 }),
-            },
+            })
         });
+        match auth {
+            Ok(auth) => return Ok(Credential { key, auth }),
+            Err(error) => {
+                transition_at(
+                    &ServiceProvider::Phala,
+                    &key,
+                    "abort",
+                    &format!("{base}/api/v1/private_ai/credential"),
+                )
+                .await?;
+                return Err(error);
+            }
+        }
     }
 }
 
@@ -834,6 +943,90 @@ mod tests {
             amount(&json!({"balance": "-1.25"}), "balance").unwrap(),
             "-1.25"
         );
+    }
+
+    #[tokio::test]
+    async fn phala_polling_and_credential_lifecycle_use_the_expected_wire_contract() {
+        use axum::{routing::post, Json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let token_calls = calls.clone();
+        let tokens = post(move |Json(body): Json<Value>| {
+            let calls = token_calls.clone();
+            async move {
+                assert_eq!(body["device_code"], "test-device");
+                assert_eq!(
+                    body["grant_type"],
+                    "urn:ietf:params:oauth:grant-type:device_code"
+                );
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail":{"error":"authorization_pending"}})),
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        Json(json!({"access_token":"sk-test-credential"})),
+                    )
+                }
+            }
+        });
+        let app = Router::new()
+            .route("/api/v1/auth/device/token", tokens)
+            .route(
+                "/api/v1/private_ai/self",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer sk-test-credential");
+                    Json(json!({"user":{"username":"alice"},"workspace":{"name":"Research"}}))
+                }),
+            )
+            .route(
+                "/api/v1/private_ai/credential/:action",
+                post(
+                    |axum::extract::Path(action): axum::extract::Path<String>,
+                     headers: HeaderMap| async move {
+                        assert!(matches!(action.as_str(), "activate" | "abort" | "revoke"));
+                        assert_eq!(headers["authorization"], "Bearer sk-test-credential");
+                        StatusCode::NO_CONTENT
+                    },
+                ),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            AbortOnDropHandle::new(tokio::spawn(
+                async move { axum::serve(listener, app).await },
+            ));
+        let credential = phala_at(client().unwrap(), "test-device".into(), 0, &base)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(credential.auth, ProfileAuth::OAuth { ref account_id, .. } if account_id == "alice")
+        );
+        for action in ["activate", "abort", "revoke"] {
+            transition_at(
+                &ServiceProvider::Phala,
+                &credential.key,
+                action,
+                &format!("{base}/api/v1/private_ai/credential"),
+            )
+            .await
+            .unwrap();
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn structured_account_errors_survive_the_management_boundary_without_raw_details() {
+        let error = account_error(
+            StatusCode::FORBIDDEN,
+            &json!({"detail":{"error":"device_disabled","internal":"secret-do-not-show"}}),
+        );
+        let public = crate::protocol::RpcError::operation(&error);
+        assert!(public.message.contains("disabled"));
+        assert!(!public.message.contains("secret"));
     }
 
     #[test]

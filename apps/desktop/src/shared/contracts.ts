@@ -144,6 +144,7 @@ export type ProfileAuth =
 
 export interface ConfidentialProfile {
   id: string;
+  credentialRef?: string;
   name: string;
   provider: ServiceProvider;
   remoteUrl: string;

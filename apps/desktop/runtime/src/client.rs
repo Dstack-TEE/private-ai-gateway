@@ -326,13 +326,34 @@ impl Client {
         require_production_os: bool,
         workspace_id: Option<i64>,
     ) -> Result<GatewayState, String> {
-        self.background(Command::SaveAccountLogin {
-            id,
-            profile,
-            require_production_os,
-            workspace_id,
-        })
-        .await
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let initial = self
+            .background::<AccountSaveResult>(Command::SaveAccountLogin {
+                operation_id: operation_id.clone(),
+                id,
+                profile,
+                require_production_os,
+                workspace_id,
+            })
+            .await;
+        let mut outcome = match initial {
+            Ok(result) => result,
+            Err(_) => {
+                self.background(Command::AccountSaveResult {
+                    operation_id: operation_id.clone(),
+                })
+                .await?
+            }
+        };
+        loop {
+            match outcome {
+                AccountSaveResult::Complete { state } => return Ok(*state),
+                AccountSaveResult::Failed { error } => return Err(error),
+                AccountSaveResult::Running => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+            outcome = self.background(Command::AccountSaveResult { operation_id: operation_id.clone() }).await
+                .map_err(|_| "Account: Save outcome is not yet confirmed. Reconnect to the backend and check the profile before retrying.".to_string())?;
+        }
     }
     pub async fn account_balance(
         self: &Arc<Self>,
