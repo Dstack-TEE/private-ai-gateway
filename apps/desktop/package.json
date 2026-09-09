@@ -32,15 +32,14 @@
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
+    "cn": "^0.2.6",
     "date-fns": "^4.4.0",
     "ipaddr.js": "^2.5.0",
     "lucide-react": "1.43.0",
     "react": "19.2.8",
     "react-day-picker": "^10.0.1",
     "react-dom": "19.2.8",
-    "recharts": "^3.10.1",
-    "tailwind-merge": "^3.6.0"
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
