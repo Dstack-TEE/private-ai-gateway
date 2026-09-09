@@ -1558,6 +1558,10 @@ test("usage history filters, paginates and inspects proof boundaries", async ({ 
   await page.setViewportSize({ width: 940, height: 760 });
   await page.goto("/?mock=ready");
   await nav(page, "Usage").click();
+  const tableContainer = page.locator('.usage-history [data-slot="table-container"]');
+  await expect(tableContainer).toHaveCSS("border-width", "0px");
+  await expect(tableContainer).toHaveCSS("border-radius", "0px");
+  await expect(tableContainer.getByRole("button").first()).toHaveCSS("color", await themeColor(page, "--foreground"));
 
   await expect(page.locator('[data-slot="chart"] .recharts-surface')).toBeVisible();
   await expect(page.getByRole("table", { name: "Usage by model", includeHidden: true }).locator("tbody tr")).toHaveCount(7);
