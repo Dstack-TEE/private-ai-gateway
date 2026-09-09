@@ -34,6 +34,20 @@ macOS acceptance testing. Browser geometry checks cannot replace that work.
 | Sheets | Clear dismissal and one default action | Complex dialogs use native child-window hosts with HTML content; browser previews use HTML dialog elements. OS confirmation and file pickers use Tauri plugins. |
 | Accessibility | Don't rely on colour alone; keyboard access | State labels remain explicit even without an icon. Focus, contrast and reduced-motion behavior have renderer coverage; VoiceOver remains a native acceptance item. |
 
+## Account form consistency
+
+Buttons, inputs and select triggers share the `rounded-lg` control radius;
+dialog surfaces use `rounded-2xl`. Providers use the shared Select composition;
+authentication methods use a Base UI RadioGroup. Neither is represented as tabs.
+The profile form uses 16 px between fields and 8 px between labels and controls,
+with a 480 px default width in both browser and native editor windows.
+
+Authorized account details reuse `SettingsList` and `Item`: identity with a
+secondary Change action, workspace, then balance. A sole workspace is read-only;
+multiple workspaces use the shared select. Repeated sign-in, tenant and billing
+paragraphs are omitted. The main card shows the billing owner, amount and actions
+in one row; nonzero promotional credits and actionable errors remain visible.
+
 ## What was taken from reference products
 
 - **Tailscale / WARP / Mullvad**: one verdict, one switch, a short list of

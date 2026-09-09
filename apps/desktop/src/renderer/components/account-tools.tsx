@@ -4,7 +4,7 @@ import type { AccountBalance, AccountBalanceTarget, AccountScope, DesktopApi, Se
 import { errorMessage } from "../lib/error-message";
 import { currency } from "../lib/usage-presentation";
 import { Button } from "./ui/button";
-import { FieldDescription, FieldError } from "./ui/field";
+import { FieldError } from "./ui/field";
 
 type Props = {
   api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
@@ -80,15 +80,16 @@ function AccountBalanceView({ api, provider, target, scope, disabled = false, co
     finally { openingRef.current = false; setOpening(false); }
   }, [api, provider, disabled]);
   const owner = (balance?.scope ?? scope)?.organization ?? (balance?.scope ?? scope)?.workspace;
-  const label = provider === "redpill" ? "Organization balance" : "Workspace balance";
-  return <div className="space-y-1.5 min-w-0" aria-label="Account balance">
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm tabular-nums" role="status" aria-live="polite" aria-busy={busy}>
-      <span>{label}{!compact && owner ? ` · ${owner}` : ""}: {balance ? <strong>{currency(Number(balance.balanceUsd))} USD</strong> : busy ? "Loading…" : "Unavailable"}</span>
-      <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh balance" disabled={disabled || busy} onClick={() => refresh.current()}><RefreshCw className={busy ? "animate-spin motion-reduce:animate-none" : ""} aria-hidden /></Button>
-      <Button type="button" size="sm" variant="link" disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>
+  return <div className="w-full min-w-0 space-y-1.5" aria-label="Account balance">
+    <div className="flex items-center justify-between gap-3" role="status" aria-live="polite" aria-busy={busy}>
+      <span className="min-w-0 text-xs text-muted-foreground wrap-anywhere" title={provider === "redpill" ? "Shared organization balance" : "Workspace balance"}>{compact ? owner ?? "Balance" : "Balance"}</span>
+      <div className="flex shrink-0 items-center gap-1">
+        <span className="text-sm font-medium tabular-nums" aria-label="Balance in USD">{balance ? currency(Number(balance.balanceUsd)) : busy ? "Loading…" : "Unavailable"}</span>
+        <Button type="button" size="icon-xs" variant="ghost" aria-label="Refresh balance" disabled={disabled || busy} onClick={() => refresh.current()}><RefreshCw className={busy ? "animate-spin motion-reduce:animate-none" : ""} aria-hidden /></Button>
+        <Button type="button" size="xs" variant="link" title={owner ? `Top up ${owner}` : "Open billing"} disabled={disabled || opening} onClick={() => void topUp()}>Top up<ExternalLink aria-hidden /></Button>
+      </div>
     </div>
-    {balance?.grantedUsd != null && <p className="text-xs text-muted-foreground tabular-nums">Promotional credits: {currency(Number(balance.grantedUsd))} USD</p>}
-    <FieldError>{error ?? linkError}</FieldError>
-    <FieldDescription>{compact ? owner ? `Billing account: ${owner}. Select this account on the billing website.` : "Top up opens the official billing website." : `${provider === "redpill" ? "Balance is shared by the organization; workspace and key limits still apply. " : ""}${owner ? `On the billing website, select ${owner} before topping up.` : "Top up opens the official billing website."}`}</FieldDescription>
+    {balance?.grantedUsd != null && Number(balance.grantedUsd) > 0 && <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground tabular-nums"><span>Promo credits</span><span>{currency(Number(balance.grantedUsd))}</span></div>}
+    <FieldError>{linkError ?? error}</FieldError>
   </div>;
 }
