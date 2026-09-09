@@ -660,7 +660,7 @@ test("Profiles keeps its list underneath the profile editor", async ({ page }) =
   const editor = page.getByRole("dialog", { name: "Edit profile" });
   await expect(editor).toBeVisible();
   await expect(page.locator("dialog[open]")).toHaveCount(2);
-  await expect(editor.getByRole("textbox", { name: "Profile name" })).toBeFocused();
+  await expect(editor.getByRole("heading").first()).toBeFocused();
   await page.keyboard.press("Meta+w");
   await expect(editor).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "Profiles" })).toBeVisible();
@@ -670,7 +670,7 @@ test("Profiles keeps its list underneath the profile editor", async ({ page }) =
 test("native close requests and keyboard close respect a pending save", async ({ page }) => {
   await page.goto("/?mock=local-save-pending&native-dialog=local-api");
   const sheet = page.getByRole("dialog", { name: "Local API settings" });
-  await expect(sheet.getByLabel("Listen address", { exact: true })).toBeFocused();
+  await expect(sheet.getByRole("heading").first()).toBeFocused();
   await sheet.getByLabel("Port", { exact: true }).fill("4181");
   await sheet.getByRole("button", { name: "Save", exact: true }).click();
   await expect(sheet.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
@@ -973,9 +973,9 @@ test("complex dialogs render as native child-window surfaces", async ({ page }) 
     if (entry.name === "New profile" || entry.name === "Local API settings") {
       expect(await dialog.locator(".sheet-scroll").evaluate((node) => node.scrollHeight - node.clientHeight)).toBe(0);
     }
-    if (entry.name === "New profile") await expect(dialog.getByRole("textbox", { name: "Profile name" })).toBeFocused();
-    else if (entry.name === "Local API settings") await expect(dialog.getByLabel("Listen address", { exact: true })).toBeFocused();
-    else await expect(dialog.getByRole("heading").first()).toBeFocused();
+    await expect(dialog.getByRole("heading").first()).toBeFocused();
+    await expect(dialog.getByRole("heading").first()).toHaveCSS("outline-style", "none");
+    expect(await dialog.getByRole("heading").first().evaluate((node) => getComputedStyle(node).boxShadow)).not.toMatch(/(?:^|\s)[1-9]\d*(?:\.\d+)?px/);
     if (entry.name === "Usage proof") {
       const alignment = await dialog.evaluate((node) => {
         const heading = node.querySelector(".sheet-heading")?.getBoundingClientRect();
@@ -1051,6 +1051,7 @@ test("network listeners show discovered addresses and require explicit save cons
   await page.goto("/?mock=ready&native-dialog=local-api");
   const sheet = page.getByRole("dialog", { name: "Local API settings" });
   const input = sheet.getByRole("combobox", { name: "Listen address" });
+  await input.focus();
   await expect(input).toBeFocused();
   const gutter = await input.evaluate((element) => {
     const field = element.closest('[data-slot="input-group"]')?.getBoundingClientRect();
@@ -1452,6 +1453,7 @@ test("agent actions report progress without disabling unrelated switches", async
   await page.goto("/?mock=agent-pending");
   await nav(page, "Agents").click();
   await expect(page.getByRole("button", { name: "Detect installed agents" })).toHaveCount(0);
+  await expect(page.locator('.agent-block [data-slot="item-description"]')).toHaveCount(0);
   await page.getByRole("switch", { name: "Connect Codex", exact: true }).click();
   const pending = page.getByRole("switch", { name: "Disconnect Codex", exact: true });
   await expect(pending).toBeChecked();
